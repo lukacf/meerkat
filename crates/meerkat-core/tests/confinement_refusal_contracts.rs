@@ -123,7 +123,8 @@ fn confinement_refusal_schema_preserves_the_five_exact_wire_causes() {
 
 #[test]
 fn confinement_terminal_class_appends_after_released_ordinals() {
-    let released = [
+    // The established ordinals (main's order, 0-15) never move.
+    let established = [
         ToolDispatchTerminalErrorKind::NotFound,
         ToolDispatchTerminalErrorKind::Unavailable,
         ToolDispatchTerminalErrorKind::InvalidArguments,
@@ -137,21 +138,28 @@ fn confinement_terminal_class_appends_after_released_ordinals() {
         ToolDispatchTerminalErrorKind::PolicyIndeterminate,
         ToolDispatchTerminalErrorKind::Other,
         ToolDispatchTerminalErrorKind::CallbackPending,
+        ToolDispatchTerminalErrorKind::ConfinementRefused,
+        ToolDispatchTerminalErrorKind::HookDenied,
+        ToolDispatchTerminalErrorKind::OutcomeUncertain,
     ];
-    for (ordinal, variant) in released.iter().enumerate() {
+    for (ordinal, variant) in established.iter().enumerate() {
         assert_eq!(*variant as usize, ordinal);
     }
     assert_eq!(
         ToolDispatchTerminalErrorKind::ConfinementRefused as usize,
-        released.len()
+        13
     );
-    // Later additions append after every released ordinal.
+    // Later additions append after every established ordinal.
     assert_eq!(
-        ToolDispatchTerminalErrorKind::HookDenied as usize,
-        released.len() + 1
+        ToolDispatchTerminalErrorKind::ReviewUnsatisfied as usize,
+        16
     );
     assert_eq!(
-        ToolDispatchTerminalErrorKind::OutcomeUncertain as usize,
-        released.len() + 2
+        ToolDispatchTerminalErrorKind::ReviewUnavailable as usize,
+        17
+    );
+    assert_eq!(
+        ToolDispatchTerminalErrorKind::HookLaunchRefused as usize,
+        18
     );
 }

@@ -15,6 +15,7 @@ mod extraction;
 mod hook_impl;
 #[cfg(test)]
 mod hooks_behavior_tests;
+pub(crate) mod reasoning_preference;
 mod runner;
 pub mod skills;
 mod state;
@@ -803,8 +804,49 @@ pub struct ToolDispatchContext {
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
     work_authorization: Option<crate::WorkAuthorizationContext>,
     prepared_authorization: Option<crate::authorization::PreparedOperationCheck>,
+    /// Trusted host review composition attached by the agent. Absence never
+    /// skips a required tier: R2 then settles as local unavailable feedback.
+    operation_review: Option<Arc<crate::approval::review::BoundOperationReview>>,
+    /// Review entry of the one prepared operation, shared by clones so the
+    /// check point is repeatable and the effect leaf spends exactly once.
+    review_entry: Option<crate::approval::review::ReviewEntry>,
     // Monotonic restriction set by the core execution policy owner.
     read_only_execution_required: bool,
+}
+
+/// Owned, single-use native entry for a leaf whose effect runs on a worker.
+/// See [`ToolDispatchContext::reviewed_entry_ticket`].
+/// An ungoverned dispatch carries an empty ticket (no context clone).
+#[derive(Debug)]
+pub struct ReviewedEntryTicket(Option<GovernedEntryTicket>);
+
+#[derive(Debug)]
+struct GovernedEntryTicket {
+    context: ToolDispatchContext,
+    with_plan: bool,
+}
+
+impl ReviewedEntryTicket {
+    /// Run the single consuming entry step now, immediately before the
+    /// worker's first effect and after its waits and cancellation checks.
+    /// Hold the returned custody for the whole effect body: a spent review's
+    /// `Used` projection is delivered only after it is dropped (and the
+    /// admitting dispatch ended), even if that dispatch was cancelled while
+    /// this worker kept running.
+    pub fn enter(self) -> Result<crate::approval::review::ReviewedEntryCustody, crate::ToolError> {
+        let Some(GovernedEntryTicket { context, with_plan }) = self.0 else {
+            return Ok(crate::approval::review::ReviewedEntryCustody::none());
+        };
+        match context
+            .prepared_authorization()
+            .and_then(|prepared| prepared.tool_dispatch_parts())
+        {
+            Some((call, plan)) => context
+                .enter_reviewed_effect_held(call, with_plan.then_some(plan))
+                .map(|(_, custody)| custody),
+            None => Ok(crate::approval::review::ReviewedEntryCustody::none()),
+        }
+    }
 }
 
 /// Process-local live bridge authority carried to the last actual tool
@@ -1072,6 +1114,8 @@ impl std::fmt::Debug for ToolDispatchContext {
             .field("live_bridge_admission", &self.live_bridge_admission)
             .field("work_authorization", &self.work_authorization)
             .field("prepared_authorization", &self.prepared_authorization)
+            .field("operation_review", &self.operation_review.is_some())
+            .field("review_entry", &self.review_entry)
             .field(
                 "read_only_execution_required",
                 &self.read_only_execution_required,
@@ -1096,6 +1140,16 @@ impl PartialEq for ToolDispatchContext {
             }
             && match (&self.prepared_authorization, &other.prepared_authorization) {
                 (Some(left), Some(right)) => left.same_check(right),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.operation_review, &other.operation_review) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.review_entry, &other.review_entry) {
+                (Some(left), Some(right)) => left.same_entry(right),
                 (None, None) => true,
                 _ => false,
             }
@@ -1134,6 +1188,8 @@ impl ToolDispatchContext {
             live_bridge_admission: None,
             work_authorization: None,
             prepared_authorization: None,
+            operation_review: None,
+            review_entry: None,
             read_only_execution_required: false,
         }
     }
@@ -1157,11 +1213,132 @@ impl ToolDispatchContext {
         self.work_authorization = context;
         // A decision prepared for a prior work context cannot be retained.
         self.prepared_authorization = None;
+        self.review_entry = None;
         self
+    }
+
+    /// Attach trusted host review composition. It only enables review; the
+    /// required tier stays the prepared authorization's own truth.
+    #[must_use]
+    pub fn with_operation_review(
+        mut self,
+        review: Option<Arc<crate::approval::review::BoundOperationReview>>,
+    ) -> Self {
+        self.operation_review = review;
+        self
+    }
+
+    pub(crate) fn operation_review(
+        &self,
+    ) -> Option<&Arc<crate::approval::review::BoundOperationReview>> {
+        self.operation_review.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) fn with_review_entry(mut self, entry: crate::approval::review::ReviewEntry) -> Self {
+        self.review_entry = Some(entry);
+        self
+    }
+
+    /// Non-consuming review check point for the decision entry staging
+    /// returned. Ungoverned dispatch has no prepared decision and no tier.
+    fn check_review(&self, entering: &Self) -> Result<(), crate::ToolError> {
+        let Some(check) = entering.prepared_authorization() else {
+            return Ok(());
+        };
+        match self.review_entry.as_ref() {
+            Some(entry) => entry.check(check),
+            // A governed decision that did not traverse the common prepared
+            // entry has no admitted review and may enter only at R1.
+            None => check
+                .require_unreviewed_entry()
+                .map_err(crate::ToolError::from),
+        }
+    }
+
+    /// An owned, single-use entry for a leaf whose effect runs on a worker
+    /// (for example a queued blocking task). It re-derives the exact
+    /// binding-owned call when entered, so it is `'static` and `Send`, and it
+    /// is consumed by value, so it can enter at most once. A ticket entered
+    /// after the admitting dispatch ended refuses.
+    pub fn reviewed_entry_ticket(
+        &self,
+        call: ToolCallView<'_>,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<ReviewedEntryTicket, crate::ToolError> {
+        // Ungoverned dispatch: nothing to stage or spend, so no clone.
+        let Some(prepared) = self.prepared_authorization() else {
+            return Ok(ReviewedEntryTicket(None));
+        };
+        let malformed = || crate::ToolError::AuthorizationRefused {
+            refusal: crate::authorization::OperationRefused::new(
+                crate::authorization::OperationRefusalKind::MalformedFacts,
+            ),
+        };
+        let (bound_call, bound_plan) = prepared.tool_dispatch_parts().ok_or_else(malformed)?;
+        if !std::ptr::eq(call.id, bound_call.id)
+            || !std::ptr::eq(call.name, bound_call.name)
+            || !std::ptr::eq(call.args, bound_call.args)
+            || plan.is_some_and(|actual| !std::ptr::eq(actual, bound_plan))
+        {
+            return Err(malformed());
+        }
+        Ok(ReviewedEntryTicket(Some(GovernedEntryTicket {
+            context: self.clone(),
+            with_plan: plan.is_some(),
+        })))
+    }
+
+    /// The single consuming step at the leaf that performs the effect.
+    ///
+    /// Call exactly once, after argument and preparation work and any waits,
+    /// immediately before the body or handoff, with the context the leaf was
+    /// handed. It runs [`Self::observe_tool_entry`] (staging, the final
+    /// authorization check and the review check point), then spends a
+    /// retained review allow once for the exact entering decision. Nothing
+    /// external runs between that spend and the caller's effect; the review
+    /// `Used` projection is delivered after dispatch returns. A second call
+    /// for the same operation refuses. R1 and ungoverned calls behave exactly
+    /// like `observe_tool_entry`. Use the returned context when present.
+    pub fn enter_reviewed_effect(
+        &self,
+        call: ToolCallView<'_>,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<Option<Self>, crate::ToolError> {
+        // An in-dispatch effect ends with its dispatch, whose guard defers
+        // `Used`; the custody is not needed beyond this call.
+        self.enter_reviewed_effect_held(call, plan)
+            .map(|(entering, _custody)| entering)
+    }
+
+    /// [`Self::enter_reviewed_effect`], also returning custody of the
+    /// entered effect for a leaf that may outlive its dispatch.
+    pub(crate) fn enter_reviewed_effect_held(
+        &self,
+        call: ToolCallView<'_>,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<(Option<Self>, crate::approval::review::ReviewedEntryCustody), crate::ToolError>
+    {
+        let entering = self.observe_tool_entry(call, plan)?;
+        let current = entering.as_ref().unwrap_or(self);
+        let custody = match (self.review_entry.as_ref(), current.prepared_authorization()) {
+            (Some(entry), Some(check)) => entry.consume_held(check)?,
+            _ => crate::approval::review::ReviewedEntryCustody::none(),
+        };
+        Ok((entering, custody))
     }
 
     pub fn work_authorization(&self) -> Option<&crate::WorkAuthorizationContext> {
         self.work_authorization.as_ref()
+    }
+
+    /// Identity of the staged run this dispatch belongs to, when its native
+    /// owner recorded one. A producer that outlives the call (fork_off, a
+    /// council) retains it so the completion can resume exactly this work.
+    pub fn retained_work(&self) -> Option<&crate::retained_work::RetainedWorkIdentity> {
+        self.work_authorization
+            .as_ref()
+            .and_then(crate::WorkAuthorizationContext::retained_work)
     }
 
     /// Retain one check with the exact immutable operation prepared upstream.
@@ -1232,7 +1409,12 @@ impl ToolDispatchContext {
             prepared.observe_entry().map_err(crate::ToolError::from)?;
         }
         let final_context = current.check_tool_authorization(call, plan)?;
-        Ok(final_context.or(first))
+        let entering = final_context.or(first);
+        // Non-consuming review check point with the decision staging returned.
+        // Repeatable: root and wrapper staging both run it; only the effect
+        // leaf spends (see `enter_reviewed_effect`).
+        self.check_review(entering.as_ref().unwrap_or(self))?;
+        Ok(entering)
     }
 
     /// Keep an audit staging failure beside the original dispatch result.
@@ -1526,6 +1708,18 @@ pub trait AgentToolDispatcher: Send + Sync {
         crate::LiveBridgeEffectKind::ExternalIo
     }
 
+    /// Whether this dispatcher carries review to the tool's physical entry
+    /// (its leaf calls `ToolDispatchContext::enter_reviewed_effect` exactly
+    /// once before the body or handoff). Wrappers forward the owning leaf's
+    /// declaration. The default is fail-closed: a required review for an
+    /// undeclared tool settles as local unavailable feedback.
+    fn review_entry_support(
+        &self,
+        _tool_name: &str,
+    ) -> crate::approval::review::ReviewEntrySupport {
+        crate::approval::review::ReviewEntrySupport::Unsupported
+    }
+
     /// Live generation for one logical tool binding.
     ///
     /// Static dispatchers keep the default zero epoch. Mutable authorities
@@ -1813,55 +2007,95 @@ pub async fn dispatch_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized
         let prepared = crate::authorization::PreparedOperationCheck::prepare(work.clone(), binding)
             .and_then(|prepared| prepared.current())
             .map_err(crate::ToolError::from)?;
-        Some(context.clone().with_prepared_authorization(prepared))
+        // Review admission at the common prepared entry: the owner tier is
+        // enforced here for every dispatcher, wrapper or not. An allow is
+        // retained for the effect leaf; nothing is spent here.
+        let (review_call, _) = prepared.tool_dispatch_parts().ok_or_else(|| {
+            crate::ToolError::AuthorizationRefused {
+                refusal: crate::authorization::OperationRefused::new(
+                    crate::authorization::OperationRefusalKind::MalformedFacts,
+                ),
+            }
+        })?;
+        let review_entry = crate::approval::review::admit_operation_review(
+            context.operation_review(),
+            dispatcher.review_entry_support(call.name),
+            review_call,
+            &prepared,
+            work,
+        )
+        .await?;
+        Some(
+            context
+                .clone()
+                .with_prepared_authorization(prepared)
+                .with_review_entry(review_entry),
+        )
     } else {
         None
     };
     let context = governed_context.as_ref().unwrap_or(context);
-    // Forward the binding's own immutable payload and plan all the way to the
-    // body. Adapters can then validate exact custody by pointer identity after
-    // a wait, without rehashing arguments or scanning policy dependencies.
-    let (call, plan) = if let Some(prepared) = context.prepared_authorization() {
-        prepared
-            .tool_dispatch_parts()
-            .ok_or_else(|| crate::ToolError::AuthorizationRefused {
-                refusal: crate::authorization::OperationRefused::new(
-                    crate::authorization::OperationRefusalKind::MalformedFacts,
-                ),
+    // The guard lives exactly as long as this dispatch. Dropping it here
+    // (cancellation, enclosing tool timeout) abandons a retained review and
+    // closes every clone a worker or transport may still hold.
+    let review_guard = context
+        .review_entry
+        .clone()
+        .map(crate::approval::review::ReviewDispatchGuard::new);
+    let outcome = async {
+        // Forward the binding's own immutable payload and plan all the way to the
+        // body. Adapters can then validate exact custody by pointer identity after
+        // a wait, without rehashing arguments or scanning policy dependencies.
+        let (call, plan) = if let Some(prepared) = context.prepared_authorization() {
+            prepared.tool_dispatch_parts().ok_or_else(|| {
+                crate::ToolError::AuthorizationRefused {
+                    refusal: crate::authorization::OperationRefused::new(
+                        crate::authorization::OperationRefusalKind::MalformedFacts,
+                    ),
+                }
             })?
-    } else {
-        (call, plan)
-    };
-    let entry_context = context.observe_tool_entry(call, Some(plan))?;
-    let context = entry_context.as_ref().unwrap_or(context);
-    let result = match plan.kind() {
-        crate::ResolvedExecutionKind::Streaming(policy) => {
-            let absolute_timeout = plan
-                .deadlines()
-                .effective_timeout()
-                .unwrap_or_else(|| policy.absolute_timeout());
-            crate::streaming_tool::supervise_streaming_tool(
-                call.name,
-                policy.inactivity_timeout(),
-                absolute_timeout,
-                |streaming| {
-                    let streaming_context = context.clone().with_streaming(streaming);
-                    async move {
-                        dispatcher
-                            .dispatch_resolved_with_context(call, &streaming_context, plan)
-                            .await
-                    }
-                },
-            )
-            .await
-        }
-        crate::ResolvedExecutionKind::Fast | crate::ResolvedExecutionKind::Detached(_) => {
-            dispatcher
-                .dispatch_resolved_with_context(call, context, plan)
+        } else {
+            (call, plan)
+        };
+        let entry_context = context.observe_tool_entry(call, Some(plan))?;
+        let context = entry_context.as_ref().unwrap_or(context);
+        let result = match plan.kind() {
+            crate::ResolvedExecutionKind::Streaming(policy) => {
+                let absolute_timeout = plan
+                    .deadlines()
+                    .effective_timeout()
+                    .unwrap_or_else(|| policy.absolute_timeout());
+                crate::streaming_tool::supervise_streaming_tool(
+                    call.name,
+                    policy.inactivity_timeout(),
+                    absolute_timeout,
+                    |streaming| {
+                        let streaming_context = context.clone().with_streaming(streaming);
+                        async move {
+                            dispatcher
+                                .dispatch_resolved_with_context(call, &streaming_context, plan)
+                                .await
+                        }
+                    },
+                )
                 .await
-        }
-    };
-    context.observe_tool_outcome(dispatcher.live_bridge_effect_kind(call.name), result)
+            }
+            crate::ResolvedExecutionKind::Fast | crate::ResolvedExecutionKind::Detached(_) => {
+                dispatcher
+                    .dispatch_resolved_with_context(call, context, plan)
+                    .await
+            }
+        };
+        context.observe_tool_outcome(dispatcher.live_bridge_effect_kind(call.name), result)
+    }
+    .await;
+    // After the dispatcher returned: a retained allow the leaf never spent
+    // (a failure before entry) is released unspent, every clone is closed,
+    // and the deferred `Used` projection is delivered only now.
+    if let Some(guard) = review_guard {
+        guard.complete();
+    }
+    outcome
 }
 
 /// Compute whether the current exact catalog should stay inline or switch to deferred mode.
@@ -2045,6 +2279,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
 
     fn live_bridge_effect_kind(&self, tool_name: &str) -> crate::LiveBridgeEffectKind {
         self.inner.live_bridge_effect_kind(tool_name)
+    }
+
+    fn review_entry_support(&self, tool_name: &str) -> crate::approval::review::ReviewEntrySupport {
+        self.inner.review_entry_support(tool_name)
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
@@ -2981,6 +3219,10 @@ where
     pub pending_skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Per-interaction event tap for streaming events to subscribers.
     pub(crate) event_tap: crate::event_tap::EventTap,
+    /// Per-instance measurement callback, absent from ordinary builds and
+    /// never consulted for authorization or turn control.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) model_preparation_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Request-only exact-boundary context coordinator for this live actor.
     pub(crate) transient_turn_context_state: crate::session::TransientTurnContextStateHandle,
     /// Optional default event channel configured at build time.
@@ -3106,6 +3348,10 @@ where
     /// it immediately before the admitted conversational user message.
     pub(crate) active_turn_request_contexts:
         Vec<crate::lifecycle::run_primitive::TurnRequestContext>,
+    /// The active runtime-owned turn's resolved reasoning preference, lowered
+    /// onto each provider attempt's own request copy; never session state.
+    pub(crate) active_turn_request_reasoning:
+        Option<crate::lifecycle::run_primitive::ReasoningBatchDisposition>,
     /// Runtime-backed external tool-surface diagnostic handle, when provided
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
@@ -3149,6 +3395,9 @@ where
     pub(crate) last_pending_catalog_sources: BTreeSet<String>,
     /// Dispatch-time projection of the current turn input for contextual tools.
     pub(crate) tool_dispatch_context: ToolDispatchContext,
+    /// Trusted host operation review composition, forwarded to every tool
+    /// dispatch context. It only enables review; the tier stays authorization's.
+    pub(crate) operation_review: Option<Arc<crate::approval::review::BoundOperationReview>>,
     /// Exact per-operation dispatch authority for a noncommitting live bridge
     /// run. Ordinary turns always leave this absent.
     pub(crate) live_bridge_dispatch_admission: Option<LiveBridgeToolDispatchAdmission>,
@@ -3612,7 +3861,7 @@ mod tests {
         use std::time::Duration;
 
         let detached = DetachedToolExecutionPolicy::new(
-            RunnerIdentity::new("homecore.security_scan", "v1").unwrap(),
+            RunnerIdentity::new("example.security_scan", "v1").unwrap(),
             RestartClass::NonResumable,
             IdempotencyScope::InteractionAndArguments,
             Duration::from_secs(10),

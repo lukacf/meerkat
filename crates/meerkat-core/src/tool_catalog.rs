@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn catalog_entry_preserves_non_default_execution_contract() {
         let detached = DetachedToolExecutionPolicy::new(
-            RunnerIdentity::new("homecore.security_scan", "v1").unwrap(),
+            RunnerIdentity::new("example.security_scan", "v1").unwrap(),
             RestartClass::NonResumable,
             IdempotencyScope::InteractionAndArguments,
             Duration::from_secs(10),

@@ -223,14 +223,20 @@ rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 ## MCP
 
 ```bash
-rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
-rkat mcp login <NAME> [--scope project|user|local]
-rkat mcp remove <NAME> [--scope project|user|local]
-rkat mcp list [--scope project|user|local] [--json]
-rkat mcp get <NAME> [--scope project|user|local] [--json]
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local|realm] [--expected-generation <N>] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
+rkat mcp login <NAME> [--scope project|user|local|realm]
+rkat mcp remove <NAME> [--scope project|user|local|realm] [--expected-generation <N>]
+rkat mcp list [--scope project|user|local|realm] [--json]
+rkat mcp get <NAME> [--scope project|user|local|realm] [--json]
 ```
 
 Omit `--scope` on `list`/`get` to search all scopes. Do not pass `--scope all`.
+`--scope realm` edits only `[[tools.mcp_servers]]` of the realm selected by
+`--realm` (inherited by its child realms); `--expected-generation` applies to
+`--scope realm` only. A realm server and an `mcp.toml` server with the same name
+must be defined identically, or `rkat run` fails with a conflict naming both.
+Realm servers are literal: `${VAR}` expands only in `mcp.toml`, and
+`--scope realm` refuses it.
 Live mutation of an already-running session uses RPC/REST/MCP/SDK surfaces, not
 `rkat mcp reload`.
 

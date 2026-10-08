@@ -2937,6 +2937,12 @@ fn submit_work_payload(
             })?;
         turn_metadata = Some(metadata);
     }
+    // Not a pairwise-merged field: the runtime folds it per batch.
+    if let Some(preference) = spec.request_reasoning {
+        turn_metadata
+            .get_or_insert_with(Default::default)
+            .request_reasoning = Some(preference);
+    }
     Ok(Box::new(super::state::SubmitWorkPayload {
         runtime_id,
         fence_token,
@@ -4664,6 +4670,10 @@ pub struct ForkJobBinding {
     pub job_id: String,
     /// The forker's session, which receives the durable completion entry.
     pub owner_session_id: meerkat_core::SessionId,
+    /// Identity of the forker's staged run, when its native owner recorded
+    /// one (a runtime with a native work authorization host). The completion
+    /// resumes exactly this work; identity only, never a permission.
+    pub retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
 }
 
 /// Durable record of the fork_off job a member was created to run.
@@ -4695,6 +4705,210 @@ pub struct ForkJobRecord {
     /// ([`Self::durable_terminal_result`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_delivery: Option<crate::store::MobDeliveryIdentity>,
+    /// Identity of the forker's staged run, retained at dispatch (see
+    /// [`ForkJobBinding::retained_work`]). `None` on a host without a native
+    /// work authorization host and in records written before this field
+    /// existed; such a record cannot resume work on a governed runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+}
+
+impl MobHandle {
+    /// Record fork child `terminal.child`'s job `terminal.job_id` terminal
+    /// outcome in this mob's event stream, once. A repeat of the same record
+    /// is a no-op; the committed outcome is immutable. The store checks and
+    /// appends in one step, so of two recorders racing with different
+    /// outcomes exactly one commits and the other is refused.
+    ///
+    /// # Errors
+    /// The event store could not be read or written
+    /// ([`ForkJobTerminalError::Store`]); the job is not a fork job of this
+    /// mob's current epoch, its digest does not match its outcome, or it
+    /// already has a different terminal outcome (each typed).
+    pub async fn record_fork_job_terminal(
+        &self,
+        terminal: crate::event::ForkJobTerminalEvent,
+    ) -> Result<(), ForkJobTerminalError> {
+        let ledger = self.fork_job_terminal_ledger().await?;
+        if !ledger
+            .jobs
+            .contains(&(terminal.job_id.clone(), terminal.child.clone()))
+        {
+            return Err(ForkJobTerminalError::UnknownJob {
+                job_id: terminal.job_id,
+                child: terminal.child,
+            });
+        }
+        ForkJobTerminalError::check_digest(&terminal)?;
+        if let Some(existing) = ledger
+            .terminals
+            .get(&(terminal.job_id.clone(), terminal.child.clone()))
+        {
+            if existing == &terminal {
+                return Ok(());
+            }
+            return Err(ForkJobTerminalError::ConflictingTerminal {
+                job_id: terminal.job_id,
+                child: terminal.child,
+            });
+        }
+        let (job_id, child) = (terminal.job_id.clone(), terminal.child.clone());
+        match self
+            .events
+            .append_fork_job_terminal_if_absent(crate::event::NewMobEvent {
+                mob_id: self.mob_id().clone(),
+                timestamp: None,
+                kind: crate::event::MobEventKind::ForkJobTerminal(terminal),
+            })
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(crate::store::MobStoreError::CasConflict(_)) => {
+                Err(ForkJobTerminalError::ConflictingTerminal { job_id, child })
+            }
+            Err(error) => Err(ForkJobTerminalError::Store(MobError::from(error))),
+        }
+    }
+
+    /// The committed terminal outcome of fork child `child`'s job `job_id` in
+    /// this mob's current epoch, if recorded. It outlives the child's
+    /// retirement. A job id names a job only with its child: a host that
+    /// binds jobs may give two children the same id.
+    ///
+    /// # Errors
+    /// The event store could not be read, or the stream's terminals fail
+    /// validation (see [`Self::fork_job_terminals`]).
+    pub async fn fork_job_terminal(
+        &self,
+        job_id: &str,
+        child: &AgentIdentity,
+    ) -> Result<Option<crate::event::ForkJobTerminalEvent>, ForkJobTerminalError> {
+        Ok(self
+            .fork_job_terminal_ledger()
+            .await?
+            .terminals
+            .remove(&(job_id.to_string(), child.clone())))
+    }
+
+    /// Every fork_off terminal outcome recorded in this mob's current epoch.
+    ///
+    /// # Errors
+    /// The event store could not be read
+    /// ([`ForkJobTerminalError::Store`]), or a recorded terminal is invalid:
+    /// it names no fork job spawned in this epoch, its digest does not match
+    /// its outcome, or a second terminal for the same job carries a
+    /// different outcome. A corrupt or duplicated event never rewrites a
+    /// committed outcome.
+    pub async fn fork_job_terminals(
+        &self,
+    ) -> Result<Vec<crate::event::ForkJobTerminalEvent>, ForkJobTerminalError> {
+        Ok(self
+            .fork_job_terminal_ledger()
+            .await?
+            .terminals
+            .into_values()
+            .collect())
+    }
+
+    /// The fork jobs spawned in this mob's current epoch and their validated
+    /// terminals, replayed from the event stream.
+    async fn fork_job_terminal_ledger(
+        &self,
+    ) -> Result<ForkJobTerminalLedger, ForkJobTerminalError> {
+        let events = self.events.replay_all().await.map_err(MobError::from)?;
+        let mob_events: Vec<_> = events
+            .iter()
+            .filter(|event| &event.mob_id == self.mob_id())
+            .collect();
+        let epoch_start = mob_events
+            .iter()
+            .rposition(|event| matches!(event.kind, crate::event::MobEventKind::MobReset))
+            .map_or(0, |position| position + 1);
+        let mut ledger = ForkJobTerminalLedger::default();
+        for event in &mob_events[epoch_start..] {
+            match &event.kind {
+                crate::event::MobEventKind::MemberSpawned(spawned) => {
+                    if let Some(job) = &spawned.fork_job {
+                        ledger
+                            .jobs
+                            .insert((job.job_id.clone(), spawned.agent_identity.clone()));
+                    }
+                }
+                crate::event::MobEventKind::ForkJobTerminal(terminal) => {
+                    let key = (terminal.job_id.clone(), terminal.child.clone());
+                    if !ledger.jobs.contains(&key) {
+                        return Err(ForkJobTerminalError::UnknownJob {
+                            job_id: key.0,
+                            child: key.1,
+                        });
+                    }
+                    ForkJobTerminalError::check_digest(terminal)?;
+                    match ledger.terminals.get(&key) {
+                        Some(existing) if existing == terminal => {}
+                        Some(_) => {
+                            return Err(ForkJobTerminalError::ConflictingTerminal {
+                                job_id: key.0,
+                                child: key.1,
+                            });
+                        }
+                        None => {
+                            ledger.terminals.insert(key, terminal.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(ledger)
+    }
+}
+
+/// The fork jobs of a mob epoch, by job id and child, and their terminals.
+#[derive(Default)]
+struct ForkJobTerminalLedger {
+    jobs: std::collections::BTreeSet<(String, AgentIdentity)>,
+    terminals:
+        std::collections::BTreeMap<(String, AgentIdentity), crate::event::ForkJobTerminalEvent>,
+}
+
+/// Why a fork job's terminal outcome could not be recorded or read.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ForkJobTerminalError {
+    /// The mob's event store failed.
+    #[error(transparent)]
+    Store(#[from] MobError),
+    /// The terminal names no fork job spawned in the mob's current epoch.
+    #[error("fork_off job {job_id} of child {child} is not a fork job of this mob")]
+    UnknownJob {
+        job_id: String,
+        child: AgentIdentity,
+    },
+    /// The terminal's digest is not its outcome's digest.
+    #[error("fork_off job {job_id} of child {child} records a digest that is not its outcome's")]
+    MismatchedDigest {
+        job_id: String,
+        child: AgentIdentity,
+    },
+    /// The job already has a different terminal outcome.
+    #[error("fork_off job {job_id} of child {child} already has a different terminal outcome")]
+    ConflictingTerminal {
+        job_id: String,
+        child: AgentIdentity,
+    },
+}
+
+impl ForkJobTerminalError {
+    fn check_digest(terminal: &crate::event::ForkJobTerminalEvent) -> Result<(), Self> {
+        if terminal.result_digest == crate::event::detached_outcome_digest(&terminal.outcome) {
+            Ok(())
+        } else {
+            Err(Self::MismatchedDigest {
+                job_id: terminal.job_id.clone(),
+                child: terminal.child.clone(),
+            })
+        }
+    }
 }
 
 impl ForkJobRecord {
@@ -5614,8 +5828,14 @@ pub struct SpawnMemberSpec {
     pub tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
     /// Administrative per-category overrides carried by durable identity intent.
     pub tool_category_overrides: meerkat_core::ToolCategoryOverrides,
-    /// Stable application consequence-policy identity for this member.
-    pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
+    /// The host's application consequence-policy choice for this member.
+    ///
+    /// `None` is no choice: a fresh member gets the default (Unmanaged), and
+    /// a member resumed on a durable session keeps the binding that session
+    /// records. `Some(binding)` is an explicit current choice, including an
+    /// intentional `Some(Unmanaged)`: a fresh member is built with it, and a
+    /// resumed member is built with it in place of its durable binding.
+    pub application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     /// Hard resource caps for the spawned member session.
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
     /// When true, automatically wire this member to its spawner.
@@ -5802,7 +6022,7 @@ impl SpawnMemberSpec {
             tool_access_policy: None,
             tool_dispatch_admission: None,
             tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
-            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
+            application_tool_policy: None,
             budget_limits: None,
             auto_wire_parent: false,
             additional_instructions: None,
@@ -14893,6 +15113,7 @@ impl MobHandle {
             member.fork_job = Some(ForkJobRecord {
                 job_id: job.job_id,
                 owner_session_id: job.owner_session_id,
+                retained_work: job.retained_work,
                 started_at_ms: u64::try_from(
                     meerkat_core::time_compat::SystemTime::now()
                         .duration_since(meerkat_core::time_compat::UNIX_EPOCH)

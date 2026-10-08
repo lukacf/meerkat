@@ -38,10 +38,17 @@ pub trait ConfigStore: Send + Sync {
     /// Fetch the current config.
     async fn get(&self) -> Result<Config, ConfigError>;
 
-    /// Persist the provided config.
+    /// Persist the provided config as a full replace.
+    ///
+    /// A document-backed store writes every field explicitly, so in a realm
+    /// document each one then overrides the parent realm instead of
+    /// inheriting it. Change individual keys with [`Self::patch`].
     async fn set(&self, config: Config) -> Result<(), ConfigError>;
 
-    /// Apply a config patch and return the updated config.
+    /// Apply an RFC 7396 JSON merge patch and return the updated config.
+    ///
+    /// A document-backed store writes only the keys the patch names; the
+    /// others keep their presence, so a realm document keeps inheriting them.
     async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError>;
 
     /// Optional metadata to expose on config APIs.
@@ -403,8 +410,9 @@ impl ConfigStore for MemoryConfigStore {
     }
 
     async fn set(&self, config: Config) -> Result<(), ConfigError> {
-        config.validate(self.catalog)?;
-        *self.config.write().await = config;
+        let mut current = self.config.write().await;
+        config.validate_for_write(self.catalog, &current.tools.mcp_servers)?;
+        *current = config;
         Ok(())
     }
 
@@ -413,7 +421,7 @@ impl ConfigStore for MemoryConfigStore {
         let mut value = serde_json::to_value(&*config).map_err(ConfigError::Json)?;
         merge_patch(&mut value, delta.0);
         let updated: Config = serde_json::from_value(value).map_err(ConfigError::Json)?;
-        updated.validate(self.catalog)?;
+        updated.validate_for_write(self.catalog, &config.tools.mcp_servers)?;
         *config = updated.clone();
         Ok(updated)
     }
@@ -512,20 +520,60 @@ impl FileConfigStore {
         &self.path
     }
 
-    /// Read the document as persisted (legacy keys removed, legacy value
-    /// shapes kept). Loads normalize it; patches merge onto it.
-    async fn read_persisted(&self) -> Result<PersistedConfigDocument, ConfigError> {
+    /// The document text as persisted; empty when the file does not exist.
+    async fn read_content(&self) -> Result<String, ConfigError> {
         if self.create_if_missing {
             self.ensure_exists().await?;
         }
 
         if !tokio::fs::try_exists(&self.path).await? {
-            return Ok(PersistedConfigDocument::absent());
+            return Ok(String::new());
         }
 
         let bytes = tokio::fs::read(&self.path).await?;
-        let content = String::from_utf8(bytes).map_err(ConfigError::Utf8)?;
-        PersistedConfigDocument::parse(&content)
+        String::from_utf8(bytes).map_err(ConfigError::Utf8)
+    }
+
+    /// The document's own MCP servers, for a write's literal-server check.
+    /// A missing or unreadable document has none, so no entry of the write
+    /// is exempted; a full replace never depends on parsing the old
+    /// document.
+    async fn persisted_mcp_servers_for_write(&self) -> Vec<crate::mcp_config::McpServerConfig> {
+        let content = match tokio::fs::read(&self.path).await {
+            Ok(bytes) => String::from_utf8(bytes).ok(),
+            Err(_) => None,
+        };
+        content
+            .and_then(|content| PersistedConfigDocument::parse(&content).ok())
+            .map(|document| document.into_loaded().0.tools.mcp_servers)
+            .unwrap_or_default()
+    }
+
+    /// Read the document as persisted (legacy keys removed, legacy value
+    /// shapes kept). Loads normalize it.
+    async fn read_persisted(&self) -> Result<PersistedConfigDocument, ConfigError> {
+        PersistedConfigDocument::parse(&self.read_content().await?)
+    }
+
+    /// Replace the document atomically: write a sibling temp file, sync it,
+    /// rename it over the document.
+    async fn write_content(&self, content: &str) -> Result<(), ConfigError> {
+        let parent = self
+            .path
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        tokio::fs::create_dir_all(&parent).await?;
+        let tmp_path = parent.join(format!(".config.tmp.{}", crate::time_compat::new_uuid_v7()));
+        let mut tmp = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .await?;
+        tmp.write_all(content.as_bytes()).await?;
+        tmp.sync_all().await?;
+        drop(tmp);
+        tokio::fs::rename(&tmp_path, &self.path).await?;
+        Ok(())
     }
 
     async fn ensure_exists(&self) -> Result<(), ConfigError> {
@@ -556,46 +604,44 @@ impl ConfigStore for FileConfigStore {
         Ok(self.read_persisted().await?.into_loaded())
     }
 
-    /// The delta merges onto the document AS PERSISTED, so a patch that adds
-    /// a chain to a pre-0.8.37 `enabled = true` document keeps fallback on.
+    /// The delta edits the document AS PERSISTED (see
+    /// `PersistedConfigDocument::patch_content`): keys it does not name keep
+    /// their presence, so a realm document keeps inheriting them, and a patch
+    /// that adds a chain to a pre-0.8.37 `enabled = true` document keeps
+    /// fallback on.
     async fn patch_preview(
         &self,
         delta: &ConfigDelta,
     ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
-        self.read_persisted().await?.apply_patch(delta.0.clone())
+        let patched =
+            PersistedConfigDocument::patch_content(&self.read_content().await?, delta.0.clone())?;
+        Ok((patched.config, patched.warnings))
     }
 
     async fn patch_with_warnings(
         &self,
         delta: ConfigDelta,
     ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
-        let (updated, warnings) = self.patch_preview(&delta).await?;
-        updated.validate(self.catalog)?;
-        self.set(updated.clone()).await?;
-        Ok((updated, warnings))
+        let content = self.read_content().await?;
+        let patched = PersistedConfigDocument::patch_content(&content, delta.0)?;
+        // The patch already parsed this content strictly, so this parse
+        // succeeds; the comparison is against the same bytes the patch edits.
+        let persisted_servers = PersistedConfigDocument::parse(&content)
+            .map(|document| document.into_loaded().0.tools.mcp_servers)?;
+        patched
+            .config
+            .validate_for_write(self.catalog, &persisted_servers)?;
+        self.write_content(&patched.content).await?;
+        Ok((patched.config, patched.warnings))
     }
 
+    /// A full replace writes every field of `config` explicitly. In a realm
+    /// document each one then overrides the parent realm, so callers that
+    /// change individual keys of a realm document patch it instead.
     async fn set(&self, config: Config) -> Result<(), ConfigError> {
-        config.validate(self.catalog)?;
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
+        config.validate_for_write(self.catalog, &self.persisted_mcp_servers_for_write().await)?;
         let content = toml::to_string_pretty(&config).map_err(ConfigError::TomlSerialize)?;
-        let parent = self
-            .path
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let tmp_path = parent.join(format!(".config.tmp.{}", crate::time_compat::new_uuid_v7()));
-        let mut tmp = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .await?;
-        tmp.write_all(content.as_bytes()).await?;
-        tmp.sync_all().await?;
-        drop(tmp);
-        tokio::fs::rename(&tmp_path, &self.path).await?;
-        Ok(())
+        self.write_content(&content).await
     }
 
     async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
@@ -622,12 +668,15 @@ fn report_config_load_warnings_once(path: &Path, warnings: &[ConfigWarning]) {
     }
 }
 
-/// Canonical RFC 7386 JSON merge-patch application.
+/// Canonical RFC 7396 JSON merge-patch application.
 ///
 /// This is the single owner of config patch acceptance/rejection semantics:
 /// a `null` patch value removes the key, an object recurses, and any other
 /// value replaces. All surfaces (RPC, REST, MCP) MUST route through this and
-/// [`apply_config_patch_preview`] rather than re-deriving the merge rules.
+/// [`apply_config_patch_preview`] (or a [`ConfigStore`]) rather than
+/// re-deriving the merge rules. [`FileConfigStore`] applies the same rules to
+/// the persisted document itself, so a patch never rewrites keys it does not
+/// name.
 pub fn merge_patch(base: &mut Value, patch: Value) {
     match (base, patch) {
         (Value::Object(base_map), Value::Object(patch_map)) => {
@@ -1292,6 +1341,449 @@ mod tests {
             config.max_tokens, original_max_tokens,
             "input config is not mutated by preview"
         );
+    }
+
+    /// Realm documents at `<root>/<realm>/config.toml`, served both typed and
+    /// as raw TOML like the filesystem source every surface composes with, so
+    /// composition reads each document's key presence (`child-wins-scalar`).
+    struct PresenceDocSource {
+        root: PathBuf,
+    }
+
+    impl PresenceDocSource {
+        fn doc_path(&self, realm: &crate::connection::RealmId) -> PathBuf {
+            self.root.join(realm.as_str()).join("config.toml")
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl RealmConfigSource for PresenceDocSource {
+        async fn config_for_realm(
+            &self,
+            realm: &crate::connection::RealmId,
+        ) -> Result<Option<Config>, ConfigError> {
+            Ok(self
+                .config_for_realm_with_warnings(realm)
+                .await?
+                .map(|(config, _)| config))
+        }
+
+        async fn config_for_realm_with_warnings(
+            &self,
+            realm: &crate::connection::RealmId,
+        ) -> Result<Option<(Config, Vec<crate::config::ConfigWarning>)>, ConfigError> {
+            let path = self.doc_path(realm);
+            if !tokio::fs::try_exists(&path).await? {
+                return Ok(None);
+            }
+            FileConfigStore::new(path, *crate::model_profile::test_catalog::TEST_CATALOG)
+                .get_with_warnings()
+                .await
+                .map(Some)
+        }
+
+        async fn raw_config_for_realm(
+            &self,
+            realm: &crate::connection::RealmId,
+        ) -> Result<Option<toml::Value>, ConfigError> {
+            let path = self.doc_path(realm);
+            if !tokio::fs::try_exists(&path).await? {
+                return Ok(None);
+            }
+            Ok(Some(toml::from_str(
+                &tokio::fs::read_to_string(&path).await?,
+            )?))
+        }
+    }
+
+    /// A parent realm that restricts tool policy and DISABLES capabilities
+    /// whose defaults are enabled (scheduling, provider web search).
+    const POLICY_PARENT_DOC: &str = "[realm.parent]\n\n\
+        [tools]\nshell_enabled = true\nmax_concurrent = 3\nschedule_enabled = false\n\n\
+        [retry]\nmax_retries = 7\n\n\
+        [provider_tools.anthropic]\nweb_search = false\n\n\
+        [provider_tools.openai]\nweb_search = false\n\n\
+        [provider_tools.gemini]\ngoogle_search = false\n";
+
+    /// A child that inherits all of that, with one explicit key that equals
+    /// its struct default.
+    const POLICY_CHILD_DOC: &str = "# Child realm: inherits tool policy from its parent.\n\
+        [realm.child]\nparent = \"parent\" # the chain edge\n\n\
+        [skills]\nenabled = true # explicit, equal to the default\n";
+
+    async fn write_realm_doc(
+        root: &Path,
+        realm: &str,
+        content: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let dir = root.join(realm);
+        tokio::fs::create_dir_all(&dir).await?;
+        let path = dir.join("config.toml");
+        tokio::fs::write(&path, content).await?;
+        Ok(path)
+    }
+
+    fn child_runtime(child_path: &Path) -> crate::ConfigRuntime {
+        let state_path = child_path.with_file_name("config_state.json");
+        crate::ConfigRuntime::new(
+            Arc::new(FileConfigStore::new(
+                child_path.to_path_buf(),
+                *crate::model_profile::test_catalog::TEST_CATALOG,
+            )),
+            state_path,
+        )
+    }
+
+    fn table_keys(table: &toml::Table) -> Vec<&str> {
+        table.keys().map(String::as_str).collect()
+    }
+
+    /// Regression: a patch naming one key must write only that key. The
+    /// typed round trip materialized every default into the child document,
+    /// and composition read them as explicit child overrides: inherited
+    /// restrictions were dropped and capabilities the parent DISABLED
+    /// (scheduling, provider web search) were silently re-enabled.
+    #[tokio::test]
+    async fn file_store_patch_keeps_child_presence_and_inherited_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::connection::RealmId;
+
+        let temp = tempfile::tempdir()?;
+        write_realm_doc(temp.path(), "parent", POLICY_PARENT_DOC).await?;
+        let child_path = write_realm_doc(temp.path(), "child", POLICY_CHILD_DOC).await?;
+        let runtime = child_runtime(&child_path);
+        let generation = runtime.get().await?.generation;
+
+        let snapshot = runtime
+            .patch(
+                ConfigDelta(serde_json::json!({
+                    "tools": { "mcp_servers": [{
+                        "name": "sentinel",
+                        "command": "sentinel-mcp",
+                        "args": ["--read-only"],
+                    }]}
+                })),
+                Some(generation),
+            )
+            .await?;
+        assert_eq!(snapshot.generation, generation + 1);
+
+        let written = tokio::fs::read_to_string(&child_path).await?;
+        let raw: toml::Table = toml::from_str(&written)?;
+        assert_eq!(
+            table_keys(&raw),
+            vec!["realm", "skills", "tools"],
+            "only the patched section is added: {written}"
+        );
+        let tools = raw
+            .get("tools")
+            .and_then(toml::Value::as_table)
+            .ok_or("tools table")?;
+        assert_eq!(table_keys(tools), vec!["mcp_servers"], "{written}");
+        let skills = raw
+            .get("skills")
+            .and_then(toml::Value::as_table)
+            .ok_or("skills table")?;
+        assert_eq!(
+            skills.get("enabled").and_then(toml::Value::as_bool),
+            Some(true),
+            "the explicit default-valued key keeps its presence: {written}"
+        );
+        assert_eq!(table_keys(skills), vec!["enabled"], "{written}");
+
+        let reader = EffectiveConfigReader::new(Arc::new(PresenceDocSource {
+            root: temp.path().to_path_buf(),
+        }));
+        let effective = reader.effective_config(&RealmId::parse("child")?).await?;
+        assert!(effective.tools.shell_enabled, "inherited shell_enabled");
+        assert_eq!(
+            effective.tools.max_concurrent, 3,
+            "inherited max_concurrent"
+        );
+        assert!(
+            !effective.tools.schedule_enabled,
+            "the parent's disabled scheduling must stay disabled"
+        );
+        assert_eq!(effective.retry.max_retries, 7, "inherited retry policy");
+        assert!(!effective.provider_tools.anthropic.web_search);
+        assert!(
+            !effective.provider_tools.openai.web_search,
+            "the parent's disabled web search must stay disabled"
+        );
+        assert!(!effective.provider_tools.gemini.google_search);
+        assert!(effective.skills.enabled);
+        assert_eq!(
+            effective
+                .tools
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sentinel"]
+        );
+        Ok(())
+    }
+
+    /// A stale `expected_generation` is refused before the document is read
+    /// or written.
+    #[tokio::test]
+    async fn file_store_patch_with_stale_generation_leaves_document_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write_realm_doc(temp.path(), "parent", POLICY_PARENT_DOC).await?;
+        let child_path = write_realm_doc(temp.path(), "child", POLICY_CHILD_DOC).await?;
+        let runtime = child_runtime(&child_path);
+        let stale = runtime.get().await?.generation;
+        runtime
+            .patch(
+                ConfigDelta(serde_json::json!({ "max_tokens": 1234 })),
+                Some(stale),
+            )
+            .await?;
+        let before = tokio::fs::read(&child_path).await?;
+
+        let error = runtime
+            .patch(
+                ConfigDelta(serde_json::json!({ "tools": { "shell_enabled": false } })),
+                Some(stale),
+            )
+            .await
+            .expect_err("a stale generation must be refused");
+        assert!(
+            matches!(
+                error,
+                crate::ConfigRuntimeError::GenerationConflict { expected, current }
+                    if expected == stale && current == stale + 1
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            tokio::fs::read(&child_path).await?,
+            before,
+            "a refused write leaves the bytes untouched"
+        );
+        Ok(())
+    }
+
+    /// `null` removes the child's own key, so the field inherits again.
+    #[tokio::test]
+    async fn file_store_patch_null_removes_key_and_restores_inheritance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::connection::RealmId;
+
+        let temp = tempfile::tempdir()?;
+        write_realm_doc(temp.path(), "parent", POLICY_PARENT_DOC).await?;
+        let child_path = write_realm_doc(
+            temp.path(),
+            "child",
+            "[realm.child]\nparent = \"parent\"\n\n[tools]\nmax_concurrent = 5\n",
+        )
+        .await?;
+        let reader = EffectiveConfigReader::new(Arc::new(PresenceDocSource {
+            root: temp.path().to_path_buf(),
+        }));
+        let child = RealmId::parse("child")?;
+        assert_eq!(
+            reader.effective_config(&child).await?.tools.max_concurrent,
+            5
+        );
+
+        child_runtime(&child_path)
+            .patch(
+                ConfigDelta(serde_json::json!({ "tools": { "max_concurrent": null } })),
+                None,
+            )
+            .await?;
+
+        let written = tokio::fs::read_to_string(&child_path).await?;
+        let raw: toml::Table = toml::from_str(&written)?;
+        assert!(
+            raw.get("tools")
+                .and_then(toml::Value::as_table)
+                .is_none_or(|tools| !tools.contains_key("max_concurrent")),
+            "the key is removed, not reset to its default: {written}"
+        );
+        let effective = reader.effective_config(&child).await?;
+        assert_eq!(
+            effective.tools.max_concurrent, 3,
+            "the parent's value applies again"
+        );
+        assert!(!effective.tools.schedule_enabled);
+        Ok(())
+    }
+
+    /// Realm MCP servers are literal, and a write is judged entry by entry
+    /// against the document's own persisted servers: a new or changed entry
+    /// holding an environment reference is refused and writes nothing, while
+    /// an unchanged legacy entry does not block an unrelated write, a repair
+    /// or a removal (resolving the MCP set still refuses it).
+    #[tokio::test]
+    async fn file_store_writes_refuse_new_or_changed_mcp_server_env_references()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("config.toml");
+        let original = "[agent]\nmodel = \"claude-sonnet-4-5\"\n";
+        tokio::fs::write(&path, original).await?;
+        let store = FileConfigStore::new(
+            path.clone(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        );
+        let referencing = |name: &str| {
+            serde_json::json!({
+                "name": name,
+                "command": "tool",
+                "env": { "TOKEN": "${HOST_SECRET}" },
+            })
+        };
+        let refused_entry = |result: &Result<Config, ConfigError>, server: &str| {
+            matches!(result, Err(ConfigError::RealmMcpServerEnvReference(reference))
+                if reference.server == server && reference.field == "env")
+        };
+
+        // New entries are refused, on patch and on set.
+        let patched = store
+            .patch(ConfigDelta(serde_json::json!({
+                "tools": { "mcp_servers": [referencing("exfil")] }
+            })))
+            .await;
+        assert!(refused_entry(&patched, "exfil"), "{patched:?}");
+        assert!(
+            !format!("{patched:?}").contains("HOST_SECRET"),
+            "{patched:?}"
+        );
+        let mut config: Config = toml::from_str(original)?;
+        config.tools.mcp_servers = vec![serde_json::from_value(referencing("exfil"))?];
+        let set = store.set(config).await;
+        assert!(
+            matches!(&set, Err(ConfigError::RealmMcpServerEnvReference(_))),
+            "{set:?}"
+        );
+        assert_eq!(tokio::fs::read_to_string(&path).await?, original);
+
+        // A document that already holds two legacy entries.
+        let existing = "[[tools.mcp_servers]]\nname = \"legacy-a\"\ncommand = \"tool\"\n\
+            env = { TOKEN = \"${HOST_SECRET}\" }\n\n\
+            [[tools.mcp_servers]]\nname = \"legacy-b\"\ncommand = \"tool\"\n\
+            env = { TOKEN = \"${HOST_SECRET}\" }\n";
+        tokio::fs::write(&path, existing).await?;
+        assert_eq!(store.get().await?.tools.mcp_servers.len(), 2);
+
+        // An unrelated patch succeeds and keeps the legacy entries, which
+        // resolving the MCP set still refuses.
+        let unrelated = store
+            .patch(ConfigDelta(serde_json::json!({ "max_tokens": 200 })))
+            .await?;
+        assert_eq!(unrelated.max_tokens, Some(200));
+        assert!(matches!(
+            crate::mcp_config::compose_effective_mcp_servers(&unrelated.tools.mcp_servers, vec![]),
+            Err(crate::mcp_config::EffectiveMcpServersError::RealmEnvReference(_))
+        ));
+
+        // Changing a legacy entry, even in a field other than the reference,
+        // or copying it under a new name, is a new or changed entry.
+        let before = tokio::fs::read_to_string(&path).await?;
+        let mut changed = referencing("legacy-a");
+        changed["connect_timeout_secs"] = serde_json::json!(30);
+        for (servers, server) in [
+            (vec![changed, referencing("legacy-b")], "legacy-a"),
+            (
+                vec![
+                    referencing("legacy-a"),
+                    referencing("legacy-b"),
+                    referencing("legacy-c"),
+                ],
+                "legacy-c",
+            ),
+        ] {
+            let result = store
+                .patch(ConfigDelta(
+                    serde_json::json!({ "tools": { "mcp_servers": servers } }),
+                ))
+                .await;
+            assert!(refused_entry(&result, server), "{server}: {result:?}");
+            assert_eq!(tokio::fs::read_to_string(&path).await?, before);
+        }
+
+        // Repairing one legacy entry beside another unchanged one, adding a
+        // valid server, removing a legacy entry, and a get-then-set round
+        // trip all succeed.
+        let repaired = serde_json::json!({ "name": "legacy-a", "command": "tool" });
+        let added = serde_json::json!({ "name": "docs", "command": "docs-tool" });
+        store
+            .patch(ConfigDelta(serde_json::json!({ "tools": { "mcp_servers": [
+                repaired, referencing("legacy-b"), added.clone()
+            ]}})))
+            .await?;
+        let round_trip = store.get().await?;
+        store.set(round_trip).await?;
+        store
+            .patch(ConfigDelta(serde_json::json!({ "tools": { "mcp_servers": [
+                serde_json::json!({ "name": "legacy-a", "command": "tool" }), added
+            ]}})))
+            .await?;
+        let names: Vec<String> = store
+            .get()
+            .await?
+            .tools
+            .mcp_servers
+            .into_iter()
+            .map(|server| server.name)
+            .collect();
+        assert_eq!(names, vec!["legacy-a", "docs"]);
+
+        // A full replace never depends on parsing the old document, and an
+        // unreadable old document exempts nothing.
+        tokio::fs::write(&path, "[tools\n").await?;
+        let mut valid: Config = toml::from_str(original)?;
+        valid.tools.mcp_servers = vec![serde_json::from_value(serde_json::json!({
+            "name": "docs", "command": "docs-tool"
+        }))?];
+        store.set(valid).await?;
+        tokio::fs::write(&path, "[tools\n").await?;
+        let mut invalid: Config = toml::from_str(original)?;
+        invalid.tools.mcp_servers = vec![serde_json::from_value(referencing("legacy-a"))?];
+        assert!(matches!(
+            store.set(invalid).await,
+            Err(ConfigError::RealmMcpServerEnvReference(_))
+        ));
+        assert_eq!(tokio::fs::read_to_string(&path).await?, "[tools\n");
+        Ok(())
+    }
+
+    /// Comments, formatting and key order outside the patched keys survive.
+    #[tokio::test]
+    async fn file_store_patch_keeps_comments_and_order_of_untouched_keys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("config.toml");
+        let original = "# Operator notes for this realm.\n\
+            max_tokens = 100 # per-turn cap\n\n\
+            [agent]\n# pinned for the review team\nmodel = \"claude-sonnet-4-5\"\n\n\
+            [tools]\nmax_concurrent = 4   # keep low on this host\nshell_enabled = true\n";
+        tokio::fs::write(&path, original).await?;
+        let store = FileConfigStore::new(
+            path.clone(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        );
+
+        store
+            .patch(ConfigDelta(serde_json::json!({
+                "max_tokens": 200,
+                "tools": { "shell_enabled": false },
+            })))
+            .await?;
+
+        let written = tokio::fs::read_to_string(&path).await?;
+        assert_eq!(
+            written,
+            "# Operator notes for this realm.\n\
+            max_tokens = 200 # per-turn cap\n\n\
+            [agent]\n# pinned for the review team\nmodel = \"claude-sonnet-4-5\"\n\n\
+            [tools]\nmax_concurrent = 4   # keep low on this host\nshell_enabled = false\n",
+            "only the patched values change"
+        );
+        Ok(())
     }
 
     #[tokio::test]

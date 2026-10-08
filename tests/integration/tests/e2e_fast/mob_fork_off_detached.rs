@@ -220,6 +220,7 @@ async fn make_stack_over(
         meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
     ));
     let runtime = Arc::new(runtime);
+    serve_detached_outcomes(&runtime, &mob_state);
     let (notif_tx, _notif_rx) = mpsc::channel(256);
     let router = MethodRouter::new_with_mob_state(
         runtime,
@@ -228,6 +229,24 @@ async fn make_stack_over(
         Arc::clone(&mob_state),
     );
     (router, mob_state)
+}
+
+/// What the rkat-rpc host does for its mob state: detached fork_off and
+/// council outcomes are submitted to the runtime's continuation owner, and
+/// the runtime's delivery owner (armed in its realm) applies them.
+fn serve_detached_outcomes(runtime: &Arc<SessionRuntime>, mob_state: &Arc<MobMcpState>) {
+    runtime.set_realm_context(
+        Some(meerkat_core::connection::RealmId::global()),
+        None,
+        None,
+    );
+    mob_state
+        .bind_continuations(
+            runtime.runtime_delivery_inbox(),
+            runtime.continuation_bindings(),
+        )
+        .expect("bind the runtime's continuation services");
+    runtime.arm_runtime_delivery_owner();
 }
 
 /// The public definition shape: what a model's `mob_create` may pass.
@@ -482,9 +501,11 @@ async fn e2e_fast_detached_fork_off_reaches_the_forker_and_its_next_turn() {
 }
 
 /// MobKit's gateway builds its mob state with `MobMcpState::new` over a
-/// session service that forwards the runtime. That shape must take the
-/// detached path, never the blocking one (HomeCore's fork_off would
-/// otherwise block its caller for the child's whole run).
+/// session service that forwards the runtime. Outcomes are submitted durably
+/// through a bound delivery inbox: until the host binds one the tools run in
+/// the turn (typed `NoContinuationOwner`), and once it does that shape takes
+/// the detached path, never the blocking one (a forker would otherwise wait
+/// for its child's whole run).
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_fast_library_host_built_like_mobkit_delivers_detached() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -497,11 +518,26 @@ async fn e2e_fast_library_host_built_like_mobkit_delivers_detached() {
         stack_state.session_service(),
         meerkat_mob::MobControlPrincipal::Owner,
     )
-    .expect("construct runtime authority");
+    .expect("construct runtime authority")
+    .into_shared();
+    assert_eq!(
+        mobkit_shaped.detached_delivery_blocked_because(),
+        Some(meerkat_mob_mcp::DetachedDeliveryUnavailable::NoContinuationOwner),
+        "a library host that never bound a delivery inbox runs the tools in the turn"
+    );
+    let bindings = meerkat::ContinuationHostBindings::default();
+    mobkit_shaped
+        .bind_continuations(
+            meerkat_runtime::RuntimeDeliveryInbox::new(Arc::new(
+                meerkat_runtime::InMemoryRuntimeStore::new(),
+            )),
+            &bindings,
+        )
+        .expect("bind the host's delivery inbox");
     assert_eq!(
         mobkit_shaped.detached_delivery_blocked_because(),
         None,
-        "a library host whose session service carries a runtime delivers detached"
+        "a bound library host whose session service carries a runtime delivers detached"
     );
 }
 
@@ -566,17 +602,16 @@ async fn e2e_fast_detached_completion_reaches_owners_that_are_not_live() {
         }
         let job_id = format!("job-{owner}");
         let before = requests.lock().unwrap().len();
-        let delivered = meerkat_mob_mcp::deliver_detached_completion_to_member(
-            &runtime,
-            &handle,
-            &AgentIdentity::from(owner),
-            &session,
-            "fork_off",
-            &job_id,
-            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
-            json!({"agent_identity": "some-child", "status": "completed"}),
-        )
-        .await;
+        let delivered = mob_state
+            .submit_detached_completion_for_tests(
+                Some((handle.clone(), AgentIdentity::from(owner))),
+                &session,
+                "fork_off",
+                &job_id,
+                meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+                json!({"agent_identity": "some-child", "status": "completed"}),
+            )
+            .await;
         assert!(delivered.is_ok(), "{owner}: {delivered:?}");
         wait_for_single_record(&router, &session, &job_id).await;
         let deadline = tokio::time::Instant::now() + WAIT;
@@ -587,17 +622,16 @@ async fn e2e_fast_detached_completion_reaches_owners_that_are_not_live() {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        let again = meerkat_mob_mcp::deliver_detached_completion_to_member(
-            &runtime,
-            &handle,
-            &AgentIdentity::from(owner),
-            &session,
-            "fork_off",
-            &job_id,
-            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
-            json!({"agent_identity": "some-child", "status": "completed"}),
-        )
-        .await;
+        let again = mob_state
+            .submit_detached_completion_for_tests(
+                Some((handle.clone(), AgentIdentity::from(owner))),
+                &session,
+                "fork_off",
+                &job_id,
+                meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+                json!({"agent_identity": "some-child", "status": "completed"}),
+            )
+            .await;
         assert!(again.is_ok(), "{owner} redelivery: {again:?}");
         tokio::time::sleep(Duration::from_millis(300)).await;
         wait_for_single_record(&router, &session, &job_id).await;
@@ -1654,6 +1688,11 @@ async fn e2e_fast_top_level_rpc_convener_is_revived_for_its_council_result() {
     let mob_state = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None)
         .expect("construct runtime authority");
     assert!(mob_state.detached_owner_host().is_some());
+    assert!(
+        mob_state.continuation_binding_generation().is_some(),
+        "the RPC mob state binds the runtime's continuation services"
+    );
+    serve_detached_outcomes(&runtime, &mob_state);
     // Councils seat on the RPC host: its session service exposes the
     // persistent service as the forked-participant source runtime.
     assert!(

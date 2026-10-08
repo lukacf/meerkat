@@ -485,9 +485,9 @@ pub fn fnv1a64_hex(input: &str) -> String {
 mod tests {
     #[test]
     fn invalid_realm_id_error_names_the_accepted_form_and_the_mobkit_realm() {
-        let error = validate_explicit_realm_id("mob.homecore").expect_err("dots are not allowed");
+        let error = validate_explicit_realm_id("mob.example").expect_err("dots are not allowed");
         let text = error.to_string();
-        assert!(text.contains("mob.homecore"), "{text}");
+        assert!(text.contains("mob.example"), "{text}");
         assert!(
             text.contains("directory name under the realms root"),
             "{text}"

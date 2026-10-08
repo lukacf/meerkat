@@ -429,7 +429,7 @@ pub use handle::{
     ExternalMemberObservationSnapshot, ExternalMemberOwnerRef, ExternalMemberReachability,
     ExternalMemberRebindStatus, ExternalPeerBindingSpec, FlowRunHandle, FlowRunWaitError,
     FlowTargetProvisioner, ForkChildRun, ForkChildRunOutcome, ForkJobBinding, ForkJobRecord,
-    ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult,
+    ForkJobTerminalError, ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult,
     HELPER_RESULT_TRUNCATION_MARKER, HelperOptions, HelperResult, HostBindReport, HostBindRequest,
     HostCapabilityReport, HostRevokeReport, InitializeAdaptiveRunRequest,
     MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT, MemberAdmissionBacklogGauge,

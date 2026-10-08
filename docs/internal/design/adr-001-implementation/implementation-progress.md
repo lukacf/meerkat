@@ -2,6 +2,241 @@
 
 ## Current delivery status, 2026-10-06
 
+The full [acceptance plan](acceptance-plan.md), read through the accepted
+[local default](../adr-001-local-governed-default.md) and
+[review/consent amendment](../adr-001-model-review-and-consent.md), remains open.
+A focused pass or delivered patch does not complete another operation family,
+surface or recovery boundary. The release coordinator leads the work; the existing
+native owners retain native integration, qualification and publication.
+
+Native candidate `18abf7414123262b7334289cf5c6415c6be6235a` passed its normal
+hooked push and reached [PR1730](https://github.com/lukacf/meerkat/pull/1730) at
+20:06:13 UTC. The retained log, independently read after completion, records
+all normal gates passed, including Clippy, machine/protocol generation drift,
+canonical TLC, governance and the workspace deterministic unit, integration
+and e2e gate. The full push took 1h44m20s; this is gate wall time, not test-body
+or authorization latency. Log: a retained receipt.
+GitHub confirms that exact head but reports a conflict with main after PR1801.
+The existing sole assembler prepared merge `0af71cc604353618f6a726246b244b17accd426e`;
+its resolution is source-clear, with the reviewed runtime and regression files
+preserved. That source passed 15 targeted tests and Clippy, verified from its
+retained raw logs. The next prepared merge is
+`76ef4d58d5b64413cdf20486d46523779d6435f6`, combining that source with
+`c2c38fe9deb3b7ff83100193771fc4e3746b519a`. Its composition is source-clear.
+The prerequisite #1796 normal push completed successfully at 21:34:45 UTC,
+confirmed in its original log and then by GitHub's published `c2c38fe9d` head.
+Its CI and Live gate were running at the next check; release semver readiness
+had passed. #1730 still published `18abf7414`, and no Actions runs were present
+for `76ef4d58d`.
+At 23:18 UTC, the original `76ef4d58d` push was still active after
+1h43m19s. Its retained log shows Clippy, machine/protocol drift, canonical TLC
+and governance gates passed; the workspace deterministic gate was still active.
+That observation establishes neither terminal push success nor successor CI.
+Earlier passes remain attached to their original heads. Qualification,
+publication, hosted CI and accepted performance measurements for the combined
+successor remain open.
+
+| Area | Verified evidence and remaining limit |
+|---|---|
+| Native human consent | Exact `885554aed055c42e332850c9b5a518036ee82e94` passed 218 focused tests with 2,748 skipped, including seven consent cases. These are library and fenced-dispatch controls, not a full Agent flow or separate-process consent recovery. The raw log is a retained receipt; compilation took 3m16s and test bodies 1.045s. |
+| Human-consent successor | Source review at `5568d2bc01968e12595601917a435fa9fd980c45` is not clear. Existing the consent implementer has a reviewed repair plan for typed store commitment/reconciliation, callback-free entry reservations, current approver eligibility and machine-owned consent association/use. Compile companion `5d257c610` is source-clear; that does not qualify the pending repairs. Original-run closure/carry, real authenticated host admission, qualified presentation, delivery/wake and restored live-consent custody remain incomplete. |
+| Reviewer context and failure feedback | Native original-input context (`15dee74b` patch), supported typed text-appends (`c35c4945`) and successful reviewer HTTP followed by protected observation failure (`ac4ab4ef`) are independently source-reviewed and delivered. Original-input reads retain their actual work owner and independently checked source permission; unsupported media/reference context remains unavailable. Protected observation failure remains infrastructure failure, with no target effect or automatic retry and with permitted sibling continuation. The new fixtures are unexecuted. |
+| Recovery | Same-process evidence retains its stated scope. The separately recorded `adc79830f` subprocess fixture proves completed-turn reconstruction followed by fresh governed work under newly installed current grants. It does not prove interrupted continuation, restored live consent or automatic recovery across all surfaces. |
+| SDK and Console | Feedback `151d9d62`, optional reference `074bf586`, reference display `774c72a4`, typed gating-result patches and public TypeScript subscription fixtures (`75e087fc`) are source-delivered. MCP setup-reason propagation is source-clear in native Python/TypeScript (`a6faf991`) and stock/shared Console projection (`769d4938`). Point-aware PostTool Console feedback (`9bb2fb59`) is source-reviewed against the accepted chain. Only a canonical per-call result establishes withholding; a bare Observe-hook refusal does not. The sole assembler must regenerate native schema/types; integrated execution and publication remain pending. An approval reference or displayed refusal does not establish action execution. |
+| Confinement | Linux `baebee65`, MCP `f7e21419` and command-hook `356acc80` source are queued with the sole assembler. The hook patch binds the exact launch and preserves durable custody plus local PreTool refusal. Durable shell-job refusal codes (`a2c19339`) and typed MCP setup notices (`d67f08ed`) are source-clear. The accepted factory-owned asynchronous MCP feedback fixtures (`5adf304b`) cover actual adapter refresh and next-model projection. Foreground Observe locality source and tests (`fcb6bb39`) supersede the earlier `b14bd9f8` test-only draft. PostTool locality production (`9e205e51`) and strengthened controls (`cc34ea37`) extend the earlier tests (`1b2c5ce2`). The source-reviewed path withholds only the affected publication while preserving entered effects, sibling results, async registration, deferred visibility and settlement diagnostics. It adds a hook-specific refusal instead of claiming the tool never ran; canonical schema/SDK regeneration and execution remain pending. Post-commit Observe continuation and retained refusal diagnostics (`ea6beabd` patch) are source-clear with two new engine-level tests, including a later observer failure. These tests do not establish host/model delivery or durable audit. All these additions are unexecuted. Mandatory Guardrail disposition, full background and post-commit feedback, descendant termination and remaining platform/launch coverage stay open. |
+| Background Observe feedback | Engine and active-Agent source (`b4861fc7`) is independently source-clear on the accepted PostTool chain. Scheduling pressure and retained completion facts reach the shared provider text projection with bounded original attribution and fixed failure reasons; concurrent PreTool preparation remains parallel, and notices are retained before event awaits. DefaultHookEngine enforces retention bounds; custom engines must uphold the contract. Factory controls (`d990b39d`) cover a real background engine with injected refusal, exact run attribution, once-only next-request feedback, deterministic concurrency pressure, permitted tool completion and no extra model request. These controls are authored, not compiled or executed; they do not establish native ABAC or OS enforcement. The separately reviewed late-fact bridge below extends this route. Full post-commit feedback, graceful teardown and process-loss recovery remain open. No new external producer mandate or qualification gate is implied. |
+| Late background Observe delivery | Frozen source `4c910591` extends the existing PostCommitHookDispatcher and same-session transcript writer. It retains old engine work across configuration changes, uses one passive identity per native completion ledger across clones, and holds immutable pending notices until the actual writer succeeds. An incoming wrapper still becomes the current execution adapter. Unsupported or temporarily unknown lifecycle status can reject a proposed replacement while preserving the installed configuration; a custom engine with no background work can explicitly report supported empty status. The current attachment and turn-finalization boundary govern idle writes, with paced failure retry and no new model input or no-hook polling timer. Root and independent TS review found no remaining source blocker. The `cabb75f5` companion authors actual A/B engine retention and both WholeBlob/HeadCanonical writer failure, uncertain-commit and live cancellation retries. The suspected writer cancellation defect was withdrawn after tracing existing durable-authority resynchronization; production persistent writer code is unchanged. All new cases remain uncompiled and unexecuted. This is process-local retention and a bounded source checkpoint, not cold-restart custody, graceful shutdown, OS enforcement, full coverage or performance acceptance. |
+| Integration corrections | Hosting-lock failure correction `72ebb4092`, base test/lint repair `e06ea02a0` and expression-grouping correction `45f368428` are independently source-clear. Their bounded owner test results do not qualify the combined native path. Redirect round 3 `ce438d85e` is independently source-clear; 133/133 tests and Clippy are owner-reported only. The stock SQLite Notification case failed twice at the same fresh-work boundary on the `dde89`/`e06` lineage, including isolated low-load execution; nine sibling cases passed. Source tracing identifies a fixture incompatibility: `claude-sonnet-4-6` rejects the permitted mid-conversation System append before transport. Prepared fixture patch `be24dad3` selects catalog-supported `claude-opus-4-8` only for Notification and reports early completion directly. It preserves the 20-second wait, four HTTP requests and effect/marker assertions. The patch is unexecuted and does not waive unsupported-model behavior. |
+| Delegation | Source review confirms that the service build-options conversion drops inherited visibility authority on main `2ae325a50` and v0.8.51. The old assumption that default InheritParent already survives this path is withdrawn. The existing owner must carry opaque authority in both directions, refuse missing required inheritance locally and preserve stricter durable ceilings on resume. Captured visibility is not a current native grant. The reported default InheritParent execution test failed during construction because a WorkGraph namespace grant was missing, so it demonstrated no later tool execution. The independent source finding that the authority carrier is lost remains confirmed; no fix or execution pass is claimed. Successor/respawn predecessor-policy persistence remains separately open. |
+| MCP account selection | The account-selection fold `5e4b8955a` and no-permissive-client-fallback correction `3e540968e` are source-clear within the reviewed scope. Installation-scoped storage is an incremental checkpoint; actual realm identity, native binding-use admission, attributable administration/audit and portable-profile coverage remain required. Runtime host-management configuration does not establish an authenticated local actor. The external `meerkat_mcp_add` management tool can carry full config if exposed; the lead selected a typed no-write refusal for account fields on that path, with source and qualification pending. The injected client-failure test does not prove zero network attempts or unchanged refresh lifecycle. Owner-reported suites remain separate from CI and full acceptance. |
+| Performance | No accepted performance result qualifies the integrated candidate. Added native authorization p99 below 1 ms and representative turn overhead at most 10 percent remain required. Earlier small-fixture measurements and conditional mean results do not establish these combined gates. Optional model-review latency is measured separately from the local default. |
+
+The related MobKit memory-quarantine candidate
+`2c69f52261fee25dca2f06499773739791d29869` is source-clear for the retained
+privacy and atomic-invalidation findings. The final two-file correction proves
+that the actual viewer lacks memory-read and quarantine-review grants while
+retaining the timeline canary assertions. Its two touched tests passed with
+28 skipped, and targeted Clippy passed; the inspected raw logs are
+retained receipts. Source attribution
+comes from the owner's final-head record; those logs do not independently prove
+a clean pre-run tree. The unchanged production implementation retains the
+previously reviewed 423-test and 13-console-flow evidence. Installation,
+publication and CI remain with their existing owners.
+
+Earlier results below remain attributed to their exact source and tested
+boundary. Their dated operational status does not supersede this section.
+
+## Earlier source-assembly status, 2026-10-06
+
+The user-authorized `COMPLETE-BRANCH-FIRST-06` direction now governs this work:
+finish the coherent implementation branch, its critical regression source and
+independent review before starting the next builds, tests, benchmarks or
+qualification push. Source commits and reviewed dependencies may stack before
+main. The already running r5 push was allowed to finish. This changes sequencing,
+not full-surface scope, normal hooks, CI or consumer acceptance requirements.
+The coordinator's `SOURCE-GENERATION-AS-IMPLEMENTATION-07` exception permits
+the existing release lane to build the minimum exact-source generator and
+produce canonical generated sources after source review. It does not authorize
+tests, lint, model checking, benchmarks or qualification pushes. Mac work remains
+source-only; normal formatting and commit hooks are permitted.
+
+The working branch is (operator-retained branch) at
+(operator-retained path), based on
+`4ae693198f2fe2aa207557babac1b6482710eede`. Source checkpoint
+`8fe1abcd585821f1cc4c56bc89682a272d52635b`, tree
+`2dadcba349d400dc816199fe797d1796dadfadba`, integrates persistent controller
+custody and governed context append. Normal commit hooks passed. Its dependency
+bundle was transferred to the GCP lead and the assigned producer bridge owners.
+Audit checkpoint `1ecfb6c76e4345e98d36fb5869152499fda0cf27`, tree
+`d70c3711b28c3390eee3a52caca2d817d91650af`, adds exact policy-publication
+observations. Normal formatting and commit hooks passed; its verified dependency
+bundle was delivered to GCP. The branch also contains `e144d3ec27823389406f2ae0f1e1be9422414539`,
+a clean cherry-pick of the publication owner's `796971dfadbea6231932a64bd20e460935f8f026`
+example-lock and RPC test-import repair. That cherry-pick did not rerun hooks.
+Source checkpoint `50ede58a1fbd69d0ba6005a2a34459aa0c5fd009`, tree
+`5440e6a71876d3da45e3028c56c0010cda881e51`, adds the full native model-preparation
+cost fixture and strict analysis controls described below. Normal commit hooks
+passed, including canonical BUILD freshness after adding the context-append
+test source. Its verified bundle was delivered to the lead and assigned GCP
+owners. Documentation commit `f4c676314` also records the inspected Codex
+context-change cancellation path and the requirement to settle it locally.
+Implementation continues above these source checkpoints.
+No build, test, benchmark or qualification push has run on this complete branch.
+
+| Included source | State in the complete branch |
+|---|---|
+| Cold-admission recovery and documentation, `5a45ed0043c81b5b334ac974187e209d180a3091` | Integrated. Prior targeted execution is recorded below and does not qualify this combined tree. |
+| Persistent controller-administration regressions, `425b214e0a073232725c3460aa93b8d419c61857` | Integrated; unexecuted. SQLite and InMemory backend custody source is now included, with critical regression source. |
+| Notification source/audience regression, `17164c682b326bba160a8c8e32a6d12b902e8ad8` | Extended with persisted raw-unavailable audit, independent invocation/source/destination revocation, positive and duplicate appends, and permitted context in fresh model requests after reopen. Uncompiled and unexecuted. |
+| Native cost benchmark and bounded runbook, `cb8fe0f6a1e912a0269ec578af9553e05fe4790c` including `a0d59214708500df568bbd74070c9929c0040461` | Integrated. Full native model-preparation timing and strict analysis source are now included; execution and accepted overhead evidence remain required. |
+
+The remaining batch includes persistent controller and credential continuity;
+owner-bound context source/audience admission across live, detached, ephemeral
+and staged surfaces; typed local recipient outcomes and multi-subscription
+delivery; and the assigned owners' native consent/reviewer, original-work carry
+and surface-coverage changes. The coordinator assigned the consent implementer the native
+review/consent source against `50ede58a1`; root retains design review and integration.
+Root integrates the public typed delivery errors
+and per-recipient behavior. The continuation batch owns the shared
+durable refused-delivery primitive and version gate; this branch stacks on that
+exact source rather than duplicating it. Issues #1497, #1646, #1741 and #1807
+remain in the cross-owner integration scope. Source preparation is not acceptance.
+
+The source checkpoint above that integration adds the following behavior:
+
+- Controller administration holds the actual SQLite writer or InMemory lock,
+  native admission custody and original-work observations through mutation.
+  Its explicit administrative scan visits canonical lifecycle/input records,
+  includes orphan and terminal-current-run rows, and has no lifetime history cap.
+  Explicit credential publication/removal uses this path; normal acquisition,
+  refresh and cached command credential reads do not enter an administration scan.
+- Context append has process-bound authenticated and prepared APIs through the
+  existing native owner. Invocation, source and destination checks share one
+  current publication, run again after queue waits when stale, and settle one
+  operation without manufacturing an input or borrowing the latest run.
+- The Session owns immutable protected control observations in its existing
+  metadata commit. Refusal records no System message. Positive append and its
+  observation commit together. Typed delivery errors distinguish refusal,
+  authorization unavailable, observation failure and other infrastructure failure.
+  Public history and provider messages do not expose the protected audit cells.
+
+These are source-level claims, not executed results. Independent review fixed
+the historical-row cap, ordinary acquisition overreach, repeated control-entry
+hazards and three test-oracle/path errors before the checkpoint. Full integration
+still needs the assigned Mob SendCommand, LiveResponses and job-delivery producer
+bridges, retained-work continuation custody and multi-recipient settlement.
+Raw governed notification refusal alone is not positive delivery coverage.
+The audit checkpoint carries the actual local publication instance and sequence
+through coherent preparation, final reprepare and Session settlement, including
+denials. The instance identifies the synchronization owner, not a fabricated
+policy principal or durable policy-document revision. Missing owner, clock or
+coherent reads do not invent an observation. The existing current-check path
+still reads the retained local stamp; it adds no per-operation UUID, hash,
+registry or owner scan. Critical unit and real native-service assertions are
+authored. Independent source review passed after correcting observation type
+paths to their actual core module; no compilation or tests have run.
+
+The model timing source uses a per-Agent callback compiled only for tests or
+`test-support`. It starts before CallingLlm notice refresh and stops after the
+native Entry observation and second currentness check, before scripted transport
+and Outcome auditing. The real factory, Agent preparation, authorization owners
+and native audit/effect assertions remain in the fixture. The new
+`native_model_preparation_ns` contains exactly two ordered spans; the older
+provider-only diagnostic retains its distinct meaning. Neither covers actual
+provider serialization, header refresh or network time. Independent source
+review found no blocker in the measurement boundaries or ordinary-build gating.
+
+The existing `native_cost_matrix` now supports `model_dispatch_tail`, selecting
+only boundary instrumentation at depths 1 and 3 with fixed W100/N2000. The
+coordinator's shared 1,200-second allocation runs representative mean first,
+tool tail second and model tail last. It never resets the deadline or reduces
+counts. A model sample timeout retains completed raw samples and fails; the
+analyzer reports incomplete counts without timing summaries. A hard process
+kill can prevent output entirely, leaving counts unavailable. Critical recorder,
+settings and parser tests are authored; none have run. This adds no accepted
+benchmark result or full-profile performance claim.
+
+Delivery review found that one committed inbox row can contain several recipients.
+A whole-row refusal would misreport an earlier success or discard later permitted
+recipients. The two independently reviewed dependencies below are now integrated
+through `877bf4df2953a8b442a9c581d2605c24ffc31a28`, tree
+`d6fa035ea1f494293181f694f412be9e9f0bbde1`. Normal merge commit hooks passed.
+The runtime authority and declarations match the source dependency exactly;
+the job facade and regression files match `fc49005f9`. Its recipient path
+supersedes C1's intermediate job-side whole-row refusal path. Native whole-row
+refusal and legacy envelope handling remain available for other delivery owners.
+Canonical generated recipient bodies from `841af4551e00431f1cd1d1055ca1fc25099af59b`
+are now integrated. Independent source reviews found no divergence between the
+declarations, generated kernel/specifications and native consumers. Executable
+qualification remains pending.
+
+| Delivery dependency | Source and remaining integration |
+|---|---|
+| Existing runtime delivery authority, `db3d15f8a1964f664b10abdf65ffc6c02d993c13`, tree `ad1c5c8304698e0d7ea67ba2c98ccda0e8f50fd3` | Immutable per-recipient manifests and outcomes, truthful `Mixed` group status, exact row binding, version-3 envelope fencing, and critical schema/runtime/SQLite/CAS test source. Normal hooks passed. The GCP lane produced the canonical outputs now included in this branch. |
+| Job projector, `fc49005f935e93888a8e30fa239ad66d38395220`, tree `e66d8b944e80dcffa694d9587950d42b7818a9b9` | Complete producer manifest extraction, independent settlement, retry skipping, and paging that counts local settlements without reporting them as applied. Normal hooks passed. Source integration with its generated runtime dependency is complete; execution remains pending. |
+
+The minimum GCP generator build of `08391bdd1` stopped after 74 seconds at an
+unsupported DSL `else if`. The reviewed `db3d15f8a` repair uses nested conditional
+expressions with identical predicates and branch order. On that repaired source,
+the same warm GCP lane completed machine generation in 2m45.76s, protocol generation
+in 1m46.20s and BUILD generation in 12.78s, ending at 12:08:10 UTC on 2026-10-06.
+Only machine generation changed files. The upstream generated transport commit
+disabled hooks; its later check-only commands are not normal commit-hook evidence.
+The integration here uses normal commit hooks. No runtime tests, model checking
+or benchmarks ran in the generation lane. One combined source qualification
+remains with the coordinator after final integration.
+The continuation-owner C2-C10 stack and consent source remain separate
+dependencies, not claims made by this delivery integration.
+
+The runtime dependency stacks on the lifecycle owner's `5cdde0cc9` and copies
+the exact test-only `5cdde0cc9..3f8e6de7e` refusal-reason repeat regression;
+`3f8e6de7e` is not its ancestor. No machine behavior was changed for that copy.
+The lifecycle owner still supplies the continuation-kind enrollment rejection
+test when that row kind is available. Only the composed A/B/C model-checker
+witness is deferred for the separately owned map-literal generator support;
+real-kernel A/B/C tests and classifier invariants remain in this source.
+
+Critical tests cover allowed A, denied/unavailable B, allowed C and a later job;
+infrastructure/observation failures remain retryable, and prior successes must
+survive retry without replay. The paging test uses 257 real jobs so a page of
+256 local refusals cannot strand the final permitted job. SQLite cases drop all
+runtime store/inbox/applier handles before reopening; the producer job store
+remains in memory, so these do not claim a full process restart. No new test has
+executed. Injected sink errors precede the synthetic effect, so these are not
+evidence for retrying an unknown effect. Durable per-recipient disposition stays
+with the existing delivery authority. Effect execution and settlement commit
+remain separate; a missing settlement does not establish safe replay.
+
+The native review/consent design has two independent source reviews. Corrections
+require an explicit non-executing R3 path until qualified human support exists,
+currentness at physical entry after preparation, exact owner-bound attempts,
+truthful cancellation causes, and native enforcement when a required reviewer
+is missing. The first review-path checkpoint does not complete Slice A's human
+decision, shared consumption, notices, host projections or restart obligations.
+All critical new tests, backend durability behavior and overhead remain unqualified.
+
+## Published native checkpoint
+
 The 0.9 coordinator leads the cross-repository work. Native
 [PR1730](https://github.com/lukacf/meerkat/pull/1730) is the current publication
 checkpoint. Commit `24efa210844e640c6907babb485cc745118c8801`, tree
@@ -15,27 +250,112 @@ Clippy, machine verification, generated/Bazel freshness, and the deterministic
 unit, integration, HeadCanonical cold-restart and E2E-fast gate. The successful
 runner does not retain per-lane counts, so this checkpoint claims no new test
 totals. The raw push log is retained locally at
-`/private/tmp/adr-001-envelope-v4-r1/adr-push-24efa210/push-raw.log` and on GCP
-at `/tmp/rb/toolkit-work/receipts/adr-push-24efa210/push-raw.log`, with SHA256
+(operator-retained path) and on GCP
+at (operator-retained path), with SHA256
 `db5499442ed2689acc64df4eb65f72ecf1557a9a8708367fc014d376d9247ec2`.
 
-This successor integrates main `17853e0e48fa7a865274ed8d8a28bd1604ed0f18`,
-including the debug-stack and write-only-when-changed code-generation fixes.
-The Mac owns source resolution and focused regression preparation; GCP owns
-the successor's compilation, normal push hooks, hosted CI and merge. The
-exact-24 qualification above does not qualify this merged successor. Normal
-hosted CI is required again; the temporary Actions-outage exception has ended.
-No accepted overhead benchmark or full-surface completion is claimed.
+Frozen successor `4ae693198f2fe2aa207557babac1b6482710eede`, tree
+`99434c3a32f55c3450d66e30aef36769d7e85232`, integrates main through
+`d28ca32e54f66547d4a3c7f6f5cef58558bf5b25`. It preserves governed refusal
+continuation, read-only restrictions across direct and resolved entry
+repreparation, prepared provider dispatch and the incoming delivery controls.
+Its only change from `a3b2646110e854aba852a14e239e332a2fdaa07a` initializes two
+missing fields in the pending-callback test fixture; production source is
+unchanged.
 
-The merge applies the read-only restriction before authorization entry
-observation and preserves it when currentness refreshes the dispatch context.
-Prepared OpenAI dispatch retains the shared replay projection and backend-owned
-cache-field filtering. Three new regression tests cover refreshed direct and
-resolved tool contexts, nested policy gates, and prepared request bodies across
-public OpenAI, ChatGPT and Azure backends. They were authored before the source
-resolution and remain uncompiled and unexecuted pending GCP validation. The
-Bazel module lock and two automatically merged BUILD files were regenerated;
-the repository's strict Bazel freshness command passed on this source.
+Exact `a3b264611` passed all 16 Linux-selected `native_governed_loop` tests, with zero failures,
+ignored or filtered cases, in 0.81s test time and 3m20.45s including compilation.
+Both workspace all-target checks, including the supplementary `--keep-going`
+check, failed solely on that fixture's E0063. The additional core test command
+was stopped before execution. Raw source, results and timings are kept as a
+retained receipt.
+
+Exact `4ae693198` then passed the locked workspace all-target check in 1m22.19s,
+both direct/resolved read-only repreparation tests in 2m21.63s, and the prepared
+OpenAI dispatch test across public OpenAI, ChatGPT and Azure backends in
+2m44.18s. All three selected tests passed with zero failures or ignored cases;
+these command times include compilation. The checkout was clean and unchanged
+before and after the 08:07:14-08:13:42 UTC run on 2026-10-06. Root read the seven
+raw source, log and timing files, and the monitor independently verified full
+remote/local hashes. They are kept as a retained receipt. The 16-case result
+remains attributed to a3; that suite was not rerun for the test-fixture-only
+repair.
+
+The owner reported the superseded c6a normal push stopped at 08:14:10 UTC, with
+its owned process group 3042014 drained and the remote still at `24efa210`.
+Its pre-runtime gates, unit lane and integration lane had passed, but
+`cold_restart_mob_resume` was compiling when stopped; this was not a completed
+push. The normal hooked r5 push started at 08:14:20.468 UTC using an explicit
+refspec with the lease tied to `24efa210`; the source update is a fast-forward.
+The r5 push finished successfully at 10:17:14.196 UTC, exit zero, after
+2h02m53s. Every normal hook passed, including the deterministic unit,
+integration and E2E gate; there were no lane timeouts or skipped hooks. The
+runner printed no per-lane test counts. The owner verified the remote at exact
+`4ae693198f2fe2aa207557babac1b6482710eede` at 10:17:14.599 UTC and the source
+checkout remained clean. Root read the raw log, command record and timing
+result after the monitor verified their transferred hashes. They are retained
+as retained receipts; `push-raw.log` has SHA256
+`dd5a755bb9329b7701e8e824bee743cf8e3b2465f45a984d2319150149fe784f`.
+GCP owns hosted CI and merge; push success does not establish either. No
+accepted overhead benchmark or full-surface completion is claimed.
+
+Hosted CI run `37448920637` failed its Format + governance job at the example
+lock check on 2026-10-06 at 10:20:42 UTC. Root read the
+[failed job log](https://github.com/lukacf/meerkat/actions/runs/37448920637/job/112220509633).
+The root Cargo.lock resolved under `--locked`; the locks for
+`examples/034-codemob-mcp` and `examples/035-mdm-tux-rs` required updates on
+GitHub's synthetic merge `fbd1e4e47881`, whose parents are main `d28ca32e54`
+and PR head `4ae693198`. The CI aggregate therefore failed. The separate Live
+gate passed, which does not override the failed lock gate. The concrete failure
+was sent to the release lead/coordinator. The coordinator confirmed that the
+existing GCP publication lead owns this and a separately reported missing
+`Duration` compile error as one correction. Root subsequently read the
+[Governed JSONL failure](https://github.com/lukacf/meerkat/actions/runs/37448920637/job/112220959789):
+RPC test compilation failed with E0425/E0433 on the unimported `Duration`, before
+test execution. The lead's repair is stacked locally as described above. Its
+normal GCP push started at 11:06:01 UTC with a retained log; no terminal
+push result or new green hosted CI result is claimed here. No duplicate repair,
+retry or qualification push was started here.
+
+The separate accepted cold-admission/docs follow-up is
+`aa4395c845948f97f44570f654f03c5e454cc9fb`, tree
+`bfce5db6767760bb5403a6d07dda38408d697703`. Its tested change at
+`adc79830f67cc004bbb474460d7428dc671b8636` extends the existing separate-process
+SQLite case: current-grant input receives typed `LeaseAbsent` readiness before
+credential-owner restoration, with zero HTTP/tool entry, no new live or durable
+input, and unchanged prior input audit, committed document and decoded token.
+The same input then completes the governed model-tool-model path after canonical
+restoration; the old-grant denial and permitted sibling controls remain.
+
+The exact `stock_sqlite_separate_process_reopen_runs_fresh_governed_model_tool_model_work`
+selector passed on GCP on 2026-10-06, from 07:13:42 to 07:17:03 UTC: one passed,
+zero failed or ignored, 15 filtered, 0.79s test body and 3m21.04s total command
+time including compilation. Source and tree were unchanged and clean before
+and after. Root read the source, raw result and timing files and verified their
+hashes after transfer. The raw log is a retained receipt, kept in two
+places, SHA256
+`56b50326025dc5c8b18aa9ad9388070088d0801f8f5a9a8301564b7a7773bf2c`.
+This is targeted acceptance, not full follow-up CI or performance evidence.
+Its r5 integration at `5a45ed0043c81b5b334ac974187e209d180a3091` is now included
+in the complete branch. The separate follow-up push was cancelled under the
+complete-branch sequencing decision.
+
+Documentation commits `92bd9a087ca3c08d7e6e59bd90c08bec72fe3fb5` and
+`b8b9045f0940d27b2f4a3a1ba584f53d183d0108` correct absent approval API claims,
+align consent commit semantics with the accepted amendment, and explain native
+governance at CLI and shared-configuration entry points. The public documentation
+checks passed for 120 pages and 54 tests; normal applicable commit hooks passed.
+These notes add no runtime behavior. GCP retains compilation and publication
+ownership. Qualification of the complete source and then its quiet performance
+window replace the earlier per-fragment execution plan. The 0.8.52 cut remains
+a resource consideration, not a source prerequisite or an additional idle wait.
+
+Persistent-administration preparation at
+`425b214e0a073232725c3460aa93b8d419c61857` is integrated in the complete branch.
+Its source-reviewed tests are uncompiled and unexecuted; the earlier
+cold-admission pass does not qualify them. The implementation must satisfy
+credential removal/replacement and detached durable-original controls before
+the combined branch is submitted for qualification.
 
 ## Earlier qualification history
 
@@ -92,7 +412,7 @@ fixture, the stuck member-retirement fixture and the profile tool-denial fixture
 The separate `cold_restart_mob_resume` target passed all nine tests with zero
 skips in 2.751 seconds of test execution; its command took 7m49s. That result
 does not qualify the inventories that did not run. Raw command output and timing
-remain under `/tmp/rb/toolkit-work/receipts/adr1730-f3ebf2a0` on GCP.
+remain under (operator-retained path) on GCP.
 
 The redundant Mac normal push was stopped after the deterministic compile
 failures were reported. Its process exited 143 and its owned group was confirmed
@@ -132,7 +452,7 @@ replay feature. The four test commands completed at 22:42:16 UTC:
   test execution took 2.576 seconds.
 
 All command results and source identity are retained under
-`/private/tmp/adr-001-envelope-v4-r1/adr1730-c7f42abb/`, copied and hash-verified
+(operator-retained path), copied and hash-verified
 against the GCP owner's raw receipts. The GCP transport commit skipped commit
 hooks; its explicit format check and normal Mac hooks are separate evidence.
 These results do not qualify the later main integration or establish performance.
@@ -251,8 +571,8 @@ binaries in 14.36 seconds, including 13.59 seconds compilation and 0.071 seconds
 of test execution. They cover cold status/bearer, foreign-row logout protection,
 failed-clear status, scope/account refresh refusals and infrastructure error
 classification. Raw logs are
-`/private/tmp/adr-001-envelope-v4-r1/envelope-main-connector-cold-red.log` and
-`/private/tmp/adr-001-envelope-v4-r1/envelope-main-connector-cold-green.log`.
+(operator-retained path) and
+(operator-retained path).
 These are focused integration results, not full candidate qualification.
 
 The native integration regression was executed before its repair: acquisition
@@ -262,7 +582,7 @@ cover persistent owner/store conflicts, the typed conflicting-owner outcome,
 ephemeral service ownership, and queued work surviving model-visible permission
 refusal. The green command took 688.77 seconds, including 11m26s compilation;
 the test bodies took 0.737 seconds. Its raw log is
-`/private/tmp/adr-001-envelope-v4-r1/envelope-main-owner-green.log`.
+(operator-retained path).
 
 The auth-core test library initially failed to compile because its refresh tests
 still used the removed `BrowserOpener` fixture. A test-only migration to the
@@ -271,7 +591,7 @@ host-driven login API retained the refresh cases. The targeted
 including the assertion that stale preparation is not a permission refusal.
 The command took 36.61 seconds, including 34.94 seconds compilation and a
 0.017-second test body. Its raw log is
-`/private/tmp/adr-001-envelope-v4-r1/envelope-main-stale-preparation-classification-r2.log`.
+(operator-retained path).
 Normal commit hooks passed. These nine selected passes do not establish complete
 surface coverage or replace the pending normal publication gate.
 
@@ -285,7 +605,7 @@ memory assertion failed and one test was terminated; 14 were skipped and
 5,337 selected tests never ran. The retry ran 6,891: 6,890 passed, one was
 terminated, 14 were skipped and 5,516 selected tests never ran. Integration,
 HeadCanonical and E2E did not start, and no push occurred. The raw log is
-`/private/tmp/adr-001-envelope-v4-r1/runtime-checkpoint-normal-push-r2.log`.
+(operator-retained path).
 
 The real memory failure also applies to the native candidate: the source is
 identical. The released-v2 purge/reopen test had confirmed three durable rows,
@@ -296,14 +616,14 @@ enumeration, and checked that lazy rebuild indexes three points. It also checked
 nonempty, nonblank reopened search results. The affected test passed in the root
 worktree's own target in 118.03 seconds, including 1m57s compilation and a
 0.033-second test body; 65 unrelated tests were unselected. Its raw log is
-`/private/tmp/adr-001-envelope-v4-r1/envelope-main-memory-reopen-oracle.log`.
+(operator-retained path).
 That targeted pass does not qualify the failed broad inventory. GCP independently
 reproduced the assertion on current main and owns the upstream correction in
 [PR1759](https://github.com/lukacf/meerkat/pull/1759), inspected at
 `915fdab04714e318a8ccd148de7a4f934507196d`. The PR uses the same exact index-count
 and durable-text checks, preserving the earlier search assertions. Root withdrew
 its duplicate hunk and retained it at
-`/private/tmp/adr-001-envelope-v4-r1/superseded-local-memory-oracle.patch`.
+(operator-retained path).
 GCP reported runner capacity as the cause of cancelled CI jobs. Under Luka's
 outage exception, its owner merged PR1759 at 20:29:08 UTC as `74b6c7473`, with
 CI explicitly skipped and local evidence recorded on the PR. The actual merge
@@ -333,7 +653,7 @@ conditional mean threshold; fresh-turn overhead was 137.01 and 145.20 percent
 at grant depths 1 and 3. The required added authorization p99 below 1 ms per
 operation and representative overhead at most 10 percent remain unchanged.
 The accepted W20/N32 representative study follows functional qualification and
-optimized correctness at the earliest actual quiet GCP window. Meta publication
+optimized correctness at the earliest actual quiet GCP window. Downstream publication
 is not a prerequisite, and no idle window is reserved. It must finish within
 20 minutes. It measures conditional mean ratios, not
 individual-operation p99; the latter still needs separate valid evidence.
@@ -341,7 +661,7 @@ individual-operation p99; the latter still needs separate valid evidence.
 Full implementation remains incomplete under the
 [acceptance plan](acceptance-plan.md). Required follow-ons include interrupted
 recovery, persistent authority administration, principal/peer/callback carry,
-all surface and operation-family activation, Elephant integration, supported
+all surface and operation-family activation, the independent consumer integration, supported
 OS confinement, model review and human consent, and measured overhead. Narrow
 native or Console checkpoints do not satisfy those remaining requirements.
 The dated sections below preserve historical evidence and do not supersede
@@ -422,11 +742,11 @@ OpenAI, Anthropic and Gemini. All 39 selected authorization tests passed
 across the three provider binaries after 2m33s of compilation, with 0.07s test
 bodies and 617 unrelated tests excluded by the selection. This includes both
 previously failed cases. The scoped raw log is
-`/private/tmp/adr-001-http-test-isolation-r1/provider-authorization-tests.log`.
+(operator-retained path).
 Normal publication and fresh CI for this repair remain open. The full failed push log is
 `publicd6f-normal-push-r1.log` in the retained evidence directory.
 No production allocation or recursion-limit change is part of the CLI repair.
-Toolkit's bounded preview source review found no blocker; it does not supply
+The adapter consumer's bounded preview source review found no blocker; it does not supply
 missing execution or performance evidence.
 Raw logs are `public4cff-normal-push-r1.log` and
 `native4cff-cli-send-clippy-r1.log` and `native4cff-cli-send-scenario-r1.log`
@@ -451,7 +771,7 @@ changes test observation, not production cleanup. Normal commit hooks passed.
 Two earlier 600s and 840s attempts expired during compilation before tests
 ran; the completed baseline then took 8m47s to compile and the repair 1.91s.
 Raw results are retained under
-`/private/tmp/adr-001-cargo-push-range-r1/cleanup-oracle-r1`.
+(operator-retained path).
 That first-branch push conservatively validated the whole tree because
 its source ref was `HEAD`; future first pushes will name the source branch
 explicitly so the existing dispatcher can select its proven comparison base.
@@ -464,7 +784,7 @@ took 3m19s, the repair recompile took 2.63s, and test bodies took 0.03s total.
 The six measurement cells, workload oracles, output format, 1,200-second budget
 and separate small-matrix profile remain unchanged. Raw `red.log`, `green.log`
 and `deadline.log` are retained in
-`/private/tmp/adr-001-representative-profile-contract-r1`. This qualifies profile
+(operator-retained path). This qualifies profile
 selection, not performance. Strict scoped Clippy passed in 3m21s and the
 repository analyzer self-test passed all 20 cases in 1.419s. The correction is
 committed at `ce8d57524897fe656df8c9944ea13d4913c82f8f`, tree
@@ -749,7 +1069,7 @@ observer retained 68 complete frames overlapping the measurement, covering
 CPU idle and zero iowait/steal/swap.
 Its raw log is `quiet-a08-fixed-mean32-r1-monitor.log`, SHA256
 `7957dbadc462f3d2881182ca169eb9a42618601226e82b48bd48ba3f5287fda7`.
-OB3 and Toolkit supplied current nonconflict replies, while fresh
+The autonomous host and the adapter consumer supplied current nonconflict replies, while fresh
 lead/typing-lag acknowledgment was absent. No full-host acknowledgment is
 claimed. Performance remains an unmet architecture gate, and further runtime
 expansion remains held behind it.
@@ -761,7 +1081,7 @@ old representation; the repair passed all 58 contracts tests and strict
 all-target Clippy. The optimized build passed in 453s, followed by both native
 cost correctness selectors (0.04s and 8.74s). The executable SHA256 is
 `18293a9065f91338a55bd93df24f176689bd120600b3c1220e2f772a65385664`.
-OB3 and Toolkit source reviews found no blocker. The measured fixture, analyzer,
+The autonomous host and the adapter consumer source reviews found no blocker. The measured fixture, analyzer,
 features, build profile and canonical encoding are unchanged from a08.
 
 Its W20/N32 study ran from 15:43:16 to 15:47:59 UTC: 283s total, 283.10s
@@ -966,7 +1286,7 @@ native-plus-Console acceptance.
 The native shell continuation is committed locally through
 `6cfa8cbbbe428ef3d51b4b8bdf8098c3725ec632`, tree
 `c23875f3f0479c384cc8c79dced0695185e9957d`, on
-`codex/security-shell-confinement`. The stock factory Required-shell E1 has
+(operator-retained branch). The stock factory Required-shell E1 has
 executed authenticated ingress, actual OS refusal after command entry,
 permitted sibling execution, ordered feedback, a second loopback model request
 and completion of the same run. Typed mechanical refusal causes remain distinct
@@ -1074,7 +1394,7 @@ deterministic test gates. The caller/lint repair is pending validation. Two
 earlier focused repair gates passed 26 and 13 native tests respectively;
 those 39 passes do not establish a successful normal push or qualify the
 pending repair. Exact sources and raw results are retained under
-`/Users/luka/.codex/adr-001-evidence/custody-repair-20261003`.
+(operator-retained path).
 
 The 13-test acceptance gate includes real loopback model/tool/model continuation
 with an exported alias to the same governed owner. Its negative setup refuses
@@ -1130,7 +1450,7 @@ proves refusal before setup, not governed MCP support. See the
 realm, selected-client and fixed-registry configuration.
 
 R7 evidence is retained under
-`/Users/luka/.codex/adr-001-evidence/gcp-native-governed-jsonl-r7-20261002`,
+(operator-retained path),
 seal `68c703166c141ad2b46fe6752ff459fb43dc828a265ca27263904968719ad45e`.
 Schema R2 and module metadata acceptance are separate, source-qualified gates.
 Clean checkpoint `11b3b77912bd7c6511f3d26f7f2a1b81087948e0` normally merges main
@@ -1140,7 +1460,7 @@ runtime result.
 The accepted R4 optimized build and two correctness smokes cover historical
 source `455d0e3b6bb143a53017392b203df49af2b518cc`, not the final publication
 candidate. Their receipt is
-`/Users/luka/.codex/adr-001-evidence/gcp-native-cost-build-smoke-r4-20261002/root-acceptance.json`.
+(operator-retained path).
 Before a fresh measurement grant, the final publication candidate must have
 its own exact-source optimized build and both correctness smokes. Performance
 remains unproven. Window `W-minimal-20261002-1` was not granted and was cancelled
@@ -1182,7 +1502,7 @@ had returned `Unavailable` instead of `ControllerInUse`; the repair joins the
 initial empty Idle checkpoint to the actual live owner without adding hot-path
 persistence. The original failure and diagnostic evidence remain preserved.
 The accepted result is under
-`/Users/luka/.codex/adr-001-evidence/gcp-native-s3-persistent-admin-green-r2-20261002`.
+(operator-retained path).
 At that acceptance checkpoint, this source candidate was outside the first
 publication checkpoint. It covers loaded owners with the stock memory store,
 not SQLite or process restart; later integration needs its own source-qualified
@@ -1205,11 +1525,11 @@ do not establish an implemented local governed path.
 ## Earlier integration and publication checkpoint, 2026-10-01
 
 The integrated donor remains `meerkat-native-governed-m1` on
-`codex/local-governed-default`. Its frozen audit/SDK checkpoint is unchanged:
+(operator-retained branch). Its frozen audit/SDK checkpoint is unchanged:
 266 selected Rust tests, 414 Python tests and 460 TypeScript tests passed, with
 typed TypeScript compilation and the recorded schema/surface checks. Evidence
 is retained under
-`/Users/luka/.codex/adr-001-evidence/audit-sdk-green-20261001`, manifest
+(operator-retained path), manifest
 `e3e352ff860ef150aa1a6ee090a410870b9db84939ab2fe03ff3e1eaac52be33`.
 This includes the storeless native model-tool-model fixture: denied delete,
 feedback, permitted read and completion of the same run with native audit
@@ -1217,7 +1537,7 @@ assertions. Scripted provider results do not prove real-provider or persistent
 coverage.
 
 Publication is a separate extraction in `meerkat-authorization-publication`,
-branch `codex/authorization-foundation`, based on main `9ebe09fa`. The first
+branch (operator-retained branch), based on main `9ebe09fa`. The first
 slice preserves qualified principals, pure contracts and the generated grant
 owner without runtime enablement. It has passed 42 contracts tests plus six
 documentation tests and 291 authorization/schema tests. Canonical machine
@@ -1234,7 +1554,7 @@ artifacts. The E2E plan has five stories and 37 named checkpoints, budgeted at
 17 live calls per attempt or 34 with one outer retry. These are not executed
 coverage. Root reports that final packet
 `b17de27b1043db434d4ef9c1b6df40fd07291637a9e9b94f8ab032a00246ceaa` was accepted
-by GCP, HomeCore and OB3 at 16:14 UTC. Toolkit verified the final
+by GCP, the pilot host and the autonomous host at 16:14 UTC. The adapter consumer verified the final
 two-paragraph delta, with closure relayed by GCP. All four reviewers have
 closed the UX r5 and E2E r7 designs; this is not execution coverage.
 
@@ -1250,7 +1570,7 @@ The four controller-continuity RED cases, account/credential custody and the
 controller-setup fixture repair remain for the next checkpoint. Optional OS
 confinement, consent and persistent/detached production changes remain held;
 post-effect live diagnostics and interrupted-callback recovery are still open.
-Full provider/source/Elephant/comms/delegation/surface support and measured cost
+Full provider/source/the independent consumer/comms/delegation/surface support and measured cost
 remain required. No benchmark or full-profile acceptance is inferred from these
 package results or design reviews. Historical records below retain their
 original scope and do not override this status.
@@ -1261,7 +1581,7 @@ The current lower native association checkpoint is clean at
 `2356d0eccb6b6a43172e5d73474a22745f1a53ee`, on composed prerequisite parent
 `8a6265fd6`. Contracts34 tests+3 compile-fail docs, combined host114 tests+3
 compile-fail docs, strict package lint, stable-tree Cargo/Bazel/example metadata
-and normal commit hooks passed. Toolkit independently accepted the frozen source.
+and normal commit hooks passed. The adapter consumer independently accepted the frozen source.
 INTEGRATION-02 drained at09:52:06UTC. Real governed native admission, witnessed
 acknowledgment and physical dispatch remain unimplemented; no native governed
 request has passed. Full WASM/publication gates remain open.
@@ -1276,14 +1596,14 @@ DSL-core32, single-owner fixture15 and model2 passed. These are prerequisite
 checks, not the integrated governed path.
 
 Witness journal commissioning repair has independent bounded source acceptance;
-its real-file regression tests remain unexecuted. Toolkit accepted the frozen
+its real-file regression tests remain unexecuted. The adapter consumer accepted the frozen
 grant target-association source, and canonical generation is queued in the next
 serialized lease. Clock and witness encryption sources have separate frozen
 review candidates. The clock profile has a known idle-entry latency failure
 against the unchanged budgets in [the acceptance plan](acceptance-plan.md).
 Early demand refresh does not close that failure.
 
-Elephant PR4 at `64e5a8d02eda56df6b34c9c448704e87eaabda23` has green hosted
+The independent consumer PR4 at `64e5a8d02eda56df6b34c9c448704e87eaabda23` has green hosted
 CI run36838043537, including full-history scanning and all configured required
 suites. E2E was skipped. The history repair preserves the previously reviewed
 final tree and its2,052 unit-test results. Earlier failed evidence remains
@@ -1296,7 +1616,7 @@ bounded witness goals, seven unproven goals and six deadlocks; its mob-seam CI
 row changes from timeout to out-of-memory, while the adaptive CI/deep passes
 have only one distinct state and are vacuous. This is not universal model
 success or an end-to-end performance improvement. The raw verification is
-`/tmp/adr-001-tlc-raw-root-verification-r1.json`, SHA-256
+(operator-retained path), SHA-256
 `097f6878404b80c24ea0845d83b390191fb47bb99adb0af5721952e7556dcacc`.
 The GCP09:00-09:45UTC reservation produced an incomplete retention comparison;
 render load and the unchanged50000-row deadline prevented full acceptance.
@@ -1307,8 +1627,8 @@ The detailed receipt and future resource conditions are in
 
 | Candidate | Exact source | Evidence and limits |
 | --- | --- | --- |
-| [Meerkat ADR PR 1352](https://github.com/lukacf/meerkat/pull/1352) | `97d3078e2e5cff9f0a49e3f46c67d2da7a9a0fe9` | Four requested bus reviewers accepted the frozen r6 design. Scoped PR source reviews and two Homecore record corrections are retained. Hosted CI gate passed at this head. The PR remains a draft; it changes documentation and archived-review hygiene, not runtime enforcement. |
-| [Elephant prerequisites PR 4](https://github.com/lukacf/elephant/pull/4) | Published `e55531eb0e41f0c04ab356f9100aa7869197cc36`; local rebased source `3985dbe37f8ee842848c776860d5e6ecf94cc885` | Independent ABAC fixes, verified caller context and retained-work repair passed 2,031 local tests and strict lint at the recorded integration checkpoint. The narrow synthetic-fixture repair passed local full-history scanning, two negative controls and the real authenticated MCP regression. Normal publication hooks and all eight applicable hosted jobs passed in run 36809459432, including all-feature tests and full-history scanning. The workflow skipped E2E; no E2E result is implied. No governed endpoint is enabled. |
+| [Meerkat ADR PR 1352](https://github.com/lukacf/meerkat/pull/1352) | `97d3078e2e5cff9f0a49e3f46c67d2da7a9a0fe9` | Four requested bus reviewers accepted the frozen r6 design. Scoped PR source reviews and two the pilot host record corrections are retained. Hosted CI gate passed at this head. The PR remains a draft; it changes documentation and archived-review hygiene, not runtime enforcement. |
+| The independent consumer's prerequisites PR | Published `e55531eb0e41f0c04ab356f9100aa7869197cc36`; local rebased source `3985dbe37f8ee842848c776860d5e6ecf94cc885` | Independent ABAC fixes, verified caller context and retained-work repair passed 2,031 local tests and strict lint at the recorded integration checkpoint. The narrow synthetic-fixture repair passed local full-history scanning, two negative controls and the real authenticated MCP regression. Normal publication hooks and all eight applicable hosted jobs passed in run 36809459432, including all-feature tests and full-history scanning. The workflow skipped E2E; no E2E result is implied. No governed endpoint is enabled. |
 
 The ADR publication explicitly disclosed the failing unchanged broad local
 workspace gate and the docs-only publication's `SKIP=cargo-test`. Other hooks
@@ -1324,7 +1644,7 @@ evidence, not a claim that the skipped local gate passed.
 | --- | --- | --- |
 | Qualified canonical principals | `07788de70f8453bcb3a6583418927bb265a9a3e4` | Rebased on main `7ace16ed9`; owned source/schema/fixture bytes preserved. Eleven principal tests and six wire tests passed after rebase. Earlier exact production checkpoint passed the declared semver and WASM checks. Qualification is identity syntax, not authentication. |
 | Pure authorization contracts | `0955991d5` | Restrictions, conjunction, evidence encoding, information dependencies and negotiation. Forty-six unit tests plus the shared negotiation consumer passed before a byte-preserving rebase; strict lint and Bazel freshness were checked. No live permit or operation owner is supplied. |
-| Physical SQLite custody | `775234131` | Eighty-two SQLite and seventeen custody tests plus strict lint passed. The normal publication gate passed 12,044 workspace unit tests, then both integration attempts hit their 900-second deadline; the push failed. Timed-out tests are not passing evidence. The warm retry then failed two timing tests outside the custody diff: 12,042 unit tests passed, two failed and 17 were skipped. It did not publish. The log is `/tmp/adr-001-custody-push-warm-long-budget.log`; no skipped-hook success stamp is claimed. The GCP exact-tree unit 12,051, integration 2,759, HeadCanonical 9 and fast E2E 30 all passed. The report and archive were downloaded and independently checked, including all 16 embedded manifest entries and eight raw lane summaries; the archive SHA-256 is `a8e353f2a226b1a25bca2b99289c5d953577862280f7948913fd870f23477373`. These Linux lane results create no local hook stamp. Physical ownership is not antirollback authority. |
+| Physical SQLite custody | `775234131` | Eighty-two SQLite and seventeen custody tests plus strict lint passed. The normal publication gate passed 12,044 workspace unit tests, then both integration attempts hit their 900-second deadline; the push failed. Timed-out tests are not passing evidence. The warm retry then failed two timing tests outside the custody diff: 12,042 unit tests passed, two failed and 17 were skipped. It did not publish. The log is (operator-retained path); no skipped-hook success stamp is claimed. The GCP exact-tree unit 12,051, integration 2,759, HeadCanonical 9 and fast E2E 30 all passed. The report and archive were downloaded and independently checked, including all 16 embedded manifest entries and eight raw lane summaries; the archive SHA-256 is `a8e353f2a226b1a25bca2b99289c5d953577862280f7948913fd870f23477373`. These Linux lane results create no local hook stamp. Physical ownership is not antirollback authority. |
 | Native retained connection adoption | `ff3af7b4e8940826b7a753b6e043b5115391d01b` | SQLite 88, session/schedule 82, runtime SQLite 107 and facade 5 tests passed, with strict four-package lint. Twelve reviewed source hashes survived rebase. Session, runtime and schedule share one physical connection; other realm writers remain unadopted. Uncertain commit and leaked transaction retire the shared handle before queued aliases enter. EVID-2 remains open. |
 | Exact numeric model packets | Reviewed `88089558f24636134aee16d175bc5f1523f828d2`, rebased to `1877c81f4d36116de4a07e74753d69650ce4d6cf` | Generated numeric witness packets and actual reached model transitions. The normal publication retry with the actual MCP fixture failed three MobKit unit timing/lifecycle tests: 12,063 passed, three failed and 17 skipped. Integration did not run in that retry; no push occurred. The failed gate is frozen under `numeric-publication-880-with-fixture`. Rebase onto main `39cae9bec` preserves the two source files and includes the upstream fixture and truthful-stamp repairs. Current-base regeneration and a controlled publication attempt remain pending. Bounded models do not prove a production store or verifier. |
 | Generated atomic composition and compiler repairs | `bd582768368599ab7a7651e58a9f55150dfd0fd9`, `802f18ac1b0e50ffb108f4123161937b3ed2f2cc` | The coherent generic stack is committed with a clean tree. 681 tests, 17 final fixture tests, strict all-target lint, normal hooks and drift for 15 machines/9 compositions passed. Conditional substitution and mixed phase/data repairs affect 12 canonical model files; the other 12 and Rust compatibility kernels remain byte-identical. A checksummed before/after packet containing 31 bounded and 12 separately classified deep configurations is with the GCP lead for controlled acceptance. The controlled comparison reports no regressions on completed rows: 31 bounded rows include 18 passes, seven unchanged unproven goals, three unchanged deadlocks, two incomplete and one unchanged rc151; 12 deep rows include six passes and six incomplete. Root verified archive 16942f40 and all 43 paired classifications/counts/coverage in the summary JSON. Raw per-row command/environment/log archive is separately requested; no universal model-success or local-rerun claim follows. |
@@ -1333,8 +1653,8 @@ evidence, not a claim that the skipped local gate passed.
 | Physical witness owner backend | `ef8deacbc4fc2680e927aba263059eecd9483bc9` | The SQLite adapter uses the retained physical connection, exact generated snapshots, a namespace head CAS and one required-absent or existing request row in one synchronous transaction. Two independent source reviews exposed and closed TEMP shadowing, direct and indirect foreign triggers, inbound foreign keys, foreign indexes and conflict-classification gaps. The indirect-cascade finding was reproduced against real SQLite. After integrating the actual owners and codecs, 71 unit tests, 23 integration tests and one compile-fail doc test passed, including actual SQLite COMMIT refusal, post-check corruption and physical retirement. The first compile failure was a test-fixture static-lifetime declaration and is retained separately. The final adversarial review additionally reproduced main/TEMP FTS3 and FTS4 shadows of the table-valued foreign-key introspector. All four actual Rust regressions failed before repair, then passed after direct catalog collision refusal. Final tests passed 75 unit, 23 integration and one compile-fail doc case; the exact PR-unit nextest command passed 75/75. Strict all-target lint, WASM compilation, CI selection/selftests, final metadata and normal commit hooks passed. The initial stale-lock metadata failure remains alongside its successful refresh. Independent review is GREEN at the committed source hashes, with no governed activation claim. Eleven source hashes and 20 evidence files are frozen under `witness-sqlite-ef8deacbc`, manifest SHA-256 `89ec02bccca7f37d317115fdf344ad4df6904277bbce9b4ecea3f3d869e39817`. |
 | Canonical grant feature host | `e9d6f02f349518c7520c37a25410ad38113c7e2d` | The isolated prerequisite is committed with normal hooks. Fifty-four feature tests, 297 schema/kernel tests, all five reached TLC witness goals, strict all-target lint, selected drift and metadata checks passed. The first restoration witness deadlock exposed an omitted expected-transition declaration; that failing receipt is retained and the canonical witness metadata was corrected without changing its reducer. This host preserves existing cached validation semantics. Stored content digests and an earlier Valid state are not current permission or constraint attenuation. The reviewed r7 durable handoff and owner-generated domain projection remain separate work. |
 | Explicitly enrolled workload authentication | `8d580f52789161ab7bf80b3c4c1c70c8fcccdde8` | Clean normal-hook checkpoint. The exact source passed independent review, 369 focused/package tests including two compile-fail cases, strict all-target lint, full canonical drift (18 machines, 10 compositions), bounded TLC (62 generated, 26 distinct, depth 5), metadata and hooks. The finite NatValues={1} model does not prove higher-generation rotation; actual Rust rotation tests passed. Real Ed25519, strict field/wire binding, weak-key rejection, administrator-pinned bounded file access and FIFO cleanup are covered. The private observation proves cryptographic binding under selected enrollment, not independent currentness, measured time, replay, a human requester or permission. Frozen manifest `workload-authn-8d580f527/manifest.json`, SHA-256 `24d5b40743f3a20091112d983a18f96fd5e671fddcdb26f360ae09ffe9b4816c`. |
-| Independent Elephant negotiation | `188e4437249b4bf76df9414388ec41dae5e1e303` | Elephant consumes the exact 14-case Meerkat negotiation corpus without a Meerkat dependency. Its 15 existing auth tests, two consumer tests and strict lint passed. Toolkit and a subagent accepted this exact bounded source. Raw ingress and actual protected sinks are not established by this normalized corpus. |
-| Independent Elephant restrictions and information flow | `82198dbbe8b5a014dd292f8806a9e4993f547c56`, rebased to `e55531eb0e41f0c04ab356f9100aa7869197cc36` | An independent implementation executes all 26 shared cases, including 13 actual derivation steps. All 23 auth/negotiation/information tests, strict lint, formatting, docs, surface and version checks passed with before/after source hashes. A subagent and Toolkit accepted the bounded source and recorded evidence after diagnostic redaction was strengthened. Neither reviewer independently reran the checks or attested the complete build graph. Rebase onto the hosted-CI-green Elephant head preserved all eight reviewed source hashes; all 23 tests passed again with `--locked`. Resource-domain differential and actual authenticated sink integration remain open under A003. The reviewed conformance commits are integrated into the clean PR worktree at e55531e. The normal e555 publication hooks passed, including full workspace unit and strict lint, and the head was pushed. Fresh hosted CI did not start because main #3 introduced security conflicts. A separately reviewed semantic-union rebase onto exact 0ce109a is clean at 3985dbe; root verified all ten changed hashes and all eight preserved conformance files. Fresh focused tests passed 913/913 (seven existing ignored), and all 23 auth/conformance cases passed. Strict all-feature lint and normal publication gates remain pending. Only the earlier 5e8efec head has confirmed green hosted CI. |
+| Independent consumer negotiation | `188e4437249b4bf76df9414388ec41dae5e1e303` | The independent consumer consumes the exact 14-case Meerkat negotiation corpus without a Meerkat dependency. Its 15 existing auth tests, two consumer tests and strict lint passed. The adapter consumer and a subagent accepted this exact bounded source. Raw ingress and actual protected sinks are not established by this normalized corpus. |
+| Independent consumer restrictions and information flow | `82198dbbe8b5a014dd292f8806a9e4993f547c56`, rebased to `e55531eb0e41f0c04ab356f9100aa7869197cc36` | An independent implementation executes all 26 shared cases, including 13 actual derivation steps. All 23 auth/negotiation/information tests, strict lint, formatting, docs, surface and version checks passed with before/after source hashes. A subagent and the adapter consumer accepted the bounded source and recorded evidence after diagnostic redaction was strengthened. Neither reviewer independently reran the checks or attested the complete build graph. Rebase onto the hosted-CI-green the independent consumer head preserved all eight reviewed source hashes; all 23 tests passed again with `--locked`. Resource-domain differential and actual authenticated sink integration remain open under A003. The reviewed conformance commits are integrated into the clean PR worktree at e55531e. The normal e555 publication hooks passed, including full workspace unit and strict lint, and the head was pushed. Fresh hosted CI did not start because main #3 introduced security conflicts. A separately reviewed semantic-union rebase onto exact 0ce109a is clean at 3985dbe; root verified all ten changed hashes and all eight preserved conformance files. Fresh focused tests passed 913/913 (seven existing ignored), and all 23 auth/conformance cases passed. Strict all-feature lint and normal publication gates remain pending. Only the earlier 5e8efec head has confirmed green hosted CI. |
 
 GCP additionally found that ordinary composition `CoreNext` consumes queued
 packets by sampling argument domains again. This can disable valid out-of-domain
@@ -1368,7 +1688,7 @@ requirements in the table or the complete requirement inventory.
 The [baseline tracer](runtime-tracer.md) now ran successfully against published
 Meerkat 0.8.49, with deliberate process loss after durable input admission,
 recovery of the exact input without resend, actual helper delegation, parent
-continuation and console delivery. Toolkit accepted its bounded diagnostic
+continuation and console delivery. The adapter consumer accepted its bounded diagnostic
 evidence and the corrected explicit export allowlist. It does not prove
 requester propagation, live authority, audience authorization or helper history
 durability across restart. The old manifest that selected identity-key paths is
@@ -1387,10 +1707,10 @@ custody with independent witness recovery, and exact entry/settlement evidence
 at real model, tool, source and recipient boundaries. It must demonstrate both
 allowed effects and physical absence of denied effects after revocation,
 restart, missing evidence and uncertain outcome. MobKit-owned reads and streams
-and independently enforcing Elephant operations must use those same contracts.
+and independently enforcing the independent consumer operations must use those same contracts.
 
 The full feature/surface inventory and deployment budgets remain required after
-that slice. Homecore supplied a recorded workload of 20,000-50,000 work items for
+that slice. The pilot host supplied a recorded workload of 20,000-50,000 work items for
 retention-cost comparison. A local native in-memory adapter benchmark cannot
 establish latency on its 16 GiB deployment under swap; matching-environment
 performance evidence remains a release requirement.
@@ -1403,7 +1723,7 @@ passed, but no measurement cell obtained the required compiler-free window.
 All eight large cells remain unmeasured; observed idle CPU alone did not satisfy
 the admission criterion. Linux time and compiler-process adaptations are retained
 with the raw receipts. A coordinated quiet window is requested. These results do
-not certify Homecore's deployment budget or create local successful-hook stamps.
+not certify the pilot host's deployment budget or create local successful-hook stamps.
 
 The GCP principal tree passed 12,083 unit, nine HeadCanonical and 30 fast E2E
 tests. Its full integration lane failed two MCP fixture-dependent tests, with
@@ -1420,28 +1740,28 @@ failed lane.
 - The combined witness/authentication integration is clean at 0a29f1dbd after normal cherry-pick hooks and canonical lock refresh. All 124 combined-feature tests passed, including three compile-fail docs. Final strict all-target lint, combined-feature WASM compilation and metadata checks all passed. The immutable combined archive manifest is bd48ecab04394efa60eb53151f6e06c31f9655542036eba9ccf9644e6c909cb8. Existing cryptographic and SQLite production source hashes are retained; no operational service/currentness is implemented by composing the features.
 - The accepted frozen r7 protocol documents are committed locally at 61ac05c2d, followed by the bounded native-tracer companion 75bd40ef3 and explicit post-fence time clarification e23829ed2 and its corrected revision 90477194b. Docs checks and normal commit hooks passed. These commits remain unpublished; PR #1352 still exposes 97d3078e with its earlier green CI.
 - The lead conditionally accepts witness time at a fresh post-fence logical decision point with a historical durable reply. GL4 remains open until authoritative final release checks, fresh retry observations, uncertainty refusal, cleanup and exact pause/race fixtures pass. All four bus reviewers received the written clarification. The inspected GCP deployment lacks the proposed authenticated clock source; no daemon or host-clock change has been made.
-- The numeric publication lane remains held for the lead's mob-flakes repair SHA. The separate main integration repairs do not authorize retry. No hook bypass, merged PR, production deployment or full ADR completion is claimed.
+- The numeric publication lane remains held for the lead's repair SHA. The separate main integration repairs do not authorize retry. No hook bypass, merged PR, production deployment or full ADR completion is claimed.
 
 ## 2026-10-01 adversarial continuation
 
-- GF-4 revisions 5/6 closed restored-away entry recovery, positive expiry, explicit human-only Unknown continuation, predecessor qualification and reached model obligations in design. Lead/Toolkit exposed hidden adapter resends, incomplete final provider-wire binding, untagged output fanout and continuation lost-ack replay. Revision 7 received lead acceptance with final text conditions. Revision 8 (89250ecca1a51f8a5b36f302161d7fdba0d3607a0095427da0a5874a33457090) is with both reviewers, adding explicit reqwest no-redirect/no-retry construction, HTTP/2 probes, refusal of catalog-selected realtime text, and one generated continuation successor per Unknown predecessor, including overlapping-set and concurrent-command races. It binds final lowered wire bytes, forbids internal resends/redirects, selects buffered first-profile output after committed settlement, enumerates all consumers and reuses canonical admission idempotency for continuation. Native admission remains dependent on NativeWorkAnchorV1 and the live b+2b handoff; attempt source remains held. A surviving entry anchor plus restored Unissued local bytes does not establish non-disclosure.
+- GF-4 revisions 5/6 closed restored-away entry recovery, positive expiry, explicit human-only Unknown continuation, predecessor qualification and reached model obligations in design. Lead/the adapter consumer exposed hidden adapter resends, incomplete final provider-wire binding, untagged output fanout and continuation lost-ack replay. Revision 7 received lead acceptance with final text conditions. Revision 8 (89250ecca1a51f8a5b36f302161d7fdba0d3607a0095427da0a5874a33457090) is with both reviewers, adding explicit reqwest no-redirect/no-retry construction, HTTP/2 probes, refusal of catalog-selected realtime text, and one generated continuation successor per Unknown predecessor, including overlapping-set and concurrent-command races. It binds final lowered wire bytes, forbids internal resends/redirects, selects buffered first-profile output after committed settlement, enumerates all consumers and reuses canonical admission idempotency for continuation. Native admission remains dependent on NativeWorkAnchorV1 and the live b+2b handoff; attempt source remains held. A surviving entry anchor plus restored Unissued local bytes does not establish non-disclosure.
 - The generic single-owner preparation source is frozen uncompiled on d93 with 20 paths (manifest ea72dcda) and independent bounded source acceptance. It retains the actual persistence future through publication, poisons at bind to cover forgotten guards and opts in no production owner. Its 14-commit prerequisite stack is cleanly rebased onto main 456dc09cb at 8cd7d7a79, preserving upstream redaction. The successor source is independently GREEN on exact current-base manifest 5e53350c; root inspected the emitter and authorized scoped generation/execution, now running. Actual native runtime gate integration remains open.
 - The additive observed-input join source passed two independent pre-build reviews. Canonical generation passed, codegen 149 tests and actual SQLite 108 tests passed without source repair; strict lint, drift/WASM/metadata and hooks are running. It supplies fresh mechanical post-fence observation and explicit rollback cleanup, not trusted time or release authority.
 - Witness bootstrap revision 2 (27c90d3acc579978a6aa4175cb197a34d0ec8f9991d4170206fc75a3829c7d8a) closes two-sided commissioning, client-detected witness rollback and singular retirement in design. Revision 3 received conditional schema-partition acceptance. Revision 4 df967985fc0ce7010ed6e1cbc9d0717154a50afa6a218ab260bfad1b325eacc1 writes in the incident record, inner profile identifier, gated client high-water acceptance and explicit refusal transitions. It also requires a client-secret keyed plaintext commitment and client-authenticated outer custody envelope, closing the witness-admin dictionary-attack gap in the prior bare-hash proposal. Current-main prerequisite composition is starting; no schema or crypto producer is yet implemented. The operational service and actual clock producer remain unimplemented.
-- Time clarification cf6c2398d7c83c801d8f03f7977c56ef9fde711a21af3dd18cdf151619e48639 has exact design acceptance from the lead, Homecore and Toolkit. OB3's current revision response remains pending. Those reviews establish no producer, sink or deployment qualification.
+- Time clarification cf6c2398d7c83c801d8f03f7977c56ef9fde711a21af3dd18cdf151619e48639 has exact design acceptance from the lead, the pilot host and the adapter consumer. The autonomous host's current revision response remains pending. Those reviews establish no producer, sink or deployment qualification.
 - Pure restriction contracts relocated byte-preservingly at ea8ae6ef840dbf2edd67ba42e669931e7c208c55 with focused gates and normal hooks. The isolated immutable child-derivation carrier passed 13 unit+3 compile-fail docs, 46 existing authorization+ 1 conformance tests, strict lint, WASM and strict metadata checks. A discriminating null-payload test repair and narrowly scoped lock repairs are in final source review (manifest 5855d806); normal commit passed at ac63171e261e33bd60c2a1564be530c265b05408 with a clean tree. Nine source and fifteen evidence files are frozen under derived-restrictions-ac63171e2, manifest fba4d286ce2609bdcd628d0cb41b45fb5bf82da422e095aedd766a3874768f40. No compiler/grant integration or runtime authority follows.
 
 ## Critical-path control, 2026-10-01 08:30 UTC
 
 The [integration critical path](critical-path.md) now makes the first actual governed native prompt the next integrated acceptance milestone. Independent prerequisite breadth is subordinate to that path. Review is relative to accepted source checkpoints; only concrete integration defects reopen settled work. This changes scheduling, not the complete ADR scope or its open requirement/case inventory.
 
-The Mac build queue is serialized after its already running jobs drain. Elephant's normal publication completed at exact `3985dbe37f8ee842848c776860d5e6ecf94cc885`: 2,052 workspace unit tests passed, 97 existing skips; all normal push hooks passed. The PR is mergeable and fresh hosted CI run `36835999238` started. Its full-history secret scan failed and is under read-only investigation; fresh CI is not green. A concrete SDKROOT difference explained the repeated native Clippy build. Future manual prevalidation will match the normal hook environment without adding a tooling project.
+The Mac build queue is serialized after its already running jobs drain. The independent consumer's normal publication completed at exact `3985dbe37f8ee842848c776860d5e6ecf94cc885`: 2,052 workspace unit tests passed, 97 existing skips; all normal push hooks passed. The PR is mergeable and fresh hosted CI run `36835999238` started. Its full-history secret scan failed and is under read-only investigation; fresh CI is not green. A concrete SDKROOT difference explained the repeated native Clippy build. Future manual prevalidation will match the normal hook environment without adding a tooling project.
 
 Generated preparation owns the next focused Mac lease. Root then reuses the now-idle `adr-observed-input` warmed cache for the single coherent integration gate. Observed-input is clean at `2bf69f187665c017ce932d6a715080746365db92`; package149/auth108, strict lint and focused drift passed. Its all-catalog drift was deliberately interrupted and WASM never started; both remain explicit integration gates.
 
 The GCP lead reserved **09:00-09:45 UTC** for the unchanged retention benchmark controller and binaries. GCP agents must stop heavy work by 08:58 and launch no compiler/TLC/hook-running push during the reservation. Host idle and compiler-free preconditions remain unchanged; violation yields NOT_MEASURED rather than another blind probe. CoreNext's 88 comparison jobs have finished, with classification/raw evidence still pending.
 
-GF-4 revision9 (`7d11682b067c38e54db57c78a1f1de4b59644849b5710510271ca62935dd779f`) has lead and Toolkit textual acceptance. It closes complete owner-derived frontier, surviving continuation/readmission claims, linear recovery chains and exact committed observation recovery. Source must distinguish a surviving committed outcome with pending evidence from Unknown. Attempt source review may proceed. Native admission edits wait for the lead's explicit handoff at turbo-live 2b's merge commit; unrelated main changes do not trigger repeated rebases.
+GF-4 revision9 (`7d11682b067c38e54db57c78a1f1de4b59644849b5710510271ca62935dd779f`) has lead and the adapter consumer textual acceptance. It closes complete owner-derived frontier, surviving continuation/readmission claims, linear recovery chains and exact committed observation recovery. Source must distinguish a surviving committed outcome with pending evidence from Unknown. Attempt source review may proceed. Native admission edits wait for the lead's explicit handoff at turbo-live 2b's merge commit; unrelated main changes do not trigger repeated rebases.
 
 Witness bootstrap outer revision5 (`c01fae20ea2f12349342d1d21aa6b08d3b3c90a509bb1a77d974457876f292e0`) is accepted for source. The neutral certificate-evidence framing is frozen before implementation. This does not qualify an inner proof, clock, key producer, current witness or runtime entry.
 
@@ -1452,19 +1772,19 @@ The root composition onto generic/main456 reached `c92544f6e3de`. Delta review f
 
 Composed current-base source8a6265fd6 now has focused execution evidence and canonical zero-drift generation, recorded in critical-path.md. The retired-custody metadata regression discriminates the repair: restoring the old pathname read fails the closed-custody case, and restoring the accepted source passes all90 SQLite tests. Combined authentication/witness130 tests and3 compile-fail docs, contracts13+3docs, DSL-core32, single-owner fixture15 and model2 passed. Strict lint/WASM and complete publication gates remain open. Required Cargo/example-lock consistency and strict Bazel metadata passed; all254 unrelated live dependency pins were preserved.
 
-The lower immutable native association source is frozen at manifest3da7e0285e862ed618a00d122b39b3633d4f4a34ca9083280ad26ffdd85b2716 for Toolkit review. It contains complete original work/authentication/grant/source references, an exact qualified ingress key and bounded canonical binding bytes. These are caller-constructible data, with no accepted/current status. Existing protocol/information/evidence definitions move to the lower contracts crate with exact-type host re-exports; production definitions retain their original bytes. Real generated admission and surviving acknowledgment are still required.
+The lower immutable native association source is frozen at manifest3da7e0285e862ed618a00d122b39b3633d4f4a34ca9083280ad26ffdd85b2716 for the adapter consumer review. It contains complete original work/authentication/grant/source references, an exact qualified ingress key and bounded canonical binding bytes. These are caller-constructible data, with no accepted/current status. Existing protocol/information/evidence definitions move to the lower contracts crate with exact-type host re-exports; production definitions retain their original bytes. Real generated admission and surviving acknowledgment are still required.
 
 Witness physical journal source is under independent review at9237565f86d270c40dd7b589bba38a27ef1053ac1ea6799f72ce188051b290d3. Its12 real-file tests and3 no-create custody tests are authored, not executed. The sealed native-work format r2,8022cdbe8968b3458a3b65b7ba956d1bf2254a20370e288696baecdaaa086e3d, has root source-contract acceptance f17154ec7f37f35f23c1686b78ce3c4a269efa9d8d902139501215873371e46b. Actual length and native receipt digest stay encrypted; encryption and commitment key generations are separate; public native receipt/head commitments are item-specific keyed values. Real historical key custody and authenticated service/client completion remain open.
 
 Measured-time proposal r4,7c070013280e05ffb3a4f34c6b0b23ff4912f18a444954db839012bb644e3090, has lead conditional acceptance219359a1fffcff6b9d3ab7ed3d620735e62f99eaa8999ddf526e724ca059b5c3. Source work must add actual single-flight acquisition, preserve valid prior samples on failed refresh, account for all qualified host-discipline terms and declare the short sample lifetime/acquisition latency. A fresh stateless observer per demand bounds all possible NTP samples inside the acquisition bracket; reference timestamp changes do not prove fresh measurements. Deployment qualification and the model-entry latency budget remain open.
 
-Elephant's identical-tree history repair at64e5a8d02eda56df6b34c9c448704e87eaabda23 now has green hosted CI36838043537, including the full-history secret scan and all configured required suites. E2E was skipped. GCP retention run2 remains incomplete:50000-row paired processing exceeded the existing deadline while unrelated render load was present. Partial20000-row data is retained with its host-load limits; it does not close full workload or Homecore deployment acceptance. See critical-path.md for resource decisions and actual timings. Full ADR implementation remains OPEN.
+The independent consumer's identical-tree history repair at64e5a8d02eda56df6b34c9c448704e87eaabda23 now has green hosted CI36838043537, including the full-history secret scan and all configured required suites. E2E was skipped. GCP retention run2 remains incomplete:50000-row paired processing exceeded the existing deadline while unrelated render load was present. Partial20000-row data is retained with its host-load limits; it does not close full workload or the pilot host deployment acceptance. See critical-path.md for resource decisions and actual timings. Full ADR implementation remains OPEN.
 
 
 ## 2026-10-01 bounded source review and clock budget disposition
 
-The native association source has independent Toolkit acceptance, review8b2576b2b847c4b36d1111ba7199f85187e25441c8f4f018d21fe1fa282810cf, on frozen manifest3da7e0285e862ed618a00d122b39b3633d4f4a34ca9083280ad26ffdd85b2716. Root verified all review hashes and read the complete report. Contracts34 tests+3compile-fail docs and combined host114 tests+3compile-fail docs passed. Strict lint passed after one test-only missing semicolon was repaired; production bytes remained unchanged. Canonical metadata and normal commit are completing in INTEGRATION-02. Native acknowledgment/currentness remains open.
+The native association source has independent the adapter consumer acceptance, review8b2576b2b847c4b36d1111ba7199f85187e25441c8f4f018d21fe1fa282810cf, on frozen manifest3da7e0285e862ed618a00d122b39b3633d4f4a34ca9083280ad26ffdd85b2716. Root verified all review hashes and read the complete report. Contracts34 tests+3compile-fail docs and combined host114 tests+3compile-fail docs passed. Strict lint passed after one test-only missing semicolon was repaired; production bytes remained unchanged. Canonical metadata and normal commit are completing in INTEGRATION-02. Native acknowledgment/currentness remains open.
 
 The accepted LinuxChronyNtsV1 r5 design has a known model-entry and turn-overhead budget failure after idle periods: conservative sample lifetime is seconds or tens of seconds and a fresh stateless authenticated acquisition takes multiple seconds. This is explicitly recorded in acceptance-plan.md as failure against unchanged numeric bounds, not merely missing measurement. Demand-triggered early refresh through the same owned single-flight worker is selected for active conversations and remains unexecuted. It does not resolve idle latency or qualify the deployment.
 
-Witness key-custody source has bounded root acceptance096454ea8e480cceaf158e2021a994c3edeb564b444304f34789b26b6eedef97. The actual selected protected commissioning/client factory and administrative/recovery-root qualification remain open. Independent physical-journal reviewd49ddaea28539d81bb5079e2e3a4277b6752b90852c375d3847daa827d344d3d found NW-P2-1: commissioning retry could return success for an absent primary head with surviving child history or an existing head with corrupt indexes. The owner is repairing transaction-local inventory checks; the original RED checkpoint remains retained. Toolkit is independently reviewing the frozen grant/control target-association source at manifest618290b14e90445189915c7515d6a224a5c202cda289ebb9d4ae0c8c9189da9b. No new heavy agent build is authorized.
+Witness key-custody source has bounded root acceptance096454ea8e480cceaf158e2021a994c3edeb564b444304f34789b26b6eedef97. The actual selected protected commissioning/client factory and administrative/recovery-root qualification remain open. Independent physical-journal reviewd49ddaea28539d81bb5079e2e3a4277b6752b90852c375d3847daa827d344d3d found NW-P2-1: commissioning retry could return success for an absent primary head with surviving child history or an existing head with corrupt indexes. The owner is repairing transaction-local inventory checks; the original RED checkpoint remains retained. The adapter consumer is independently reviewing the frozen grant/control target-association source at manifest618290b14e90445189915c7515d6a224a5c202cda289ebb9d4ae0c8c9189da9b. No new heavy agent build is authorized.

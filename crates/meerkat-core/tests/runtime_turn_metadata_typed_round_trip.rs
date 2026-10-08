@@ -94,6 +94,8 @@ fn sample_metadata() -> RuntimeTurnMetadata {
             uuid::Uuid::new_v4(),
         )],
         transcript_identity: Default::default(),
+        request_reasoning: None,
+        request_reasoning_disposition: None,
         work_authorization: None,
     }
 }

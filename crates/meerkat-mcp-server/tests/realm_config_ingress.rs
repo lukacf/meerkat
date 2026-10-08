@@ -29,7 +29,7 @@ provider_params = { provider_tag = { provider = \"anthropic\", cache_control = \
 const HEAD_WITHOUT_AGENT_PROVIDER_PARAMS: &str = "[agent]\nmax_tokens_per_turn = 256\n";
 
 /// Substring of `Config::reject_unwired_agent_provider_params`'s
-/// `ConfigError::Validation` payload.
+/// refusal message, which a persisted document reports as a stored fault.
 const REFUSAL_TEXT: &str = "[agent] provider_params is not applied to any session";
 
 fn bootstrap(root: &Path, realm_id: &str) -> RuntimeBootstrap {
@@ -93,8 +93,8 @@ async fn head_config_with_agent_provider_params_refuses_mcp_startup() {
         "startup error must carry the ingress refusal text; got: {error}"
     );
     assert!(
-        error.contains("Validation error"),
-        "startup error must surface the typed ConfigError::Validation; got: {error}"
+        error.contains("persisted config document is invalid"),
+        "startup error must surface the stored-document fault; got: {error}"
     );
     assert!(
         error.contains(&format!("realm '{realm_id}'")),
@@ -144,8 +144,8 @@ async fn global_config_with_agent_provider_params_refuses_mcp_startup() {
         "startup error must carry the ingress refusal text; got: {error}"
     );
     assert!(
-        error.contains("Validation error"),
-        "startup error must surface the typed ConfigError::Validation; got: {error}"
+        error.contains("persisted config document is invalid"),
+        "startup error must surface the stored-document fault; got: {error}"
     );
     assert!(
         error.contains(&format!(

@@ -201,7 +201,7 @@ pub async fn handle_health(id: Option<RpcId>, runtime: &Arc<SessionRuntime>) -> 
 /// produces nothing - `PrimitiveApplied` has moved the phase on, so
 /// `session_run_start` stands down, and the run is in flight, so
 /// `session_liveness` stands down - is mid-turn progress, a distinct
-/// dimension with no probe and no declared name yet. The household fleet's
+/// dimension with no probe and no declared name yet. A downstream app's
 /// own fuse has already observed that class in the field (a member mute on an
 /// established run for 54 minutes). Naming it here is what keeps this
 /// handler's green honest about its edges.

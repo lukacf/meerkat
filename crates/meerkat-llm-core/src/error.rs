@@ -54,6 +54,13 @@ pub enum LlmError {
     OperationObservationUnavailable,
     #[error("operation authorization unavailable")]
     OperationAuthorizationUnavailable,
+    /// A current, permitted model operation required review that a model
+    /// request cannot carry. Settled locally before sending: never a provider
+    /// failure, permission refusal, retry or fallback trigger.
+    #[error("{refusal}")]
+    OperationReviewRefused {
+        refusal: meerkat_core::OperationReviewRefusal,
+    },
     // === Retryable Errors ===
     #[error("Rate limited{}", match .retry_after_ms {
         Some(ms) => format!(", retry after {ms}ms"),
@@ -726,6 +733,14 @@ impl LlmError {
                 LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
                     LlmProviderErrorKind::OperationAuthorizationUnavailable,
                     serde_json::Value::Null,
+                ))
+            }
+            // The wire kind is the existing non-retryable authority class; the
+            // typed review settlement travels in its details.
+            Self::OperationReviewRefused { refusal } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::OperationAuthorizationUnavailable,
+                    json!({ "review": refusal }),
                 ))
             }
             Self::RateLimited { retry_after_ms } => LlmFailureReason::RateLimited {

@@ -442,8 +442,8 @@ graph it claims to review.
 
 After the integrated gate, the release authority owns BuildBuddy Turbo S
 e2e-smoke diagnosis, repair, rerun, and green evidence on that exact Meerkat
-commit. The exact Meerkat/MobKit pair must then pass isolated no-deploy OB3 and
-HomeCore qualification before the Meerkat lead may publish 0.8.30. This feature
+commit. The exact Meerkat/MobKit pair must then pass isolated no-deploy downstream
+qualification before the Meerkat lead may publish 0.8.30. This feature
 lane does not independently merge, tag, or publish either repository.
 
 ## Dogma check

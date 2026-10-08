@@ -18,8 +18,10 @@ use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{
     AuthOAuthFlowSnapshotUpdate, CommittedWholeBlobProvisionalTail, CommittedWholeBlobSnapshot,
-    ExactInputStateObservation, FencedInputStateBatchCasOutcome, FencedMachineLifecycleCasOutcome,
-    InputStateBatchCasImplementationProfile, InputStateBatchCasOutcome, InputStateRow,
+    ContinuationAdmission, ContinuationAdmissionOutcome, ContinuationAdmissionTransition,
+    ContinuationKeyBinding, ExactInputStateObservation, FencedInputStateBatchCasOutcome,
+    FencedMachineLifecycleCasOutcome, InputStateBatchCasImplementationProfile,
+    InputStateBatchCasOutcome, InputStateRow, KeyedRuntimeDeliveryCasOutcome,
     MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
     MachineLifecycleObservation, MachineLifecycleStoreRecord, PreparedRecoveryInputSnapshot,
     PreparedRecoveryInputStateMutation, PreparedRuntimeSessionCommitResult,
@@ -119,6 +121,80 @@ struct Inner {
     runtime_delivery_authority: HashMap<String, RuntimeDeliveryAuthorityRecord>,
     /// Durable runtime-delivery rows ordered by generated sequence.
     runtime_delivery_records: HashMap<String, BTreeMap<u64, RuntimeDeliveryStoreRecord>>,
+    continuation_key_bindings: HashMap<(String, String), ContinuationKeyBinding>,
+    continuation_admissions: HashMap<(String, String), ContinuationAdmission>,
+}
+
+struct MemoryControllerCustody<'a> {
+    inner: crate::tokio::sync::MutexGuard<'a, Inner>,
+}
+
+impl super::RuntimeStoreControllerCustody for MemoryControllerCustody<'_> {
+    fn visit_runtimes(
+        &self,
+        visit: &mut dyn FnMut(&super::RuntimeStoreControllerRuntime) -> bool,
+    ) -> Result<bool, RuntimeStoreError> {
+        // Scan canonical owners while retaining the same lock used by every
+        // lifecycle/input commit. Input-only owners must remain visible; the
+        // listing catalog and accumulated receipts are not absence evidence.
+        let owners =
+            self.inner
+                .runtime_lifecycle
+                .keys()
+                .chain(self.inner.input_states.iter().filter_map(|(id, rows)| {
+                    (!rows.is_empty() && !self.inner.runtime_lifecycle.contains_key(id))
+                        .then_some(id)
+                }));
+        for id in owners {
+            let lifecycle = self
+                .inner
+                .runtime_lifecycle
+                .get(id)
+                .map_or(MachineLifecycleObservation::Missing, |bytes| {
+                    classify_machine_lifecycle_record(bytes)
+                });
+            let run =
+                match &lifecycle {
+                    MachineLifecycleObservation::Decoded { record, .. }
+                        if record
+                            .binding()
+                            .agent_runtime_id()
+                            .is_none_or(|bound| bound == id) =>
+                    {
+                        record.run().current_run_id()
+                    }
+                    MachineLifecycleObservation::Missing => None,
+                    _ => return Err(RuntimeStoreError::ReadFailed(
+                        "controller custody lifecycle is undecodable or bound to another runtime"
+                            .into(),
+                    )),
+                };
+            let mut input_states = Vec::new();
+            if let Some(rows) = self.inner.input_states.get(id) {
+                for (input_id, stored) in rows {
+                    if input_id != &stored.state.input_id {
+                        return Err(RuntimeStoreError::ReadFailed(
+                            "controller custody input identity differs from its physical key"
+                                .into(),
+                        ));
+                    }
+                    if super::input_state_is_recovery_nonterminal(stored)
+                        || (run.is_some() && stored.seed.last_run_id.as_ref() == run)
+                    {
+                        input_states.push(stored.clone());
+                    }
+                }
+            }
+            if visit(&super::RuntimeStoreControllerRuntime::new(
+                LogicalRuntimeId::new(id.clone()),
+                lifecycle,
+                input_states,
+            )) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 fn sync_runtime_session_catalog_lifecycle(
@@ -1769,6 +1845,21 @@ impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
         Some(&self.execution_custody)
     }
 
+    fn try_controller_mutation_custody<'a>(
+        &'a self,
+        claim: &'a super::RuntimeStoreExecutionClaim,
+    ) -> Result<Box<dyn super::RuntimeStoreControllerCustody + 'a>, RuntimeStoreError> {
+        if !self.execution_custody.owns_governed_claim(claim) {
+            return Err(RuntimeStoreError::Unsupported(
+                "controller administration requires this backend's governed execution claim".into(),
+            ));
+        }
+        let inner = self.inner.try_lock().map_err(|_| {
+            RuntimeStoreError::WriteFailed("controller administration memory writer is busy".into())
+        })?;
+        Ok(Box::new(MemoryControllerCustody { inner }))
+    }
+
     fn session_persistence_profile(&self) -> super::RuntimeSessionPersistenceProfile {
         super::RuntimeSessionPersistenceProfile::WholeBlobV1
     }
@@ -2407,11 +2498,77 @@ impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
     }
 }
 
+/// The delivery-authority compare-and-swap, with the store's state lock held.
+fn compare_and_swap_runtime_delivery_authority_locked(
+    inner: &mut Inner,
+    runtime_id: &LogicalRuntimeId,
+    expected_revision: Option<u64>,
+    replacement: RuntimeDeliveryAuthorityRecord,
+    inserted_delivery: Option<RuntimeDeliveryStoreRecord>,
+) -> Result<RuntimeDeliveryAuthorityCasOutcome, RuntimeStoreError> {
+    let current = inner.runtime_delivery_authority.get(&runtime_id.0).cloned();
+    if current
+        .as_ref()
+        .map(RuntimeDeliveryAuthorityRecord::revision)
+        != expected_revision
+    {
+        return Ok(RuntimeDeliveryAuthorityCasOutcome::Conflict(current));
+    }
+    let required_revision = expected_revision
+        .map_or(Some(1), |revision| revision.checked_add(1))
+        .ok_or_else(|| {
+            RuntimeStoreError::WriteFailed(
+                "runtime delivery authority revision exhausted u64".into(),
+            )
+        })?;
+    if replacement.revision() != required_revision {
+        return Err(RuntimeStoreError::WriteFailed(format!(
+            "runtime delivery replacement revision {} is not required successor {required_revision}",
+            replacement.revision()
+        )));
+    }
+    if let Some(record) = inserted_delivery.as_ref() {
+        let records = inner
+            .runtime_delivery_records
+            .entry(runtime_id.0.clone())
+            .or_default();
+        if records.contains_key(&record.sequence())
+            || records
+                .values()
+                .any(|existing| existing.delivery_id() == record.delivery_id())
+        {
+            return Err(RuntimeStoreError::WriteFailed(format!(
+                "runtime delivery row {} / sequence {} already exists",
+                record.delivery_id(),
+                record.sequence()
+            )));
+        }
+    }
+
+    inner
+        .runtime_delivery_authority
+        .insert(runtime_id.0.clone(), replacement.clone());
+    if let Some(record) = inserted_delivery {
+        inner
+            .runtime_delivery_records
+            .entry(runtime_id.0.clone())
+            .or_default()
+            .insert(record.sequence(), record);
+    }
+    Ok(RuntimeDeliveryAuthorityCasOutcome::Applied(replacement))
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeStore for InMemoryRuntimeStore {
     fn session_authority_ops(&self) -> &dyn super::RuntimeSessionAuthorityOps {
         self
+    }
+
+    /// No other process can open an in-memory store: this process is the
+    /// only possible host of its sessions.
+    fn hosting_capability(&self) -> crate::session_hosting::HostingCapability {
+        crate::session_hosting::HostingCapability::ProcessLocal
     }
 
     async fn commit_prepared_session_boundary_with_fence(
@@ -2489,56 +2646,91 @@ impl RuntimeStore for InMemoryRuntimeStore {
         inserted_delivery: Option<RuntimeDeliveryStoreRecord>,
     ) -> Result<RuntimeDeliveryAuthorityCasOutcome, RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
-        let current = inner.runtime_delivery_authority.get(&runtime_id.0).cloned();
-        if current
-            .as_ref()
-            .map(RuntimeDeliveryAuthorityRecord::revision)
-            != expected_revision
-        {
-            return Ok(RuntimeDeliveryAuthorityCasOutcome::Conflict(current));
+        compare_and_swap_runtime_delivery_authority_locked(
+            &mut inner,
+            runtime_id,
+            expected_revision,
+            replacement,
+            inserted_delivery,
+        )
+    }
+
+    async fn load_continuation_key_binding(
+        &self,
+        owner: &str,
+        key: &str,
+    ) -> Result<Option<ContinuationKeyBinding>, RuntimeStoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .continuation_key_bindings
+            .get(&(owner.to_string(), key.to_string()))
+            .cloned())
+    }
+
+    async fn load_continuation_admission(
+        &self,
+        address: &LogicalRuntimeId,
+        delivery_id: &str,
+    ) -> Result<Option<ContinuationAdmission>, RuntimeStoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .continuation_admissions
+            .get(&(address.0.clone(), delivery_id.to_string()))
+            .cloned())
+    }
+
+    async fn transition_continuation_admission(
+        &self,
+        address: &LogicalRuntimeId,
+        delivery_id: &str,
+        transition: ContinuationAdmissionTransition,
+    ) -> Result<ContinuationAdmissionOutcome, RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let entry_key = (address.0.clone(), delivery_id.to_string());
+        let current = inner.continuation_admissions.get(&entry_key).cloned();
+        let Some(next) = transition.next(current.as_ref()) else {
+            return Ok(ContinuationAdmissionOutcome::Rejected { current });
+        };
+        inner
+            .continuation_admissions
+            .insert(entry_key, next.clone());
+        Ok(ContinuationAdmissionOutcome::Transitioned(next))
+    }
+
+    async fn compare_and_swap_runtime_delivery_authority_with_key_binding(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: Option<u64>,
+        replacement: RuntimeDeliveryAuthorityRecord,
+        inserted_delivery: RuntimeDeliveryStoreRecord,
+        binding: ContinuationKeyBinding,
+    ) -> Result<KeyedRuntimeDeliveryCasOutcome, RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let pair = (binding.owner.clone(), binding.key.clone());
+        if let Some(existing) = inner.continuation_key_bindings.get(&pair) {
+            return Ok(KeyedRuntimeDeliveryCasOutcome::KeyAlreadyBound(
+                existing.clone(),
+            ));
         }
-        let required_revision = expected_revision
-            .map_or(Some(1), |revision| revision.checked_add(1))
-            .ok_or_else(|| {
-                RuntimeStoreError::WriteFailed(
-                    "runtime delivery authority revision exhausted u64".into(),
-                )
-            })?;
-        if replacement.revision() != required_revision {
-            return Err(RuntimeStoreError::WriteFailed(format!(
-                "runtime delivery replacement revision {} is not required successor {required_revision}",
-                replacement.revision()
-            )));
-        }
-        if let Some(record) = inserted_delivery.as_ref() {
-            let records = inner
-                .runtime_delivery_records
-                .entry(runtime_id.0.clone())
-                .or_default();
-            if records.contains_key(&record.sequence())
-                || records
-                    .values()
-                    .any(|existing| existing.delivery_id() == record.delivery_id())
-            {
-                return Err(RuntimeStoreError::WriteFailed(format!(
-                    "runtime delivery row {} / sequence {} already exists",
-                    record.delivery_id(),
-                    record.sequence()
-                )));
+        match compare_and_swap_runtime_delivery_authority_locked(
+            &mut inner,
+            runtime_id,
+            expected_revision,
+            replacement,
+            Some(inserted_delivery),
+        )? {
+            RuntimeDeliveryAuthorityCasOutcome::Applied(record) => {
+                inner.continuation_key_bindings.insert(pair, binding);
+                Ok(KeyedRuntimeDeliveryCasOutcome::Applied(record))
+            }
+            RuntimeDeliveryAuthorityCasOutcome::Conflict(current) => {
+                Ok(KeyedRuntimeDeliveryCasOutcome::Conflict(current))
             }
         }
-
-        inner
-            .runtime_delivery_authority
-            .insert(runtime_id.0.clone(), replacement.clone());
-        if let Some(record) = inserted_delivery {
-            inner
-                .runtime_delivery_records
-                .entry(runtime_id.0.clone())
-                .or_default()
-                .insert(record.sequence(), record);
-        }
-        Ok(RuntimeDeliveryAuthorityCasOutcome::Applied(replacement))
     }
 
     async fn list_runtime_delivery_authorities(
@@ -3932,6 +4124,181 @@ mod tests {
             ),
             crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
         )
+    }
+
+    #[tokio::test]
+    async fn controller_admin_custody_retains_memory_writer_and_exact_claim() {
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("memory-controller-admin");
+        store
+            .commit_machine_lifecycle(
+                &runtime_id,
+                lifecycle_commit(&runtime_id, RuntimeState::Idle, 1, 1),
+                &[],
+            )
+            .await
+            .unwrap();
+        let shared = store.execution_custody.try_acquire_shared().unwrap();
+        assert!(store.try_controller_mutation_custody(&shared).is_err());
+        drop(shared);
+        let foreign = InMemoryRuntimeStore::new();
+        let foreign_claim = foreign.execution_custody.try_acquire_governed().unwrap();
+        assert!(
+            store
+                .try_controller_mutation_custody(&foreign_claim)
+                .is_err()
+        );
+        let claim = store.execution_custody.try_acquire_governed().unwrap();
+        let held = store.inner.lock().await;
+        assert!(store.try_controller_mutation_custody(&claim).is_err());
+        drop(held);
+        let clone = store.clone();
+        let guard = clone.try_controller_mutation_custody(&claim).unwrap();
+        assert!(
+            store.inner.try_lock().is_err(),
+            "actual writer remains held"
+        );
+        let mut visited = 0;
+        assert!(!guard.visit_runtimes(&mut |owner| {
+            assert_eq!(owner.runtime_id(), &runtime_id);
+            assert!(matches!(owner.lifecycle(), MachineLifecycleObservation::Decoded { record, .. }
+                if record.runtime_state() == Some(RuntimeState::Idle)));
+            assert!(owner.input_states().is_empty());
+            visited += 1;
+            false
+        }).unwrap());
+        assert_eq!(visited, 1);
+        drop(guard);
+        assert!(store.inner.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn controller_admin_memory_inventory_keeps_terminal_current_run_originals() {
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("memory-controller-originals");
+        let run = RunId::new();
+        let mut original = StoredInputState::new_accepted(InputId::new());
+        original.seed.phase = crate::input_state::InputLifecycleState::Consumed;
+        original.seed.last_run_id = Some(run.clone());
+        original.seed.terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Consumed);
+        let pending = StoredInputState::new_accepted(InputId::new());
+        let mut history = StoredInputState::new_accepted(InputId::new());
+        history.seed.phase = crate::input_state::InputLifecycleState::Consumed;
+        history.seed.last_run_id = Some(RunId::new());
+        history.seed.terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Consumed);
+        store
+            .commit_machine_lifecycle(
+                &runtime_id,
+                MachineLifecycleCommit::new_with_binding_run_and_unregister_progress(
+                    RuntimeState::Running,
+                    MachineLifecycleBindingFacts::new(
+                        Some(runtime_id.0.clone()),
+                        Some(1),
+                        Some(1),
+                        Some("epoch-1".into()),
+                    ),
+                    super::super::MachineLifecycleRunFacts::new(
+                        Some(run),
+                        Some(super::super::MachineLifecyclePreRunPhase::Idle),
+                    ),
+                    super::super::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    None,
+                ),
+                &[
+                    persistable(original.clone()),
+                    persistable(pending.clone()),
+                    persistable(history),
+                ],
+            )
+            .await
+            .unwrap();
+        let before = store.inner.lock().await.runtime_lifecycle[&runtime_id.0].clone();
+        let claim = store.execution_custody.try_acquire_governed().unwrap();
+        let guard = store.try_controller_mutation_custody(&claim).unwrap();
+        let mut visited = 0;
+        assert!(
+            !guard
+                .visit_runtimes(&mut |owner| {
+                    assert_eq!(
+                        owner
+                            .input_states()
+                            .iter()
+                            .map(|row| (row.state.input_id.clone(), row.seed.clone()))
+                            .collect::<Vec<_>>(),
+                        vec![
+                            (original.state.input_id.clone(), original.seed.clone()),
+                            (pending.state.input_id.clone(), pending.seed.clone())
+                        ]
+                    );
+                    visited += 1;
+                    false
+                })
+                .unwrap()
+        );
+        assert_eq!(visited, 1);
+        drop(guard);
+        let after = store.inner.lock().await;
+        assert_eq!(after.runtime_lifecycle[&runtime_id.0], before);
+        assert_eq!(after.input_states[&runtime_id.0].len(), 3);
+    }
+
+    #[tokio::test]
+    async fn controller_admin_memory_inventory_exposes_orphans_and_refuses_corruption() {
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("memory-controller-orphan");
+        let input = StoredInputState::new_accepted(InputId::new());
+        store
+            .persist_input_state(&runtime_id, &persistable(input.clone()))
+            .await
+            .unwrap();
+        let claim = store.execution_custody.try_acquire_governed().unwrap();
+        let guard = store.try_controller_mutation_custody(&claim).unwrap();
+        assert!(
+            guard
+                .visit_runtimes(&mut |owner| {
+                    assert_eq!(owner.runtime_id(), &runtime_id);
+                    assert_eq!(owner.lifecycle(), &MachineLifecycleObservation::Missing);
+                    assert_eq!(owner.input_states().len(), 1);
+                    assert_eq!(owner.input_states()[0].state.input_id, input.state.input_id);
+                    assert_eq!(owner.input_states()[0].seed, input.seed);
+                    true
+                })
+                .unwrap(),
+            "an orphan is observed, not treated as empty custody"
+        );
+        drop(guard);
+        store
+            .inner
+            .lock()
+            .await
+            .runtime_lifecycle
+            .insert(runtime_id.0.clone(), b"broken-lifecycle".to_vec());
+        let guard = store.try_controller_mutation_custody(&claim).unwrap();
+        assert!(guard.visit_runtimes(&mut |_| false).is_err());
+        drop(guard);
+        assert_eq!(
+            store.inner.lock().await.runtime_lifecycle[&runtime_id.0],
+            b"broken-lifecycle"
+        );
+
+        store
+            .inner
+            .lock()
+            .await
+            .runtime_lifecycle
+            .remove(&runtime_id.0);
+        // Simulate a torn physical key while retaining otherwise valid typed bytes.
+        let wrong_id = InputId::new();
+        store
+            .inner
+            .lock()
+            .await
+            .input_states
+            .get_mut(&runtime_id.0)
+            .unwrap()
+            .insert(wrong_id, input);
+        let guard = store.try_controller_mutation_custody(&claim).unwrap();
+        assert!(guard.visit_runtimes(&mut |_| false).is_err());
     }
 
     struct AppliedWriteFence;

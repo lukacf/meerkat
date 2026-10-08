@@ -5365,6 +5365,72 @@ impl std::fmt::Display for LiveExecutionMode {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveMemberTurnReasoning {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Low")]
+    Low,
+    #[serde(rename = "Medium")]
+    Medium,
+    #[serde(rename = "High")]
+    High,
+    #[serde(rename = "Xhigh")]
+    Xhigh,
+    #[serde(rename = "Max")]
+    Max,
+}
+impl LiveMemberTurnReasoning {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::Xhigh => "Xhigh",
+            Self::Max => "Max",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveMemberTurnReasoning {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Low" => Ok(Self::Low),
+            "Medium" => Ok(Self::Medium),
+            "High" => Ok(Self::High),
+            "Xhigh" => Ok(Self::Xhigh),
+            "Max" => Ok(Self::Max),
+            other => Err(format!("invalid LiveMemberTurnReasoning value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveMemberTurnReasoning {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveMemberTurnReasoning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveOpenAdmissionRejection {
     #[default]
     #[serde(rename = "AlreadyBound")]
@@ -13686,6 +13752,7 @@ pub struct State {
     pub drain_mode: Option<DrainMode>,
     pub next_staged_visibility_revision: u64,
     pub inherited_base_filter: ToolFilter,
+    pub policy_base_filter: ToolFilter,
     pub active_filter: ToolFilter,
     pub staged_filter: ToolFilter,
     pub active_visibility_revision: u64,
@@ -13778,6 +13845,8 @@ pub struct State {
     pub live_active_channel_by_session: std::collections::BTreeMap<String, String>,
     pub live_channel_session_by_channel: std::collections::BTreeMap<String, String>,
     pub live_channel_identity_by_channel: std::collections::BTreeMap<String, SessionLlmIdentity>,
+    pub live_member_turn_reasoning_by_channel:
+        std::collections::BTreeMap<String, LiveMemberTurnReasoning>,
     pub live_execution_runtime_id_by_channel: std::collections::BTreeMap<String, AgentRuntimeId>,
     pub live_execution_fence_by_channel: std::collections::BTreeMap<String, FenceToken>,
     pub live_execution_generation_by_channel: std::collections::BTreeMap<String, Generation>,
@@ -13878,6 +13947,7 @@ pub struct State {
         std::collections::BTreeMap<OperationId, AgentIdentity>,
     pub live_bridge_context_revision_by_operation: std::collections::BTreeMap<OperationId, String>,
     pub live_bridge_request_digest_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_original_work_by_operation: std::collections::BTreeMap<OperationId, String>,
     pub live_bridge_phase_by_operation:
         std::collections::BTreeMap<OperationId, LiveBridgeOperationPhase>,
     pub live_bridge_effect_operation_by_authority: std::collections::BTreeMap<String, OperationId>,
@@ -14417,6 +14487,7 @@ impl std::fmt::Debug for State {
                 &self.next_staged_visibility_revision,
             )
             .field("inherited_base_filter", &self.inherited_base_filter)
+            .field("policy_base_filter", &self.policy_base_filter)
             .field("active_filter", &self.active_filter)
             .field("staged_filter", &self.staged_filter)
             .field(
@@ -14625,6 +14696,10 @@ impl std::fmt::Debug for State {
             .field(
                 "live_channel_identity_by_channel",
                 &self.live_channel_identity_by_channel,
+            )
+            .field(
+                "live_member_turn_reasoning_by_channel",
+                &self.live_member_turn_reasoning_by_channel,
             )
             .field(
                 "live_execution_runtime_id_by_channel",
@@ -14945,6 +15020,10 @@ impl std::fmt::Debug for State {
             .field(
                 "live_bridge_request_digest_by_operation",
                 &self.live_bridge_request_digest_by_operation,
+            )
+            .field(
+                "live_bridge_original_work_by_operation",
+                &self.live_bridge_original_work_by_operation,
             )
             .field(
                 "live_bridge_phase_by_operation",
@@ -16944,6 +17023,7 @@ pub mod inputs {
         pub session_id: String,
         pub channel_id: String,
         pub llm_identity: SessionLlmIdentity,
+        pub member_turn_reasoning: Option<LiveMemberTurnReasoning>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BindLiveExecutionChannel {
@@ -17349,6 +17429,7 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
         pub canonical_context_revision: String,
         pub request_digest: String,
+        pub original_work: String,
         pub structural_lineage_proven: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17892,6 +17973,7 @@ pub mod inputs {
     pub struct ReplaceVisibilityState {
         pub capability_base_filter: ToolFilter,
         pub inherited_base_filter: ToolFilter,
+        pub policy_base_filter: ToolFilter,
         pub active_filter: ToolFilter,
         pub staged_filter: ToolFilter,
         pub active_revision: u64,
@@ -20578,6 +20660,7 @@ pub mod effects {
         pub operation_id: OperationId,
         pub worker_identity: String,
         pub worker_ownership: LiveDelegationWorkerOwnership,
+        pub member_turn_reasoning: Option<LiveMemberTurnReasoning>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationWorkerStartResolved {
@@ -25076,6 +25159,7 @@ pub fn initial_state() -> State {
         drain_mode: None,
         next_staged_visibility_revision: 0,
         inherited_base_filter: ToolFilter::All,
+        policy_base_filter: ToolFilter::All,
         active_filter: ToolFilter::All,
         staged_filter: ToolFilter::All,
         active_visibility_revision: 0,
@@ -25159,6 +25243,7 @@ pub fn initial_state() -> State {
         live_active_channel_by_session: Default::default(),
         live_channel_session_by_channel: Default::default(),
         live_channel_identity_by_channel: Default::default(),
+        live_member_turn_reasoning_by_channel: Default::default(),
         live_execution_runtime_id_by_channel: Default::default(),
         live_execution_fence_by_channel: Default::default(),
         live_execution_generation_by_channel: Default::default(),
@@ -25239,6 +25324,7 @@ pub fn initial_state() -> State {
         live_bridge_agent_identity_by_operation: Default::default(),
         live_bridge_context_revision_by_operation: Default::default(),
         live_bridge_request_digest_by_operation: Default::default(),
+        live_bridge_original_work_by_operation: Default::default(),
         live_bridge_phase_by_operation: Default::default(),
         live_bridge_effect_operation_by_authority: Default::default(),
         live_bridge_effect_kind_by_authority: Default::default(),

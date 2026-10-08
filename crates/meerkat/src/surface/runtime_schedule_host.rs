@@ -727,6 +727,8 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             directed_interaction_ids: Vec::new(),
             auth_binding: None,
             transcript_identity: Default::default(),
+            request_reasoning: None,
+            request_reasoning_disposition: None,
         };
         // The attention overlay is deliberately NOT composed here: a queued
         // prompt can sit behind a running turn that mutates the work item,
@@ -773,6 +775,7 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             objective_id: None,
             header: meerkat_runtime::input::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

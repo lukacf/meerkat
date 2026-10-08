@@ -9,13 +9,13 @@ use meerkat::{
     AttemptClaim, AttemptWriteAuthority, CanonicalArgumentsHash, CreateWorkItemRequest,
     DetachedJobError, DetachedJobService, DetachedJobStore, ExecutionIntentId, HostRunnable,
     HostRunnableInvocation, HostRunnableName, InteractionLineageId, JobAwaitCoordinator,
-    JobAwaitDeliverySink, JobDeliveryApplication, JobDeliveryContent, JobDeliveryKind,
-    JobDeliverySink, JobFailureCode, JobId, JobOutboxEntry, JobReference, JobSubmissionKey,
-    JobSubscription, JobSubscriptionId, JobTerminalEvidenceKind, JobTerminalEvidenceProjection,
-    JobTerminalEvidenceProjector, JobTerminalResult, JobWorkGraphLink, MemoryDetachedJobStore,
-    MemoryWorkGraphStore, RestartClass, RunnerHandleRef, RunnerIdentity,
-    ScheduledDurableJobRunnable, ScheduledJobTemplate, SessionId, ToolIdentity, WorkGraphService,
-    WorkItemRef, WorkNamespace, WorkerId,
+    JobAwaitDeliverySink, JobDeliveryApplication, JobDeliveryApplyError, JobDeliveryContent,
+    JobDeliveryKind, JobDeliverySink, JobFailureCode, JobId, JobOutboxEntry, JobReference,
+    JobSubmissionKey, JobSubscription, JobSubscriptionId, JobTerminalEvidenceKind,
+    JobTerminalEvidenceProjection, JobTerminalEvidenceProjector, JobTerminalResult,
+    JobWorkGraphLink, MemoryDetachedJobStore, MemoryWorkGraphStore, RestartClass, RunnerHandleRef,
+    RunnerIdentity, ScheduledDurableJobRunnable, ScheduledJobTemplate, SessionId, ToolIdentity,
+    WorkGraphService, WorkItemRef, WorkNamespace, WorkerId,
 };
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationSource, OperationSpec, OperationStatus, OpsLifecycleRegistry,
@@ -549,9 +549,113 @@ struct CountingDeliverySink {
     applications: Mutex<usize>,
 }
 
+struct RefusingDeliverySink(JobDeliveryApplyError);
+
+#[async_trait]
+impl JobDeliverySink for RefusingDeliverySink {
+    async fn apply(
+        &self,
+        _application: JobDeliveryApplication,
+    ) -> Result<(), JobDeliveryApplyError> {
+        Err(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn terminal_delivery_preserves_local_authorization_failures_and_completed_job_truth() {
+    use meerkat_core::authorization::{
+        OperationAuthorizationError, OperationObservationError, OperationRefusalKind,
+        OperationRefused,
+    };
+
+    for expected in [
+        JobDeliveryApplyError::Authorization(OperationAuthorizationError::Refused(
+            OperationRefused::new(OperationRefusalKind::Denied),
+        )),
+        JobDeliveryApplyError::Authorization(OperationAuthorizationError::Unavailable),
+        JobDeliveryApplyError::Authorization(OperationAuthorizationError::ObservationUnavailable(
+            OperationObservationError,
+        )),
+        JobDeliveryApplyError::Infrastructure("session store unavailable".into()),
+    ] {
+        let jobs = DetachedJobService::new(Arc::new(MemoryDetachedJobStore::new()));
+        let session_id = SessionId::new();
+        let receipt = jobs
+            .submit(job_spec("typed-delivery-failure", session_id.clone()))
+            .await
+            .expect("submit");
+        let claim = jobs
+            .claim_attempt(
+                &receipt.job_id,
+                AttemptClaim::new(
+                    WorkerId::new("typed-delivery-worker").expect("worker"),
+                    1,
+                    1_000,
+                    RunnerHandleRef::new("runner:typed-delivery").expect("handle"),
+                ),
+            )
+            .await
+            .expect("claim");
+        let reference = JobReference::new("realm-a", receipt.job_id.clone()).expect("reference");
+        let operations = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let coordinator = JobAwaitCoordinator::new("realm-a", jobs.clone(), operations.clone());
+        let waiting = coordinator
+            .await_job(&session_id, &reference)
+            .await
+            .expect("await live job");
+        let terminal = jobs
+            .complete_attempt(
+                &receipt.job_id,
+                AttemptWriteAuthority::from(&claim),
+                2,
+                None,
+            )
+            .await
+            .expect("complete job")
+            .terminal_result
+            .expect("terminal result");
+        let application = JobDeliveryApplication::Notification {
+            job_id: receipt.job_id,
+            delivery_sequence: 1,
+            subscription: JobSubscription::new(
+                JobSubscriptionId::new("typed-delivery-subscriber").expect("subscription"),
+                session_id,
+                JobDeliveryKind::Notification,
+            ),
+            content: JobDeliveryContent::Terminal(terminal),
+        };
+        let sink = JobAwaitDeliverySink::new(
+            coordinator,
+            Arc::new(RefusingDeliverySink(expected.clone())),
+        );
+
+        assert_eq!(
+            sink.apply(application.clone()).await,
+            Err(expected.clone()),
+            "the recipient disposition must retain its native error, not become text or success"
+        );
+        assert!(
+            operations
+                .snapshot(&waiting.operation_id)
+                .expect("snapshot")
+                .expect("wait operation")
+                .terminal,
+            "a refused recipient append cannot undo the already completed job"
+        );
+        assert_eq!(
+            sink.apply(application).await,
+            Err(expected),
+            "replaying the completed wait must not hide a refused recipient append"
+        );
+    }
+}
+
 #[async_trait]
 impl JobDeliverySink for CountingDeliverySink {
-    async fn apply(&self, _application: JobDeliveryApplication) -> Result<(), String> {
+    async fn apply(
+        &self,
+        _application: JobDeliveryApplication,
+    ) -> Result<(), JobDeliveryApplyError> {
         *self.applications.lock().await += 1;
         Ok(())
     }

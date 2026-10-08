@@ -476,7 +476,7 @@ Events emitted: `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`.
 - Intra-turn persistence may write provisional physical successors. Each write returns an exact receipt, and the final runtime boundary promotes the latest receipt without reserializing or reapplying the turn.
 - `WholeBlob` currentness binds the session ID, store revision, and blob digest. `HeadCanonical` currentness binds the session ID, store revision, boundary head, and committed head token.
 - Backends are pinned per realm (`realm_manifest.json`). Surfaces share state only when both `realm_id` and the resolved physical provider/root match.
-- SQLite-backed realms are the standard same-realm multi-process mode.
+- SQLite-backed realms are the standard same-realm multi-process mode; `[storage] hosting = "multiprocess"` makes session hosting and delivery routing explicit across processes.
 - Every composed store slot carries a machine-readable durability class (`durable` / `rebuildable_cache` / `scratch`). An undeclared non-persistent durable slot needs a manifest `ephemeral_domains` declaration or startup fails typed. A provider can instead return typed `DeclaredEphemeral` directly; neither path permits silent in-memory fallback.
 
 ## See also

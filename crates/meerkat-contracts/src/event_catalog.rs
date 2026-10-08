@@ -57,4 +57,8 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     // committed close with the channel, a typed `LiveChannelCloseReason` and
     // `reopen_recommended` (docs/api/rpc.mdx event table).
     "live_channel_closed",
+    // One provider attempt of a turn carrying a reasoning-effort preference:
+    // the batch's requested disposition, the attempt's baseline effort and
+    // what the attempt sent.
+    "request_reasoning_lowered",
 ];

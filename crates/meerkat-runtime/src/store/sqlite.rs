@@ -9,6 +9,10 @@ mod inner {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+    // Every blocking SQLite operation holds the calling task's scoped hosting
+    // claims until it returns (#1813), so a store-only write's claim outlives
+    // a cancelled caller.
+    use meerkat_core::session_hosting::spawn_blocking_holding_claim;
     use meerkat_store::json_column::JsonColumnBytes;
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -17,10 +21,12 @@ mod inner {
     use crate::runtime_state::RuntimeState;
     use crate::store::{
         AuthOAuthFlowSnapshotUpdate, CommittedRecoveryBoundary, CommittedWholeBlobProvisionalTail,
-        CommittedWholeBlobSnapshot, ExactInputStateObservation, FencedInputStateBatchCasOutcome,
-        FencedMachineLifecycleCasOutcome, HeadCanonicalProvisionalTailAuthority,
-        HeadCanonicalRuntimeAuthorityActivation, HeadCanonicalStoreAuthority,
-        InputStateBatchCasImplementationProfile, InputStateBatchCasOutcome, InputStateRow,
+        CommittedWholeBlobSnapshot, ContinuationAdmission, ContinuationAdmissionOutcome,
+        ContinuationAdmissionTransition, ContinuationKeyBinding, ExactInputStateObservation,
+        FencedInputStateBatchCasOutcome, FencedMachineLifecycleCasOutcome,
+        HeadCanonicalProvisionalTailAuthority, HeadCanonicalRuntimeAuthorityActivation,
+        HeadCanonicalStoreAuthority, InputStateBatchCasImplementationProfile,
+        InputStateBatchCasOutcome, InputStateRow, KeyedRuntimeDeliveryCasOutcome,
         MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
         MachineLifecycleObservation, MachineLifecycleObservationVersion, MachineLifecycleSnapshot,
         MachineLifecycleStoreRecord, PreparedDurableTailRecoverySource,
@@ -1150,6 +1156,148 @@ CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
         tx: &rusqlite::Transaction<'_>,
     ) -> Result<(), rusqlite::Error> {
         tx.execute_batch(CREATE_RUNTIME_DELIVERY_SCHEMA_SQL)
+    }
+
+    /// Continuation key ledger (first binding of each `(owner, key)`) and the
+    /// continuation admission index (`(address, delivery_id)` to the session
+    /// input that admitted it).
+    fn migration_0002_runtime_continuation_ledger(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute_batch(
+            r"
+            CREATE TABLE runtime_continuation_keys (
+                owner TEXT NOT NULL,
+                key TEXT NOT NULL,
+                binding_json BLOB NOT NULL,
+                PRIMARY KEY (owner, key)
+            );
+            CREATE TABLE runtime_continuation_admissions (
+                runtime_id TEXT NOT NULL,
+                delivery_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('reserved', 'applied')),
+                session_id TEXT NOT NULL,
+                input_id TEXT NOT NULL,
+                PRIMARY KEY (runtime_id, delivery_id)
+            );
+            ",
+        )
+    }
+
+    /// #1813: the input idempotency index constraint a failed input-state
+    /// statement hit, read from SQLite's own report of that statement: the
+    /// extended result code (PRIMARY KEY or UNIQUE) together with the exact
+    /// constrained columns it names. `None` for every other failure,
+    /// including other tables' constraints.
+    fn input_idempotency_index_constraint(
+        error: &rusqlite::Error,
+    ) -> Option<crate::store::InputIdempotencyIndexConstraint> {
+        const RUNTIME_KEY_COLUMNS: &str = "runtime_input_idempotency_keys.runtime_id, \
+                                           runtime_input_idempotency_keys.idempotency_key";
+        const RUNTIME_INPUT_ID_COLUMNS: &str =
+            "runtime_input_idempotency_keys.runtime_id, runtime_input_idempotency_keys.input_id";
+        let rusqlite::Error::SqliteFailure(failure, Some(message)) = error else {
+            return None;
+        };
+        let columns = message.strip_prefix("UNIQUE constraint failed: ")?;
+        match failure.extended_code {
+            rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY if columns == RUNTIME_KEY_COLUMNS => {
+                Some(crate::store::InputIdempotencyIndexConstraint::RuntimeKey)
+            }
+            rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE if columns == RUNTIME_INPUT_ID_COLUMNS => {
+                Some(crate::store::InputIdempotencyIndexConstraint::RuntimeInputId)
+            }
+            _ => None,
+        }
+    }
+
+    /// #1813: one durable counter, incremented in the same transaction as
+    /// every delivery-authority commit, so a process that sees the store's
+    /// files change learns from one row whether a delivery was committed.
+    const CREATE_RUNTIME_DELIVERY_GENERATION_SQL: &str = r"
+CREATE TABLE runtime_delivery_generation (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    generation INTEGER NOT NULL CHECK (generation >= 0)
+);
+INSERT INTO runtime_delivery_generation (singleton, generation) VALUES (1, 0)";
+
+    fn migration_0003_runtime_delivery_generation(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute_batch(CREATE_RUNTIME_DELIVERY_GENERATION_SQL)
+    }
+
+    fn initialize_current_runtime_delivery_schema(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        migration_0001_runtime_delivery_inbox(tx)?;
+        migration_0002_runtime_continuation_ledger(tx)?;
+        migration_0003_runtime_delivery_generation(tx)
+    }
+
+    const RELEASED_RUNTIME_DELIVERY_V1_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_delivery_authority",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_delivery_inbox",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_runtime_delivery_inbox_sequence",
+        },
+    ];
+
+    fn verify_released_runtime_delivery_v1_schema(conn: &Connection) -> Result<(), String> {
+        meerkat_sqlite::verify_released_schema_fingerprint(
+            conn,
+            &RUNTIME_DELIVERY_DOMAIN,
+            RELEASED_RUNTIME_DELIVERY_V1_OBJECTS,
+            migration_0001_runtime_delivery_inbox,
+        )
+    }
+
+    /// Version 2 (the continuation ledger) on version 1, before the delivery
+    /// generation counter (#1813) existed.
+    fn build_runtime_delivery_v2_schema(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        migration_0001_runtime_delivery_inbox(tx)?;
+        migration_0002_runtime_continuation_ledger(tx)
+    }
+
+    const RUNTIME_DELIVERY_V2_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_delivery_authority",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_delivery_inbox",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_runtime_delivery_inbox_sequence",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_continuation_keys",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_continuation_admissions",
+        },
+    ];
+
+    fn verify_runtime_delivery_v2_schema(conn: &Connection) -> Result<(), String> {
+        meerkat_sqlite::verify_released_schema_fingerprint(
+            conn,
+            &RUNTIME_DELIVERY_DOMAIN,
+            RUNTIME_DELIVERY_V2_OBJECTS,
+            build_runtime_delivery_v2_schema,
+        )
     }
 
     const HEAD_CANONICAL_FROZEN_SNAPSHOT_ERROR: &str =
@@ -2804,16 +2952,41 @@ END";
     pub const RUNTIME_DELIVERY_DOMAIN: meerkat_sqlite::SchemaDomain =
         meerkat_sqlite::SchemaDomain {
             name: "runtime-delivery",
-            migrations: &[meerkat_sqlite::Migration {
-                version: 1,
-                name: "delivery-inbox",
-                apply: migration_0001_runtime_delivery_inbox,
-            }],
-            initialize_current: migration_0001_runtime_delivery_inbox,
-            allowed_existing_versions: &[1],
+            migrations: &[
+                meerkat_sqlite::Migration {
+                    version: 1,
+                    name: "delivery-inbox",
+                    apply: migration_0001_runtime_delivery_inbox,
+                },
+                meerkat_sqlite::Migration {
+                    version: 2,
+                    name: "continuation-ledger",
+                    apply: migration_0002_runtime_continuation_ledger,
+                },
+                meerkat_sqlite::Migration {
+                    version: 3,
+                    name: "delivery-generation",
+                    apply: migration_0003_runtime_delivery_generation,
+                },
+            ],
+            initialize_current: initialize_current_runtime_delivery_schema,
+            allowed_existing_versions: &[1, 2, 3],
             bridge_recoverable_versions: &[1],
-            released_predecessors: &[],
+            released_predecessors: &[
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 1,
+                    verify: verify_released_runtime_delivery_v1_schema,
+                },
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 2,
+                    verify: verify_runtime_delivery_v2_schema,
+                },
+            ],
             owned_objects: &[
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_delivery_generation",
+                },
                 meerkat_sqlite::SchemaObject {
                     kind: meerkat_sqlite::SchemaObjectKind::Table,
                     name: "runtime_delivery_authority",
@@ -2825,6 +2998,14 @@ END";
                 meerkat_sqlite::SchemaObject {
                     kind: meerkat_sqlite::SchemaObjectKind::Index,
                     name: "idx_runtime_delivery_inbox_sequence",
+                },
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_continuation_keys",
+                },
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_continuation_admissions",
                 },
             ],
             retired_objects: &[],
@@ -3986,6 +4167,144 @@ END";
         }
     }
 
+    // Closing this connection rolls back its read-only IMMEDIATE transaction
+    // before RuntimeConn drops the shared maintenance fence. No transaction or
+    // derived absence claim escapes the native synchronous mutation guard.
+    struct SqliteControllerCustody {
+        connection: RuntimeConn,
+    }
+
+    impl crate::store::RuntimeStoreControllerCustody for SqliteControllerCustody {
+        fn visit_runtimes(
+            &self,
+            visit: &mut dyn FnMut(&crate::store::RuntimeStoreControllerRuntime) -> bool,
+        ) -> Result<bool, RuntimeStoreError> {
+            visit_controller_custody_runtimes(&self.connection, visit)
+        }
+    }
+
+    fn controller_custody_bytes<'a>(
+        row: &'a rusqlite::Row<'_>,
+        column: usize,
+    ) -> Result<&'a [u8], RuntimeStoreError> {
+        match row
+            .get_ref(column)
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+        {
+            rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
+                Ok(bytes)
+            }
+            _ => Err(RuntimeStoreError::ReadFailed(
+                "controller custody row is not encoded bytes".to_string(),
+            )),
+        }
+    }
+
+    fn visit_controller_custody_runtimes(
+        conn: &Connection,
+        visit: &mut dyn FnMut(&crate::store::RuntimeStoreControllerRuntime) -> bool,
+    ) -> Result<bool, RuntimeStoreError> {
+        // Recheck after taking the actual writer: an open-time observation is
+        // not the authority for a callback that runs later in this transaction.
+        meerkat_sqlite::ledger::try_preflight_current_schema(conn, &RUNTIME_STORE_DOMAIN)
+            .map_err(map_shared_sqlite_error)?;
+        // These are the canonical lifecycle/input owners, not the listing
+        // catalog or accumulated event/receipt tables. Include orphan input
+        // runtimes so a missing lifecycle cannot manufacture absence. Both
+        // key sets use existing primary keys; no lifetime workload cap exists.
+        let mut inventory = conn.prepare(
+            "SELECT runtime_id FROM runtime_states
+             UNION ALL
+             SELECT DISTINCT i.runtime_id FROM runtime_input_states AS i
+             WHERE NOT EXISTS (SELECT 1 FROM runtime_states AS r WHERE r.runtime_id = i.runtime_id)"
+        ).map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let mut inventory = inventory
+            .query([])
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        while let Some(owner) = inventory
+            .next()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+        {
+            let runtime_id = LogicalRuntimeId::new(
+                std::str::from_utf8(controller_custody_bytes(owner, 0)?)
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                    .to_owned(),
+            );
+            let mut statement = conn
+                .prepare("SELECT runtime_state_json FROM runtime_states WHERE runtime_id = ?1")
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let mut rows = statement
+                .query([runtime_id_text(&runtime_id)])
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let lifecycle = if let Some(row) = rows
+                .next()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            {
+                let bytes = controller_custody_bytes(row, 0)?;
+                let observation = MachineLifecycleObservation::from_raw_record(bytes);
+                match &observation {
+                    MachineLifecycleObservation::Decoded { record, .. }
+                        if record
+                            .binding()
+                            .agent_runtime_id()
+                            .is_none_or(|bound| bound == runtime_id_text(&runtime_id)) => {}
+                    _ => return Err(RuntimeStoreError::ReadFailed(
+                        "controller custody lifecycle is undecodable or bound to another runtime"
+                            .to_string(),
+                    )),
+                }
+                observation
+            } else {
+                MachineLifecycleObservation::Missing
+            };
+            let run = match &lifecycle {
+                MachineLifecycleObservation::Decoded { record, .. } => {
+                    record.run().current_run_id()
+                }
+                _ => None,
+            };
+            let mut statement = conn
+                .prepare(
+                    "SELECT input_id, state_json FROM runtime_input_states WHERE runtime_id = ?1",
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let mut rows = statement
+                .query([runtime_id_text(&runtime_id)])
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let mut input_states = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            {
+                let key = controller_custody_bytes(row, 0)?;
+                let bytes = controller_custody_bytes(row, 1)?;
+                let stored = deserialize_persisted_input_state(bytes)?;
+                if stored.state.input_id.to_string().as_bytes() != key {
+                    return Err(RuntimeStoreError::ReadFailed(
+                        "controller custody input identity differs from its physical key"
+                            .to_string(),
+                    ));
+                }
+                // Stream past completed history using the canonical seed
+                // classifier. Retain current-run originals even if their
+                // individual input lifecycle has already settled.
+                if crate::store::input_state_is_recovery_nonterminal(&stored)
+                    || (run.is_some() && stored.seed.last_run_id.as_ref() == run)
+                {
+                    input_states.push(stored);
+                }
+            }
+            if visit(&crate::store::RuntimeStoreControllerRuntime {
+                runtime_id,
+                lifecycle,
+                input_states,
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Validate file identity before opening SQLite or changing journal state.
     /// The storage owner keeps this namespace stable for the store's lifetime.
     #[cfg(any(unix, windows))]
@@ -4145,6 +4464,165 @@ END";
     /// file where durable delivery was never used must not stamp the file.
     /// Returns `Ok(None)` when the domain is absent, which reads as "no
     /// delivery state".
+    fn load_continuation_admission_in(
+        conn: &rusqlite::Connection,
+        address: &LogicalRuntimeId,
+        delivery_id: &str,
+    ) -> Result<Option<ContinuationAdmission>, RuntimeStoreError> {
+        conn.query_row(
+            r"
+            SELECT state, session_id, input_id
+              FROM runtime_continuation_admissions
+             WHERE runtime_id = ?1 AND delivery_id = ?2
+            ",
+            params![runtime_id_text(address), delivery_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+        .map(|(state, session_id, input_id)| {
+            let session_id = meerkat_core::types::SessionId::parse(&session_id)
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let input_id = serde_json::from_value(serde_json::Value::String(input_id))
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            match state.as_str() {
+                "reserved" => Ok(ContinuationAdmission::Reserved {
+                    session_id,
+                    input_id,
+                }),
+                "applied" => Ok(ContinuationAdmission::Applied {
+                    session_id,
+                    input_id,
+                }),
+                other => Err(RuntimeStoreError::ReadFailed(format!(
+                    "unknown continuation admission state `{other}`"
+                ))),
+            }
+        })
+        .transpose()
+    }
+
+    fn load_continuation_key_binding_in(
+        conn: &Connection,
+        owner: &str,
+        key: &str,
+    ) -> Result<Option<ContinuationKeyBinding>, RuntimeStoreError> {
+        conn.query_row(
+            r"
+            SELECT binding_json
+              FROM runtime_continuation_keys
+             WHERE owner = ?1 AND key = ?2
+            ",
+            params![owner, key],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+        .map(|binding_json| {
+            serde_json::from_slice(&binding_json)
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+        })
+        .transpose()
+    }
+
+    /// The delivery-authority compare-and-swap inside an open transaction.
+    /// The caller commits on `Applied`.
+    fn runtime_delivery_cas_in_transaction(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: Option<u64>,
+        replacement: RuntimeDeliveryAuthorityRecord,
+        inserted_delivery: Option<&RuntimeDeliveryStoreRecord>,
+    ) -> Result<RuntimeDeliveryAuthorityCasOutcome, RuntimeStoreError> {
+        let current = tx
+            .query_row(
+                r"
+                    SELECT revision, state_json
+                      FROM runtime_delivery_authority
+                     WHERE runtime_id = ?1
+                    ",
+                params![runtime_id_text(runtime_id)],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            .map(|(revision, state_json)| {
+                Ok(RuntimeDeliveryAuthorityRecord::from_parts(
+                    decode_u64(revision, "runtime delivery authority revision")?,
+                    state_json,
+                ))
+            })
+            .transpose()?;
+        if current
+            .as_ref()
+            .map(RuntimeDeliveryAuthorityRecord::revision)
+            != expected_revision
+        {
+            return Ok(RuntimeDeliveryAuthorityCasOutcome::Conflict(current));
+        }
+        let required_revision = expected_revision
+            .map_or(Some(1), |revision| revision.checked_add(1))
+            .ok_or_else(|| {
+                RuntimeStoreError::WriteFailed(
+                    "runtime delivery authority revision exhausted u64".into(),
+                )
+            })?;
+        if replacement.revision() != required_revision {
+            return Err(RuntimeStoreError::WriteFailed(format!(
+                "runtime delivery replacement revision {} is not required successor {required_revision}",
+                replacement.revision()
+            )));
+        }
+
+        if let Some(record) = inserted_delivery {
+            tx.execute(
+                r"
+                    INSERT INTO runtime_delivery_inbox
+                        (runtime_id, delivery_id, sequence, submission_json)
+                    VALUES (?1, ?2, ?3, ?4)
+                    ",
+                params![
+                    runtime_id_text(runtime_id),
+                    record.delivery_id(),
+                    encode_u64(record.sequence()).as_slice(),
+                    record.submission_json(),
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+
+        tx.execute(
+            r"
+                INSERT INTO runtime_delivery_authority (runtime_id, revision, state_json)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(runtime_id) DO UPDATE SET
+                    revision = excluded.revision,
+                    state_json = excluded.state_json
+                ",
+            params![
+                runtime_id_text(runtime_id),
+                encode_u64(replacement.revision()).as_slice(),
+                replacement.state_json(),
+            ],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        // #1813: in the same transaction, so a writer that dies after its
+        // commit has already announced it to every other process.
+        tx.execute(
+            "UPDATE runtime_delivery_generation SET generation = generation + 1 \
+             WHERE singleton = 1",
+            [],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        Ok(RuntimeDeliveryAuthorityCasOutcome::Applied(replacement))
+    }
+
     fn open_runtime_delivery_read_connection(
         path: &Path,
     ) -> Result<Option<RuntimeConn>, RuntimeStoreError> {
@@ -9482,7 +9960,20 @@ ORDER BY runtime_id";
                     state_json
                 ],
             )
-            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            .map_err(|err| match input_idempotency_index_constraint(&err) {
+                // The index triggers refused the row: name the constraint.
+                Some(constraint) => RuntimeStoreError::InputIdempotencyIndexConflict {
+                    runtime_id: runtime_id.to_string(),
+                    input_id: bundle.state.input_id.to_string(),
+                    idempotency_key: bundle
+                        .state
+                        .idempotency_key
+                        .as_ref()
+                        .map(ToString::to_string),
+                    constraint,
+                },
+                None => RuntimeStoreError::WriteFailed(err.to_string()),
+            })?;
             update_pending_terminal_owner_index(tx, runtime_id, bundle)?;
         }
         Ok(())
@@ -9756,6 +10247,9 @@ ORDER BY runtime_id";
         path: PathBuf,
         execution_custody: crate::store::RuntimeStoreExecutionCustody,
         session_persistence_profile: RuntimeSessionPersistenceProfile,
+        /// Cross-process hosting of this store's sessions (#1813). `None`
+        /// until the composition injects the realm's hosting paths.
+        hosting: crate::session_hosting::HostingCapability,
         /// Transcript facts of the WholeBlob documents this store wrote.
         whole_blob_transcript_facts: Arc<RecordedWholeBlobTranscriptFacts>,
         #[cfg(test)]
@@ -9794,7 +10288,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let session_id = session_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 use sha2::Digest as _;
                 let blob_sha256 = format!("row-sha256:{:x}", sha2::Sha256::digest(&bytes));
                 let mut conn = open_runtime_connection(&path)?;
@@ -9869,6 +10363,7 @@ ORDER BY runtime_id";
                 path,
                 execution_custody,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
+                hosting: crate::session_hosting::HostingCapability::None,
                 whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
@@ -9980,6 +10475,7 @@ ORDER BY runtime_id";
                 path,
                 execution_custody,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                hosting: crate::session_hosting::HostingCapability::None,
                 whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
@@ -9994,6 +10490,22 @@ ORDER BY runtime_id";
 
         pub fn path(&self) -> &Path {
             &self.path
+        }
+
+        /// Host this store's sessions across processes with OS-locked claims
+        /// at `paths` (#1813), unless the OS lock cannot be trusted on their
+        /// filesystem, in which case the store reports single-process hosting.
+        /// The coordination paths come from the realm's path authority; the
+        /// store adds its own database file, which delivery owners watch for
+        /// commits by other processes.
+        #[must_use]
+        pub fn with_hosting_paths(
+            mut self,
+            mut paths: crate::session_hosting::HostingPaths,
+        ) -> Self {
+            paths.database = Some(self.path.clone());
+            self.hosting = crate::session_hosting::os_lock_if_trusted(paths);
+            self
         }
 
         fn require_whole_blob_session_operation(
@@ -10050,7 +10562,7 @@ ORDER BY runtime_id";
             let recorded_facts = Arc::clone(&self.whole_blob_transcript_facts);
             #[cfg(test)]
             let snapshot_byte_probe_bytes = std::sync::Arc::clone(&self.snapshot_byte_probe_bytes);
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 use sha2::Digest as _;
                 let incoming_sha256 = format!(
                     "row-sha256:{:x}",
@@ -10326,7 +10838,7 @@ ORDER BY runtime_id";
                 .into_iter()
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
-            let authority = tokio::task::spawn_blocking(move || {
+            let authority = spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -10423,7 +10935,7 @@ ORDER BY runtime_id";
                 .into_iter()
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let lifecycle_expected = machine_lifecycle
                     .as_ref()
                     .and_then(|commit| commit.expected_version().cloned());
@@ -10552,7 +11064,7 @@ ORDER BY runtime_id";
                 .collect::<Vec<_>>();
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -10757,7 +11269,7 @@ ORDER BY runtime_id";
                 .into_iter()
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let lifecycle_expected = machine_lifecycle
                     .as_ref()
                     .and_then(|commit| commit.expected_version().cloned());
@@ -10912,6 +11424,47 @@ ORDER BY runtime_id";
             Some(&self.execution_custody)
         }
 
+        fn try_controller_mutation_custody<'a>(
+            &'a self,
+            claim: &'a crate::store::RuntimeStoreExecutionClaim,
+        ) -> Result<Box<dyn crate::store::RuntimeStoreControllerCustody + 'a>, RuntimeStoreError>
+        {
+            if !self.execution_custody.owns_governed_claim(claim) {
+                return Err(RuntimeStoreError::Unsupported(
+                    "controller administration requires the backend's actual governed execution claim".to_string(),
+                ));
+            }
+            let guard = meerkat_sqlite::OperationGuard::try_for_database_strict(&self.path)
+                .map_err(map_shared_sqlite_error)?;
+            let connection = meerkat_sqlite::open_with(
+                &self.path,
+                meerkat_sqlite::ConnectionProfile::OnlineExistingWriter,
+                meerkat_sqlite::OpenOptions {
+                    schema_preflight: &[&RUNTIME_STORE_DOMAIN],
+                    ..meerkat_sqlite::OpenOptions::default()
+                },
+            )
+            .map_err(map_shared_sqlite_error)?;
+            let connection = RuntimeConn {
+                conn: connection,
+                _guard: guard,
+            };
+            // Owned connection avoids a self-referential Transaction. SQLite
+            // closes with rollback on every return/unwind; there are no writes
+            // or commit acknowledgements after the caller's mutation callback.
+            connection
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|error| {
+                    map_runtime_connection_error(
+                        &self.path,
+                        "controller administration BEGIN IMMEDIATE",
+                        std::panic::Location::caller(),
+                        error.into(),
+                    )
+                })?;
+            Ok(Box::new(SqliteControllerCustody { connection }))
+        }
+
         fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
             self.session_persistence_profile
         }
@@ -10938,7 +11491,7 @@ ORDER BY runtime_id";
                 "HeadCanonical runtime authority activation",
             )?;
             let path = self.path.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_head_canonical_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 if load_head_canonical_provisional_tail_authority(&tx, &runtime_id)?.is_some() {
@@ -11517,7 +12070,7 @@ ORDER BY runtime_id";
             };
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_head_canonical_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let mut newly_installed_head_authority = None;
@@ -12345,7 +12898,7 @@ ORDER BY runtime_id";
 
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 load_head_canonical_authority(&conn, &runtime_id)
             })
@@ -12359,7 +12912,7 @@ ORDER BY runtime_id";
         ) -> Result<serde_json::Map<String, serde_json::Value>, RuntimeStoreError> {
             let path = self.path.clone();
             let authority = authority.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = conn
                     .transaction()
@@ -12392,7 +12945,7 @@ ORDER BY runtime_id";
         ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 // One read transaction: the current authority row and the
                 // metadata of the boundary it names are the same snapshot.
@@ -12422,7 +12975,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let profile = self.session_persistence_profile;
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = conn
                     .transaction()
@@ -12477,7 +13030,7 @@ ORDER BY runtime_id";
             }
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_head_canonical_runtime_connection(&path)?;
                 let tx = conn
                     .transaction()
@@ -12625,7 +13178,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let run_id = run_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = match profile {
                     RuntimeSessionPersistenceProfile::WholeBlobV1 => {
                         open_runtime_connection(&path)?
@@ -12696,7 +13249,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let candidate_id = candidate_id.to_string();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 load_recovery_boundary(&conn, &runtime_id, &candidate_id)
             })
@@ -12714,7 +13267,7 @@ ORDER BY runtime_id";
             )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 load_whole_blob_store_authority(&conn, &runtime_id)
             })
@@ -12728,7 +13281,7 @@ ORDER BY runtime_id";
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.execute(
                     "DELETE FROM runtime_session_catalog WHERE runtime_id = ?1",
@@ -12747,7 +13300,7 @@ ORDER BY runtime_id";
         ) -> Result<Option<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 load_runtime_session_catalog_entry_in_txn(&conn, &runtime_id)
             })
@@ -12760,7 +13313,7 @@ ORDER BY runtime_id";
             filter: meerkat_core::SessionFilter,
         ) -> Result<Vec<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
             let path = self.path.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 list_runtime_session_catalog_entries_in_conn(&conn, filter)
             })
@@ -12778,7 +13331,7 @@ ORDER BY runtime_id";
             )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = conn
                     .transaction()
@@ -12818,7 +13371,7 @@ ORDER BY runtime_id";
             let observed = self.load_committed_whole_blob_bytes(runtime_id).await?;
             // Hash and partially decode the owned bytes off the async worker,
             // like the full snapshot read, but without materializing rows.
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 observed
                     .map(|(bytes, authority)| {
                         crate::store::CommittedWholeBlobMetadata::from_committed_bytes(
@@ -12842,7 +13395,7 @@ ORDER BY runtime_id";
             )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let observed = {
                     let mut conn = open_runtime_connection(&path)?;
                     let tx = conn.transaction()
@@ -12912,7 +13465,7 @@ ORDER BY runtime_id";
             let cas_runtime_id = runtime_id.clone();
             let recorded_facts =
                 crate::store::WholeBlobCommittedTranscriptFacts::from_session(&candidate_session);
-            let outcome = tokio::task::spawn_blocking(move || {
+            let outcome = spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -13023,7 +13576,7 @@ ORDER BY runtime_id";
                 .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let current =
@@ -13221,7 +13774,7 @@ ORDER BY runtime_id";
             )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = conn
                     .transaction()
@@ -13247,7 +13800,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let expected = expected.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let deleted = tx
@@ -13343,7 +13896,7 @@ ORDER BY runtime_id";
             }
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_head_canonical_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let authority = issue_head_canonical_provisional_tail_authority_in_txn(
@@ -13376,7 +13929,7 @@ ORDER BY runtime_id";
             )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_head_canonical_runtime_connection(&path)?;
                 load_head_canonical_provisional_tail_authority(&conn, &runtime_id)
             })
@@ -13396,7 +13949,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let expected = expected.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_head_canonical_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let discarded = discard_head_canonical_provisional_tail_authority_in_txn(
@@ -13527,81 +14080,169 @@ ORDER BY runtime_id";
         ) -> Result<RuntimeDeliveryAuthorityCasOutcome, RuntimeStoreError> {
             let mut conn = open_runtime_delivery_write_connection(&self.path)?;
             let tx = begin_runtime_transaction(&mut conn)?;
-            let current = tx
-                .query_row(
-                    r"
-                    SELECT revision, state_json
-                      FROM runtime_delivery_authority
-                     WHERE runtime_id = ?1
-                    ",
-                    params![runtime_id_text(runtime_id)],
-                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                )
-                .optional()
-                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
-                .map(|(revision, state_json)| {
-                    Ok(RuntimeDeliveryAuthorityRecord::from_parts(
-                        decode_u64(revision, "runtime delivery authority revision")?,
-                        state_json,
-                    ))
-                })
-                .transpose()?;
-            if current
-                .as_ref()
-                .map(RuntimeDeliveryAuthorityRecord::revision)
-                != expected_revision
+            let outcome = runtime_delivery_cas_in_transaction(
+                &tx,
+                runtime_id,
+                expected_revision,
+                replacement,
+                inserted_delivery.as_ref(),
+            )?;
+            if matches!(outcome, RuntimeDeliveryAuthorityCasOutcome::Applied(_)) {
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            }
+            Ok(outcome)
+        }
+
+        async fn load_continuation_key_binding(
+            &self,
+            owner: &str,
+            key: &str,
+        ) -> Result<Option<ContinuationKeyBinding>, RuntimeStoreError> {
+            let Some(conn) = open_runtime_delivery_read_connection(&self.path)? else {
+                return Ok(None);
+            };
+            // A file last written by a binary without the ledger holds no
+            // bindings yet; its first delivery write migrates it.
+            if meerkat_sqlite::domain_version(&conn, RUNTIME_DELIVERY_DOMAIN.name)
+                .map_err(map_shared_sqlite_error)?
+                < Some(2)
             {
-                return Ok(RuntimeDeliveryAuthorityCasOutcome::Conflict(current));
+                return Ok(None);
             }
-            let required_revision = expected_revision
-                .map_or(Some(1), |revision| revision.checked_add(1))
-                .ok_or_else(|| {
-                    RuntimeStoreError::WriteFailed(
-                        "runtime delivery authority revision exhausted u64".into(),
-                    )
-                })?;
-            if replacement.revision() != required_revision {
-                return Err(RuntimeStoreError::WriteFailed(format!(
-                    "runtime delivery replacement revision {} is not required successor {required_revision}",
-                    replacement.revision()
-                )));
-            }
+            load_continuation_key_binding_in(&conn, owner, key)
+        }
 
-            if let Some(record) = inserted_delivery.as_ref() {
-                tx.execute(
-                    r"
-                    INSERT INTO runtime_delivery_inbox
-                        (runtime_id, delivery_id, sequence, submission_json)
-                    VALUES (?1, ?2, ?3, ?4)
-                    ",
-                    params![
-                        runtime_id_text(runtime_id),
-                        record.delivery_id(),
-                        encode_u64(record.sequence()).as_slice(),
-                        record.submission_json(),
-                    ],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        async fn load_continuation_admission(
+            &self,
+            address: &LogicalRuntimeId,
+            delivery_id: &str,
+        ) -> Result<Option<ContinuationAdmission>, RuntimeStoreError> {
+            let Some(conn) = open_runtime_delivery_read_connection(&self.path)? else {
+                return Ok(None);
+            };
+            if meerkat_sqlite::domain_version(&conn, RUNTIME_DELIVERY_DOMAIN.name)
+                .map_err(map_shared_sqlite_error)?
+                < Some(2)
+            {
+                return Ok(None);
             }
+            load_continuation_admission_in(&conn, address, delivery_id)
+        }
 
+        async fn transition_continuation_admission(
+            &self,
+            address: &LogicalRuntimeId,
+            delivery_id: &str,
+            transition: ContinuationAdmissionTransition,
+        ) -> Result<ContinuationAdmissionOutcome, RuntimeStoreError> {
+            let mut conn = open_runtime_delivery_write_connection(&self.path)?;
+            let tx = begin_runtime_transaction(&mut conn)?;
+            let current = load_continuation_admission_in(&tx, address, delivery_id)?;
+            let Some(next) = transition.next(current.as_ref()) else {
+                return Ok(ContinuationAdmissionOutcome::Rejected { current });
+            };
+            let state = match &next {
+                ContinuationAdmission::Reserved { .. } => "reserved",
+                ContinuationAdmission::Applied { .. } => "applied",
+            };
             tx.execute(
                 r"
-                INSERT INTO runtime_delivery_authority (runtime_id, revision, state_json)
-                VALUES (?1, ?2, ?3)
-                ON CONFLICT(runtime_id) DO UPDATE SET
-                    revision = excluded.revision,
-                    state_json = excluded.state_json
+                INSERT INTO runtime_continuation_admissions
+                    (runtime_id, delivery_id, state, session_id, input_id)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(runtime_id, delivery_id) DO UPDATE SET
+                    state = excluded.state,
+                    session_id = excluded.session_id,
+                    input_id = excluded.input_id
                 ",
                 params![
-                    runtime_id_text(runtime_id),
-                    encode_u64(replacement.revision()).as_slice(),
-                    replacement.state_json(),
+                    runtime_id_text(address),
+                    delivery_id,
+                    state,
+                    next.session_id().to_string(),
+                    next.input_id().to_string(),
                 ],
             )
             .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
             tx.commit()
                 .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-            Ok(RuntimeDeliveryAuthorityCasOutcome::Applied(replacement))
+            Ok(ContinuationAdmissionOutcome::Transitioned(next))
+        }
+
+        async fn compare_and_swap_runtime_delivery_authority_with_key_binding(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_revision: Option<u64>,
+            replacement: RuntimeDeliveryAuthorityRecord,
+            inserted_delivery: RuntimeDeliveryStoreRecord,
+            binding: ContinuationKeyBinding,
+        ) -> Result<KeyedRuntimeDeliveryCasOutcome, RuntimeStoreError> {
+            let mut conn = open_runtime_delivery_write_connection(&self.path)?;
+            let tx = begin_runtime_transaction(&mut conn)?;
+            if let Some(existing) =
+                load_continuation_key_binding_in(&tx, &binding.owner, &binding.key)?
+            {
+                return Ok(KeyedRuntimeDeliveryCasOutcome::KeyAlreadyBound(existing));
+            }
+            match runtime_delivery_cas_in_transaction(
+                &tx,
+                runtime_id,
+                expected_revision,
+                replacement,
+                Some(&inserted_delivery),
+            )? {
+                RuntimeDeliveryAuthorityCasOutcome::Applied(record) => {
+                    let binding_json = serde_json::to_vec(&binding)
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    tx.execute(
+                        r"
+                        INSERT INTO runtime_continuation_keys (owner, key, binding_json)
+                        VALUES (?1, ?2, ?3)
+                        ",
+                        params![binding.owner, binding.key, binding_json],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    tx.commit()
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    Ok(KeyedRuntimeDeliveryCasOutcome::Applied(record))
+                }
+                RuntimeDeliveryAuthorityCasOutcome::Conflict(current) => {
+                    Ok(KeyedRuntimeDeliveryCasOutcome::Conflict(current))
+                }
+            }
+        }
+
+        async fn load_delivery_generation(&self) -> Result<u64, RuntimeStoreError> {
+            // A file that never used durable delivery reads zero.
+            let Some(conn) = open_runtime_delivery_read_connection(&self.path)? else {
+                return Ok(0);
+            };
+            // A version-1 delivery file not yet migrated by a write has no
+            // counter yet; its first delivery write migrates it.
+            let counted: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = \
+                     'runtime_delivery_generation')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if !counted {
+                return Ok(0);
+            }
+            let generation: i64 = conn
+                .query_row(
+                    "SELECT generation FROM runtime_delivery_generation WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            u64::try_from(generation).map_err(|_| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "runtime delivery generation {generation} is negative"
+                ))
+            })
         }
 
         async fn list_runtime_delivery_authorities(
@@ -13701,6 +14342,10 @@ ORDER BY runtime_id";
         fn auth_authority_key(&self) -> Option<String> {
             let path = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
             Some(format!("sqlite:{}", path.display()))
+        }
+
+        fn hosting_capability(&self) -> crate::session_hosting::HostingCapability {
+            self.hosting.clone()
         }
 
         fn persist_auth_oauth_flow_snapshot(
@@ -13808,7 +14453,7 @@ ORDER BY runtime_id";
             }
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -13894,7 +14539,7 @@ ORDER BY runtime_id";
                 .into_iter()
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let prepared_session = session_delta.map(parsed_whole_blob_snapshot).transpose()?;
                 let compaction_intents = prepared_session
                     .as_ref()
@@ -13967,7 +14612,7 @@ ORDER BY runtime_id";
                 .into_iter()
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let prepared = parsed_whole_blob_snapshot(session_delta)?;
                 let session = prepared.session();
                 let compaction_intents =
@@ -14013,7 +14658,7 @@ ORDER BY runtime_id";
         ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 let mut statement = conn
                     .prepare(
@@ -14052,7 +14697,7 @@ ORDER BY runtime_id";
                 let path = self.path.clone();
                 let runtime_id = runtime_id.clone();
                 let projection = projection.clone();
-                return tokio::task::spawn_blocking(move || {
+                return spawn_blocking_holding_claim(move || {
                     let mut conn =
                         open_head_canonical_runtime_connection(&path)?;
                     let tx = begin_runtime_transaction(&mut conn)?;
@@ -14324,7 +14969,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let projection = projection.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -14405,7 +15050,7 @@ ORDER BY runtime_id";
         ) -> Result<Vec<InputStateRow>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 let mut stmt = conn
                     .prepare(
@@ -14450,7 +15095,7 @@ ORDER BY runtime_id";
         ) -> Result<PreparedRecoveryInputSnapshot, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = conn
                     .transaction()
@@ -14473,7 +15118,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let run_id = run_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
                     r"
@@ -14508,7 +15153,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let run_id = run_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 let mut stmt = conn
                     .prepare(
@@ -14554,7 +15199,7 @@ ORDER BY runtime_id";
             }
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let snapshot = tokio::task::spawn_blocking(move || {
+            let snapshot = spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 if load_head_canonical_authority(&conn, &runtime_id)?.is_some() {
                     return Err(session_authority_conflict(
@@ -14581,7 +15226,7 @@ ORDER BY runtime_id";
             self.require_whole_blob_session_operation(runtime_id, "clear_session_snapshot")?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 if load_head_canonical_authority(&tx, &runtime_id)?.is_some() {
@@ -14612,7 +15257,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let expected_current = expected_current.to_vec();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 if load_head_canonical_authority(&tx, &runtime_id)?.is_some() {
@@ -14661,7 +15306,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let expected_current = expected_current.to_vec();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 if load_head_canonical_authority(&tx, &runtime_id)?.is_some() {
@@ -14704,7 +15349,7 @@ ORDER BY runtime_id";
         ) -> Result<bool, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM runtime_projection_quarantine WHERE runtime_id = ?1)",
@@ -14728,7 +15373,7 @@ ORDER BY runtime_id";
                 state.clone_stored(),
                 state.expected_row_digest().map(str::to_owned),
             );
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 upsert_input_states(&tx, &runtime_id, &[state])?;
@@ -14756,7 +15401,7 @@ ORDER BY runtime_id";
                     )
                 })
                 .collect();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 upsert_input_states(&tx, &runtime_id, &states)?;
@@ -14783,7 +15428,7 @@ ORDER BY runtime_id";
             }
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let mut all_expected = true;
@@ -14862,7 +15507,7 @@ ORDER BY runtime_id";
             }
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let mut all_expected = true;
@@ -14969,7 +15614,7 @@ ORDER BY runtime_id";
             let prepared = prepare_recovery_input_state_mutations(mutations)?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let Some(changed) = prepare_current_sqlite_recovery_input_mutations(
@@ -15000,7 +15645,7 @@ ORDER BY runtime_id";
             let prepared = prepare_recovery_input_state_mutations(mutations)?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let Some(changed) = prepare_current_sqlite_recovery_input_mutations(
@@ -15057,7 +15702,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let input_id = input_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
                     r"
@@ -15085,7 +15730,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let key = key.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 // Completeness evidence and the keyed row must come from one
                 // SQLite snapshot. Separate autocommit reads can interleave
@@ -15286,7 +15931,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let input_ids = input_ids.to_vec();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 let placeholders = (0..input_ids.len())
                     .map(|index| format!("?{}", index + 2))
@@ -15352,7 +15997,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let after = after.map(|input_id| input_id.0.to_string());
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 let sql_limit = i64::try_from(limit).map_err(|_| {
                     RuntimeStoreError::ReadFailed(
@@ -15413,7 +16058,7 @@ ORDER BY runtime_id";
         ) -> Result<MachineLifecycleObservation, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 let raw = conn
                     .query_row(
@@ -15441,7 +16086,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let replacement = prepare_machine_lifecycle_replacement(replacement)?;
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let current_raw = tx
@@ -15510,7 +16155,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let replacement = prepare_machine_lifecycle_replacement(replacement)?;
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let current_raw = tx
@@ -15610,7 +16255,7 @@ ORDER BY runtime_id";
         ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
                     "SELECT runtime_state_json FROM runtime_states WHERE runtime_id = ?1",
@@ -15642,7 +16287,7 @@ ORDER BY runtime_id";
                     )
                 })
                 .collect::<Vec<_>>();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 upsert_machine_lifecycle_snapshot(&tx, &runtime_id, &snapshot)?;
@@ -15811,7 +16456,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let snapshot = snapshot.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let state_json = serde_json::to_vec(&snapshot)
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
@@ -15860,7 +16505,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let candidate = candidate.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let state_json = serde_json::to_vec(&candidate)
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
@@ -15936,7 +16581,7 @@ ORDER BY runtime_id";
         ) -> Result<Option<crate::ops_lifecycle::PersistedOpsSnapshot>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
                     "SELECT state_json FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
@@ -15961,7 +16606,7 @@ ORDER BY runtime_id";
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 tx.execute(
@@ -15992,7 +16637,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let member_session_id = member_session_id.to_string();
             let candidate = candidate.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let current = tx
@@ -16045,7 +16690,7 @@ ORDER BY runtime_id";
         ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
             let path = self.path.clone();
             let mob_id = mob_id.to_string();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
                     "SELECT record_json FROM runtime_mob_host_bindings WHERE mob_id = ?1",
@@ -16063,7 +16708,7 @@ ORDER BY runtime_id";
             &self,
         ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
             let path = self.path.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 let mut stmt = conn
                     .prepare(
@@ -16093,7 +16738,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let mob_id = mob_id.to_string();
             let record_json = record_json.to_vec();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let changed = tx
@@ -16132,7 +16777,7 @@ ORDER BY runtime_id";
             let mob_id = mob_id.to_string();
             let expected_json = expected_json.to_vec();
             let next_json = next_json.to_vec();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let changed = tx
@@ -16159,7 +16804,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let mob_id = mob_id.to_string();
             let expected_json = expected_json.to_vec();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let changed = tx
@@ -16183,7 +16828,7 @@ ORDER BY runtime_id";
         ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
             let path = self.path.clone();
             let mob_id = mob_id.to_string();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
                     "SELECT receipt_json FROM runtime_mob_host_revocations WHERE mob_id = ?1",
@@ -16201,7 +16846,7 @@ ORDER BY runtime_id";
             &self,
         ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
             let path = self.path.clone();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 let mut stmt = conn
                     .prepare(
@@ -16233,7 +16878,7 @@ ORDER BY runtime_id";
             let mob_id = mob_id.to_string();
             let expected_binding_json = expected_binding_json.to_vec();
             let receipt_json = receipt_json.to_vec();
-            tokio::task::spawn_blocking(move || {
+            spawn_blocking_holding_claim(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let changed = tx
@@ -16905,6 +17550,210 @@ ORDER BY runtime_id";
             drop(reservation);
         }
 
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn persistent_admin_custody_retains_the_actual_writer_and_maintenance_guard() {
+            let (_directory, store) = temp_store();
+            let claim = sqlite_execution_owner(&store)
+                .try_acquire_governed()
+                .unwrap();
+            let mut contender = open_runtime_connection(store.path()).unwrap();
+            contender.busy_timeout(Duration::ZERO).unwrap();
+            let custody = RuntimeStore::try_controller_mutation_custody(&store, &claim)
+                .expect("actual backend administration custody");
+            assert!(!custody.visit_runtimes(&mut |_| true).unwrap());
+            assert!(matches!(
+                begin_runtime_transaction(&mut contender),
+                Err(RuntimeStoreError::SqliteOperationFailed {
+                    primary_code: rusqlite::ffi::SQLITE_BUSY,
+                    ..
+                })
+            ));
+            assert!(
+                meerkat_sqlite::ExclusiveFence::try_acquire(store.path())
+                    .unwrap()
+                    .is_none()
+            );
+            drop(custody);
+            let transaction = begin_runtime_transaction(&mut contender)
+                .expect("dropping the actual guard releases its SQLite writer");
+            drop(transaction);
+            drop(contender);
+            let maintenance = meerkat_sqlite::ExclusiveFence::try_acquire(store.path())
+                .unwrap()
+                .expect("released operation fence");
+            assert!(
+                RuntimeStore::try_controller_mutation_custody(&store, &claim).is_err(),
+                "a maintenance holder must not self-admit online administration"
+            );
+            drop(maintenance);
+            RuntimeStore::try_controller_mutation_custody(&store, &claim)
+                .expect("ordinary administration resumes after actual fence release");
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn persistent_admin_custody_rejects_shared_foreign_and_contended_claims() {
+            let (_directory, store) = temp_store();
+            let shared = sqlite_execution_owner(&store).try_acquire_shared().unwrap();
+            assert!(RuntimeStore::try_controller_mutation_custody(&store, &shared).is_err());
+            drop(shared);
+            let (_other_directory, other) = temp_store();
+            let foreign = sqlite_execution_owner(&other)
+                .try_acquire_governed()
+                .unwrap();
+            assert!(RuntimeStore::try_controller_mutation_custody(&store, &foreign).is_err());
+            let claim = sqlite_execution_owner(&store)
+                .try_acquire_governed()
+                .unwrap();
+            let alias = SqliteRuntimeStore::new_whole_blob(store.path()).unwrap();
+            assert!(
+                RuntimeStore::try_controller_mutation_custody(&alias, &claim).is_err(),
+                "same path is not the actual claim-issuing carrier"
+            );
+            let mut writer = open_runtime_connection(store.path()).unwrap();
+            let transaction = begin_runtime_transaction(&mut writer).unwrap();
+            assert!(RuntimeStore::try_controller_mutation_custody(&store, &claim).is_err());
+            drop(transaction);
+            RuntimeStore::try_controller_mutation_custody(&store, &claim)
+                .expect("same claim succeeds after actual competing writer release");
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn persistent_admin_custody_refuses_corrupt_and_misbound_physical_rows() {
+            let (_directory, store) = temp_store();
+            let claim = sqlite_execution_owner(&store)
+                .try_acquire_governed()
+                .unwrap();
+            let mut connection = open_runtime_connection(store.path()).unwrap();
+            let rid = runtime_id();
+            let original = input_state();
+            let tx = begin_runtime_transaction(&mut connection).unwrap();
+            upsert_input_states(&tx, &rid, &[(original.as_stored().clone(), None)]).unwrap();
+            tx.commit().unwrap();
+            let key = original.as_stored().state.input_id.to_string();
+            let before: Vec<u8> = connection.query_row(
+                "SELECT state_json FROM runtime_input_states WHERE runtime_id = ?1 AND input_id = ?2",
+                params![rid.to_string(), key], |row| row.get(0),
+            ).unwrap();
+            for bytes in [b"not a native row".as_slice(), before.as_slice()] {
+                connection.execute(
+                    "UPDATE runtime_input_states SET input_id = ?1, state_json = ?2 WHERE runtime_id = ?3",
+                    params![InputId::new().to_string(), bytes, rid.to_string()],
+                ).unwrap();
+                let custody =
+                    RuntimeStore::try_controller_mutation_custody(&store, &claim).unwrap();
+                assert!(custody.visit_runtimes(&mut |_| false).is_err());
+                drop(custody);
+                let retained: Vec<u8> = connection
+                    .query_row(
+                        "SELECT state_json FROM runtime_input_states WHERE runtime_id = ?1",
+                        [rid.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    retained, bytes,
+                    "refusal cannot repair or normalize authority"
+                );
+            }
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[test]
+        fn persistent_admin_custody_preserves_current_schema_mismatch() {
+            let (_directory, store) = temp_store();
+            let claim = sqlite_execution_owner(&store)
+                .try_acquire_governed()
+                .unwrap();
+            let connection = open_runtime_connection(store.path()).unwrap();
+            connection
+                .execute_batch("ALTER TABLE runtime_input_states ADD COLUMN unexpected TEXT")
+                .unwrap();
+            assert!(matches!(
+                meerkat_sqlite::ledger::try_preflight_current_schema(&connection, &RUNTIME_STORE_DOMAIN),
+                Err(meerkat_sqlite::SqliteStoreError::CurrentSchemaMismatch { changed_objects, .. })
+                    if changed_objects.iter().any(|name| name == "table:runtime_input_states")
+            ));
+            assert!(RuntimeStore::try_controller_mutation_custody(&store, &claim).is_err());
+            let present: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_input_states') WHERE name = 'unexpected')",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert!(
+                present,
+                "online refusal must not migrate the current schema"
+            );
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[tokio::test]
+        async fn persistent_admin_history_volume_does_not_disable_completed_owner() {
+            let (_directory, store) = temp_store();
+            let rid = runtime_id();
+            store
+                .commit_machine_lifecycle(
+                    &rid,
+                    lifecycle_commit(&rid, RuntimeState::Idle, 1, 1),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let claim = sqlite_execution_owner(&store)
+                .try_acquire_governed()
+                .unwrap();
+            let mut connection = open_runtime_connection(store.path()).unwrap();
+            let transaction = begin_runtime_transaction(&mut connection).unwrap();
+            for ordinal in 0..8_200 {
+                transaction.execute(
+                    "INSERT INTO runtime_retired_ops_epochs(runtime_id, epoch_id) VALUES (?1, ?2)",
+                    params![rid.to_string(), format!("retired-{ordinal}")],
+                ).unwrap();
+            }
+            transaction.commit().unwrap();
+            let before = raw_fixture_row(
+                store.path(),
+                "runtime_states",
+                "runtime_state_json",
+                &rid.to_string(),
+            );
+            let custody = RuntimeStore::try_controller_mutation_custody(&store, &claim).unwrap();
+            let mut visited = 0;
+            assert!(
+                !custody
+                    .visit_runtimes(&mut |runtime| {
+                        visited += 1;
+                        assert_eq!(runtime.runtime_id, rid);
+                        assert!(runtime.input_states.is_empty());
+                        false
+                    })
+                    .expect("completed history cannot impose a lifetime administration cap")
+            );
+            assert_eq!(visited, 1);
+            drop(custody);
+            assert_eq!(
+                raw_fixture_row(
+                    store.path(),
+                    "runtime_states",
+                    "runtime_state_json",
+                    &rid.to_string()
+                ),
+                before
+            );
+            let count: u64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM runtime_retired_ops_epochs",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 8_200,
+                "administration does not compact historical evidence"
+            );
+        }
+
         /// #1551: SQLite derives journal, WAL and SHM names from the path it
         /// opened, so two hard-linked names for one database break
         /// coordinated access and crash recovery. Every runtime constructor
@@ -17217,7 +18066,7 @@ ORDER BY runtime_id";
             let tx = conn.transaction().unwrap();
             migration_0001_runtime_schema(&tx).unwrap();
             let released_session = include_bytes!(
-                "../../../meerkat-core/tests/fixtures/v0_8_10_ob3_recovery_migration_session.json"
+                "../../../meerkat-core/tests/fixtures/v0_8_10_recovery_migration_session.json"
             );
             let imported = meerkat_core::import_released_0810_session(released_session).unwrap();
             let runtime_id = LogicalRuntimeId::for_session(imported.receipt().session_id());
@@ -17286,6 +18135,7 @@ ORDER BY runtime_id";
                 crate::input::Input::Continuation(crate::input::ContinuationInput {
                     header: crate::input::InputHeader {
                         ingress_context: None,
+                        retained_resume: None,
                         authority_association: None,
                         id: InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -17323,6 +18173,7 @@ ORDER BY runtime_id";
                 crate::input::Input::Continuation(crate::input::ContinuationInput {
                     header: crate::input::InputHeader {
                         ingress_context: None,
+                        retained_resume: None,
                         authority_association: None,
                         id: InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -18298,6 +19149,153 @@ ORDER BY runtime_id";
         async fn sqlite_input_idempotency_mutations_use_complete_final_image() {
             let (_dir, store) = temp_store();
             crate::store::assert_input_idempotency_final_image_contract(&store).await;
+        }
+
+        /// #1813 (ADR R6 condition 2): a write whose key another input of the
+        /// same runtime already holds is refused on the index's PRIMARY KEY
+        /// (runtime_id, idempotency_key), reported precisely and typed, by
+        /// both input-state writers. Nothing of the refused write commits.
+        #[tokio::test]
+        async fn an_idempotency_key_held_by_another_input_is_classified_runtime_key() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("index-conflict-runtime-key");
+            let holder = input_state_with_idempotency_key(InputId::new(), "shared-key");
+            store
+                .persist_input_states_atomically(&runtime_id, &[persistable(holder)])
+                .await
+                .unwrap();
+            let rival_id = InputId::new();
+            let rival = input_state_with_idempotency_key(rival_id.clone(), "shared-key");
+            let atomic = store
+                .persist_input_states_atomically(&runtime_id, &[persistable(rival.clone())])
+                .await
+                .expect_err("the key is held by another input");
+            let single = store
+                .persist_input_state(&runtime_id, &persistable(rival))
+                .await
+                .expect_err("the key is held by another input");
+            for error in [atomic, single] {
+                match error {
+                    RuntimeStoreError::InputIdempotencyIndexConflict {
+                        runtime_id: conflicted_runtime,
+                        input_id,
+                        idempotency_key,
+                        constraint,
+                    } => {
+                        assert_eq!(conflicted_runtime, runtime_id.to_string());
+                        assert_eq!(input_id, rival_id.to_string());
+                        assert_eq!(idempotency_key.as_deref(), Some("shared-key"));
+                        assert_eq!(
+                            constraint,
+                            crate::store::InputIdempotencyIndexConstraint::RuntimeKey
+                        );
+                    }
+                    other => panic!("expected the typed index conflict, got {other:?}"),
+                }
+            }
+            assert!(
+                store
+                    .load_input_state(&runtime_id, &rival_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "nothing of the refused write committed"
+            );
+        }
+
+        /// #1813 (ADR R6 condition 2): another runtime reusing a key is
+        /// legitimate (both index constraints include the runtime id).
+        #[tokio::test]
+        async fn another_runtime_reusing_a_key_is_not_a_conflict() {
+            let (_dir, store) = temp_store();
+            for runtime in ["index-reuse-a", "index-reuse-b"] {
+                store
+                    .persist_input_states_atomically(
+                        &LogicalRuntimeId::new(runtime),
+                        &[persistable(input_state_with_idempotency_key(
+                            InputId::new(),
+                            "reused-key",
+                        ))],
+                    )
+                    .await
+                    .expect("a key is scoped to its runtime");
+            }
+        }
+
+        /// #1813 (ADR R6 condition 2): the classification reads SQLite's own
+        /// report of the failing statement against the real schema. The
+        /// UNIQUE (runtime_id, input_id) side cannot be reached through the
+        /// stores' writers (they release an input's mapping before rewriting
+        /// it), so it is produced here directly.
+        #[test]
+        fn a_second_mapping_for_one_input_is_classified_runtime_input_id() {
+            let (_dir, store) = temp_store();
+            let conn = Connection::open(store.path()).unwrap();
+            conn.execute(
+                "INSERT INTO runtime_input_idempotency_keys (runtime_id, idempotency_key, input_id) \
+                 VALUES ('classified', 'first-key', 'input-x')",
+                [],
+            )
+            .unwrap();
+            let same_input = conn
+                .execute(
+                    "INSERT INTO runtime_input_idempotency_keys \
+                     (runtime_id, idempotency_key, input_id) \
+                     VALUES ('classified', 'second-key', 'input-x')",
+                    [],
+                )
+                .expect_err("one mapping per input");
+            assert_eq!(
+                input_idempotency_index_constraint(&same_input),
+                Some(crate::store::InputIdempotencyIndexConstraint::RuntimeInputId)
+            );
+            let same_key = conn
+                .execute(
+                    "INSERT INTO runtime_input_idempotency_keys \
+                     (runtime_id, idempotency_key, input_id) \
+                     VALUES ('classified', 'first-key', 'input-y')",
+                    [],
+                )
+                .expect_err("one input per key");
+            assert_eq!(
+                input_idempotency_index_constraint(&same_key),
+                Some(crate::store::InputIdempotencyIndexConstraint::RuntimeKey)
+            );
+        }
+
+        /// #1813 (ADR R6 condition 2): other tables' key constraints, and
+        /// other failures, are never classified as an index conflict.
+        #[test]
+        fn an_unrelated_constraint_is_not_classified() {
+            let (_dir, store) = temp_store();
+            let conn = Connection::open(store.path()).unwrap();
+            let insert_unindexable = || {
+                conn.execute(
+                    "INSERT INTO runtime_input_idempotency_unindexable_rows \
+                     (runtime_id, input_id, reason) VALUES ('unrelated', 'input-z', 'probe')",
+                    [],
+                )
+            };
+            insert_unindexable().unwrap();
+            let other_primary_key = insert_unindexable().expect_err("same primary key");
+            assert!(matches!(
+                &other_primary_key,
+                rusqlite::Error::SqliteFailure(failure, _)
+                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+            ));
+            assert_eq!(input_idempotency_index_constraint(&other_primary_key), None);
+            let check = conn
+                .execute(
+                    "INSERT INTO runtime_input_idempotency_unindexable_rows \
+                     (runtime_id, input_id, reason) VALUES ('unrelated', 'input-w', '')",
+                    [],
+                )
+                .expect_err("an empty reason fails its CHECK");
+            assert_eq!(input_idempotency_index_constraint(&check), None);
+            let syntax = conn
+                .execute("INSERT INTO no_such_table VALUES (1)", [])
+                .expect_err("no such table");
+            assert_eq!(input_idempotency_index_constraint(&syntax), None);
         }
 
         #[tokio::test]
@@ -24084,8 +25082,8 @@ ORDER BY runtime_id";
             let conn = Connection::open(store.path()).unwrap();
             assert_eq!(
                 meerkat_sqlite::domain_version(&conn, "runtime-delivery").unwrap(),
-                Some(1),
-                "the first delivery write provisions the delivery domain"
+                Some(3),
+                "the first delivery write provisions the delivery domain at its current version"
             );
             assert_eq!(
                 meerkat_sqlite::domain_version(&conn, "runtime-store").unwrap(),
@@ -24093,6 +25091,11 @@ ORDER BY runtime_id";
                 "delivery use must not move the runtime-store domain"
             );
             drop(conn);
+            assert_eq!(
+                store.load_delivery_generation().await.unwrap(),
+                1,
+                "the provisioning write is counted in its own transaction (#1813)"
+            );
             assert!(
                 store
                     .load_runtime_delivery_authority(&rid)
@@ -24107,6 +25110,57 @@ ORDER BY runtime_id";
                     .unwrap()
                     .len(),
                 1
+            );
+        }
+
+        /// #1823: a live delegation's accepted reasoning preference rides the
+        /// persisted pending input, so the real recovery read hands it back
+        /// and the batch fold applies it again, with no live admission.
+        #[tokio::test]
+        async fn a_persisted_reasoning_preference_survives_recovery_and_folds_again() {
+            use meerkat_core::lifecycle::run_primitive::{
+                ReasoningBatchDisposition, RequestReasoningPreference, RuntimeTurnMetadata,
+            };
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            let (_dir, store) = temp_store();
+            let rid = runtime_id();
+            let mut stored = StoredInputState::new_accepted(InputId::new());
+            let input = crate::input::Input::Prompt(crate::input::PromptInput::new(
+                "delegated work",
+                Some(RuntimeTurnMetadata {
+                    request_reasoning: Some(
+                        RequestReasoningPreference::set(EffortLevel::Low).expect("low"),
+                    ),
+                    ..Default::default()
+                }),
+            ));
+            stored.state.persisted_input = Some(input);
+            let record = InputStatePersistenceRecord::from_machine_snapshot(stored)
+                .expect("accepted input state is machine-authorized");
+            store.persist_input_state(&rid, &record).await.unwrap();
+
+            let recovered = crate::store::load_input_states_for_recovery(&store, &rid)
+                .await
+                .unwrap();
+            let input = recovered[0]
+                .state
+                .persisted_input
+                .clone()
+                .expect("the pending input is retained for redelivery");
+            let semantics =
+                crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                    &input, true,
+                )
+                .expect("admission semantics");
+            let metadata = crate::runtime_loop::merge_batch_turn_metadata(
+                &[(recovered[0].state.input_id.clone(), input)],
+                &[semantics],
+            )
+            .expect("fold")
+            .expect("metadata");
+            assert_eq!(
+                metadata.request_reasoning_disposition,
+                Some(ReasoningBatchDisposition::Apply(EffortLevel::Low))
             );
         }
 

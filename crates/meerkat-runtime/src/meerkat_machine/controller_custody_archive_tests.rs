@@ -53,6 +53,14 @@ struct Staged {
 }
 
 async fn register_and_stage(machine: &MeerkatMachine, governed: bool) -> Staged {
+    register_and_stage_with_ancestor(machine, governed, false).await
+}
+
+async fn register_and_stage_with_ancestor(
+    machine: &MeerkatMachine,
+    governed: bool,
+    include_ancestor: bool,
+) -> Staged {
     let session_id = SessionId::new();
     machine
         .register_session(session_id.clone())
@@ -82,6 +90,11 @@ async fn register_and_stage(machine: &MeerkatMachine, governed: bool) -> Staged 
         candidate.target.logical_runtime =
             EvidenceId::new(runtime_id.to_string()).expect("runtime");
         let grant = candidate.controller_grant_lineage[0].clone();
+        if include_ancestor {
+            let mut ancestor = grant.clone();
+            ancestor.grant_id = EvidenceId::new("controller-ancestor").expect("ancestor");
+            candidate.controller_grant_lineage.insert(0, ancestor);
+        }
         let selection = candidate
             .controller_model
             .clone()
@@ -543,5 +556,387 @@ async fn actual_cold_registration_settles_old_run_before_omitting_closed_termina
     assert!(
         retained.state.controller_client.is_none(),
         "no process client restored from storage"
+    );
+}
+
+#[cfg(all(
+    feature = "sqlite-store",
+    feature = "local-authorization",
+    any(target_os = "macos", target_os = "linux", windows)
+))]
+#[tokio::test]
+async fn sqlite_detached_terminal_original_vetoes_controller_mutation_until_cold_convergence() {
+    use meerkat_authorization::publication::LocalAuthorizationPublication;
+    use std::cell::Cell;
+
+    let machine = MeerkatMachine::ephemeral();
+    let host = Arc::new(TestIngress::new(machine.generated_auth_lease_handle()));
+    let credential = host
+        .input("caller")
+        .header()
+        .authority_association
+        .as_ref()
+        .expect("fixture claims")
+        .candidate()
+        .controller_model
+        .as_ref()
+        .expect("actual selected controller")
+        .credential()
+        .clone();
+    let machine = machine
+        .with_native_work_authorization_host(host)
+        .expect("actual native ingress owner");
+    let credentials = meerkat_auth_core::auth_store::TokenStoreBackend::Ephemeral
+        .open_with_refresh_authority()
+        .expect("actual coordinated credential store");
+    let published = meerkat_auth_core::save_tokens_and_publish_lifecycle(
+        credentials.clone(),
+        machine.generated_auth_lease_handle(),
+        credential.clone(),
+        meerkat_core::auth::PersistedTokens::api_key("retained-controller-credential"),
+    )
+    .await
+    .expect("publish the actual fixture credential before admitting work");
+    let staged = register_and_stage_with_ancestor(&machine, true, true).await;
+    let dir = tempfile::TempDir::new().expect("SQLite fixture directory");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = crate::store::SqliteRuntimeStore::new_whole_blob(path.clone())
+        .expect("actual SQLite runtime store");
+    let lineage = {
+        let mut locked = staged.driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *locked else {
+            panic!("actual staged source")
+        };
+        assert_eq!(
+            driver
+                .abandon_all_non_terminal(InputAbandonReason::Stopped)
+                .expect("stop input delivery without ending its run"),
+            1
+        );
+        let row = driver
+            .stored_input_state(&staged.input_id)
+            .expect("actual terminal original");
+        assert!(!crate::store::input_state_is_pending_terminal_owner(
+            &row.state
+        ));
+        let lineage = row.state.authority_contributors[0]
+            .association()
+            .candidate()
+            .controller_grant_lineage
+            .clone();
+        assert_eq!(lineage.len(), 2, "leaf and its retained ancestor");
+        assert_eq!(driver.runtime_state(), crate::RuntimeState::Running);
+        assert!(
+            driver
+                .unfinished_work_references_controller(&lineage[0])
+                .expect("generated unfinished run binding")
+        );
+        store
+            .commit_machine_lifecycle(
+                &staged.runtime_id,
+                crate::store::MachineLifecycleCommit::new_with_binding_run_and_unregister_progress(
+                    driver.runtime_state(),
+                    driver.machine_lifecycle_binding_facts(),
+                    crate::store::MachineLifecycleRunFacts::new(
+                        driver.current_run_id(),
+                        driver.pre_run_phase().map(|phase| match phase {
+                            crate::RuntimeState::Idle => {
+                                crate::store::MachineLifecyclePreRunPhase::Idle
+                            }
+                            crate::RuntimeState::Attached => {
+                                crate::store::MachineLifecyclePreRunPhase::Attached
+                            }
+                            crate::RuntimeState::Retired => {
+                                crate::store::MachineLifecyclePreRunPhase::Retired
+                            }
+                            other => panic!("unexpected actual pre-run phase: {other:?}"),
+                        }),
+                    ),
+                    driver.supervisor_authority_snapshot(),
+                    None,
+                ),
+                &[InputStatePersistenceRecord::from_machine_snapshot(row)
+                    .expect("actual generated input seed")],
+            )
+            .await
+            .expect("atomic Running lifecycle and terminal original");
+        lineage
+    };
+    let Staged {
+        driver,
+        session_id,
+        runtime_id,
+        input_id,
+        ..
+    } = staged;
+    drop(driver);
+    drop(machine);
+    drop(store);
+
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new_whole_blob(path.clone())
+            .expect("reopened physical SQLite store"),
+    );
+    let machine = MeerkatMachine::persistent_with_mode(store.clone(), None, true)
+        .expect("actual governed physical execution claim");
+    let host = Arc::new(TestIngress::new(machine.generated_auth_lease_handle()));
+    let machine = machine
+        .install_native_work_authorization(|_| host)
+        .expect("native fixture ingress installation under governed custody");
+    assert!(machine.sessions.read().await.is_empty());
+    let read_bytes = || {
+        let connection = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("independent physical observation");
+        let lifecycle: Vec<u8> = connection
+            .query_row(
+                "SELECT runtime_state_json FROM runtime_states WHERE runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("physical lifecycle bytes");
+        let input: Vec<u8> = connection
+            .query_row(
+                "SELECT state_json FROM runtime_input_states
+                 WHERE runtime_id = ?1 AND input_id = ?2",
+                rusqlite::params![runtime_id.to_string(), input_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("physical original bytes");
+        (lifecycle, input)
+    };
+    {
+        let connection = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("physical catalog observation");
+        let catalog_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM runtime_session_catalog", [], |row| {
+                row.get(0)
+            })
+            .expect("catalog count");
+        assert_eq!(
+            catalog_count, 0,
+            "detached rows cannot rely on catalog listing"
+        );
+    }
+    let before = read_bytes();
+    let lease = meerkat_core::handles::LeaseKey::from_credential_identity(&credential);
+    let token_key = meerkat_core::auth::TokenKey::from_credential_identity(&credential);
+    let auth = machine.generated_auth_lease_handle();
+    meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+        credentials.token_store().as_ref(),
+        &auth,
+        &credential,
+        meerkat_core::auth::PersistedAuthMode::ApiKey,
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("restore the actual marked credential in the fresh owner")
+    .expect("retained credential");
+    let lease_before = auth.snapshot(&lease);
+    assert!(
+        auth.release_lease(&lease).is_err(),
+        "detached unfinished work vetoes release"
+    );
+    let clear = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+            credentials.clone(),
+            auth.clone(),
+            credential.clone(),
+        ),
+    )
+    .await
+    .expect("finite credential removal");
+    assert!(
+        matches!(
+            clear,
+            Err(meerkat_core::auth::CredentialMutationError::AuthLifecycle(
+                _
+            ))
+        ),
+        "actual coordinated removal must reach the native custody veto: {clear:?}"
+    );
+    let replace = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        meerkat_auth_core::save_tokens_and_publish_lifecycle(
+            credentials.clone(),
+            auth.clone(),
+            credential.clone(),
+            meerkat_core::auth::PersistedTokens::api_key("replacement-before-convergence"),
+        ),
+    )
+    .await
+    .expect("finite credential replacement");
+    assert!(
+        matches!(
+            replace,
+            Err(meerkat_core::auth::CredentialMutationError::AuthLifecycle(
+                _
+            ))
+        ),
+        "actual coordinated replacement must reach the native custody veto: {replace:?}"
+    );
+    assert_eq!(auth.snapshot(&lease), lease_before);
+    assert_eq!(
+        credentials.token_store().load(&token_key).await.unwrap(),
+        Some(published)
+    );
+    assert_eq!(
+        read_bytes(),
+        before,
+        "credential refusal changes no native rows"
+    );
+    let publication = LocalAuthorizationPublication::new();
+    // This is the real publication primitive used as a callback-entry witness.
+    // Synthetic TestIngress lineage does not prove LocalGrantAuthority revocation.
+    for reference in &lineage {
+        let entered = Cell::new(0);
+        let ((), stamp) = publication.observe(|| ()).expect("before mutation");
+        let result = machine
+            .try_controller_grant_mutation()
+            .and_then(|mut custody| {
+                custody.with_unreferenced_controller_grant(reference, || {
+                    entered.set(entered.get() + 1);
+                    let _publication = publication
+                        .begin_owner_change()
+                        .expect("entered publication");
+                    Ok::<_, ()>(())
+                })
+            });
+        assert_eq!(
+            entered.get(),
+            0,
+            "unfinished controller mutation must not enter"
+        );
+        assert_eq!(
+            read_bytes(),
+            before,
+            "refusal must preserve exact stored bytes"
+        );
+        stamp
+            .check_current()
+            .expect("refusal must not publish a change");
+        assert_eq!(
+            result,
+            Err(ControllerCustodyRefusal::ControllerInUse),
+            "the detached unfinished run protects every controller ancestor"
+        );
+    }
+
+    let mut unrelated = lineage[0].clone();
+    unrelated.authority_namespace = EvidenceId::new("unrelated-namespace").expect("namespace");
+    let entered = Cell::new(0);
+    let result = machine
+        .try_controller_grant_mutation()
+        .and_then(|mut custody| {
+            custody.with_unreferenced_controller_grant(&unrelated, || {
+                entered.set(entered.get() + 1);
+                Ok::<_, ()>(7)
+            })
+        });
+    assert_eq!(
+        result,
+        Ok(Ok(7)),
+        "complete scope does not veto an unrelated grant"
+    );
+    assert_eq!(entered.get(), 1);
+    assert_eq!(read_bytes(), before);
+
+    // Actual registration performs lifecycle convergence before input recovery;
+    // the test neither patches a recovered image nor restores a process client.
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("actual cold registration convergence");
+    assert_eq!(
+        crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("converged durable lifecycle"),
+        Some(crate::RuntimeState::Idle)
+    );
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("cold registered owner");
+        let driver = entry.driver.lock().await;
+        let DriverEntry::Persistent(driver) = &*driver else {
+            panic!("real SQLite driver")
+        };
+        assert!(driver.inner_ref().ledger().get(&input_id).is_none());
+    }
+    let retained = store
+        .load_input_state(&runtime_id, &input_id)
+        .await
+        .expect("retained physical history")
+        .expect("original remains retained");
+    assert!(retained.state.controller_client.is_none());
+    assert_eq!(
+        read_bytes().1,
+        before.1,
+        "convergence preserves the original bytes"
+    );
+    let after_convergence = read_bytes();
+    for reference in &lineage {
+        let entered = Cell::new(0);
+        let ((), stamp) = publication.observe(|| ()).expect("before permitted entry");
+        let result = machine
+            .try_controller_grant_mutation()
+            .and_then(|mut custody| {
+                custody.with_unreferenced_controller_grant(reference, || {
+                    entered.set(entered.get() + 1);
+                    let _publication = publication
+                        .begin_owner_change()
+                        .expect("entered publication");
+                    Ok::<_, ()>(())
+                })
+            });
+        assert_eq!(
+            result,
+            Ok(Ok(())),
+            "converged old run no longer vetoes entry"
+        );
+        assert_eq!(entered.get(), 1);
+        assert_eq!(
+            stamp.check_current(),
+            Err(meerkat_authorization::publication::PublicationError::Changed)
+        );
+        assert_eq!(read_bytes(), after_convergence);
+    }
+    let replacement = meerkat_auth_core::save_tokens_and_publish_lifecycle(
+        credentials.clone(),
+        auth.clone(),
+        credential.clone(),
+        meerkat_core::auth::PersistedTokens::api_key("replacement-after-convergence"),
+    )
+    .await
+    .expect("completed work permits actual credential replacement");
+    assert_eq!(
+        credentials.token_store().load(&token_key).await.unwrap(),
+        Some(replacement)
+    );
+    meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+        credentials.clone(),
+        auth.clone(),
+        credential,
+    )
+    .await
+    .expect("completed work permits actual credential removal");
+    assert!(
+        credentials
+            .token_store()
+            .load(&token_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!auth.snapshot(&lease).credential_present);
+    assert_eq!(
+        read_bytes(),
+        after_convergence,
+        "credential mutation preserves native history"
     );
 }

@@ -1,6 +1,5 @@
 //! MCP connection management
 
-use crate::McpError;
 use crate::client_service::{ClientServiceSelection, ConnectedClient, McpClientServiceFactory};
 use crate::transport::protected::{
     ProtectedMetadata, ProtectedMetadataState, ProtectedStdioTransport,
@@ -14,6 +13,7 @@ use crate::transport::{
     sse::ReqwestSseClient,
     streamable_http::{OAuthBearer, ReqwestStreamableHttpClient},
 };
+use crate::{McpError, McpStdioLaunchProfile};
 use async_trait::async_trait;
 use meerkat_auth_core::{McpAuthMode, McpOAuthError, McpServerIdentity};
 use meerkat_core::McpServerConfig;
@@ -65,13 +65,25 @@ const STDIO_GROUP_EXIT_BACKSTOP: Duration = Duration::from_secs(10);
 /// direct child is killed and reaped.
 #[derive(Clone, Default)]
 pub(crate) struct StdioChildCustody {
-    slot: Arc<std::sync::Mutex<Option<StdioChild>>>,
+    slot: Arc<tokio::sync::Mutex<Option<StdioChild>>>,
     #[cfg(test)]
     spawned: Arc<tokio::sync::watch::Sender<Option<u32>>>,
+    #[cfg(all(test, unix))]
+    reap_gate: Arc<std::sync::Mutex<Option<StdioReapTestGate>>>,
+    #[cfg(all(test, unix))]
+    direct_kill_requests: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Holds the existing reap await pending so cancellation tests do not depend
+/// on how quickly the operating system delivers SIGKILL.
+#[cfg(all(test, unix))]
+struct StdioReapTestGate {
+    entered: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
 }
 
 struct StdioChild {
-    child: tokio::process::Child,
+    child: meerkat_sandbox::ProcessChild,
     /// The server's process group, while it may still need killing. Cleared
     /// before the leader is reaped, so a reused id is never signalled.
     #[cfg(unix)]
@@ -91,29 +103,73 @@ impl Drop for StdioChild {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn confined_stdio_spawn_error(error: std::io::Error) -> McpError {
+    match error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<meerkat_core::confinement::ConfinementRefusal>())
+    {
+        Some(refusal) => McpError::Confinement(*refusal),
+        None => McpError::Io(error),
+    }
+}
+
 impl StdioChildCustody {
     /// Spawn the server and take custody of it; returns its stdout and stdin
     /// for the MCP transport.
-    fn spawn(
+    async fn spawn(
         &self,
         stdio: &meerkat_core::mcp_config::McpStdioConfig,
+        profile: &McpStdioLaunchProfile,
     ) -> Result<(tokio::process::ChildStdout, tokio::process::ChildStdin), McpError> {
-        let mut cmd = Command::new(&stdio.command);
-        cmd.args(&stdio.args);
-        for (key, value) in &stdio.env {
-            cmd.env(key, value);
-        }
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            // Fallback only: the owner path is `terminate`.
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-        let mut child = cmd.spawn().map_err(|e| McpError::ConnectionFailed {
-            reason: format!("Failed to spawn process: {e}"),
-        })?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        // Acquire custody before spawning, with no await between creating the
+        // child and installing its owner.
+        let mut slot = self.slot.lock().await;
+        // Binding validates the exact launch and retained backend before any
+        // process exists. Required isolation has no Command fallback.
+        let mut child: meerkat_sandbox::ProcessChild = match profile.prepare(stdio)? {
+            Some(prepared) => {
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                {
+                    prepared
+                        .spawn_with_io(meerkat_sandbox::SpawnIo {
+                            stdin: meerkat_sandbox::StdioMode::Piped,
+                            stdout: meerkat_sandbox::StdioMode::Piped,
+                            stderr: meerkat_sandbox::StdioMode::Null,
+                        })
+                        .map_err(confined_stdio_spawn_error)?
+                        .into()
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                {
+                    let _ = prepared;
+                    return Err(
+                        meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement
+                            .into(),
+                    );
+                }
+            }
+            None => {
+                let mut cmd = Command::new(&stdio.command);
+                cmd.args(&stdio.args);
+                for (key, value) in &stdio.env {
+                    cmd.env(key, value);
+                }
+                cmd.stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::inherit())
+                    // Fallback only: the owner path is `terminate`.
+                    .kill_on_drop(true);
+                #[cfg(unix)]
+                cmd.process_group(0);
+                cmd.spawn()
+                    .map_err(|e| McpError::ConnectionFailed {
+                        reason: format!("Failed to spawn process: {e}"),
+                    })?
+                    .into()
+            }
+        };
+        let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
             return Err(McpError::ConnectionFailed {
                 reason: "spawned MCP server has no piped stdin/stdout".to_string(),
             });
@@ -134,17 +190,13 @@ impl StdioChildCustody {
             .map(nix::unistd::Pid::from_raw);
         #[cfg(test)]
         self.spawned.send_replace(child.id());
-        let replaced = self
-            .slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace(StdioChild {
-                child,
-                #[cfg(unix)]
-                process_group,
-                #[cfg(unix)]
-                stdout_witness,
-            });
+        let replaced = slot.replace(StdioChild {
+            child,
+            #[cfg(unix)]
+            process_group,
+            #[cfg(unix)]
+            stdout_witness,
+        });
         // One custody holds one process; a replaced one is killed by its drop.
         drop(replaced);
         Ok((stdout, stdin))
@@ -154,21 +206,42 @@ impl StdioChildCustody {
     /// has exited. `None` when nothing is in custody (never spawned, or
     /// already terminated).
     pub(crate) async fn terminate(&self) -> Option<std::io::Result<std::process::ExitStatus>> {
-        let mut held = self
-            .slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()?;
+        // Cancellation releases the lock without dropping the child, so a
+        // retained owner can finish reaping it. Concurrent callers wait here.
+        let mut slot = self.slot.lock().await;
+        let held = slot.as_mut()?;
         #[cfg(unix)]
         if let Some(group) = held.process_group.take() {
             let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+            // A failed wait may mean another reaper consumed the status.
+            // Issue both signals once, before any reap, so retries cannot
+            // signal a reused process id.
+            #[cfg(test)]
+            self.direct_kill_requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = held.child.start_kill();
         }
-        // The direct child (the only kill there is off Unix); a no-op error
-        // once it has already exited.
+        // Off Unix, the process handle identifies the direct child.
+        #[cfg(not(unix))]
         let _ = held.child.start_kill();
-        let status = held.child.wait().await;
+        #[cfg(all(test, unix))]
+        {
+            let gate = self
+                .reap_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                let _ = gate.entered.send(());
+                let _ = gate.resume.await;
+            }
+        }
+        let status = match held.child.wait().await {
+            Ok(status) => status,
+            Err(error) => return Some(Err(error)),
+        };
         #[cfg(unix)]
-        if let Some(mut witness) = held.stdout_witness.take() {
+        if let Some(witness) = held.stdout_witness.as_mut() {
             use tokio::io::AsyncReadExt as _;
             let mut discard = [0u8; 4096];
             let all_writers_exited =
@@ -182,11 +255,31 @@ impl StdioChildCustody {
                 );
             }
         }
-        Some(status)
+        slot.take();
+        Some(Ok(status))
+    }
+
+    #[cfg(all(test, unix))]
+    fn pause_next_reap(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        *self
+            .reap_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(StdioReapTestGate {
+            entered,
+            resume: resumed,
+        });
+        (waiting, resume)
     }
 
     /// The spawned process id, once spawned.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, unix))]
     #[allow(clippy::expect_used)]
     pub(crate) async fn spawned_pid(&self) -> u32 {
         let mut spawned = self.spawned.subscribe();
@@ -281,7 +374,49 @@ impl McpConnection {
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
         client_factory: Option<Arc<dyn McpClientServiceFactory>>,
     ) -> Result<Self, McpError> {
-        Self::connect_with_custody(config, auth_mode, auth_resolver, client_factory, None).await
+        Self::connect_with_services_and_stdio_profile(
+            config,
+            auth_mode,
+            auth_resolver,
+            client_factory,
+            &McpStdioLaunchProfile::trusted_host(),
+        )
+        .await
+    }
+
+    /// Connect with a retained host profile for local process isolation.
+    /// Remote HTTP transports are outside this local-process boundary.
+    pub async fn connect_with_stdio_profile(
+        config: &McpServerConfig,
+        profile: &McpStdioLaunchProfile,
+    ) -> Result<Self, McpError> {
+        Self::connect_with_services_and_stdio_profile(
+            config,
+            McpAuthMode::Stored,
+            None,
+            None,
+            profile,
+        )
+        .await
+    }
+
+    /// Connect with the same explicit host service and local-launch owners.
+    pub async fn connect_with_services_and_stdio_profile(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+        client_factory: Option<Arc<dyn McpClientServiceFactory>>,
+        profile: &McpStdioLaunchProfile,
+    ) -> Result<Self, McpError> {
+        Self::connect_with_custody(
+            config,
+            auth_mode,
+            auth_resolver,
+            client_factory,
+            None,
+            profile,
+        )
+        .await
     }
 
     /// [`Self::connect_with_services`] with the custody a stdio server's
@@ -293,6 +428,7 @@ impl McpConnection {
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
         client_factory: Option<Arc<dyn McpClientServiceFactory>>,
         stdio_custody: Option<StdioChildCustody>,
+        profile: &McpStdioLaunchProfile,
     ) -> Result<Self, McpError> {
         if matches!(config.transport, McpTransportConfig::Http(_)) {
             let target = McpServerIdentity::from_config(config)
@@ -312,7 +448,7 @@ impl McpConnection {
             McpTransportConfig::Stdio(stdio) => {
                 // We own the process; rmcp only gets its stdout/stdin.
                 let custody = stdio_custody.unwrap_or_default();
-                let (stdout, stdin) = custody.spawn(stdio)?;
+                let (stdout, stdin) = custody.spawn(stdio, profile).await?;
                 match client
                     .serve(ProtectedStdioTransport::new(
                         stdout,
@@ -588,6 +724,40 @@ impl McpConnection {
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
         client_factory: Option<Arc<dyn McpClientServiceFactory>>,
     ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
+        Self::connect_and_enumerate_with_services_and_stdio_profile(
+            config,
+            auth_mode,
+            auth_resolver,
+            client_factory,
+            &McpStdioLaunchProfile::trusted_host(),
+        )
+        .await
+    }
+
+    /// Connect and enumerate under the normal deadline with a retained host
+    /// launch profile. Required isolation never falls back to trusted execution.
+    pub async fn connect_and_enumerate_with_stdio_profile(
+        config: &McpServerConfig,
+        profile: &McpStdioLaunchProfile,
+    ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
+        Self::connect_and_enumerate_with_services_and_stdio_profile(
+            config,
+            McpAuthMode::Stored,
+            None,
+            None,
+            profile,
+        )
+        .await
+    }
+
+    /// Connect and enumerate with explicit host services and local isolation.
+    pub async fn connect_and_enumerate_with_services_and_stdio_profile(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+        client_factory: Option<Arc<dyn McpClientServiceFactory>>,
+        profile: &McpStdioLaunchProfile,
+    ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
         let stdio_custody = matches!(config.transport, McpTransportConfig::Stdio(_))
             .then(StdioChildCustody::default);
         Self::connect_and_enumerate_with_custody(
@@ -596,6 +766,7 @@ impl McpConnection {
             auth_resolver,
             client_factory,
             stdio_custody,
+            profile,
         )
         .await
     }
@@ -610,6 +781,7 @@ impl McpConnection {
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
         client_factory: Option<Arc<dyn McpClientServiceFactory>>,
         stdio_custody: Option<StdioChildCustody>,
+        profile: &McpStdioLaunchProfile,
     ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
         let timeout_secs = config
             .connect_timeout_secs
@@ -627,6 +799,7 @@ impl McpConnection {
                 auth_resolver,
                 client_factory,
                 stdio_custody.clone(),
+                profile,
             )
             .await?;
             let tools = conn
@@ -719,6 +892,23 @@ impl McpConnection {
         args: &Value,
         metadata: Option<serde_json::Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
+        self.call_tool_result_entering(name, args, metadata, || Ok(()))
+            .await
+    }
+
+    /// Like [`Self::call_tool_result`], running `enter` after every local
+    /// request preparation step (parameters, protected metadata registration)
+    /// and immediately before the local transport handoff. A refusal from
+    /// `enter` sends nothing; nothing that could still fail locally runs after
+    /// it. The reviewed boundary is this local handoff: it makes no claim about
+    /// when or whether the remote server performs its effect.
+    pub(crate) async fn call_tool_result_entering(
+        &self,
+        name: &str,
+        args: &Value,
+        metadata: Option<serde_json::Map<String, Value>>,
+        enter: impl FnOnce() -> Result<(), McpError>,
+    ) -> Result<CallToolResult, McpError> {
         call_tool_on(
             &self.service,
             &self.config.name,
@@ -728,6 +918,7 @@ impl McpConnection {
             name,
             args,
             metadata,
+            enter,
         )
         .await
     }
@@ -777,6 +968,7 @@ pub(crate) async fn call_tool_on(
     name: &str,
     args: &Value,
     metadata: Option<serde_json::Map<String, Value>>,
+    enter: impl FnOnce() -> Result<(), McpError>,
 ) -> Result<CallToolResult, McpError> {
     let params = match args.as_object().cloned() {
         Some(arguments) => CallToolRequestParams::new(name.to_string()).with_arguments(arguments),
@@ -793,21 +985,23 @@ pub(crate) async fn call_tool_on(
         protected_metadata.register(&metadata)?;
         request.extensions.insert(ProtectedMetadata(metadata));
     }
-    let result = service
-        .send_request(request.into())
-        .await
-        .map_err(|error| {
-            let disposition = dispatch.disposition();
-            // An OAuth refusal (a 401, or no usable credential before
-            // dispatch) is typed unless the request's own disposition already
-            // makes its outcome uncertain or proves it unsent.
-            if matches!(disposition, Some(RequestDisposition::Sent) | None)
-                && let Some(refused) = authorization_required(oauth_target, &error)
-            {
-                return refused;
-            }
-            tool_call_failure(server, name, disposition, &error)
-        })?;
+    let request = request.into();
+    // Reviewed boundary: the local transport handoff. The single consuming
+    // native entry step runs with no local preparation left that could fail
+    // before it.
+    enter()?;
+    let result = service.send_request(request).await.map_err(|error| {
+        let disposition = dispatch.disposition();
+        // An OAuth refusal (a 401, or no usable credential before
+        // dispatch) is typed unless the request's own disposition already
+        // makes its outcome uncertain or proves it unsent.
+        if matches!(disposition, Some(RequestDisposition::Sent) | None)
+            && let Some(refused) = authorization_required(oauth_target, &error)
+        {
+            return refused;
+        }
+        tool_call_failure(server, name, disposition, &error)
+    })?;
     match result {
         ServerResult::CallToolResult(result) => Ok(result),
         _ => Err(McpError::ProtocolError {
@@ -886,7 +1080,7 @@ pub(crate) async fn close_connected(
     if let Some(custody) = stdio_child
         && let Some(Err(error)) = custody.terminate().await
     {
-        tracing::warn!(%error, "failed to reap MCP stdio server process");
+        return Err(McpError::Io(error));
     }
     cancelled.map_err(|e| McpError::ConnectionFailed {
         reason: format!("Failed to close connection: {e:?}"),
@@ -1106,6 +1300,42 @@ pub mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::TcpListener;
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn confined_stdio_spawn_preserves_exact_refusals_and_original_io() {
+        use meerkat_core::confinement::ConfinementRefusal;
+
+        for refusal in [
+            ConfinementRefusal::InvalidRequirement,
+            ConfinementRefusal::InvalidLaunch,
+            ConfinementRefusal::UnsupportedRequirement,
+            ConfinementRefusal::BackendUnavailable,
+            ConfinementRefusal::PreparationFailed,
+        ] {
+            assert!(matches!(
+                confined_stdio_spawn_error(std::io::Error::other(refusal)),
+                McpError::Confinement(actual) if actual == refusal,
+            ));
+        }
+        for error in [
+            std::io::Error::from_raw_os_error(nix::libc::EPIPE),
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "ordinary IO"),
+            std::io::Error::other(ConfinementRefusal::BackendUnavailable.to_string()),
+        ] {
+            let kind = error.kind();
+            let raw = error.raw_os_error();
+            let message = error.to_string();
+            let retained = match confined_stdio_spawn_error(error) {
+                McpError::Io(error) => Some(error),
+                _ => None,
+            }
+            .expect("ordinary IO must remain IO, including refusal text lookalikes");
+            assert_eq!(retained.kind(), kind);
+            assert_eq!(retained.raw_os_error(), raw);
+            assert_eq!(retained.to_string(), message);
+        }
+    }
 
     /// Test that content block extraction works correctly with multiple text items
     #[test]
@@ -1762,6 +1992,148 @@ pub mod tests {
         conn.close().await.expect("Failed to close connection");
     }
 
+    #[cfg(unix)]
+    async fn custody_test_child() -> (
+        StdioChildCustody,
+        (tokio::process::ChildStdout, tokio::process::ChildStdin),
+    ) {
+        let custody = StdioChildCustody::default();
+        let pipes = custody
+            .spawn(
+                &meerkat_core::mcp_config::McpStdioConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string(), "exec sleep 60".to_string()],
+                    env: HashMap::new(),
+                },
+                &McpStdioLaunchProfile::trusted_host(),
+            )
+            .await
+            .expect("spawn real stdio child");
+        (custody, pipes)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn assert_child_reaped(pid: u32) {
+        assert_eq!(
+            nix::sys::wait::waitpid(
+                nix::unistd::Pid::from_raw(i32::try_from(pid).expect("valid child pid")),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+            ),
+            Err(nix::errno::Errno::ECHILD),
+            "custody must already have reaped its direct child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_custody_cancelled_termination_can_be_reaped_by_the_retained_owner() {
+        let (custody, _pipes) = custody_test_child().await;
+        let pid = custody.spawned_pid().await;
+        let (waiting, resume) = custody.pause_next_reap();
+        let first = tokio::spawn({
+            let custody = custody.clone();
+            async move { custody.terminate().await }
+        });
+        waiting.await.expect("termination reached its reap await");
+        assert_eq!(
+            custody
+                .direct_kill_requests
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the first waiter requests termination before reaping"
+        );
+        first.abort();
+        assert!(
+            first
+                .await
+                .expect_err("first waiter was aborted")
+                .is_cancelled()
+        );
+        drop(resume);
+
+        custody
+            .terminate()
+            .await
+            .expect("cancellation must leave the child in retained custody")
+            .expect("retained owner reaps the child");
+        assert_child_reaped(pid);
+        assert_eq!(
+            custody
+                .direct_kill_requests
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "reaping retries must not signal the process id again"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_custody_concurrent_termination_waits_for_the_reap_owner() {
+        let (custody, _pipes) = custody_test_child().await;
+        let pid = custody.spawned_pid().await;
+        let (waiting, resume) = custody.pause_next_reap();
+        let first = tokio::spawn({
+            let custody = custody.clone();
+            async move { custody.terminate().await }
+        });
+        waiting.await.expect("termination reached its reap await");
+        let mut second = Box::pin(custody.terminate());
+        let second_waited = futures::poll!(second.as_mut()).is_pending();
+
+        resume.send(()).expect("release the first reap");
+        first
+            .await
+            .expect("first waiter joins")
+            .expect("first waiter owns the child")
+            .expect("first waiter reaps the child");
+        if second_waited {
+            assert!(second.await.is_none(), "the first waiter completed custody");
+        }
+        assert_child_reaped(pid);
+        assert!(
+            second_waited,
+            "a concurrent close must wait for the owned reap"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_custody_close_reports_a_reap_failure() {
+        use rmcp::ServiceExt as _;
+
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let (client, server) = tokio::join!(
+            ClientServiceSelection::Default.serve(client_io),
+            mcp_test_server::FormTestServer::default().serve(server_io),
+        );
+        let client = client.expect("initialize client");
+        let server = server.expect("initialize server");
+        let (custody, _pipes) = custody_test_child().await;
+        let pid = custody.spawned_pid().await;
+        let (waiting, resume) = custody.pause_next_reap();
+        let close = tokio::spawn(close_connected(client, Some(custody)));
+        waiting.await.expect("close reached its reap await");
+
+        // Fault injection: another process owner consumes the status before
+        // Child::wait can reap it. The close must preserve that OS error.
+        tokio::task::spawn_blocking(move || {
+            nix::sys::wait::waitpid(
+                nix::unistd::Pid::from_raw(i32::try_from(pid).expect("valid child pid")),
+                None,
+            )
+        })
+        .await
+        .expect("external waiter joins")
+        .expect("external waiter consumes the exit status");
+        resume.send(()).expect("release the failed reap");
+        let result = close.await.expect("close task joins");
+        server.cancel().await.expect("server task joins");
+        assert!(
+            matches!(result, Err(McpError::Io(ref error)) if error.raw_os_error() == Some(nix::errno::Errno::ECHILD as i32)),
+            "close must return the typed reap error, got {result:?}"
+        );
+    }
+
     /// `close` owns the stdio server's exit: the server is killed with its
     /// whole process group right after its stdin closes, even when it keeps
     /// running past EOF, and has exited when `close` returns. (Fails-old:
@@ -1787,10 +2159,7 @@ pub mod tests {
 
         conn.close().await.expect("close");
 
-        assert!(
-            process_exited(wrapper),
-            "stdio server {wrapper} outlived close"
-        );
+        assert_child_reaped(wrapper);
         assert!(
             process_exited(server),
             "stdio server's grandchild {server} outlived close"
@@ -1802,7 +2171,6 @@ pub mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn failed_handshake_returns_after_the_stdio_server_exits() {
-        use crate::stdio_test_fixture::process_exited;
         // Closes its stdout (the handshake fails on EOF) but keeps running.
         let config = McpServerConfig::stdio(
             "closes-stdout",
@@ -1818,15 +2186,13 @@ pub mod tests {
             None,
             None,
             Some(custody.clone()),
+            &McpStdioLaunchProfile::trusted_host(),
         )
         .await;
 
         assert!(result.is_err(), "a server without stdout cannot connect");
         let pid = custody.spawned_pid().await;
-        assert!(
-            process_exited(pid),
-            "stdio server {pid} of a failed handshake outlived the error"
-        );
+        assert_child_reaped(pid);
         assert!(
             custody.terminate().await.is_none(),
             "the failed attempt already terminated and reaped the server"
@@ -2083,3 +2449,7 @@ mod pagination_tests;
 #[cfg(test)]
 #[path = "structured_result_tests.rs"]
 mod structured_result_tests;
+
+#[cfg(test)]
+#[path = "process_confinement_tests.rs"]
+mod process_confinement_tests;

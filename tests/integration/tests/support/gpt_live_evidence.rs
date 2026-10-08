@@ -2730,7 +2730,7 @@ mod tests {
 
     /// The timeline record S97 and S99 now write (`BrowserPeer::record_timeline`)
     /// carries exactly what the lag rule's journal reader parses
-    /// (`/tmp/rb/journal-lag.py`): a `timeline` record whose entries pair a
+    /// (an operator-retained journal-lag script): a `timeline` record whose entries pair a
     /// `fixture_start`'s `t_ms + detail.speech_ms` with the next
     /// `input_final`'s `detail.t_ms`.
     #[test]

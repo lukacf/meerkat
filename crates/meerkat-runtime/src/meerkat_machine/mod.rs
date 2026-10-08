@@ -1138,6 +1138,7 @@ mod durability_health;
 #[cfg(feature = "live")]
 mod live_context_preparation;
 mod llm_reconfigure;
+mod retained_resume;
 mod runtime_control;
 mod session_management;
 mod terminal_receipt;
@@ -1454,6 +1455,11 @@ impl UnregisterTeardownMechanicalObservations {
 struct RuntimeSessionEntry {
     /// Canonical runtime control-plane identity for this registered session.
     runtime_id: LogicalRuntimeId,
+    /// This runtime owner's hosting claim for the session (#1813), taken
+    /// before the registration's durable recovery and held exactly as long as
+    /// this entry: unregister finalization, which removes the entry after
+    /// teardown, releases it.
+    _hosting_claim: meerkat_core::session_hosting::HostingClaim,
     /// Reconstructed solely for archive convergence. This cleanup ownership
     /// survives caller timeout; ordinary/concurrent registrations never carry
     /// it.
@@ -1596,7 +1602,9 @@ struct RuntimeSessionEntry {
     /// the machine mutation gate is deliberately released. External
     /// unregister, loop-owned unregister, and final-unregister retry may race
     /// in `Draining`; exactly one of them may call the surface cleanup handle
-    /// at a time.
+    /// at a time. On the not-yet-completed path the ordinary cleanup callback
+    /// also joins the removed actor's exit while this attachment-local gate is
+    /// held, which assumes an actor drain never needs this gate.
     post_stop_cleanup_gate: Arc<Mutex<()>>,
     /// Temporary live interrupt capability for prepared, session-owned turns
     /// that run before the runtime loop attachment is published.
@@ -2316,6 +2324,15 @@ pub enum RuntimeSessionRegistrationOutcome {
     /// Observation, fence admission, or target persistence was temporarily
     /// unavailable. The caller should re-observe and retry.
     Backoff { reason: String },
+    /// Another runtime owner hosts the session: another process on the same
+    /// realm, or another machine of this process (it holds the session's
+    /// hosting claim, #1813). No live registration was published and the
+    /// durable row was not touched.
+    ServedElsewhere { session_id: SessionId },
+    /// The store selected cross-process hosting claims, but the session's
+    /// claim cannot be taken (#1813). No live registration was published and
+    /// the durable row was not touched.
+    HostingUnavailable { session_id: SessionId },
 }
 
 /// Opaque identity for one exact runtime-executor attachment.
@@ -2678,6 +2695,58 @@ impl MeerkatMachine {
     /// shared. This is a composition observation, never a permission decision.
     pub fn has_native_work_authorization_host(&self) -> bool {
         self.native_work_authorization_host.get().is_some()
+    }
+
+    /// Prepare through the actual installed native owner. The immutable
+    /// process ingress must already carry authentic original/service evidence.
+    pub fn prepare_context_append(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<
+        meerkat_core::service::PreparedSystemContextAppend,
+        meerkat_core::OperationAuthorizationError,
+    > {
+        self.prepare_context_append_observed(control).result
+    }
+
+    /// Keep the exact owner preparation observation for control settlement,
+    /// including a coherent denial. No missing owner is invented for audit.
+    pub fn prepare_context_append_observed(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> meerkat_core::authorization::ObservedAuthorizationResult<
+        meerkat_core::service::PreparedSystemContextAppend,
+    > {
+        let context = (|| {
+            self.shared
+                .require_governed_execution_custody()
+                .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+            self.native_work_authorization_host
+                .get()
+                .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?
+                .host()
+                .context_control_authorization(Arc::clone(&control))
+        })();
+        let context = match context {
+            Ok(context) => context,
+            Err(error) => {
+                return meerkat_core::authorization::ObservedAuthorizationResult::unobserved(Err(
+                    error,
+                ));
+            }
+        };
+        meerkat_core::service::PreparedSystemContextAppend::prepare_observed(
+            Arc::clone(&self.shared),
+            control,
+            context,
+        )
+    }
+
+    pub fn owns_context_append(
+        &self,
+        prepared: &meerkat_core::service::PreparedSystemContextAppend,
+    ) -> bool {
+        self.has_native_work_authorization_host() && prepared.belongs_to(&self.shared)
     }
 
     /// Take the interrupted-run notices owed to `session_id`'s model, if any.
@@ -9041,6 +9110,12 @@ impl LiveChannelStatusAuthority {
 #[doc(hidden)]
 pub struct MeerkatMachineShared {
     native_work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
+    /// This runtime owner's identity for session hosting claims (#1813).
+    /// Every claim this machine's lineage takes (its registrations, and its
+    /// session service's actors, cold attaches and store-only writes) carries
+    /// it; another machine over the same store is another owner and is
+    /// refused a session this one hosts.
+    hosting_owner: meerkat_core::session_hosting::HostingOwner,
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -10828,6 +10903,7 @@ impl MeerkatMachine {
         Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+                hosting_owner: meerkat_core::session_hosting::HostingOwner::mint(),
                 sessions: RwLock::new(HashMap::new()),
                 #[cfg(not(target_arch = "wasm32"))]
                 credential_release_observer: std::sync::OnceLock::new(),
@@ -11002,6 +11078,7 @@ impl MeerkatMachine {
         Ok(Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+                hosting_owner: meerkat_core::session_hosting::HostingOwner::mint(),
                 sessions: RwLock::new(HashMap::new()),
                 #[cfg(not(target_arch = "wasm32"))]
                 credential_release_observer: std::sync::OnceLock::new(),
@@ -11800,6 +11877,9 @@ mod durable_steer_tests;
 
 #[cfg(test)]
 mod terminal_receipt_tests;
+
+#[cfg(all(test, feature = "live", feature = "test-support"))]
+mod live_bridge_original_work_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod oauth_pair_tests;

@@ -11,7 +11,7 @@ name-keyed routing, surface-level mutation, folklore comments. These don't exhau
 the production-bug surface. This doc enumerates **classes of failure modes the
 catalog cannot see**, with concrete sites and enforcement paths. Seeds issue #341.
 
-Line citations: worktree `/Users/luka/src/meerkat/.claude/worktrees/wave-a-demo`,
+Line citations: worktree `(operator-retained path)/.claude/worktrees/wave-a-demo`,
 branch `dogma/wave-a-demolition`.
 
 ---

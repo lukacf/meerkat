@@ -20,7 +20,7 @@ fn spec(key: &str, restart_class: RestartClass) -> JobSpec {
         ExecutionIntentId::new(),
         InteractionLineageId::new(),
         ToolIdentity::new("security_scan", "v1").expect("valid tool identity"),
-        RunnerIdentity::new("homecore.security_scan", "v1").expect("valid runner identity"),
+        RunnerIdentity::new("example.security_scan", "v1").expect("valid runner identity"),
         restart_class,
         CanonicalArgumentsHash::new("sha256:scan-a").expect("valid arguments hash"),
         JobSubmissionKey::new(key).expect("valid submission key"),

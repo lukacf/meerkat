@@ -286,6 +286,7 @@ impl LocalWorkPolicy for FixturePolicy {
                 operation_values,
                 restrictions: state.restrictions.clone(),
                 expires_at_ms: state.expires_at_ms,
+                review_tier: meerkat_core::authorization::OperationReviewTier::R1,
             }
         };
         if self
@@ -366,6 +367,72 @@ fn assert_refused<T, E: Into<meerkat_core::OperationAuthorizationError>>(
     assert!(
         matches!(result.map_err(Into::into), Err(meerkat_core::OperationAuthorizationError::Refused(refusal)) if refusal.kind() == kind)
     );
+}
+
+#[test]
+fn context_compilation_retains_only_its_coherent_policy_observation() {
+    let publication = LocalAuthorizationPublication::new();
+    let clock: Arc<dyn LocalAuthorizationClock> = Arc::new(FixtureClock::new());
+    let binding = read_binding();
+    let ((), stamp) = publication.observe(|| ()).expect("initial publication");
+    let expected = Some(stamp.policy_observation());
+    let allowed = compile_context_control(&publication, &clock, &binding, |_| {
+        Ok(vec![LocalPolicyAllowance {
+            operation_values: vec![tuple("read", "public")],
+            restrictions: ExecutionRestrictions::unrestricted(),
+            expires_at_ms: 2_000,
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
+        }])
+    });
+    assert_eq!(allowed.policy, expected);
+    let decision = allowed.result.expect("allowed control");
+    assert_eq!(decision.policy_observation(), expected);
+    let refused = compile_context_control(&publication, &clock, &binding, |_| Err(denied().into()));
+    assert_refused(refused.result, OperationRefusalKind::Denied);
+    assert_eq!(refused.policy, expected);
+    let changed = compile_context_control(&publication, &clock, &binding, |_| {
+        drop(
+            publication
+                .begin_owner_change()
+                .expect("concurrent owner change"),
+        );
+        Err(denied().into())
+    });
+    assert_refused(changed.result, OperationRefusalKind::ReprepareRequired);
+    assert_eq!(changed.policy, None);
+    // An infrastructure failure must not be reclassified as a stale refusal.
+    let unavailable = compile_context_control(&publication, &clock, &binding, |_| {
+        drop(
+            publication
+                .begin_owner_change()
+                .expect("concurrent owner change"),
+        );
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    });
+    assert!(matches!(
+        unavailable.result,
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    ));
+    assert_eq!(unavailable.policy, None);
+}
+
+#[test]
+fn context_clock_failure_never_claims_a_policy_read() {
+    let publication = LocalAuthorizationPublication::new();
+    let clock = Arc::new(FixtureClock::new());
+    clock.unavailable.store(true, Ordering::Relaxed);
+    let clock: Arc<dyn LocalAuthorizationClock> = clock;
+    let calls = AtomicUsize::new(0);
+    let observed = compile_context_control(&publication, &clock, &read_binding(), |_| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        Err(denied().into())
+    });
+    assert!(matches!(
+        observed.result,
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    ));
+    assert_eq!(observed.policy, None);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -735,6 +802,7 @@ impl LocalWorkPolicy for BatchFixturePolicy {
             operation_values: vec![tuple("read", "public")],
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: if index == 0 { 2_000 } else { 1_500 },
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
 }
@@ -946,6 +1014,7 @@ fn controller_ceiling_is_independent_but_never_bypasses_other_operation_duties()
                 operation_values: vec![tuple("controller", "public")],
                 restrictions: ExecutionRestrictions::unrestricted(),
                 expires_at_ms: 2_000,
+                review_tier: meerkat_core::authorization::OperationReviewTier::R1,
             },
             now,
         );
@@ -967,6 +1036,7 @@ fn controller_label_cannot_substitute_model_account_profile_or_backend() {
                 operation_values: vec![tuple("controller", "public")],
                 restrictions: ExecutionRestrictions::unrestricted(),
                 expires_at_ms: 2_000,
+                review_tier: meerkat_core::authorization::OperationReviewTier::R1,
             },
             now,
         )
@@ -999,6 +1069,11 @@ struct RoleFixturePolicy {
     admitted: InputAuthorityAssociation,
     calls: Mutex<Vec<LocalPolicyPurpose>>,
     refuse_operation: AtomicBool,
+    /// Owner tiers for the controller and the hosted-operation duty.
+    tiers: Mutex<(
+        meerkat_core::authorization::OperationReviewTier,
+        meerkat_core::authorization::OperationReviewTier,
+    )>,
 }
 
 impl LocalWorkPolicy for RoleFixturePolicy {
@@ -1044,10 +1119,15 @@ impl LocalWorkPolicy for RoleFixturePolicy {
                 "web_search"
             }
         };
+        let (controller_tier, operation_tier) = *self.tiers.lock().expect("tiers");
         Ok(LocalPolicyAllowance {
             operation_values: vec![tuple(action, "public")],
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: 2_000,
+            review_tier: match purpose {
+                LocalPolicyPurpose::Controller => controller_tier,
+                LocalPolicyPurpose::Operation => operation_tier,
+            },
         })
     }
 }
@@ -1066,6 +1146,10 @@ fn hosted_controller_conjoins_distinct_duties_without_cross_applying_action_ceil
         admitted: admitted.clone(),
         calls: Mutex::new(Vec::new()),
         refuse_operation: AtomicBool::new(false),
+        tiers: Mutex::new((
+            meerkat_core::authorization::OperationReviewTier::R1,
+            meerkat_core::authorization::OperationReviewTier::R1,
+        )),
     });
     let publication = LocalAuthorizationPublication::new();
     let compiler = LocalWorkAuthorization::new(
@@ -1098,6 +1182,69 @@ fn hosted_controller_conjoins_distinct_duties_without_cross_applying_action_ceil
             false,
         ))
         .expect("bare controller remains available");
+}
+
+/// The compiled decision keeps the STRICTEST tier over every contributing
+/// duty and every context source/audience rule, in either order. A min (or
+/// first/last-wins) combination fails this test.
+#[test]
+fn review_tier_is_the_strictest_over_duties_and_context_rules_in_either_order() {
+    use meerkat_core::authorization::OperationReviewTier::{R1, R3};
+    for (first, second) in [(R1, R3), (R3, R1)] {
+        let mut retained = association(ExecutionRestrictions::unrestricted())
+            .candidate()
+            .clone();
+        retained.controller_ceiling.actions =
+            ExactRestriction::exact([tuple("infer", "public").action]);
+        retained.admitted_ceiling.actions =
+            ExactRestriction::exact([tuple("web_search", "public").action]);
+        let admitted = InputAuthorityAssociation::new(retained).expect("separate ceilings");
+        let policy = Arc::new(RoleFixturePolicy {
+            admitted: admitted.clone(),
+            calls: Mutex::new(Vec::new()),
+            refuse_operation: AtomicBool::new(false),
+            tiers: Mutex::new((first, second)),
+        });
+        let compiler = LocalWorkAuthorization::new(
+            Arc::new(admitted),
+            policy,
+            LocalAuthorizationPublication::new(),
+            Arc::new(FixtureClock::new()),
+        );
+        let prepared = compiler
+            .prepare(&model_binding(
+                ModelAuthorizationUse::ControllerInference,
+                true,
+            ))
+            .expect("both duties allow");
+        assert_eq!(
+            prepared.review_tier(),
+            R3,
+            "duties ({first:?}, {second:?}) keep the strictest tier"
+        );
+
+        let clock: Arc<dyn LocalAuthorizationClock> = Arc::new(FixtureClock::new());
+        let allowance = |review_tier| LocalPolicyAllowance {
+            operation_values: vec![tuple("read", "public")],
+            restrictions: ExecutionRestrictions::unrestricted(),
+            expires_at_ms: 2_000,
+            review_tier,
+        };
+        let observed = super::compile_context_control(
+            &LocalAuthorizationPublication::new(),
+            &clock,
+            &read_binding(),
+            |_now| Ok(vec![allowance(first), allowance(second)]),
+        );
+        assert_eq!(
+            observed
+                .result
+                .expect("source and audience rules allow")
+                .review_tier(),
+            R3,
+            "context rules ({first:?}, {second:?}) keep the strictest tier"
+        );
+    }
 }
 
 #[test]

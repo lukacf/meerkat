@@ -619,6 +619,29 @@ impl JobManager {
         tool_call_id: &str,
         run_id: Option<&meerkat_core::RunId>,
     ) -> Result<JobId, ShellError> {
+        self.spawn_job_for_call_in_run_entering(
+            command,
+            working_dir,
+            timeout_secs,
+            tool_call_id,
+            run_id,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::spawn_job_for_call_in_run`], running the call's single
+    /// native entry step immediately before the durable job handoff. A
+    /// refusal publishes no job and spawns nothing.
+    pub(crate) async fn spawn_job_for_call_in_run_entering(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: &str,
+        run_id: Option<&meerkat_core::RunId>,
+        entry: super::custody_spawn::EntryHook<'_>,
+    ) -> Result<JobId, ShellError> {
         self.spawn_runner_for_call(
             command,
             working_dir,
@@ -627,6 +650,7 @@ impl JobManager {
             run_id,
             None,
             RestartClass::NonResumable,
+            entry,
         )
         .await
     }
@@ -662,6 +686,32 @@ impl JobManager {
         run_id: Option<&meerkat_core::RunId>,
         options: MonitorStartOptions,
     ) -> Result<JobId, ShellError> {
+        self.spawn_monitor_for_call_in_run_entering(
+            command,
+            working_dir,
+            timeout_secs,
+            tool_call_id,
+            run_id,
+            options,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::spawn_monitor_for_call_in_run`], running the call's single
+    /// native entry step immediately before the durable job handoff, after
+    /// every local validation step. A refusal publishes no job.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn spawn_monitor_for_call_in_run_entering(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: &str,
+        run_id: Option<&meerkat_core::RunId>,
+        options: MonitorStartOptions,
+        entry: super::custody_spawn::EntryHook<'_>,
+    ) -> Result<JobId, ShellError> {
         if options.restart_class == RestartClass::Adoptable {
             return Err(shell_io(
                 "agent-authored script monitors cannot claim adoptable restart semantics",
@@ -689,6 +739,7 @@ impl JobManager {
                 delivery: options.delivery,
             }),
             options.restart_class,
+            entry,
         )
         .await
     }
@@ -703,6 +754,7 @@ impl JobManager {
         run_id: Option<&meerkat_core::RunId>,
         monitor: Option<MonitorRunnerSpecification>,
         restart_class: RestartClass,
+        entry: super::custody_spawn::EntryHook<'_>,
     ) -> Result<JobId, ShellError> {
         if !self.exports_canonical_async_ops() {
             return Err(shell_io(
@@ -744,19 +796,6 @@ impl JobManager {
         let encoded_spec = serde_json::to_string(&runner_spec).map_err(|error| {
             shell_io(format!("cannot encode shell runner specification: {error}"))
         })?;
-        let spec_blob = durable
-            .blob_store
-            .put_artifact(SHELL_RUNNER_MEDIA_TYPE, &encoded_spec)
-            .await
-            .map_err(|error| {
-                shell_io(format!(
-                    "cannot persist shell runner specification: {error}"
-                ))
-            })?;
-        let spec_ref =
-            RunnerSpecificationRef::new(spec_blob.blob_id.to_string()).map_err(shell_job_error)?;
-        let canonical_arguments_hash =
-            CanonicalArgumentsHash::new(spec_blob.blob_id.to_string()).map_err(shell_job_error)?;
         let stable_call = validate_call_identity(tool_call_id)?;
         let runner_label = if monitor.is_some() {
             "monitor"
@@ -787,6 +826,26 @@ impl JobManager {
                 RunnerIdentity::new("meerkat.shell", "v1").map_err(shell_job_error)?,
             )
         };
+        // Reviewed entry boundary for a detached call: before its first
+        // externally visible write (the durable runner specification
+        // artifact), after pure validation only. A refusal persists no
+        // command or runner data, publishes no job and spawns nothing. The
+        // artifact, the job handoff and the later spawn by the job owner are
+        // this one entered effect, not further entries.
+        super::custody_spawn::enter_physical(entry).map_err(ShellError::Io)?;
+        let spec_blob = durable
+            .blob_store
+            .put_artifact(SHELL_RUNNER_MEDIA_TYPE, &encoded_spec)
+            .await
+            .map_err(|error| {
+                shell_io(format!(
+                    "cannot persist shell runner specification: {error}"
+                ))
+            })?;
+        let spec_ref =
+            RunnerSpecificationRef::new(spec_blob.blob_id.to_string()).map_err(shell_job_error)?;
+        let canonical_arguments_hash =
+            CanonicalArgumentsHash::new(spec_blob.blob_id.to_string()).map_err(shell_job_error)?;
         let spec = JobSpec::new(
             durable.realm_id.clone(),
             durable.origin_session_id.clone(),
@@ -925,6 +984,7 @@ impl JobManager {
                 directory: &resolved_dir,
                 environment: &environment,
             },
+            None,
             OwnedProcessGroup::new,
         )
         .await;
@@ -935,17 +995,27 @@ impl JobManager {
         } = match spawned {
             Ok(spawned) => spawned,
             Err(error) => {
-                terminal_fail(&service, &receipt.job_id, write, "shell_spawn_failed").await;
+                let confinement_code = confinement_spawn_failure_code(&error);
+                terminal_fail(
+                    &service,
+                    &receipt.job_id,
+                    write,
+                    confinement_code.unwrap_or("shell_spawn_failed"),
+                )
+                .await;
                 match durable
                     .delivery_projector
                     .project_job(public_job_id.as_ref())
                     .await
                 {
                     Ok(()) => {
-                        if let Err(projection_error) = self
-                            .ops_registry
-                            .fail_operation(&operation_id, format!("shell spawn failed: {error}"))
-                        {
+                        if let Err(projection_error) = self.ops_registry.fail_operation(
+                            &operation_id,
+                            confinement_code.map_or_else(
+                                || format!("shell spawn failed: {error}"),
+                                str::to_owned,
+                            ),
+                        ) {
                             warn!(
                                 job_id = %public_job_id,
                                 %projection_error,
@@ -1093,6 +1163,7 @@ impl JobManager {
                 directory: &resolved_dir,
                 environment: &environment,
             },
+            None,
             OwnedProcessGroup::new,
         )
         .await;
@@ -1107,7 +1178,8 @@ impl JobManager {
                     &service,
                     &stored.job_id,
                     write,
-                    "monitor_recovery_spawn_failed",
+                    confinement_spawn_failure_code(&error)
+                        .unwrap_or("monitor_recovery_spawn_failed"),
                 )
                 .await;
                 return Err(ShellError::Io(error));
@@ -1225,14 +1297,27 @@ impl JobManager {
     }
 
     pub async fn cancel_job(&self, job_id: &JobId) -> Result<CancelJobDisposition, ShellError> {
+        self.cancel_job_entering(job_id, None).await
+    }
+
+    /// The single native entry step runs after the job lookup and terminal
+    /// validation, immediately before the first cancellation effect: the
+    /// durable `request_cancel` (or, without durable storage, the synthetic
+    /// projection change). A refusal requests nothing and signals nothing.
+    pub(crate) async fn cancel_job_entering(
+        &self,
+        job_id: &JobId,
+        entry: super::custody_spawn::EntryHook<'_>,
+    ) -> Result<CancelJobDisposition, ShellError> {
         self.ensure_recovered().await?;
         if self.durable.is_none()
             && let Some(projection) = self.projections.lock().await.get_mut(job_id)
         {
-            projection.view.status = JobStatus::Cancelled { duration_secs: 0.0 };
             let operation_id = self
                 .canonical_operation_for_job(job_id)
                 .ok_or_else(|| ShellError::JobNotFound(job_id.to_string()))?;
+            super::custody_spawn::enter_physical(entry)?;
+            projection.view.status = JobStatus::Cancelled { duration_secs: 0.0 };
             self.ops_registry
                 .cancel_operation(&operation_id, Some("cancelled synthetic operation".into()))
                 .map_err(shell_ops_error)?;
@@ -1249,6 +1334,7 @@ impl JobManager {
         if snapshot.terminal_result.is_some() {
             return Err(ShellError::JobNotRunning);
         }
+        super::custody_spawn::enter_physical(entry)?;
         let requested = durable
             .service()
             .request_cancel(&domain_id)
@@ -2771,6 +2857,22 @@ async fn load_runner_spec(
     Ok(spec)
 }
 
+/// Preserve the backend's bounded mechanical refusal in the existing durable
+/// failure code. IO text, errno and nested custody errors do not identify a
+/// confinement refusal.
+fn confinement_spawn_failure_code(error: &std::io::Error) -> Option<&'static str> {
+    use meerkat_core::confinement::ConfinementRefusal;
+
+    let refusal = error.get_ref()?.downcast_ref::<ConfinementRefusal>()?;
+    Some(match refusal {
+        ConfinementRefusal::InvalidRequirement => "confinement_refused_invalid_requirement",
+        ConfinementRefusal::InvalidLaunch => "confinement_refused_invalid_launch",
+        ConfinementRefusal::UnsupportedRequirement => "confinement_refused_unsupported_requirement",
+        ConfinementRefusal::BackendUnavailable => "confinement_refused_backend_unavailable",
+        ConfinementRefusal::PreparationFailed => "confinement_refused_preparation_failed",
+    })
+}
+
 async fn terminal_fail(
     service: &DetachedJobService,
     job_id: &meerkat_jobs::JobId,
@@ -3475,6 +3577,376 @@ mod durable_tests {
         durable_fixture_with_projector(temp, session_id, Arc::new(NoopDeliveryProjector))
     }
 
+    #[test]
+    fn durable_spawn_code_preserves_only_exact_confinement_refusals() {
+        use meerkat_core::confinement::ConfinementRefusal;
+
+        for (refusal, code) in [
+            (
+                ConfinementRefusal::InvalidRequirement,
+                "confinement_refused_invalid_requirement",
+            ),
+            (
+                ConfinementRefusal::InvalidLaunch,
+                "confinement_refused_invalid_launch",
+            ),
+            (
+                ConfinementRefusal::UnsupportedRequirement,
+                "confinement_refused_unsupported_requirement",
+            ),
+            (
+                ConfinementRefusal::BackendUnavailable,
+                "confinement_refused_backend_unavailable",
+            ),
+            (
+                ConfinementRefusal::PreparationFailed,
+                "confinement_refused_preparation_failed",
+            ),
+        ] {
+            assert_eq!(
+                confinement_spawn_failure_code(&std::io::Error::other(refusal)),
+                Some(code)
+            );
+            assert!(JobFailureCode::new(code).is_ok());
+        }
+        for error in [
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "ordinary IO"),
+            std::io::Error::other(ConfinementRefusal::BackendUnavailable.to_string()),
+            std::io::Error::other(std::io::Error::other(
+                ConfinementRefusal::BackendUnavailable,
+            )),
+            std::io::Error::other(super::super::ProcessCustodyError::InvalidScope(
+                "scope".into(),
+            )),
+        ] {
+            assert_eq!(confinement_spawn_failure_code(&error), None);
+        }
+    }
+
+    #[cfg(unix)]
+    fn configure_spawn_failure(config: &mut ShellConfig, temp: &TempDir, confinement: bool) {
+        use meerkat_core::confinement::{
+            ConfinementSpec, FilesystemAccess, IpNetworkAccess, PlatformBaseline,
+        };
+        use std::os::unix::fs::PermissionsExt;
+
+        if confinement {
+            config.confinement = super::super::config::ShellConfinement::Required {
+                requirement: ConfinementSpec {
+                    baseline: PlatformBaseline::CommandRuntimeV1,
+                    read: FilesystemAccess::Unrestricted,
+                    write: FilesystemAccess::Unrestricted,
+                    deny_read: vec![],
+                    deny_write: vec![],
+                    network: IpNetworkAccess::Denied,
+                    unix_connect: vec![],
+                    require_descendant_termination: true,
+                }
+                .try_into()
+                .expect("valid requirement with unsupported descendant guarantee"),
+            };
+        } else {
+            // Resolution accepts this existing path; actual spawn produces
+            // ordinary permission IO before any target body can run.
+            let shell = temp.path().join("non-executable-shell");
+            std::fs::write(&shell, "not executable").expect("fixture shell");
+            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o600))
+                .expect("remove execute permission");
+            config.shell_path = Some(shell);
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_failed_spawn_snapshot(
+        snapshot: &meerkat_jobs::JobSnapshot,
+        code: &str,
+        attempts: u64,
+    ) {
+        let terminal = JobTerminalResult::Failed {
+            code: JobFailureCode::new(code).expect("bounded code"),
+            detail_ref: None,
+        };
+        assert_eq!(snapshot.phase, JobPhase::Failed);
+        assert_eq!(snapshot.attempt_count, attempts);
+        assert_eq!(snapshot.terminal_result.as_ref(), Some(&terminal));
+        let terminal_entries = snapshot
+            .outbox
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                meerkat_jobs::JobOutboxPayload::Terminal(value) => Some(value),
+                meerkat_jobs::JobOutboxPayload::Notification(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_entries, vec![&terminal]);
+    }
+
+    #[cfg(unix)]
+    async fn assert_separate_trusted_job_completes(manager: &JobManager) {
+        // The caller explicitly constructed a new TrustedHost manager. This
+        // is unrelated permitted work, never a fallback for the refused job.
+        let job = manager
+            .spawn_job_for_call("printf permitted", None, 5, "separate-permitted-work")
+            .await
+            .expect("permitted new job");
+        let completed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let status = manager
+                    .get_status(&job)
+                    .await
+                    .expect("status")
+                    .expect("job");
+                if !matches!(status.status, JobStatus::Queued | JobStatus::Running { .. }) {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("permitted job completion");
+        assert!(
+            matches!(completed.status, JobStatus::Completed { stdout, .. } if stdout == "permitted")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn durable_spawn_refusal_and_io_remain_distinct_after_sqlite_reopen() {
+        use crate::builtin::BuiltinToolError;
+        use meerkat_core::confinement::ConfinementRefusal;
+
+        for monitor in [false, true] {
+            for confinement in [true, false] {
+                let temp = TempDir::new().expect("tempdir");
+                let session = SessionId::new();
+                let (runtime, store, mut config) = durable_fixture(&temp, session.clone());
+                configure_spawn_failure(&mut config, &temp, confinement);
+                let registry: Arc<dyn OpsLifecycleRegistry> =
+                    Arc::new(RuntimeOpsLifecycleRegistry::new());
+                let manager = JobManager::new(config)
+                    .bind_canonical_async_ops(session.clone(), registry.clone())
+                    .with_durable_job_runtime(runtime);
+                let command = "printf entered > must-not-enter";
+                let error = if monitor {
+                    manager
+                        .spawn_monitor_for_call(
+                            command,
+                            None,
+                            5,
+                            "refused-call",
+                            MonitorStartOptions::default(),
+                        )
+                        .await
+                } else {
+                    manager
+                        .spawn_job_for_call(command, None, 5, "refused-call")
+                        .await
+                }
+                .expect_err("launch must refuse before target entry");
+                if confinement {
+                    assert!(matches!(
+                        BuiltinToolError::from(error),
+                        BuiltinToolError::ConfinementRefused {
+                            refusal: ConfinementRefusal::UnsupportedRequirement,
+                        }
+                    ));
+                } else {
+                    assert!(matches!(
+                        BuiltinToolError::from(error),
+                        BuiltinToolError::ExecutionFailed(_)
+                    ));
+                }
+                let code = if confinement {
+                    "confinement_refused_unsupported_requirement"
+                } else {
+                    "shell_spawn_failed"
+                };
+                let jobs = store
+                    .list_for_origin("test-realm", &session, 10)
+                    .await
+                    .expect("stored jobs");
+                assert_eq!(jobs.len(), 1);
+                let id = jobs[0].job_id.clone();
+                let public_id = JobId::from_string(id.as_str());
+                let service = DetachedJobService::new(store.clone());
+                let before = service.get(&id).await.expect("snapshot").expect("job");
+                assert_failed_spawn_snapshot(&before, code, 1);
+                assert!(!temp.path().join("must-not-enter").exists());
+                assert!(manager.active_attempts.lock().await.is_empty());
+                if confinement {
+                    let operation = registry
+                        .snapshot(&operation_id_for_job(&public_id))
+                        .expect("operation snapshot")
+                        .expect("operation");
+                    assert_eq!(
+                        operation.terminal_outcome,
+                        Some(
+                            meerkat_core::ops_lifecycle::OperationTerminalOutcome::Failed {
+                                error: code.into()
+                            }
+                        )
+                    );
+                }
+                // Every SQLite owner is dropped before opening a new store.
+                drop(service);
+                drop(manager);
+                drop(store);
+                drop(registry);
+                let (runtime, reopened_store, config) = durable_fixture(&temp, session.clone());
+                assert!(matches!(
+                    config.confinement,
+                    super::super::config::ShellConfinement::TrustedHost
+                ));
+                let reopened = JobManager::new(config)
+                    .bind_canonical_async_ops(session, Arc::new(RuntimeOpsLifecycleRegistry::new()))
+                    .with_durable_job_runtime(runtime);
+                let status = reopened
+                    .get_status(&public_id)
+                    .await
+                    .expect("reopen status")
+                    .expect("job");
+                assert!(matches!(status.status, JobStatus::Failed { error, .. } if error == code));
+                assert_separate_trusted_job_completes(&reopened).await;
+                let after = DetachedJobService::new(reopened_store)
+                    .get(&id)
+                    .await
+                    .expect("retained snapshot")
+                    .expect("job");
+                assert_failed_spawn_snapshot(&after, code, 1);
+                assert_eq!(after.current_attempt_id, before.current_attempt_id);
+                assert_eq!(after.current_fence, before.current_fence);
+                assert!(
+                    !temp.path().join("must-not-enter").exists(),
+                    "terminal refused work must not restart"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn recovered_monitor_spawn_refusal_is_durable_without_another_retry() {
+        use crate::builtin::BuiltinToolError;
+        use meerkat_core::confinement::ConfinementRefusal;
+
+        for confinement in [true, false] {
+            let temp = TempDir::new().expect("tempdir");
+            let session = SessionId::new();
+            let (runtime, store, mut config) = durable_fixture(&temp, session.clone());
+            let service = DetachedJobService::new(store.clone());
+            let entry_marker = temp.path().join("recovered-must-not-enter");
+            let receipt = service
+                .submit(
+                    test_monitor_job_spec_with_command(
+                        &runtime,
+                        session.clone(),
+                        "recover-refused",
+                        "printf entered > recovered-must-not-enter",
+                    )
+                    .await,
+                )
+                .await
+                .expect("submit");
+            let first = service
+                .claim_attempt(
+                    &receipt.job_id,
+                    AttemptClaim::new(
+                        WorkerId::new("before-loss").expect("worker"),
+                        1,
+                        2,
+                        RunnerHandleRef::new("lost-monitor").expect("handle"),
+                    ),
+                )
+                .await
+                .expect("first claim");
+            service
+                .record_checkpoint(
+                    &receipt.job_id,
+                    (&first).into(),
+                    meerkat_jobs::CheckpointRef::new("retained-checkpoint").expect("checkpoint"),
+                    2,
+                )
+                .await
+                .expect("checkpoint");
+            configure_spawn_failure(&mut config, &temp, confinement);
+            let manager = JobManager::new(config)
+                .bind_canonical_async_ops(
+                    session.clone(),
+                    Arc::new(RuntimeOpsLifecycleRegistry::new()),
+                )
+                .with_durable_job_runtime(runtime);
+            let error = manager
+                .ensure_recovered()
+                .await
+                .expect_err("recovered launch must fail before entry");
+            assert!(
+                !entry_marker.exists(),
+                "refused recovery must not enter the target"
+            );
+            if confinement {
+                assert!(matches!(
+                    BuiltinToolError::from(error),
+                    BuiltinToolError::ConfinementRefused {
+                        refusal: ConfinementRefusal::UnsupportedRequirement,
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    BuiltinToolError::from(error),
+                    BuiltinToolError::ExecutionFailed(_)
+                ));
+            }
+            let code = if confinement {
+                "confinement_refused_unsupported_requirement"
+            } else {
+                "monitor_recovery_spawn_failed"
+            };
+            let before = service
+                .get(&receipt.job_id)
+                .await
+                .expect("snapshot")
+                .expect("job");
+            assert_failed_spawn_snapshot(&before, code, 2);
+            assert_ne!(before.current_attempt_id.as_ref(), Some(&first.attempt_id));
+            assert_eq!(before.current_fence.get(), first.fence.get() + 1);
+            assert_eq!(
+                before
+                    .checkpoint_ref
+                    .as_ref()
+                    .map(meerkat_jobs::CheckpointRef::as_str),
+                Some("retained-checkpoint")
+            );
+            assert!(manager.active_attempts.lock().await.is_empty());
+            drop(service);
+            drop(manager);
+            drop(store);
+            let (runtime, reopened_store, config) = durable_fixture(&temp, session.clone());
+            let reopened = JobManager::new(config)
+                .bind_canonical_async_ops(session, Arc::new(RuntimeOpsLifecycleRegistry::new()))
+                .with_durable_job_runtime(runtime);
+            let public_id = JobId::from_string(receipt.job_id.as_str());
+            let status = reopened
+                .get_status(&public_id)
+                .await
+                .expect("reopen status")
+                .expect("job");
+            assert!(matches!(status.status, JobStatus::Failed { error, .. } if error == code));
+            assert_separate_trusted_job_completes(&reopened).await;
+            let after = DetachedJobService::new(reopened_store)
+                .get(&receipt.job_id)
+                .await
+                .expect("retained snapshot")
+                .expect("job");
+            assert_failed_spawn_snapshot(&after, code, 2);
+            assert_eq!(after.current_attempt_id, before.current_attempt_id);
+            assert_eq!(after.current_fence, before.current_fence);
+            assert_eq!(after.checkpoint_ref, before.checkpoint_ref);
+            assert!(
+                !entry_marker.exists(),
+                "reopen and permitted work must not restart refused recovery"
+            );
+        }
+    }
+
     fn test_job_spec(session_id: SessionId) -> JobSpec {
         JobSpec::new(
             "test-realm",
@@ -3497,8 +3969,17 @@ mod durable_tests {
         session_id: SessionId,
         submission_key: &str,
     ) -> JobSpec {
+        test_monitor_job_spec_with_command(runtime, session_id, submission_key, "true").await
+    }
+
+    async fn test_monitor_job_spec_with_command(
+        runtime: &DurableShellJobRuntime,
+        session_id: SessionId,
+        submission_key: &str,
+        command: &str,
+    ) -> JobSpec {
         let runner_spec = ShellRunnerSpecification {
-            command: "true".to_string(),
+            command: command.to_string(),
             working_dir: ".".to_string(),
             placement: ExecutionPlacement::new(
                 None::<String>,
@@ -3900,6 +4381,194 @@ mod durable_tests {
         assert!(
             recorded.contains("\"monitor\""),
             "spawner is a monitor: {recorded}"
+        );
+    }
+
+    /// Every file the durable blob store wrote under `root`.
+    fn blob_files(root: &std::path::Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() { blob_files(&path) } else { 1 }
+            })
+            .sum()
+    }
+
+    /// A detached call's reviewed boundary precedes its first externally
+    /// visible write, the durable runner specification artifact: a refused
+    /// entry (shell or monitor) writes no artifact and publishes no job, so
+    /// no command or runner data persists and no job record can claim a
+    /// spawn failure. The paired allowed shell and monitor entries write
+    /// their artifacts and publish.
+    #[tokio::test]
+    async fn refused_entry_before_the_durable_handoff_publishes_no_job() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, _job_store, config) = durable_fixture(&temp, session_id.clone());
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id.clone(), registry)
+            .with_durable_job_runtime(runtime);
+        let refusal = meerkat_core::ToolError::ReviewUnavailable {
+            kind: meerkat_core::ReviewUnavailableKind::DeadlineExpired,
+        };
+        let refuse: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) =
+            &|| Err(refusal.clone());
+        let refused_shell = manager
+            .spawn_job_for_call_in_run_entering(
+                "printf refused",
+                None,
+                5,
+                "refused-shell",
+                None,
+                Some(refuse),
+            )
+            .await
+            .expect_err("refused shell entry");
+        let refused_monitor = manager
+            .spawn_monitor_for_call_in_run_entering(
+                "printf refused",
+                None,
+                5,
+                "refused-monitor",
+                None,
+                MonitorStartOptions::default(),
+                Some(refuse),
+            )
+            .await
+            .expect_err("refused monitor entry");
+        for error in [refused_shell, refused_monitor] {
+            let converted = crate::builtin::BuiltinToolError::from(error);
+            assert!(
+                matches!(
+                    &converted,
+                    crate::builtin::BuiltinToolError::EntryRefused(typed) if **typed == refusal
+                ),
+                "typed entry refusal survives, got {converted:?}"
+            );
+        }
+        assert!(
+            manager.list_jobs().await.expect("jobs").is_empty(),
+            "no job was published for a refused entry"
+        );
+        let blobs = temp.path().join("blobs");
+        assert_eq!(
+            blob_files(&blobs),
+            0,
+            "a refused entry persists no runner specification artifact"
+        );
+
+        let allow: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) = &|| Ok(());
+        manager
+            .spawn_job_for_call_in_run_entering(
+                "printf allowed",
+                None,
+                5,
+                "allowed-shell",
+                None,
+                Some(allow),
+            )
+            .await
+            .expect("allowed entry publishes the job");
+        assert_eq!(manager.list_jobs().await.expect("jobs").len(), 1);
+        let after_shell = blob_files(&blobs);
+        assert!(
+            after_shell > 0,
+            "the allowed shell entry wrote its artifact"
+        );
+        manager
+            .spawn_monitor_for_call_in_run_entering(
+                "printf allowed",
+                None,
+                5,
+                "allowed-monitor",
+                None,
+                MonitorStartOptions::default(),
+                Some(allow),
+            )
+            .await
+            .expect("allowed entry publishes the monitor");
+        assert_eq!(manager.list_jobs().await.expect("jobs").len(), 2);
+        assert!(
+            blob_files(&blobs) > after_shell,
+            "the allowed monitor entry wrote its own artifact"
+        );
+    }
+
+    /// A cancel call's reviewed boundary is the durable cancellation
+    /// request, after the job lookup and terminal validation: a refused entry
+    /// requests nothing (the job keeps running), an unknown job still fails
+    /// its lookup without spending, and the allowed entry requests the cancel.
+    #[tokio::test]
+    async fn refused_entry_before_request_cancel_leaves_the_job_running() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, config) = durable_fixture(&temp, session_id.clone());
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id.clone(), registry)
+            .with_durable_job_runtime(runtime);
+        let job_id = manager
+            .spawn_job_for_call("sleep 30", None, 60, "cancel-target")
+            .await
+            .expect("spawn");
+        let domain_id = meerkat_jobs::JobId::new(job_id.to_string()).expect("domain id");
+        let service = DetachedJobService::new(job_store);
+
+        let entries = std::sync::atomic::AtomicUsize::new(0);
+        let refusal = meerkat_core::ToolError::ReviewUnsatisfied {
+            kind: meerkat_core::ReviewUnsatisfiedKind::HumanConsentRequired,
+        };
+        let refuse: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) = &|| {
+            entries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(refusal.clone())
+        };
+        let missing = manager
+            .cancel_job_entering(&JobId::from_string("job_missing"), Some(refuse))
+            .await;
+        assert!(missing.is_err(), "an unknown job fails its lookup");
+        assert_eq!(
+            entries.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a failed lookup never reaches the entry"
+        );
+
+        let refused = manager
+            .cancel_job_entering(&job_id, Some(refuse))
+            .await
+            .expect_err("refused cancel entry");
+        match crate::builtin::BuiltinToolError::from(refused) {
+            crate::builtin::BuiltinToolError::EntryRefused(typed) => assert_eq!(*typed, refusal),
+            other => panic!("typed entry refusal survives, got {other:?}"),
+        }
+        let snapshot = service
+            .get(&domain_id)
+            .await
+            .expect("snapshot")
+            .expect("job");
+        assert!(
+            !snapshot.cancel_requested,
+            "a refused entry requests no cancel"
+        );
+        assert!(snapshot.terminal_result.is_none(), "the job keeps running");
+
+        let allow: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) = &|| Ok(());
+        manager
+            .cancel_job_entering(&job_id, Some(allow))
+            .await
+            .expect("allowed entry requests the cancel");
+        let snapshot = service
+            .get(&domain_id)
+            .await
+            .expect("snapshot")
+            .expect("job");
+        assert!(
+            snapshot.cancel_requested || snapshot.terminal_result.is_some(),
+            "the allowed entry requested the cancel"
         );
     }
 

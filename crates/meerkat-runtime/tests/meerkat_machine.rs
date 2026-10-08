@@ -38,6 +38,7 @@ fn make_prompt(text: &str) -> Input {
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -2066,6 +2067,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2805,7 +2807,7 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
     );
 }
 
-/// Field regression (household fleet, 2026-08-12, domain:home): a turn failed,
+/// Field regression (production deployment, 2026-08-12): a turn failed,
 /// its staged input was rolled back to Queued, and nothing re-armed the runtime
 /// loop. The input sat queued for 21 minutes with zero further attempts and
 /// zero refusals; only an app restart - which wakes on
@@ -5802,7 +5804,7 @@ async fn completed_terminal_then_failing_session(
     (adapter, sid)
 }
 
-/// Field regression (household fleet, 0.8.23). A run whose turn reached a
+/// Field regression (production deployment, 0.8.23). A run whose turn reached a
 /// `Completed` terminal and whose runtime-level completion then failed was
 /// refused as an incoherent terminal pair. That refusal corrupted the recovery
 /// carrier, which ended the runtime loop task, and the session could not run
@@ -5895,7 +5897,7 @@ async fn completed_terminal_then_failed_runtime_completion_refuses_to_replay_the
     let (outcome, handle) = adapter
         .accept_input_with_completion(
             &sid,
-            make_prompt("one household instruction, executed exactly once"),
+            make_prompt("one user instruction, executed exactly once"),
         )
         .await
         .expect("input should be accepted");
@@ -5995,7 +5997,7 @@ async fn completed_terminal_then_failed_runtime_completion_retires_the_shell_and
         .expect("runtime executor registration should succeed");
 
     let (outcome, handle) = adapter
-        .accept_input_with_completion(&sid, make_prompt("persisted household instruction"))
+        .accept_input_with_completion(&sid, make_prompt("persisted user instruction"))
         .await
         .expect("input should be accepted");
     assert!(outcome.is_accepted());
@@ -6325,7 +6327,7 @@ async fn directed_caller_on_post_completion_failure_observes_teardown_not_the_ru
     let interaction_uuid = meerkat_core::time_compat::new_uuid_v7();
     let input = meerkat_runtime::mob_adapter::create_tracked_flow_step_input(
         "directed-step",
-        meerkat_core::types::ContentInput::Text("directed household instruction".to_string()),
+        meerkat_core::types::ContentInput::Text("directed user instruction".to_string()),
         "directed-flow",
         None,
         &interaction_uuid.to_string(),

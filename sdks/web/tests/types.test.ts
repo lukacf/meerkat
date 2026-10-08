@@ -512,6 +512,11 @@ function handleEvent(event: AgentEvent): string {
       // typed close cause; `reopen_recommended` is true only for a media
       // fault while the session's one reopen is still available.
       return `${event.type}:${event.session_id}:${event.channel_id}:${event.reason}:${event.reopen_recommended}`;
+    case 'request_reasoning_lowered':
+      // One provider attempt of a turn with a reasoning preference: what the
+      // batch requested and what this attempt sent (absent when the batch
+      // applies no level).
+      return `${event.type}:${event.requested.disposition}:${event.outcome?.kind ?? 'none'}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

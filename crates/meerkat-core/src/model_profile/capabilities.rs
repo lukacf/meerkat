@@ -485,9 +485,22 @@ impl ThinkingSupport {
 /// the same level vocabulary; modeling it as a typed enum keeps the catalog
 /// value-domain compiler-checked instead of relying on raw string literals.
 /// Each catalog row declares its accepted subset via `effort_levels`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
-    /// OpenAI `reasoning.effort: "none"` — reasoning disabled.
+    /// OpenAI `reasoning.effort: "none"` - reasoning disabled.
     None,
     /// OpenAI realtime `reasoning.effort: "minimal"`.
     Minimal,
@@ -515,6 +528,20 @@ impl EffortLevel {
             EffortLevel::Xhigh => "xhigh",
             EffortLevel::Max => "max",
         }
+    }
+
+    /// The level a wire string names, the inverse of [`Self::as_wire_str`].
+    pub fn from_wire_str(value: &str) -> Option<Self> {
+        Some(match value {
+            "none" => EffortLevel::None,
+            "minimal" => EffortLevel::Minimal,
+            "low" => EffortLevel::Low,
+            "medium" => EffortLevel::Medium,
+            "high" => EffortLevel::High,
+            "xhigh" => EffortLevel::Xhigh,
+            "max" => EffortLevel::Max,
+            _ => return None,
+        })
     }
 }
 

@@ -48,6 +48,7 @@ fn event(sink: &NativeInputAuditSink) -> AuthorizationAuditObservation {
         execution_scope: scope(),
         run_id: Some(sink.run_id.clone()),
         context_revision: None,
+        review_attribution: None,
         observation: AuditObservation::Entry,
     }
 }
@@ -225,11 +226,13 @@ async fn existing_atomic_input_commit_persists_frozen_prefix_and_failed_cas_keep
 struct InfrastructureEntryPolicy {
     sink: Arc<dyn AuthorizationAuditSink>,
     event: AuthorizationAuditObservation,
+    allow_outcome: bool,
 }
 struct InfrastructureEntryCheck {
     sink: Arc<dyn AuthorizationAuditSink>,
     event: AuthorizationAuditObservation,
     binding: meerkat_core::authorization::PreparedAuthorizationBinding,
+    allow_outcome: bool,
 }
 impl meerkat_core::authorization::WorkAuthorization for InfrastructureEntryPolicy {
     fn prepare(
@@ -243,10 +246,15 @@ impl meerkat_core::authorization::WorkAuthorization for InfrastructureEntryPolic
             sink: self.sink.clone(),
             event: self.event.clone(),
             binding: binding.clone(),
+            allow_outcome: self.allow_outcome,
         }))
     }
 }
 impl meerkat_core::authorization::PreparedOperationAuthorization for InfrastructureEntryCheck {
+    fn review_tier(&self) -> meerkat_core::authorization::OperationReviewTier {
+        meerkat_core::authorization::OperationReviewTier::R1
+    }
+
     fn check_current(
         &self,
         binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
@@ -260,19 +268,31 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for Infrastruct
         observation: meerkat_core::authorization::OperationObservation,
     ) -> Result<(), OperationObservationError> {
         assert!(self.binding.same_operation(binding));
-        assert!(
-            matches!(
-                observation,
-                meerkat_core::authorization::OperationObservation::Entry
+        let mut event = self.event.clone();
+        match observation {
+            meerkat_core::authorization::OperationObservation::Entry => {}
+            meerkat_core::authorization::OperationObservation::Outcome(outcome)
+                if self.allow_outcome =>
+            {
+                event.observation = AuditObservation::Outcome { outcome };
+            }
+            _ => panic!(
+                "entry infrastructure failure cannot recursively emit policy refusal or outcome"
             ),
-            "entry infrastructure failure cannot recursively emit policy refusal or outcome"
-        );
-        self.sink.append(self.event.clone())
+        }
+        self.sink.append(event)
     }
 }
 fn infrastructure_entry_check(
     sink: Arc<dyn AuthorizationAuditSink>,
     event: AuthorizationAuditObservation,
+) -> meerkat_core::authorization::PreparedOperationCheck {
+    infrastructure_check(sink, event, false)
+}
+fn infrastructure_check(
+    sink: Arc<dyn AuthorizationAuditSink>,
+    event: AuthorizationAuditObservation,
+    allow_outcome: bool,
 ) -> meerkat_core::authorization::PreparedOperationCheck {
     use meerkat_core::authorization::*;
     let binding = PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
@@ -290,7 +310,14 @@ fn infrastructure_entry_check(
         }),
     });
     PreparedOperationCheck::prepare(
-        WorkAuthorizationContext::new(Arc::new(InfrastructureEntryPolicy { sink, event }), scope()),
+        WorkAuthorizationContext::new(
+            Arc::new(InfrastructureEntryPolicy {
+                sink,
+                event,
+                allow_outcome,
+            }),
+            scope(),
+        ),
         binding,
     )
     .unwrap()
@@ -337,6 +364,93 @@ fn observation_infrastructure_actual_native_poison_is_not_recovered_or_denied() 
     assert_entry_infrastructure_and_independent_sibling(infrastructure_entry_check(
         Arc::new(sink),
         observation,
+    ));
+}
+
+/// A real native pending-buffer failure after an entry observation. The HTTP
+/// status is an observation fixture: no request or physical effect runs here,
+/// and a frozen prefix is a store candidate, not proof of a durable commit.
+#[test]
+fn observation_infrastructure_native_poison_after_entry_preserves_frozen_prefix() {
+    use meerkat_core::authorization::OperationObservedOutcome;
+
+    let (audit, sink) = fixture();
+    let observation = event(&sink);
+    let check = infrastructure_check(Arc::new(sink), observation.clone(), true);
+    let entered = check.current().unwrap();
+    entered.observe_entry().unwrap();
+    let frozen = audit.freeze_for_persistence().unwrap();
+    let prefix = serde_json::to_vec(&frozen).unwrap();
+    let prior: Vec<StoredAuthorizationAuditObservation> = serde_json::from_slice(&prefix).unwrap();
+    assert_eq!(prior.len(), 1);
+    assert_eq!(prior[0].observation.operation_id, observation.operation_id);
+    assert!(matches!(
+        prior[0].observation.observation,
+        AuditObservation::Entry
+    ));
+
+    let AuditPayload::Pending(records) = &audit.0 else {
+        panic!("same live pending buffer");
+    };
+    let poisoned_records = Arc::clone(records);
+    assert!(
+        std::thread::spawn(move || {
+            let _held = poisoned_records.lock().unwrap();
+            panic!("intentional audit mutex poison after entry");
+        })
+        .join()
+        .is_err()
+    );
+
+    let error = entered
+        .observe_outcome(OperationObservedOutcome::HttpResponse { status: 200 })
+        .expect_err("the retained check cannot stage an outcome into its poisoned native sink");
+    assert_eq!(error, OperationObservationError);
+    assert!(
+        audit.freeze_for_persistence().is_err(),
+        "live poison stays unavailable"
+    );
+    assert_eq!(serde_json::to_vec(&frozen).unwrap(), prefix);
+    // Inspect the poisoned bytes only as a test oracle. Do not restore an
+    // appendable owner or clear poison to turn the failed outcome into success.
+    let poisoned = records
+        .lock()
+        .expect_err("the same pending mutex remains poisoned");
+    assert_eq!(
+        serde_json::to_vec(&**poisoned.get_ref()).unwrap(),
+        prefix,
+        "the failed outcome cannot append an Outcome, Refused, or replacement Entry"
+    );
+    drop(poisoned);
+
+    let (other_audit, other_sink) = fixture();
+    let other_event = event(&other_sink);
+    let other = infrastructure_check(Arc::new(other_sink), other_event.clone(), true);
+    let other_entered = other.current().unwrap();
+    other_entered.observe_entry().unwrap();
+    other_entered
+        .observe_outcome(OperationObservedOutcome::HttpResponse { status: 200 })
+        .unwrap();
+    let other_records: Vec<StoredAuthorizationAuditObservation> =
+        serde_json::from_value(serde_json::to_value(&other_audit).unwrap()).unwrap();
+    assert_eq!(
+        other_records.len(),
+        2,
+        "the independent native sink remains usable"
+    );
+    assert_eq!(
+        other_records[1].observation.operation_id,
+        other_event.operation_id
+    );
+    assert!(matches!(
+        other_records[0].observation.observation,
+        AuditObservation::Entry
+    ));
+    assert!(matches!(
+        other_records[1].observation.observation,
+        AuditObservation::Outcome {
+            outcome: OperationObservedOutcome::HttpResponse { status: 200 }
+        }
     ));
 }
 

@@ -39,6 +39,17 @@ impl WebSearchExecutor for AnthropicWebSearchExecutor {
         &self,
         request: WebSearchRequest,
     ) -> Result<WebSearchResult, LlmError> {
+        self.execute_web_search_authorized(request, None).await
+    }
+
+    /// The helper request carries the tool's admitted work authorization to
+    /// the factory-selected client, which prepares it against the helper's
+    /// own resolved target before any send.
+    async fn execute_web_search_authorized(
+        &self,
+        request: WebSearchRequest,
+        authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Result<WebSearchResult, LlmError> {
         if let Some(requested_provider) = request.provider
             && requested_provider != Provider::Anthropic
         {
@@ -57,6 +68,7 @@ impl WebSearchExecutor for AnthropicWebSearchExecutor {
             &self.model,
             request,
             Self::provider_tag,
+            authorization,
         )
         .await
     }
@@ -68,6 +80,7 @@ async fn execute_native_web_search(
     model: &str,
     request: WebSearchRequest,
     provider_tag: impl FnOnce(Option<serde_json::Value>) -> ProviderTag,
+    authorization: Option<meerkat_core::LlmRequestAuthorization>,
 ) -> Result<WebSearchResult, LlmError> {
     let prompt = web_search_user_prompt(&request);
     let messages = vec![
@@ -88,7 +101,14 @@ async fn execute_native_web_search(
     // failure into a stringly-typed LlmError::Unknown that erases whether the
     // search was rate-limited, auth-rejected, content-filtered, etc.
     let result = client
-        .stream_response(&messages, &[], 2048, None, Some(&provider_params))
+        .stream_response_authorized(
+            &messages,
+            &[],
+            2048,
+            None,
+            Some(&provider_params),
+            authorization,
+        )
         .await
         .map_err(map_agent_error_to_llm_error)?;
 

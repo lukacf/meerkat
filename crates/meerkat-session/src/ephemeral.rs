@@ -2175,6 +2175,10 @@ enum SessionCommand {
         authority_context: Option<MobToolAuthorityContext>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
+    GovernedSystemContextControl {
+        control: meerkat_core::service::SystemContextAppendControl,
+        reply_tx: oneshot::Sender<Result<AppendSystemContextResult, SessionControlError>>,
+    },
     AppendSystemMessageControl {
         req: AppendSystemContextRequest,
         reply_tx: oneshot::Sender<
@@ -2621,6 +2625,11 @@ impl RuntimeContextAdmissionGuard {
 struct SessionTaskControl {
     // Source-event publication remains bound to this exact actor incarnation.
     actor_witness: LiveSessionActorWitness,
+    /// The session's hosting claim (#1813), owned by the task:
+    /// released only when the task future completes, after the actor's last
+    /// durable write. Dropping the handle merely signals shutdown and does
+    /// not join, so the handle must not own it.
+    _hosting_claim: meerkat_core::session_hosting::HostingClaim,
     state_tx: watch::Sender<SessionState>,
     summary_tx: watch::Sender<SessionSummaryCache>,
     transcript_authority_tx: watch::Sender<PublishedTranscriptAuthority>,
@@ -3054,6 +3063,21 @@ pub trait SessionAgent: Send {
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError>;
 
+    /// Stage the runtime batch's resolved reasoning-effort preference for the
+    /// next run (`None` clears it). An agent that cannot lower it onto its
+    /// requests refuses a present one rather than dropping it silently.
+    fn set_turn_request_reasoning(
+        &mut self,
+        disposition: Option<meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        match disposition {
+            None => Ok(()),
+            Some(_) => Err(meerkat_core::error::AgentError::ConfigError(
+                "request reasoning preference is not supported by this session agent".to_string(),
+            )),
+        }
+    }
+
     /// Apply staged callback tool results before the next continuation turn.
     fn apply_pending_tool_results(
         &mut self,
@@ -3291,6 +3315,15 @@ pub trait SessionAgent: Send {
             "ordinary System-message control append is not supported by this session agent"
                 .to_string(),
         ))
+    }
+
+    /// Apply a native-owner context command at the actual actor mutation seam.
+    /// Unsupported agents cannot downgrade it to the unauthenticated method.
+    fn append_governed_system_context(
+        &mut self,
+        _control: meerkat_core::service::SystemContextAppendControl,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable.into())
     }
 
     /// Append one typed system notice to the canonical Session document once
@@ -3634,11 +3667,28 @@ impl SessionTable {
     }
 }
 
+/// One removed actor's completion: its exact task join, shared so that a
+/// cancelled or retried waiter awaits the same task. The abort handle only
+/// observes completion, to prune finished entries; it never aborts.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct RemovedActorExit {
+    actor: LiveSessionActorWitness,
+    finished: tokio::task::AbortHandle,
+    exit: futures::future::Shared<futures::future::BoxFuture<'static, ()>>,
+}
+
 /// In-memory session service with no persistence.
 ///
 /// Sessions are kept alive as tokio tasks. All state is lost on process exit.
 pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: SessionTable,
+    /// The tasks of actors removed from `sessions` that may still be running.
+    /// An actor task owns its session's hosting claim (#1813) until it
+    /// completes, so teardown that must hand the session to another owner
+    /// awaits these exact joins; an absent registry entry never proves exit.
+    #[cfg(not(target_arch = "wasm32"))]
+    removed_actor_exits: std::sync::Mutex<HashMap<SessionId, Vec<RemovedActorExit>>>,
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
     /// Stable outer boundary for overlapping turns and live identity/tool
     /// mutations of one logical session. Weak entries keep the same mutex
@@ -3989,6 +4039,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub fn new(builder: B, max_sessions: usize) -> Self {
         Self {
             sessions: SessionTable::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            removed_actor_exits: std::sync::Mutex::new(HashMap::new()),
             archived_views: RwLock::new(IndexMap::new()),
             turn_finalization_gates: Mutex::new(HashMap::new()),
             session_event_lines: std::sync::Mutex::new(HashMap::new()),
@@ -5150,6 +5202,116 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         handle.archive_snapshot_gate.close_for_snapshot();
         handle.state_tx.send_replace(projection);
         handle.shutdown_notify.notify_one();
+        // Dropping the rest of the handle closes the command channel; the
+        // task then drains and exits on its own. Its join is retained, never
+        // awaited here, so this discard stays non-blocking.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let SessionHandle {
+                actor_witness,
+                task_handle,
+                ..
+            } = handle;
+            self.retain_removed_actor_exit(id, actor_witness, task_handle);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn retain_removed_actor_exit(
+        &self,
+        id: &SessionId,
+        actor: LiveSessionActorWitness,
+        task: tokio::task::JoinHandle<()>,
+    ) {
+        use futures::FutureExt as _;
+        let finished = task.abort_handle();
+        let exit = async move {
+            // The task's own outcome (including a panic) is reported by the
+            // task; the waiter only needs its completion.
+            let _ = task.await;
+        }
+        .boxed()
+        .shared();
+        let mut exits = self
+            .removed_actor_exits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        exits.retain(|_, removed| {
+            removed.retain(|entry| !entry.finished.is_finished());
+            !removed.is_empty()
+        });
+        exits.entry(id.clone()).or_default().push(RemovedActorExit {
+            actor,
+            finished,
+            exit,
+        });
+    }
+
+    /// Wait until every actor removed for `id` has exited, so its hosting
+    /// claim (#1813) is released. Never call this from the actor's own task.
+    /// A cancelled wait leaves the joins retained for the next waiter.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn await_removed_actor_exit(&self, id: &SessionId) {
+        self.await_removed_actor_exits_where(id, |_| true).await;
+    }
+
+    /// Wait until the exact removed actor incarnation named by `witness` has
+    /// exited. A later actor for the same session is never waited on.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn await_removed_actor_exit_exact(&self, witness: &LiveSessionActorWitness) {
+        self.await_removed_actor_exits_where(witness.session_id(), |actor| {
+            actor.same_incarnation(witness)
+        })
+        .await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn await_removed_actor_exits_where(
+        &self,
+        id: &SessionId,
+        selected: impl Fn(&LiveSessionActorWitness) -> bool,
+    ) {
+        let pending: Vec<RemovedActorExit> = self
+            .removed_actor_exits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .map(|removed| {
+                removed
+                    .iter()
+                    .filter(|entry| selected(&entry.actor))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for entry in &pending {
+            entry.exit.clone().await;
+        }
+        let mut exits = self
+            .removed_actor_exits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(removed) = exits.get_mut(id) {
+            removed.retain(|entry| !pending.iter().any(|done| done.exit.ptr_eq(&entry.exit)));
+            if removed.is_empty() {
+                exits.remove(id);
+            }
+        }
+    }
+
+    /// Wait until every removed actor of every session has exited.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn await_all_removed_actor_exits(&self) {
+        let ids: Vec<SessionId> = self
+            .removed_actor_exits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect();
+        for id in ids {
+            self.await_removed_actor_exit(&id).await;
+        }
     }
 
     /// Prepare one exact active-turn model boundary delivery and wait until its
@@ -5961,6 +6123,21 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 ))
             })?
             .map_err(SessionError::Agent)
+    }
+
+    pub(crate) async fn append_governed_system_context(
+        &self,
+        control: meerkat_core::service::SystemContextAppendControl,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let command_tx = self.session_command_tx(control.session_id()).await?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::GovernedSystemContextControl { control, reply_tx })
+            .await
+            .map_err(|_| SessionError::Agent(AgentError::Cancelled))?;
+        reply_rx
+            .await
+            .map_err(|_| SessionError::Agent(AgentError::Cancelled))?
     }
 
     pub(crate) async fn append_system_message_control(
@@ -6781,6 +6958,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         for (session_id, handle, projection) in handles {
             self.shutdown_removed_live_session_handle(&session_id, handle, projection);
         }
+        // Shutdown is terminal: it returns only once every removed actor has
+        // finished its last durable write and released its hosting claim, so a
+        // successor owner can take the sessions.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.await_all_removed_actor_exits().await;
         match first_error {
             Some(error) => Err(error),
             None => Ok(()),
@@ -7024,6 +7206,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .build
             .as_mut()
             .and_then(|build| build.initial_work_authorization.take());
+        // The hosting intent moves into the task; reusable build options never
+        // retain a claim.
+        let hosting_intent = req
+            .build
+            .as_mut()
+            .map(|build| std::mem::take(&mut build.hosting))
+            .unwrap_or_default();
         if req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer
             && initial_work_authorization.is_some()
         {
@@ -7145,6 +7334,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 )),
             ));
         }
+        // #1813: no actor without its runtime owner's hosting claim. The claim
+        // moves into the session task below.
+        let hosting_claim = hosting_intent.resolve(&session_id)?;
         let created_at = SystemTime::now();
         let transient_turn_context_state = agent.transient_turn_context_state();
         let actor_witness =
@@ -7231,6 +7423,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Arc::clone(&deferred_turn_state),
             SessionTaskControl {
                 actor_witness: actor_witness.clone(),
+                _hosting_claim: hosting_claim,
                 state_tx,
                 summary_tx,
                 transcript_authority_tx,
@@ -7256,6 +7449,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Arc::clone(&deferred_turn_state),
             SessionTaskControl {
                 actor_witness: actor_witness.clone(),
+                _hosting_claim: hosting_claim,
                 state_tx,
                 summary_tx,
                 transcript_authority_tx,
@@ -7868,11 +8062,78 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSes
         id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError> {
+        #[cfg(feature = "runtime-machine")]
+        let governed = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|owner| owner.has_native_work_authorization_host());
+        #[cfg(feature = "runtime-machine")]
+        if governed {
+            let control =
+                meerkat_core::service::SystemContextAppendControl::unavailable(id.clone(), req)?;
+            return self.append_governed_system_context(control).await;
+        }
         let status = self
             .append_system_message_control(id, req)
             .await
             .map_err(SessionControlError::Session)?;
         Ok(AppendSystemContextResult { status })
+    }
+
+    async fn append_authenticated_system_context(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        #[cfg(feature = "runtime-machine")]
+        let prepared = {
+            let owner = self
+                .runtime_adapter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            match owner {
+                Some(owner) => owner.prepare_context_append_observed(Arc::clone(&control)),
+                None => meerkat_core::authorization::ObservedAuthorizationResult::unobserved(Err(
+                    meerkat_core::OperationAuthorizationError::Unavailable,
+                )),
+            }
+        };
+        #[cfg(not(feature = "runtime-machine"))]
+        let prepared = meerkat_core::authorization::ObservedAuthorizationResult::unobserved(Err(
+            meerkat_core::OperationAuthorizationError::Unavailable,
+        ));
+        self.append_governed_system_context(
+            meerkat_core::service::SystemContextAppendControl::from_observed_preparation(
+                control, prepared,
+            ),
+        )
+        .await
+    }
+
+    async fn append_authorized_system_context(
+        &self,
+        prepared: meerkat_core::service::PreparedSystemContextAppend,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        #[cfg(feature = "runtime-machine")]
+        {
+            let valid = self
+                .runtime_adapter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|owner| owner.owns_context_append(&prepared));
+            if valid {
+                return self
+                    .append_governed_system_context(
+                        meerkat_core::service::SystemContextAppendControl::authorized(prepared),
+                    )
+                    .await;
+            }
+        }
+        let _ = prepared;
+        Err(meerkat_core::OperationAuthorizationError::Unavailable.into())
     }
 
     async fn stage_tool_results(
@@ -8724,6 +8985,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::UpdateMobToolAuthority { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
+            SessionCommand::GovernedSystemContextControl { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(SessionError::Agent(AgentError::Cancelled).into()));
+            }
             SessionCommand::AppendSystemMessageControl { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
@@ -9017,6 +9281,9 @@ async fn session_task<A: SessionAgent>(
                 let execution_kind = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.execution_kind);
+                let request_reasoning = metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.request_reasoning_disposition);
                 let transcript_identity = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.transcript_message_identity());
@@ -9204,6 +9471,15 @@ async fn session_task<A: SessionAgent>(
 
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_turn_tool_overlay(turn_tool_overlay) {
+                    restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
+                    abort_admitted_turn(&control);
+                    let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                        Err(error),
+                    ));
+                    continue;
+                }
+                if let Err(error) = agent.set_turn_request_reasoning(request_reasoning) {
+                    let _ = agent.set_turn_tool_overlay(None);
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
@@ -10172,6 +10448,28 @@ async fn session_task<A: SessionAgent>(
                         last_assistant_text: snap.last_assistant_text,
                     });
                 }
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::GovernedSystemContextControl {
+                control: command,
+                reply_tx,
+            } => {
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => agent.append_governed_system_context(command),
+                    Err(error) => Err(SessionError::Agent(AgentError::InternalError(
+                        error.to_string(),
+                    ))
+                    .into()),
+                };
+                // Refusal may have staged a protected control observation.
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
                 let _ = reply_tx.send(result);
             }
             SessionCommand::AppendSystemMessageControl { req, reply_tx } => {

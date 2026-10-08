@@ -445,6 +445,8 @@ async fn deliver_scheduled_prompt(
         directed_interaction_ids: Vec::new(),
         auth_binding: None,
         transcript_identity: Default::default(),
+        request_reasoning: None,
+        request_reasoning_disposition: None,
     };
     let mut prompt_input = PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
     prompt_input.header.source = InputOrigin::System;
@@ -492,6 +494,7 @@ async fn deliver_scheduled_event(
         objective_id: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),

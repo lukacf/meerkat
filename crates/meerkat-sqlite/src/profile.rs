@@ -21,6 +21,10 @@
 //!   migration/diagnostic work performed by the party holding the exclusive
 //!   maintenance fence; it deliberately does not take a shared fence guard.
 //!
+//! - [`ConnectionProfile::OnlineExistingWriter`]: no-create online
+//!   administration with zero busy timeout, existing WAL and current schema.
+//!   The caller retains its strict operation fence and writer reservation.
+//!
 //! Opening a connection never runs schema DDL. Stores apply their
 //! [`crate::ledger`] domain after opening.
 //!
@@ -98,6 +102,10 @@ pub enum ConnectionProfile {
     /// default (a held lock surfaces immediately instead of stalling), never
     /// creates, never mutates pragmas. `write: false` opens read-only.
     Maintenance { write: bool },
+    /// No-create online administration. Requires existing WAL and the current
+    /// schema, with no busy waiting, migration, or journal-mode conversion.
+    /// The caller must retain a strict operation fence and actual transaction.
+    OnlineExistingWriter,
 }
 
 /// What an open under a profile does to the file's journal mode.
@@ -109,11 +117,13 @@ pub enum ConnectionProfile {
 pub enum JournalPolicy {
     /// Convert-or-confirm `journal_mode=WAL` at open, verified against the
     /// mode SQLite reports back, and fail the open when WAL cannot be
-    /// established. Every profile that serves durable read-write traffic is
-    /// here; a store that cannot get WAL must not run degraded.
+    /// established. Ordinary primary traffic establishes WAL; online
+    /// administration instead requires WAL to have been established already.
     EstablishWal,
     /// Leave the file's journal mode exactly as found.
     PreserveExisting,
+    /// Require established WAL without attempting a conversion.
+    RequireExistingWal,
 }
 
 /// The strongest filesystem no-write guarantee an open under a profile can
@@ -146,13 +156,14 @@ impl ConnectionProfile {
             Self::ReadOnly => "read-only",
             Self::Maintenance { write: true } => "maintenance(write)",
             Self::Maintenance { write: false } => "maintenance(read)",
+            Self::OnlineExistingWriter => "online-existing-writer",
         }
     }
 
     fn default_busy_timeout(self) -> Duration {
         match self {
             Self::Primary { .. } | Self::ReadOnly => SHARED_BUSY_TIMEOUT,
-            Self::Maintenance { .. } => Duration::ZERO,
+            Self::Maintenance { .. } | Self::OnlineExistingWriter => Duration::ZERO,
         }
     }
 
@@ -165,12 +176,13 @@ impl ConnectionProfile {
     /// Converting the journal mode of a database another step is about to
     /// relocate is a mutation outside that mandate, and it would leave
     /// sidecars beside bytes that are about to move. Durable serving traffic
-    /// therefore never uses that profile; it uses
-    /// [`ConnectionProfile::Primary`], which establishes and verifies WAL or
-    /// refuses the open.
+    /// therefore never uses that profile; ordinary traffic uses
+    /// [`ConnectionProfile::Primary`], and bounded online administration uses
+    /// [`ConnectionProfile::OnlineExistingWriter`]. Both require WAL.
     pub fn journal_policy(self) -> JournalPolicy {
         match self {
             Self::Primary { .. } => JournalPolicy::EstablishWal,
+            Self::OnlineExistingWriter => JournalPolicy::RequireExistingWal,
             Self::ReadOnly | Self::Maintenance { .. } => JournalPolicy::PreserveExisting,
         }
     }
@@ -178,7 +190,9 @@ impl ConnectionProfile {
     /// The strongest no-write guarantee an open under this profile makes.
     pub fn write_contact(self) -> WriteContact {
         match self {
-            Self::Primary { .. } | Self::Maintenance { write: true } => WriteContact::ReadWrite,
+            Self::Primary { .. }
+            | Self::Maintenance { write: true }
+            | Self::OnlineExistingWriter => WriteContact::ReadWrite,
             Self::ReadOnly | Self::Maintenance { write: false } => {
                 WriteContact::ReadOnlyWalSidecars
             }
@@ -224,6 +238,16 @@ pub fn open_with(
     profile: ConnectionProfile,
     options: OpenOptions,
 ) -> Result<Connection, SqliteStoreError> {
+    if profile == ConnectionProfile::OnlineExistingWriter
+        && options
+            .busy_timeout
+            .is_some_and(|timeout| !timeout.is_zero())
+    {
+        return Err(SqliteStoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "online existing writer requires zero busy timeout",
+        )));
+    }
     // Validate the file before SQLite sees it, then again once the
     // connection holds it and before any pragma or schema work runs: a file
     // replaced or linked in between is refused rather than mutated.
@@ -235,7 +259,7 @@ pub fn open_with(
             }
             Connection::open(path)?
         }
-        ConnectionProfile::Primary { create: false } => {
+        ConnectionProfile::Primary { create: false } | ConnectionProfile::OnlineExistingWriter => {
             open_existing(path, profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?
         }
         ConnectionProfile::ReadOnly => {
@@ -274,7 +298,11 @@ pub fn open_with(
     // create carries no ledger table and passes inside
     // `preflight_schema_eligibility` itself.
     for domain in options.schema_preflight {
-        crate::ledger::preflight_schema_eligibility(&conn, domain)?;
+        if profile == ConnectionProfile::OnlineExistingWriter {
+            crate::ledger::try_preflight_current_schema(&conn, domain)?;
+        } else {
+            crate::ledger::preflight_schema_eligibility(&conn, domain)?;
+        }
     }
 
     match profile.journal_policy() {
@@ -285,6 +313,17 @@ pub fn open_with(
             conn.pragma_update(None, "synchronous", "FULL")?;
         }
         JournalPolicy::PreserveExisting => {}
+        JournalPolicy::RequireExistingWal => {
+            let mode =
+                conn.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                return Err(SqliteStoreError::WalNotEstablished {
+                    path: path.to_path_buf(),
+                    actual: mode,
+                });
+            }
+            conn.pragma_update(None, "synchronous", "FULL")?;
+        }
     }
 
     Ok(conn)
@@ -559,6 +598,7 @@ mod tests {
         let path = dir.path().join("missing.sqlite3");
         for profile in [
             ConnectionProfile::Primary { create: false },
+            ConnectionProfile::OnlineExistingWriter,
             ConnectionProfile::ReadOnly,
             ConnectionProfile::Maintenance { write: true },
             ConnectionProfile::Maintenance { write: false },
@@ -594,6 +634,38 @@ mod tests {
         );
         conn.execute("INSERT INTO t VALUES (1)", [])
             .expect_err("read-only connection must reject writes");
+    }
+
+    #[test]
+    fn online_existing_writer_requires_wal_without_converting_or_waiting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("online.sqlite3");
+        seed_delete_mode_database(&path);
+        assert!(matches!(
+            open(&path, ConnectionProfile::OnlineExistingWriter),
+            Err(SqliteStoreError::WalNotEstablished { actual, .. }) if actual == "delete"
+        ));
+        let observed = open(&path, ConnectionProfile::ReadOnly).expect("unchanged file");
+        assert_eq!(journal_mode(&observed), "delete");
+        drop(observed);
+        drop(open(&path, ConnectionProfile::PRIMARY).expect("ordinary owner establishes WAL"));
+        let online = open(&path, ConnectionProfile::OnlineExistingWriter).expect("existing WAL");
+        assert_eq!(journal_mode(&online), "wal");
+        let timeout: u64 = online
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("busy timeout");
+        assert_eq!(timeout, 0);
+        let retained: i64 = online
+            .query_row("SELECT x FROM legacy", [], |row| row.get(0))
+            .expect("original contents");
+        assert_eq!(retained, 7);
+        assert!(matches!(
+            open_with(&path, ConnectionProfile::OnlineExistingWriter, OpenOptions {
+                busy_timeout: Some(Duration::from_millis(1)),
+                ..OpenOptions::default()
+            }),
+            Err(SqliteStoreError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]
@@ -804,6 +876,10 @@ mod tests {
             WriteContact::ReadWrite
         );
         assert_eq!(
+            ConnectionProfile::OnlineExistingWriter.write_contact(),
+            WriteContact::ReadWrite
+        );
+        assert_eq!(
             ConnectionProfile::ReadOnly.write_contact(),
             WriteContact::ReadOnlyWalSidecars
         );
@@ -821,6 +897,10 @@ mod tests {
         // `ConnectionProfile::journal_policy` for why.
         for (profile, expected) in [
             (ConnectionProfile::PRIMARY, JournalPolicy::EstablishWal),
+            (
+                ConnectionProfile::OnlineExistingWriter,
+                JournalPolicy::RequireExistingWal,
+            ),
             (
                 ConnectionProfile::Primary { create: false },
                 JournalPolicy::EstablishWal,

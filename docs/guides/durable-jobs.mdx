@@ -26,7 +26,7 @@ The agent-side shell tool submits a durable, non-resumable job when
 ```json
 {
   "command": "./scripts/run-security-scan",
-  "working_dir": "/srv/homecore",
+  "working_dir": "/srv/example",
   "timeout_secs": 3600,
   "background": true
 }
@@ -173,7 +173,7 @@ or working-directory context.
     "session_id": "019...",
     "submission_key": "prod-alert-watch-v1",
     "command": "./scripts/watch-alerts",
-    "working_dir": "/srv/homecore",
+    "working_dir": "/srv/example",
     "timeout_secs": 86400,
     "protocol": "framed_jsonl",
     "restart_class": "checkpoint_resumable",

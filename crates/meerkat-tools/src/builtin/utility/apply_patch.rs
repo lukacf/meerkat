@@ -1,6 +1,6 @@
 //! ApplyPatch tool for structured file edits within the project root.
 
-use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
+use crate::builtin::{BuiltinTool, BuiltinToolError, LeafEntry, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
@@ -78,6 +78,9 @@ enum ApplyPatchError {
         #[source]
         source: std::io::Error,
     },
+    /// The native entry step before the first file change refused.
+    #[error(transparent)]
+    Entry(BuiltinToolError),
 }
 
 #[derive(Debug, Error, PartialEq, Clone)]
@@ -157,16 +160,50 @@ impl BuiltinTool for ApplyPatchTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::none()).await
+    }
+
+    async fn call_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::for_call(context, call)?)
+            .await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
+    }
+}
+
+impl ApplyPatchTool {
+    /// The owned entry moves into the queued blocking worker and is spent
+    /// there, after the worker started and resolved the root and the patch,
+    /// immediately before the first file change. A dispatch that ended before
+    /// the worker resumed has closed the entry, so the worker refuses.
+    async fn call_entering(
+        &self,
+        args: Value,
+        entry: LeafEntry,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let args: ApplyPatchArgs = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid arguments: {e}")))?;
         let project_root = self.project_root.clone();
         let patch = args.patch;
-        let affected = tokio::task::spawn_blocking(move || apply_patch(&project_root, &patch))
-            .await
-            .map_err(|e| {
-                BuiltinToolError::execution_failed(format!("apply_patch task failed: {e}"))
-            })?
-            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
+        let affected = tokio::task::spawn_blocking(move || {
+            let mut entry = entry;
+            apply_patch(&project_root, &patch, &mut || {
+                entry.enter().map_err(ApplyPatchError::Entry)
+            })
+        })
+        .await
+        .map_err(|e| BuiltinToolError::execution_failed(format!("apply_patch task failed: {e}")))?
+        .map_err(|e| match e {
+            ApplyPatchError::Entry(error) => error,
+            other => BuiltinToolError::execution_failed(other.to_string()),
+        })?;
 
         Ok(ToolOutput::Json(json!({
             "status": "success",
@@ -189,14 +226,21 @@ impl BuiltinTool for ApplyPatchTool {
     }
 }
 
-fn apply_patch(project_root: &Path, patch: &str) -> Result<AffectedPaths, ApplyPatchError> {
+/// Enter callback run before the first file change of a patch.
+type PatchEntry<'a> = &'a mut dyn FnMut() -> Result<(), ApplyPatchError>;
+
+fn apply_patch(
+    project_root: &Path,
+    patch: &str,
+    enter: PatchEntry<'_>,
+) -> Result<AffectedPaths, ApplyPatchError> {
     let canonical_root =
         std::fs::canonicalize(project_root).map_err(|source| ApplyPatchError::Io {
             context: format!("failed to resolve project root {}", project_root.display()),
             source,
         })?;
     let hunks = parse_patch(patch)?;
-    apply_hunks_to_files(&canonical_root, &hunks)
+    apply_hunks_to_files(&canonical_root, &hunks, enter)
 }
 
 fn parse_patch(patch: &str) -> Result<Vec<Hunk>, ParseError> {
@@ -422,6 +466,7 @@ fn parse_update_file_chunk(
 fn apply_hunks_to_files(
     project_root: &Path,
     hunks: &[Hunk],
+    enter: PatchEntry<'_>,
 ) -> Result<AffectedPaths, ApplyPatchError> {
     if hunks.is_empty() {
         return Err(ApplyPatchError::ComputeReplacements(
@@ -440,6 +485,7 @@ fn apply_hunks_to_files(
                         path.display()
                     )));
                 }
+                enter()?;
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|source| ApplyPatchError::Io {
                         context: format!(
@@ -467,6 +513,7 @@ fn apply_hunks_to_files(
                         source: std::io::Error::other("Is a directory"),
                     });
                 }
+                enter()?;
                 std::fs::remove_file(&path).map_err(|source| ApplyPatchError::Io {
                     context: format!("Failed to delete file {}", path.display()),
                     source,
@@ -492,6 +539,7 @@ fn apply_hunks_to_files(
                             ),
                         });
                     }
+                    enter()?;
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent).map_err(|source| ApplyPatchError::Io {
                             context: format!(
@@ -513,6 +561,7 @@ fn apply_hunks_to_files(
                     }
                     affected.modified.push(dest);
                 } else {
+                    enter()?;
                     std::fs::write(&path, new_contents).map_err(|source| ApplyPatchError::Io {
                         context: format!("Failed to write file {}", path.display()),
                         source,
@@ -792,6 +841,72 @@ mod tests {
         format!("*** Begin Patch\n{body}\n*** End Patch")
     }
 
+    fn refused() -> ApplyPatchError {
+        ApplyPatchError::Entry(BuiltinToolError::EntryRefused(Box::new(
+            meerkat_core::ToolError::ReviewUnavailable {
+                kind: meerkat_core::ReviewUnavailableKind::DispatchEnded,
+            },
+        )))
+    }
+
+    /// The worker's entry precedes its FIRST change, here the parent mkdir:
+    /// a refusal leaves no directory and no file behind.
+    #[test]
+    fn refused_entry_precedes_the_first_change_including_mkdir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let patch = wrap_patch("*** Add File: nested/new.txt\n+hello");
+        let mut entries = 0usize;
+        let err = apply_patch(root, &patch, &mut || {
+            entries += 1;
+            Err(refused())
+        })
+        .expect_err("refused entry");
+        assert!(matches!(
+            err,
+            ApplyPatchError::Entry(BuiltinToolError::EntryRefused(_))
+        ));
+        assert_eq!(entries, 1);
+        assert!(!root.join("nested").exists(), "no directory was created");
+    }
+
+    /// Validation and preparation failures precede entry, so they never
+    /// spend it; a multi-change patch enters exactly once.
+    #[test]
+    fn entry_runs_once_after_preparation_and_never_for_a_failed_preparation() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut entries = 0usize;
+        apply_patch(root, "not a patch", &mut || {
+            entries += 1;
+            Ok(())
+        })
+        .expect_err("invalid patch");
+        assert_eq!(entries, 0, "a parse failure never enters");
+        std::fs::write(root.join("exists.txt"), "x").unwrap();
+        apply_patch(
+            root,
+            &wrap_patch("*** Add File: exists.txt\n+y"),
+            &mut || {
+                entries += 1;
+                Ok(())
+            },
+        )
+        .expect_err("existing destination");
+        assert_eq!(entries, 0, "a refused precondition never enters");
+
+        let patch = wrap_patch("*** Add File: a.txt\n+a\n*** Add File: b.txt\n+b");
+        let mut entered = LeafEntry::none();
+        let mut calls = 0usize;
+        apply_patch(root, &patch, &mut || {
+            calls += 1;
+            entered.enter().map_err(ApplyPatchError::Entry)
+        })
+        .expect("allowed entry");
+        assert_eq!(calls, 2, "each change asks; the owned entry spends once");
+        assert!(root.join("a.txt").exists() && root.join("b.txt").exists());
+    }
+
     /// The example embedded in the tool description must be a patch the
     /// tool actually accepts, with the documented anchor semantics.
     #[test]
@@ -807,7 +922,7 @@ mod tests {
         std::fs::write(root.join("src/old_name.rs"), "fn old_func() {}\n").unwrap();
         std::fs::write(root.join("src/deprecated.rs"), "// gone\n").unwrap();
 
-        let affected = apply_patch(root, APPLY_PATCH_EXAMPLE).unwrap();
+        let affected = apply_patch(root, APPLY_PATCH_EXAMPLE, &mut || Ok(())).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(root.join("src/config.rs")).unwrap(),
@@ -886,7 +1001,7 @@ mod tests {
             "*** Add File: nested/new.txt\n+hello\n+world\n*** Update File: source.txt\n*** Move to: moved.txt\n@@\n a\n-b\n+c\n*** Delete File: delete.txt",
         );
 
-        let affected = apply_patch(root, &patch).unwrap();
+        let affected = apply_patch(root, &patch, &mut || Ok(())).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.join("nested/new.txt")).unwrap(),
             "hello\nworld\n"
@@ -911,7 +1026,7 @@ mod tests {
 
         let patch =
             wrap_patch("*** Update File: tail.txt\n@@\n alpha\n-beta\n+gamma\n*** End of File");
-        apply_patch(root, &patch).unwrap();
+        apply_patch(root, &patch, &mut || Ok(())).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma");
     }
@@ -924,7 +1039,7 @@ mod tests {
         std::fs::write(&path, "import a\nimport z\n").unwrap();
 
         let patch = wrap_patch("*** Update File: imports.py\n@@ import a\n+import m");
-        apply_patch(root, &patch).unwrap();
+        apply_patch(root, &patch, &mut || Ok(())).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -936,7 +1051,7 @@ mod tests {
     fn rejects_escape_path() {
         let dir = tempdir().unwrap();
         let patch = wrap_patch("*** Add File: ../escape.txt\n+bad");
-        let err = apply_patch(dir.path(), &patch).expect_err("escape should fail");
+        let err = apply_patch(dir.path(), &patch, &mut || Ok(())).expect_err("escape should fail");
         assert!(err.to_string().contains("escapes the project root"));
     }
 
@@ -949,7 +1064,7 @@ mod tests {
 
         let patch =
             wrap_patch("*** Update File: same.txt\n*** Move to: ./same.txt\n@@\n-before\n+after");
-        apply_patch(root, &patch).unwrap();
+        apply_patch(root, &patch, &mut || Ok(())).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
     }
@@ -974,7 +1089,8 @@ mod tests {
         symlink(outside.join("secret"), root.join("link")).unwrap();
 
         let patch = wrap_patch("*** Add File: link/loot.txt\n+pwned");
-        let err = apply_patch(root, &patch).expect_err("symlink escape should fail");
+        let err =
+            apply_patch(root, &patch, &mut || Ok(())).expect_err("symlink escape should fail");
         assert!(
             err.to_string().contains("escapes the project root"),
             "expected typed containment rejection, got: {err}"
@@ -984,7 +1100,7 @@ mod tests {
 
         // A normal in-root path through a real (non-escaping) directory still works.
         let patch_ok = wrap_patch("*** Add File: nested/ok.txt\n+fine");
-        apply_patch(root, &patch_ok).expect("in-root path should succeed");
+        apply_patch(root, &patch_ok, &mut || Ok(())).expect("in-root path should succeed");
         assert_eq!(
             std::fs::read_to_string(root.join("nested/ok.txt")).unwrap(),
             "fine\n"

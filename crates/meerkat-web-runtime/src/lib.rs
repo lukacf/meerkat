@@ -869,7 +869,9 @@ fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
         meerkat_core::SessionError::DurableTailHeldForRecovery { .. }
         | meerkat_core::SessionError::DurableTailRecoveryRefused { .. }
         | meerkat_core::SessionError::DurableEvidenceQuarantined { .. }
-        | meerkat_core::SessionError::WholeBlobAuditedEndpointDivergence { .. } => {
+        | meerkat_core::SessionError::WholeBlobAuditedEndpointDivergence { .. }
+        | meerkat_core::SessionError::ServedElsewhere { .. }
+        | meerkat_core::SessionError::HostingUnavailable { .. } => {
             let mut envelope = e.structured_data().unwrap_or_else(|| serde_json::json!({}));
             if let serde_json::Value::Object(map) = &mut envelope {
                 map.insert(
@@ -913,6 +915,8 @@ fn err_session_control(e: meerkat_core::SessionControlError) -> JsValue {
             ..
         }) => err_js("SESSION_NOT_FOUND", "session not found"),
         meerkat_core::SessionControlError::Session(other) => err_str("internal_error", other),
+        error @ (meerkat_core::SessionControlError::Authorization(_)
+        | meerkat_core::SessionControlError::Review(_)) => err_js(error.code(), &error.to_string()),
         meerkat_core::SessionControlError::InvalidRequest { message } => {
             err_js("INVALID_PARAMS", &message)
         }

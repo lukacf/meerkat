@@ -140,6 +140,56 @@ external storage provider, so later surfaces cannot reinterpret the realm:
 keeps inspectable session files and a durable `runtime.sqlite3` companion for
 runtime authority. `memory` is explicitly ephemeral and process-local.
 
+## Multi-process hosting
+
+Several processes may serve one durable realm at once, for example two
+`rkat-rpc` servers. Declare it in realm config:
+
+```toml
+[storage]
+hosting = "multiprocess"   # default: "single_process"
+```
+
+The option is layered like every realm option: a child realm's value,
+including an explicit `single_process`, overrides its parent's.
+
+With `multiprocess`:
+
+- Each session is hosted by exactly one runtime at a time. The host holds the
+  session's hosting claim, an OS file lock released by the kernel when the
+  process exits. Two runtimes inside one process are distinct hosts too.
+- Another process (or runtime) neither attaches the session nor writes its
+  durable state: those calls fail with the typed `SESSION_SERVED_ELSEWHERE`
+  error (the session-busy code with `data.kind = "session_served_elsewhere"`).
+- Each job-delivery recipient is applied by the process hosting the
+  recipient's session. Recipients of sessions no process hosts are applied by
+  one elected cold-delivery owner per realm, which takes the session's claim
+  first.
+- A process learns of deliveries committed by another process from changes to
+  the realm's database files, plus a bounded sweep (5 seconds by default) that
+  also notices a released claim or cold-delivery lock after a process exits.
+  These are wake hints only: who may host or write a session is decided by the
+  claims, never by the watch.
+
+Startup refuses with a typed "multi-process hosting is unavailable" error when
+the realm's stores cannot provide this: an in-memory or external store without
+hosting claims, or a network or userspace filesystem (NFS, SMB, 9P, FUSE and
+similar) where OS locks cannot be trusted. `single_process` keeps the previous
+behavior and makes no multi-process claim.
+
+On a store with OS-locked claims, in either mode, a session whose claim cannot
+be taken for a reason other than another holder (its lock file cannot be
+created or locked, for example after the `hosting/` directory became
+unwritable) is refused with a typed "hosting claim unavailable" error
+(`SESSION_HOSTING_UNAVAILABLE`, carried under the runtime-unavailable code).
+It is never served without its claim. Likewise a process that cannot take the
+cold-delivery lock applies no cold deliveries until it can.
+
+The claims and delivery coordination live under the realm root in `hosting/`
+and `delivery/`. They are derived runtime files, reported by
+`rkat storage doctor` as inventory, and never removed while the realm is
+online.
+
 Manifest format 2 can also record operator-declared ephemeral domains. A storage provider
 must declare exactly one durability result for each required domain:
 `sessions`, `runtime`, `schedule`, `workgraph`, `jobs`, `blobs`, and

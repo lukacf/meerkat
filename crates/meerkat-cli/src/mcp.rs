@@ -3,8 +3,9 @@
 //! Provides `rkat mcp add|remove|list|get` commands for managing MCP server configuration.
 
 use meerkat_core::mcp_config::{
-    McpConfig, McpConfigMutationAuthority, McpOAuthAccountSelection, McpScope, McpServerConfig,
-    McpTransportConfig, McpTransportKind,
+    McpConfig, McpConfigMutationAuthority, McpOAuthAccountSelection, McpRealmPersistTarget,
+    McpScope, McpServerConfig, McpServerSource, McpServerWithSource, McpTransportConfig,
+    McpTransportKind, compose_effective_mcp_servers,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -139,6 +140,28 @@ pub struct AddServerRequest {
     pub project_scope: bool,
 }
 
+/// The server an `rkat mcp add` request describes, with its OAuth account
+/// selection validated.
+fn server_from_request(request: AddServerRequest) -> anyhow::Result<McpServerConfig> {
+    let mut server = build_server_config(
+        request.name,
+        request.transport,
+        request.url,
+        request.positional_url,
+        request.headers,
+        request.command,
+        request.env,
+    )?;
+    if let Some(account) = request.oauth_account {
+        let McpTransportConfig::Http(http) = &mut server.transport else {
+            return Err(meerkat_auth_core::McpOAuthError::UnsupportedAccountSelection.into());
+        };
+        http.oauth_account = Some(account);
+        meerkat_auth_core::McpServerIdentity::from_config(&server)?;
+    }
+    Ok(server)
+}
+
 /// Add an MCP server to the configuration
 pub async fn add_server(
     request: AddServerRequest,
@@ -159,22 +182,7 @@ pub async fn add_server(
         );
     }
 
-    let mut server = build_server_config(
-        request.name.clone(),
-        request.transport,
-        request.url,
-        request.positional_url,
-        request.headers,
-        request.command,
-        request.env,
-    )?;
-    if let Some(account) = request.oauth_account {
-        let McpTransportConfig::Http(http) = &mut server.transport else {
-            return Err(meerkat_auth_core::McpOAuthError::UnsupportedAccountSelection.into());
-        };
-        http.oauth_account = Some(account);
-        meerkat_auth_core::McpServerIdentity::from_config(&server)?;
-    }
+    let server = server_from_request(request)?;
 
     let authority = McpConfigMutationAuthority::for_scope(
         scope,
@@ -192,6 +200,28 @@ pub async fn add_server(
         target,
         scope,
         path.display()
+    );
+    Ok(())
+}
+
+/// Add an MCP server to the selected realm's own config, under the
+/// generation check (`expected_generation`, when given, must be current).
+pub async fn add_realm_server(
+    request: AddServerRequest,
+    realm: &McpRealmPersistTarget<'_>,
+    realm_name: &str,
+    expected_generation: Option<u64>,
+) -> anyhow::Result<()> {
+    let server = server_from_request(request)?;
+    let snapshot = realm.add(server.clone(), expected_generation).await?;
+    let (kind, target) = format_server_target(&server);
+    println!(
+        "Added {} MCP server '{}' ({}) to realm '{}' config [generation {}]",
+        transport_label(kind),
+        server.name,
+        target,
+        realm_name,
+        snapshot.generation
     );
     Ok(())
 }
@@ -276,25 +306,85 @@ pub async fn remove_server(
     Ok(())
 }
 
+/// Remove an MCP server from the selected realm's own config, under the
+/// generation check. `realm_servers` is the realm's composed list: a server
+/// it only inherits is refused with the realm to edit instead.
+pub async fn remove_realm_server(
+    name: &str,
+    realm: &McpRealmPersistTarget<'_>,
+    realm_name: &str,
+    realm_servers: &[McpServerConfig],
+    expected_generation: Option<u64>,
+) -> anyhow::Result<()> {
+    let (own, _) = realm.servers().await?;
+    if !own.iter().any(|server| server.name == name)
+        && realm_servers.iter().any(|server| server.name == name)
+    {
+        anyhow::bail!(
+            "MCP server '{name}' is inherited from a parent realm of '{realm_name}'; remove it in the realm that configures it"
+        );
+    }
+    let snapshot = realm.remove(name, expected_generation).await?;
+    println!(
+        "Removed MCP server '{name}' from realm '{realm_name}' config [generation {}]",
+        snapshot.generation
+    );
+    Ok(())
+}
+
+/// The configured servers a `list` or `get` reports: the selected source,
+/// or every source when `selection` is `None`. `realm_servers` is the
+/// realm's composed list.
+async fn listed_servers(
+    selection: Option<McpServerSource>,
+    realm_servers: &[McpServerConfig],
+    context_root: Option<&Path>,
+    user_config_root: Option<&Path>,
+) -> anyhow::Result<Vec<McpServerWithSource>> {
+    let realm = || {
+        realm_servers.iter().map(|server| McpServerWithSource {
+            server: server.clone(),
+            source: McpServerSource::Realm,
+        })
+    };
+    Ok(match selection {
+        Some(McpServerSource::Realm) => realm().collect(),
+        Some(McpServerSource::File(scope)) => {
+            McpConfig::load_scope_from_roots(scope, context_root, user_config_root)
+                .await?
+                .servers
+                .into_iter()
+                .map(|server| McpServerWithSource {
+                    server,
+                    source: McpServerSource::File(scope),
+                })
+                .collect()
+        }
+        None => {
+            let files =
+                McpConfig::load_with_scopes_from_roots(context_root, user_config_root).await?;
+            if let Err(error) = compose_effective_mcp_servers(realm_servers, files.clone()) {
+                eprintln!("warning: {error}; sessions in this realm refuse to start until then");
+            }
+            realm()
+                .chain(files.into_iter().map(|file| McpServerWithSource {
+                    server: file.server,
+                    source: McpServerSource::File(file.scope),
+                }))
+                .collect()
+        }
+    })
+}
+
 /// List configured MCP servers
 pub async fn list_servers(
-    scope: Option<McpScope>,
+    selection: Option<McpServerSource>,
+    realm_servers: &[McpServerConfig],
     json_output: bool,
     context_root: Option<&Path>,
     user_config_root: Option<&Path>,
 ) -> anyhow::Result<()> {
-    let servers = match scope {
-        Some(s) => {
-            let config =
-                McpConfig::load_scope_from_roots(s, context_root, user_config_root).await?;
-            config
-                .servers
-                .into_iter()
-                .map(|server| meerkat_core::mcp_config::McpServerWithScope { server, scope: s })
-                .collect()
-        }
-        None => McpConfig::load_with_scopes_from_roots(context_root, user_config_root).await?,
-    };
+    let servers = listed_servers(selection, realm_servers, context_root, user_config_root).await?;
 
     if json_output {
         let json: Vec<serde_json::Value> = servers
@@ -306,7 +396,7 @@ pub async fn list_servers(
                     "command": stdio.command,
                     "args": stdio.args,
                     "env": stdio.env,
-                    "scope": s.scope.to_string(),
+                    "scope": s.source.to_string(),
                 }),
                 McpTransportConfig::Http(http) => serde_json::json!({
                     "name": s.server.name,
@@ -318,7 +408,7 @@ pub async fn list_servers(
                     "headers": http.headers,
                     "oauth_account": http.oauth_account,
                     "oauth_account_selection": http.oauth_account_selection,
-                    "scope": s.scope.to_string(),
+                    "scope": s.source.to_string(),
                 }),
             })
             .collect();
@@ -341,7 +431,7 @@ pub async fn list_servers(
             println!(
                 "{:<20} {:<10} {:<16} {}",
                 s.server.name,
-                s.scope,
+                s.source,
                 transport_label(kind),
                 cmd_display
             );
@@ -354,28 +444,18 @@ pub async fn list_servers(
 /// Get details of a specific MCP server
 pub async fn get_server(
     name: String,
-    scope: Option<McpScope>,
+    selection: Option<McpServerSource>,
+    realm_servers: &[McpServerConfig],
     json_output: bool,
     context_root: Option<&Path>,
     user_config_root: Option<&Path>,
 ) -> anyhow::Result<()> {
-    let servers = match scope {
-        Some(s) => {
-            let config =
-                McpConfig::load_scope_from_roots(s, context_root, user_config_root).await?;
-            config
-                .servers
-                .into_iter()
-                .filter(|server| server.name == name)
-                .map(|server| meerkat_core::mcp_config::McpServerWithScope { server, scope: s })
-                .collect::<Vec<_>>()
-        }
-        None => McpConfig::load_with_scopes_from_roots(context_root, user_config_root)
+    let servers: Vec<McpServerWithSource> =
+        listed_servers(selection, realm_servers, context_root, user_config_root)
             .await?
             .into_iter()
             .filter(|s| s.server.name == name)
-            .collect(),
-    };
+            .collect();
 
     if servers.is_empty() {
         anyhow::bail!("MCP server '{name}' not found");
@@ -391,7 +471,7 @@ pub async fn get_server(
                 "command": stdio.command,
                 "args": stdio.args,
                 "env": stdio.env,
-                "scope": server.scope.to_string(),
+                "scope": server.source.to_string(),
             }),
             McpTransportConfig::Http(http) => serde_json::json!({
                 "name": server.server.name,
@@ -403,13 +483,13 @@ pub async fn get_server(
                 "headers": http.headers,
                 "oauth_account": http.oauth_account,
                 "oauth_account_selection": http.oauth_account_selection,
-                "scope": server.scope.to_string(),
+                "scope": server.source.to_string(),
             }),
         };
         println!("{}", serde_json::to_string_pretty(&json)?);
     } else {
         println!("Name:    {}", server.server.name);
-        println!("Scope:   {}", server.scope);
+        println!("Scope:   {}", server.source);
         match &server.server.transport {
             McpTransportConfig::Stdio(stdio) => {
                 println!("Transport: stdio");
@@ -579,6 +659,81 @@ mod tests {
                 .await
                 .unwrap();
         assert!(user.servers.is_empty());
+    }
+
+    /// `--scope realm` writes the realm's own config document through its
+    /// config runtime; a server the realm only inherits is refused with the
+    /// realm to edit instead.
+    #[tokio::test]
+    async fn test_realm_scope_mutations_edit_the_realms_own_servers() {
+        let temp = TempDir::new().unwrap();
+        let doc_path = temp.path().join("config.toml");
+        tokio::fs::write(&doc_path, "[realm.team]\nparent = \"org\"\n")
+            .await
+            .unwrap();
+        let runtime = meerkat_core::ConfigRuntime::new(
+            std::sync::Arc::new(meerkat_core::FileConfigStore::new(
+                doc_path.clone(),
+                meerkat_models::canonical(),
+            )),
+            temp.path().join("config_state.json"),
+        );
+        let realm = McpRealmPersistTarget::new(&runtime);
+
+        add_realm_server(
+            AddServerRequest {
+                name: "realm-tools".to_string(),
+                transport: None,
+                url: None,
+                positional_url: None,
+                headers: Vec::new(),
+                oauth_account: None,
+                command: vec!["realm-tools".to_string(), "--stdio".to_string()],
+                env: Vec::new(),
+                project_scope: false,
+            },
+            &realm,
+            "team",
+            Some(0),
+        )
+        .await
+        .unwrap();
+        let (own, generation) = realm.servers().await.unwrap();
+        assert_eq!(
+            own.iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["realm-tools"]
+        );
+        assert_eq!(generation, 1);
+
+        let inherited =
+            McpServerConfig::stdio("org-tools", "org-tools", Vec::new(), HashMap::new());
+        let error = remove_realm_server(
+            "org-tools",
+            &realm,
+            "team",
+            &[own[0].clone(), inherited],
+            None,
+        )
+        .await
+        .expect_err("an inherited server is not removable here");
+        assert!(
+            error
+                .to_string()
+                .contains("inherited from a parent realm of 'team'"),
+            "{error}"
+        );
+
+        remove_realm_server("realm-tools", &realm, "team", &own, Some(generation))
+            .await
+            .unwrap();
+        assert!(realm.servers().await.unwrap().0.is_empty());
+        assert_eq!(
+            tokio::fs::read_to_string(&doc_path).await.unwrap(),
+            "[realm.team]\nparent = \"org\"\n",
+            "the realm document is back to what the operator wrote"
+        );
     }
 
     #[tokio::test]

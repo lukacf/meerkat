@@ -196,6 +196,26 @@ fn host_auth_service(state: &AppState) -> meerkat::HostAuthService {
     )
 }
 
+/// Resolve a requested MCP target against this host's configured MCP servers:
+/// the realm's own (from its composed config) and the `mcp.toml` scopes. A
+/// client-supplied name or URL is never an authority.
+async fn configured_mcp_target(
+    state: &AppState,
+    mcp: &meerkat_contracts::WireMcpAuthTarget,
+) -> Result<meerkat::McpServerIdentity, axum::response::Response> {
+    let realm_config = crate::effective_config_for_state(state)
+        .await
+        .map_err(|error| crate::ApiError::Configuration(error.to_string()).into_response())?;
+    meerkat::resolve_configured_mcp_target_in_realm(
+        mcp,
+        &realm_config.tools.mcp_servers,
+        state.context_root.as_deref(),
+        state.user_config_root.as_deref(),
+    )
+    .await
+    .map_err(host_auth_error_response)
+}
+
 fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Response {
     let status = match &error {
         meerkat::HostAuthError::Target(error) => target_error_status(error),
@@ -239,9 +259,17 @@ fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Re
         meerkat::HostAuthError::Connector(_) => StatusCode::INTERNAL_SERVER_ERROR,
         meerkat::HostAuthError::ConnectorTarget(_) => StatusCode::BAD_REQUEST,
     };
+    let reason = error.reason();
+    if reason == meerkat_contracts::WireAuthErrorReason::Infrastructure {
+        // Protected diagnostics only: the public text is fixed.
+        tracing::warn!(target: "meerkat::auth", error = %error, "auth infrastructure failure");
+    }
     (
         status,
-        Json(serde_json::json!({ "error": error.to_string() })),
+        Json(meerkat_contracts::WireAuthErrorBody {
+            error: error.public_message(),
+            reason,
+        }),
     )
         .into_response()
 }
@@ -1288,15 +1316,9 @@ pub async fn start_login(
     let provider_target = match body.target {
         WireLoginTarget::Provider(target) => target,
         WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match meerkat::resolve_configured_mcp_target(
-                &mcp,
-                state.context_root.as_deref(),
-                state.user_config_root.as_deref(),
-            )
-            .await
-            {
+            let target = match configured_mcp_target(&state, &mcp).await {
                 Ok(target) => target,
-                Err(error) => return host_auth_error_response(error),
+                Err(response) => return response,
             };
             return match host_auth_service(&state)
                 .mcp_login_start(&target, &body.redirect_uri, None)
@@ -1398,15 +1420,9 @@ pub async fn complete_login(
     let provider_target = match body.target {
         WireLoginTarget::Provider(target) => target,
         WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match meerkat::resolve_configured_mcp_target(
-                &mcp,
-                state.context_root.as_deref(),
-                state.user_config_root.as_deref(),
-            )
-            .await
-            {
+            let target = match configured_mcp_target(&state, &mcp).await {
                 Ok(target) => target,
-                Err(error) => return host_auth_error_response(error),
+                Err(response) => return response,
             };
             return match host_auth_service(&state)
                 .mcp_login_complete(
@@ -1552,15 +1568,9 @@ pub async fn cancel_login(
     use meerkat_contracts::WireLoginCancelledTarget;
     let cancelled = match body {
         LoginCancelBody::Mcp(body) => {
-            let target = match meerkat::resolve_configured_mcp_target(
-                &body.mcp,
-                state.context_root.as_deref(),
-                state.user_config_root.as_deref(),
-            )
-            .await
-            {
+            let target = match configured_mcp_target(&state, &body.mcp).await {
                 Ok(target) => target,
-                Err(error) => return host_auth_error_response(error),
+                Err(response) => return response,
             };
             host_auth_service(&state)
                 .mcp_login_cancel_by_state(&target, &body.state)
@@ -1984,6 +1994,44 @@ mod tests {
             binding: BindingId::parse("default_google").unwrap(),
             profile: None,
             origin: meerkat_core::connection::BindingOrigin::Configured,
+        }
+    }
+
+    #[tokio::test]
+    async fn every_auth_error_reason_is_carried_in_the_rest_body() {
+        use meerkat::test_fixtures::auth_errors::{
+            INTERNAL_DETAIL_CANARY, all_reasons, reason_examples,
+        };
+        let examples = reason_examples();
+        for reason in all_reasons() {
+            assert!(
+                examples.iter().any(|(_, expected)| *expected == reason),
+                "{reason:?} has an example"
+            );
+        }
+        for (error, expected) in examples {
+            let display = error.to_string();
+            let response = host_auth_error_response(error);
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body["reason"],
+                serde_json::to_value(expected).unwrap(),
+                "{display}"
+            );
+            assert!(
+                !body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains(INTERNAL_DETAIL_CANARY)
+            );
+            if expected == meerkat_contracts::WireAuthErrorReason::Infrastructure {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(body["error"], "auth infrastructure failure");
+            }
         }
     }
 

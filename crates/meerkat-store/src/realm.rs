@@ -140,6 +140,36 @@ pub struct RealmPaths {
     pub jobs_sqlite_path: PathBuf,
 }
 
+/// Directory, under the realm root, of the per-session hosting lock files.
+pub const SESSION_HOSTING_LOCK_DIR: &str = "hosting";
+/// Directory, under the realm root, of the delivery coordination files (the
+/// cold-delivery owner lock).
+pub const DELIVERY_COORDINATION_DIR: &str = "delivery";
+
+impl RealmPaths {
+    /// Directory of the per-session hosting lock files: one OS-locked file
+    /// per session runtime, held by the process that hosts the session.
+    ///
+    /// These are derived runtime files, not durable state. They are never
+    /// unlinked while the realm is online: removing a lock file another
+    /// process holds and re-creating it would admit two holders.
+    pub fn session_hosting_lock_dir(&self) -> PathBuf {
+        self.root.join(SESSION_HOSTING_LOCK_DIR)
+    }
+
+    /// Directory of the delivery coordination files.
+    pub fn delivery_coordination_dir(&self) -> PathBuf {
+        self.root.join(DELIVERY_COORDINATION_DIR)
+    }
+
+    /// The OS-locked file whose holder is this realm's single cold-delivery
+    /// owner: the one process that applies deliveries for sessions no
+    /// process hosts.
+    pub fn cold_delivery_lock_path(&self) -> PathBuf {
+        self.delivery_coordination_dir().join("cold-delivery.lock")
+    }
+}
+
 pub const REALM_LEASE_HEARTBEAT_SECS: u64 = 5;
 pub const REALM_LEASE_STALE_TTL_SECS: u64 = 30;
 pub(crate) const MANIFEST_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);

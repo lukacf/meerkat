@@ -259,6 +259,191 @@ pub struct McpServerWithScope {
     pub scope: McpScope,
 }
 
+/// Where a server in the MCP set of a realm-scoped session is configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpServerSource {
+    /// The selected realm's config (`[[tools.mcp_servers]]`), composed
+    /// child-wins along the realm's parent chain.
+    Realm,
+    /// An `mcp.toml` file scope.
+    File(McpScope),
+}
+
+impl std::fmt::Display for McpServerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Realm => f.write_str("realm"),
+            Self::File(scope) => scope.fmt(f),
+        }
+    }
+}
+
+/// A server in the MCP set of a realm-scoped session, with its source.
+#[derive(Debug, Clone)]
+pub struct McpServerWithSource {
+    pub server: McpServerConfig,
+    pub source: McpServerSource,
+}
+
+/// The realm config and an `mcp.toml` scope define one server name
+/// differently. Neither definition may shadow the other.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "MCP server '{name}' is defined differently in the realm config and in the {scope} \
+     mcp.toml; remove or rename one of them"
+)]
+pub struct McpServerDefinitionConflict {
+    pub name: String,
+    pub scope: McpScope,
+}
+
+/// A realm MCP server holds `${` in a field that `mcp.toml` loading would
+/// expand from the environment.
+///
+/// Realm MCP servers are literal: they are never expanded. A realm document
+/// is writable over the config APIs (RPC `config/set`, REST `PUT /config`),
+/// so expanding it would let an API caller copy host environment variables,
+/// secrets included, into a URL or header sent to a server it chooses.
+/// Env-derived values belong in an `mcp.toml` server, a host file. Writes
+/// refuse such a server, and a realm config that already holds one is
+/// refused when the MCP set is resolved; it is never passed on or expanded.
+/// The message names the server and field, never the value.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "MCP server '{server}' in the realm config has `${{` in its {field}; realm MCP servers are \
+     literal and never expanded from the environment, so put env-derived values in an \
+     mcp.toml server instead"
+)]
+pub struct McpRealmServerEnvReference {
+    pub server: String,
+    pub field: &'static str,
+}
+
+/// The first field of `server` that `mcp.toml` loading would expand from the
+/// environment and that holds `${`.
+fn env_reference_field(server: &McpServerConfig) -> Option<&'static str> {
+    let has_reference = |value: &str| value.contains("${");
+    match &server.transport {
+        McpTransportConfig::Stdio(stdio) => {
+            if has_reference(&stdio.command) {
+                Some("command")
+            } else if stdio.args.iter().any(|arg| has_reference(arg)) {
+                Some("args")
+            } else if stdio.env.values().any(|value| has_reference(value)) {
+                Some("env")
+            } else {
+                None
+            }
+        }
+        McpTransportConfig::Http(http) => {
+            if has_reference(&http.url) {
+                Some("url")
+            } else if http.headers.values().any(|value| has_reference(value)) {
+                Some("headers")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Refuse a realm MCP server list that holds an environment reference
+/// (`${`); see [`McpRealmServerEnvReference`].
+pub fn reject_realm_server_env_references(
+    servers: &[McpServerConfig],
+) -> Result<(), McpRealmServerEnvReference> {
+    match servers
+        .iter()
+        .find_map(|server| env_reference_field(server).map(|field| (server, field)))
+    {
+        Some((server, field)) => Err(McpRealmServerEnvReference {
+            server: server.name.clone(),
+            field,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Refuse a written realm MCP server list that adds or changes an entry
+/// holding an environment reference (`${`). An entry of `servers` is
+/// unchanged when `persisted` holds the same whole typed definition, name
+/// included; a renamed or copied entry is new. Unchanged legacy entries are
+/// left for [`compose_effective_mcp_servers`] to refuse when the set is
+/// resolved.
+pub fn reject_new_realm_server_env_references(
+    servers: &[McpServerConfig],
+    persisted: &[McpServerConfig],
+) -> Result<(), McpRealmServerEnvReference> {
+    match servers
+        .iter()
+        .filter(|server| !persisted.contains(server))
+        .find_map(|server| env_reference_field(server).map(|field| (server, field)))
+    {
+        Some((server, field)) => Err(McpRealmServerEnvReference {
+            server: server.name.clone(),
+            field,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Why the MCP set of a realm-scoped session could not be resolved.
+#[derive(Debug, thiserror::Error)]
+pub enum EffectiveMcpServersError {
+    #[error(transparent)]
+    Config(#[from] McpConfigError),
+    #[error(transparent)]
+    Conflict(#[from] McpServerDefinitionConflict),
+    #[error(transparent)]
+    RealmEnvReference(#[from] McpRealmServerEnvReference),
+}
+
+/// The MCP set of a realm-scoped session from its two sources: the realm's
+/// own servers and the `mcp.toml` file servers.
+///
+/// Realm servers come first. They are literal: one holding an environment
+/// reference is refused ([`McpRealmServerEnvReference`]), never passed on or
+/// expanded. A file server whose name a realm server already uses must be
+/// defined identically (it is then the same server, listed once); a
+/// different definition is refused, so a repository's `mcp.toml` cannot
+/// shadow a server installed in the realm, nor the reverse. Between the
+/// files, project wins over user, which `file_servers` from
+/// [`McpConfig::load_with_scopes_from_roots`] has already resolved and
+/// expanded.
+pub fn compose_effective_mcp_servers(
+    realm_servers: &[McpServerConfig],
+    file_servers: Vec<McpServerWithScope>,
+) -> Result<Vec<McpServerWithSource>, EffectiveMcpServersError> {
+    reject_realm_server_env_references(realm_servers)?;
+    let mut servers: Vec<McpServerWithSource> = realm_servers
+        .iter()
+        .map(|server| McpServerWithSource {
+            server: server.clone(),
+            source: McpServerSource::Realm,
+        })
+        .collect();
+    for McpServerWithScope { server, scope } in file_servers {
+        match servers
+            .iter()
+            .find(|existing| existing.server.name == server.name)
+        {
+            Some(existing) if existing.server == server => {}
+            Some(_) => {
+                return Err(McpServerDefinitionConflict {
+                    name: server.name,
+                    scope,
+                }
+                .into());
+            }
+            None => servers.push(McpServerWithSource {
+                server,
+                source: McpServerSource::File(scope),
+            }),
+        }
+    }
+    Ok(servers)
+}
+
 /// Authority for mutating persisted MCP server configuration.
 ///
 /// Public surfaces do not choose ad hoc files. They present the caller's
@@ -476,6 +661,25 @@ impl McpConfig {
             }
         }
         Ok(result)
+    }
+
+    /// The MCP set of a session in a realm: the realm's own servers
+    /// (`realm_servers`, the selected realm's composed
+    /// `Config::tools.mcp_servers`) plus the project and user `mcp.toml`
+    /// files at the convention roots.
+    ///
+    /// This is the one owner of that set. Every surface that seeds a
+    /// realm-scoped session from configuration, and MCP login target
+    /// resolution, read it here; see [`compose_effective_mcp_servers`] for
+    /// how the two sources combine.
+    pub async fn effective_servers_from_roots(
+        realm_servers: &[McpServerConfig],
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+    ) -> Result<Vec<McpServerWithSource>, EffectiveMcpServersError> {
+        let file_servers =
+            Self::load_with_scopes_from_roots(context_root, user_config_root).await?;
+        compose_effective_mcp_servers(realm_servers, file_servers)
     }
 
     /// Load from a specific scope only
@@ -1203,6 +1407,128 @@ impl std::fmt::Display for McpScope {
             McpScope::User => write!(f, "user"),
             McpScope::Project => write!(f, "project"),
         }
+    }
+}
+
+/// Why a mutation of the realm's own MCP servers was refused.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, thiserror::Error)]
+pub enum McpRealmPersistError {
+    #[error(
+        "Server '{0}' already exists in the realm config. Remove it first with: rkat mcp remove {0} --scope realm"
+    )]
+    ServerExists(String),
+    #[error("Server '{0}' not found in the realm's own config")]
+    ServerNotFound(String),
+    #[error(transparent)]
+    EnvReference(#[from] McpRealmServerEnvReference),
+    #[error(transparent)]
+    Config(#[from] crate::config_runtime::ConfigRuntimeError),
+}
+
+/// The selected realm's own config document as the target of a persisted
+/// MCP server mutation, beside the `mcp.toml` scopes ([`McpScope`]).
+///
+/// It edits `[[tools.mcp_servers]]` of the realm's own document through that
+/// document's [`ConfigRuntime`](crate::config_runtime::ConfigRuntime): a
+/// patch of `tools.mcp_servers` alone, so the document keeps every other key
+/// and the realm keeps inheriting. The server list it reads and rewrites is
+/// the realm's own, never the servers it inherits, and the write is checked
+/// against the generation that list was read at, so a concurrent write is
+/// never lost.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct McpRealmPersistTarget<'a> {
+    runtime: &'a crate::config_runtime::ConfigRuntime,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> McpRealmPersistTarget<'a> {
+    /// `runtime` reads and writes the selected realm's own config document.
+    pub fn new(runtime: &'a crate::config_runtime::ConfigRuntime) -> Self {
+        Self { runtime }
+    }
+
+    /// The servers the realm's own document lists, and its generation.
+    pub async fn servers(&self) -> Result<(Vec<McpServerConfig>, u64), McpRealmPersistError> {
+        let snapshot = self.runtime.get().await?;
+        Ok((snapshot.config.tools.mcp_servers, snapshot.generation))
+    }
+
+    /// Add `server`. `expected_generation`, when given, must be the
+    /// document's current generation. A server holding an environment
+    /// reference is refused before anything is read or written: realm
+    /// servers are literal ([`McpRealmServerEnvReference`]).
+    pub async fn add(
+        &self,
+        server: McpServerConfig,
+        expected_generation: Option<u64>,
+    ) -> Result<crate::config_runtime::ConfigSnapshot, McpRealmPersistError> {
+        reject_realm_server_env_references(std::slice::from_ref(&server))?;
+        let (mut servers, generation) = self.current(expected_generation).await?;
+        if servers.iter().any(|existing| existing.name == server.name) {
+            return Err(McpRealmPersistError::ServerExists(server.name));
+        }
+        servers.push(server);
+        self.write(&servers, generation).await
+    }
+
+    /// Remove the server named `server_name` from the realm's own document.
+    /// `expected_generation`, when given, must be the document's current
+    /// generation.
+    pub async fn remove(
+        &self,
+        server_name: &str,
+        expected_generation: Option<u64>,
+    ) -> Result<crate::config_runtime::ConfigSnapshot, McpRealmPersistError> {
+        let (mut servers, generation) = self.current(expected_generation).await?;
+        let listed = servers.len();
+        servers.retain(|server| server.name != server_name);
+        if servers.len() == listed {
+            return Err(McpRealmPersistError::ServerNotFound(server_name.to_owned()));
+        }
+        self.write(&servers, generation).await
+    }
+
+    /// The realm's own servers at the generation the write will be checked
+    /// against: a caller's expected generation must be that one.
+    async fn current(
+        &self,
+        expected_generation: Option<u64>,
+    ) -> Result<(Vec<McpServerConfig>, u64), McpRealmPersistError> {
+        let (servers, generation) = self.servers().await?;
+        match expected_generation {
+            Some(expected) if expected != generation => Err(
+                crate::config_runtime::ConfigRuntimeError::GenerationConflict {
+                    expected,
+                    current: generation,
+                }
+                .into(),
+            ),
+            _ => Ok((servers, generation)),
+        }
+    }
+
+    async fn write(
+        &self,
+        servers: &[McpServerConfig],
+        generation: u64,
+    ) -> Result<crate::config_runtime::ConfigSnapshot, McpRealmPersistError> {
+        // An emptied list is removed rather than written as `[]`.
+        let servers = if servers.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::to_value(servers)
+                .map_err(crate::config_runtime::ConfigRuntimeError::Json)?
+        };
+        Ok(self
+            .runtime
+            .patch(
+                crate::config::ConfigDelta(
+                    serde_json::json!({ "tools": { "mcp_servers": servers } }),
+                ),
+                Some(generation),
+            )
+            .await?)
     }
 }
 
@@ -2026,5 +2352,276 @@ command = "remove-cmd"
         rollback.rollback().await.unwrap();
         let restored = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(restored, original);
+    }
+
+    fn file_server(server: McpServerConfig, scope: McpScope) -> McpServerWithScope {
+        McpServerWithScope { server, scope }
+    }
+
+    #[test]
+    fn effective_set_lists_realm_servers_first_and_dedupes_identical_file_servers() {
+        let installed = McpServerConfig::stdio("installed", "sentinel", vec![], HashMap::new());
+        let repo = McpServerConfig::stdio("repo", "repo-tool", vec![], HashMap::new());
+        let personal = McpServerConfig::streamable_http(
+            "personal",
+            "https://mcp.example.com/personal",
+            HashMap::new(),
+        );
+
+        let servers = compose_effective_mcp_servers(
+            std::slice::from_ref(&installed),
+            vec![
+                file_server(installed.clone(), McpScope::Project),
+                file_server(repo, McpScope::Project),
+                file_server(personal, McpScope::User),
+            ],
+        )
+        .expect("an identical definition is the same server");
+
+        let listed: Vec<(&str, McpServerSource)> = servers
+            .iter()
+            .map(|entry| (entry.server.name.as_str(), entry.source))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("installed", McpServerSource::Realm),
+                ("repo", McpServerSource::File(McpScope::Project)),
+                ("personal", McpServerSource::File(McpScope::User)),
+            ]
+        );
+    }
+
+    /// A same-name server defined differently in the realm and in a file is
+    /// refused: neither source may shadow the other.
+    #[test]
+    fn effective_set_refuses_a_file_server_redefining_a_realm_server() {
+        let installed = McpServerConfig::stdio("tools", "sentinel", vec![], HashMap::new());
+        let shadow = McpServerConfig::stdio("tools", "shadow", vec![], HashMap::new());
+
+        for scope in [McpScope::Project, McpScope::User] {
+            let conflict = compose_effective_mcp_servers(
+                std::slice::from_ref(&installed),
+                vec![file_server(shadow.clone(), scope)],
+            )
+            .expect_err("a different definition must not shadow the realm's");
+            assert!(
+                matches!(
+                    &conflict,
+                    EffectiveMcpServersError::Conflict(conflict)
+                        if *conflict == McpServerDefinitionConflict {
+                            name: "tools".to_string(),
+                            scope,
+                        }
+                ),
+                "{conflict:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_set_reads_both_file_scopes_at_the_convention_roots() {
+        let project = TempDir::new().unwrap();
+        let user = TempDir::new().unwrap();
+        for (root, name) in [(&project, "repo"), (&user, "personal")] {
+            tokio::fs::create_dir_all(root.path().join(".rkat"))
+                .await
+                .unwrap();
+            tokio::fs::write(
+                root.path().join(".rkat/mcp.toml"),
+                format!("[[servers]]\nname = \"{name}\"\ncommand = \"{name}-cmd\"\n"),
+            )
+            .await
+            .unwrap();
+        }
+        let installed = McpServerConfig::stdio("installed", "sentinel", vec![], HashMap::new());
+
+        let servers = McpConfig::effective_servers_from_roots(
+            std::slice::from_ref(&installed),
+            Some(project.path()),
+            Some(user.path()),
+        )
+        .await
+        .unwrap();
+        let names: Vec<&str> = servers
+            .iter()
+            .map(|entry| entry.server.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["installed", "repo", "personal"]);
+    }
+
+    /// Realm servers are literal: a realm server holding `${` in any field
+    /// `mcp.toml` would expand is refused when the set is resolved, never
+    /// passed on or expanded, even when a file defines the same text. The
+    /// refusal names the server and field, never the value.
+    #[test]
+    fn effective_set_refuses_realm_servers_with_environment_references() {
+        let secret_header = HashMap::from([(
+            "Authorization".to_string(),
+            "Bearer ${HOST_SECRET}".to_string(),
+        )]);
+        let cases = [
+            (
+                McpServerConfig::stdio("cmd", "${HOME}/bin/tool", vec![], HashMap::new()),
+                "command",
+            ),
+            (
+                McpServerConfig::stdio("arg", "tool", vec!["--key=${KEY}".into()], HashMap::new()),
+                "args",
+            ),
+            (
+                McpServerConfig::stdio(
+                    "env",
+                    "tool",
+                    vec![],
+                    HashMap::from([("TOKEN".to_string(), "${TOKEN}".to_string())]),
+                ),
+                "env",
+            ),
+            (
+                McpServerConfig::streamable_http(
+                    "url",
+                    "https://mcp.example.com/${HOST_SECRET}",
+                    HashMap::new(),
+                ),
+                "url",
+            ),
+            (
+                McpServerConfig::streamable_http(
+                    "header",
+                    "https://mcp.example.com/mcp",
+                    secret_header,
+                ),
+                "headers",
+            ),
+        ];
+        for (server, field) in cases {
+            let name = server.name.clone();
+            let refused = compose_effective_mcp_servers(
+                std::slice::from_ref(&server),
+                vec![file_server(server.clone(), McpScope::Project)],
+            )
+            .expect_err("a realm server with an environment reference is refused");
+            assert!(
+                matches!(
+                    &refused,
+                    EffectiveMcpServersError::RealmEnvReference(reference)
+                        if reference.server == name && reference.field == field
+                ),
+                "{refused:?}"
+            );
+            assert!(!refused.to_string().contains("HOST_SECRET"), "{refused}");
+        }
+        // A file server may still use references; only realm servers are literal.
+        compose_effective_mcp_servers(
+            &[],
+            vec![file_server(
+                McpServerConfig::stdio("file", "${HOME}/bin/tool", vec![], HashMap::new()),
+                McpScope::User,
+            )],
+        )
+        .expect("mcp.toml servers keep their expansion");
+    }
+
+    fn realm_runtime(dir: &Path) -> crate::config_runtime::ConfigRuntime {
+        crate::config_runtime::ConfigRuntime::new(
+            std::sync::Arc::new(crate::config_store::FileConfigStore::new(
+                dir.join("config.toml"),
+                *crate::model_profile::test_catalog::TEST_CATALOG,
+            )),
+            dir.join("config_state.json"),
+        )
+    }
+
+    /// The realm writer edits only `tools.mcp_servers` of the realm's own
+    /// document, under the generation check.
+    #[tokio::test]
+    async fn realm_persist_target_edits_only_the_realms_own_server_list() {
+        let dir = TempDir::new().unwrap();
+        let doc = "[realm.child]\nparent = \"parent\" # inherits tool policy\n";
+        tokio::fs::write(dir.path().join("config.toml"), doc)
+            .await
+            .unwrap();
+        let runtime = realm_runtime(dir.path());
+        let target = McpRealmPersistTarget::new(&runtime);
+        let sentinel = McpServerConfig::stdio(
+            "sentinel",
+            "/bin/sh",
+            vec!["sentinel.sh".into()],
+            HashMap::new(),
+        );
+
+        let (servers, generation) = target.servers().await.unwrap();
+        assert!(servers.is_empty());
+        let added = target
+            .add(sentinel.clone(), Some(generation))
+            .await
+            .unwrap();
+        assert_eq!(added.generation, generation + 1);
+        let written = tokio::fs::read_to_string(dir.path().join("config.toml"))
+            .await
+            .unwrap();
+        assert!(written.starts_with(doc), "{written}");
+        let raw: toml::Table = toml::from_str(&written).unwrap();
+        let mut keys: Vec<&str> = raw.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["realm", "tools"], "{written}");
+        assert_eq!(
+            raw["tools"].as_table().unwrap().keys().collect::<Vec<_>>(),
+            vec!["mcp_servers"],
+            "{written}"
+        );
+        assert_eq!(target.servers().await.unwrap().0, vec![sentinel.clone()]);
+
+        assert!(matches!(
+            target.add(sentinel.clone(), None).await,
+            Err(McpRealmPersistError::ServerExists(name)) if name == "sentinel"
+        ));
+        assert!(matches!(
+            target.remove("sentinel", Some(generation)).await,
+            Err(McpRealmPersistError::Config(
+                crate::config_runtime::ConfigRuntimeError::GenerationConflict { .. }
+            ))
+        ));
+        assert!(matches!(
+            target.remove("absent", None).await,
+            Err(McpRealmPersistError::ServerNotFound(name)) if name == "absent"
+        ));
+
+        // A server holding an environment reference is refused; nothing is
+        // written.
+        let before = tokio::fs::read_to_string(dir.path().join("config.toml"))
+            .await
+            .unwrap();
+        let referencing = McpServerConfig::stdio(
+            "referencing",
+            "tool",
+            vec![],
+            HashMap::from([("TOKEN".to_string(), "${TOKEN}".to_string())]),
+        );
+        assert!(matches!(
+            target.add(referencing, None).await,
+            Err(McpRealmPersistError::EnvReference(reference))
+                if reference.server == "referencing" && reference.field == "env"
+        ));
+        assert_eq!(
+            tokio::fs::read_to_string(dir.path().join("config.toml"))
+                .await
+                .unwrap(),
+            before
+        );
+
+        target.remove("sentinel", None).await.unwrap();
+        let written = tokio::fs::read_to_string(dir.path().join("config.toml"))
+            .await
+            .unwrap();
+        let raw: toml::Table = toml::from_str(&written).unwrap();
+        assert!(
+            raw.get("tools")
+                .and_then(toml::Value::as_table)
+                .is_none_or(|tools| !tools.contains_key("mcp_servers")),
+            "the emptied list is removed: {written}"
+        );
+        assert!(written.starts_with(doc), "{written}");
     }
 }

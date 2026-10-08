@@ -8,8 +8,8 @@ Reviewed on 2026-09-30 against `reviews/adr-001/candidate-r4.md` and `reviews/ad
 
 | Artifact | Lines | SHA-256 |
 | --- | --- | --- |
-| `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md` | 847 | `dae4e6a4fab44b103ced096cd730a54668a4d617a78b72dd10c2ed30f88dd0b5` |
-| `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/governed-deployment-profiles.md` | 218 | `4a745ab008ed8876a213ab311010bbe5be400f03b8876b87f8424ebe8249b174` |
+| `(operator-retained path)/docs/internal/design/adr-001-runtime-security.md` | 847 | `dae4e6a4fab44b103ced096cd730a54668a4d617a78b72dd10c2ed30f88dd0b5` |
+| `(operator-retained path)/docs/internal/design/governed-deployment-profiles.md` | 218 | `4a745ab008ed8876a213ab311010bbe5be400f03b8876b87f8424ebe8249b174` |
 
 ## Material findings
 
@@ -23,7 +23,7 @@ Companion lines 72-81 permit the initial stable-recipient profile to release to 
 
 The account-binding authority must verify the principal/account relationship; policy must expressly allow provider retention and the principal's authorized devices; binding revocation blocks new sends; shared/group accounts and compromised or unknowable control do not qualify merely through credential possession. The existing later-read and dynamic-audience rules remain at companion lines 83-104, and the runtime still requires actual recipient and source-constraint authorization.
 
-Counterexamples checked: sending to an unverified address because the API accepted it; classifying a household-shared account as a personal account because one parent owns its credential; and treating this rule as authorization for a later group member. None satisfies the new conditions. Retention by the authorized principal's own account is an explicitly permitted irreversible release, not a promise that previously delivered copies can be revoked. New test coverage is at companion line 205.
+Counterexamples checked: sending to an unverified address because the API accepted it; classifying a team-shared account as a personal account because one lead owns its credential; and treating this rule as authorization for a later group member. None satisfies the new conditions. Retention by the authorized principal's own account is an explicitly permitted irreversible release, not a promise that previously delivered copies can be revoked. New test coverage is at companion line 205.
 
 ### Legacy adoption and participant rights
 
@@ -31,7 +31,7 @@ Companion lines 142-151 explicitly reject custody, operator/admin status, generi
 
 This strengthens, rather than contradicts, the existing exceptional-adoption contract at lines 131-141. Unknown provenance remains unknown; the adoption grant explicitly covers it within its declared bounds. Known source restrictions remain binding, new bytes require authorization, derivatives retain the bundle dependency, revocation blocks later use, and no historical execution authority is created.
 
-Counterexamples checked: a storage administrator adopts a child's corpus; a parent invokes generic guardianship for every participant's private messages; a union of conversation participants is declared entitled to every constituent message. The additions explicitly reject all three shortcuts. They do not pretend that an authorization assumption reconstructs historical identity. New test coverage is at companion line 206.
+Counterexamples checked: a storage administrator adopts a member's corpus; a lead invokes generic guardianship for every participant's private messages; a union of conversation participants is declared entitled to every constituent message. The additions explicitly reject all three shortcuts. They do not pretend that an authorization assumption reconstructs historical identity. New test coverage is at companion line 206.
 
 ### Per-item classifier isolation
 

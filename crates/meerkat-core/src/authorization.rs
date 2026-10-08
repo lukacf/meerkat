@@ -141,6 +141,14 @@ pub enum ToolAuthorizationTarget {
 pub enum SourceAuthorizationTarget {
     Blob(BlobRef),
     Memory(MemorySearchScope),
+    /// The actual native owner's retained original input, not a transcript
+    /// range or a source-owned work reference. The policy owner must map this
+    /// explicit resource family; unknown targets never inherit permission.
+    RuntimeInput {
+        owner_session_id: SessionId,
+        runtime_epoch_id: crate::RuntimeEpochId,
+        input_id: crate::InputId,
+    },
     Transcript {
         session_id: SessionId,
         range: MessageRange,
@@ -210,6 +218,7 @@ pub struct OperationAuthorizationFacts {
 
 struct BoundOperation {
     facts: OperationAuthorizationFacts,
+    review_attribution: Option<Arc<crate::approval::review::ReviewChildAttribution>>,
 }
 
 /// Immutable identity of one actual prepared operation, not permission.
@@ -230,7 +239,24 @@ pub struct PreparedAuthorizationBinding(Arc<BoundOperation>);
 
 impl PreparedAuthorizationBinding {
     pub fn new(facts: OperationAuthorizationFacts) -> Self {
-        Self(Arc::new(BoundOperation { facts }))
+        Self(Arc::new(BoundOperation {
+            facts,
+            review_attribution: None,
+        }))
+    }
+
+    pub(crate) fn new_review_child(
+        facts: OperationAuthorizationFacts,
+        attribution: crate::approval::review::ReviewChildAttribution,
+    ) -> Self {
+        Self(Arc::new(BoundOperation {
+            facts,
+            review_attribution: Some(Arc::new(attribution)),
+        }))
+    }
+
+    pub fn review_attribution(&self) -> Option<&crate::approval::review::ReviewChildAttribution> {
+        self.0.review_attribution.as_deref()
     }
 
     pub fn facts(&self) -> &OperationAuthorizationFacts {
@@ -249,6 +275,52 @@ impl fmt::Debug for PreparedAuthorizationBinding {
     }
 }
 
+/// Historical observation of the actual process-local publication enclosing
+/// policy reads. The instance is minted once by that synchronization owner;
+/// neither it nor its sequence is a principal, durable policy revision or
+/// recovered permission/currentness proof. A refused preparation can stop at
+/// its first failed conjunct; this observation does not claim every owner read.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PolicyPublicationObservation {
+    LocalPublication { instance: uuid::Uuid, sequence: u64 },
+}
+
+impl fmt::Debug for PolicyPublicationObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PolicyPublicationObservation([REDACTED])")
+    }
+}
+
+/// Result and historical observation from the same actual owner evaluation.
+/// Refusal preserves its native kind. Absence never means unrestricted policy.
+pub struct ObservedAuthorizationResult<T> {
+    pub result: Result<T, OperationAuthorizationError>,
+    pub policy: Option<PolicyPublicationObservation>,
+}
+
+impl<T> ObservedAuthorizationResult<T> {
+    pub fn unobserved(result: Result<T, OperationAuthorizationError>) -> Self {
+        Self {
+            result,
+            policy: None,
+        }
+    }
+
+    pub fn map<U>(self, map: impl FnOnce(T) -> U) -> ObservedAuthorizationResult<U> {
+        ObservedAuthorizationResult {
+            result: self.result.map(map),
+            policy: self.policy,
+        }
+    }
+}
+
+impl<T> fmt::Debug for ObservedAuthorizationResult<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ObservedAuthorizationResult([REDACTED])")
+    }
+}
+
 /// Immutable feature-owned context attached to one admitted work item.
 ///
 /// Implementations resolve current owner policy against all correlated operation
@@ -256,6 +328,18 @@ impl fmt::Debug for PreparedAuthorizationBinding {
 /// implementation is the actual feature's responsibility, not a core registry.
 /// This trait and its result are never persisted or reconstructed by serde.
 pub trait WorkAuthorization: Send + Sync {
+    /// Read complete review material through this retained work owner.
+    /// Caller-provided coordinates cannot choose another input. Implementations
+    /// separately authorize every source and recheck native custody after waits.
+    /// This optional R2 path is never called by ordinary R1 preparation/checks.
+    fn read_review_context<'a>(
+        &'a self,
+        _binding: &'a PreparedAuthorizationBinding,
+        _attribution: Option<&'a crate::approval::review::ReviewOperationAttribution>,
+    ) -> crate::approval::review::ReviewContextFuture<'a> {
+        Box::pin(async { Err(OperationAuthorizationError::Unavailable) })
+    }
+
     /// The native work owner's admitted controller selection, if supported.
     /// This is data for matching the actual selected client, never permission
     /// to construct a client or infer an external account from credentials.
@@ -267,12 +351,27 @@ pub trait WorkAuthorization: Send + Sync {
         &self,
         binding: &PreparedAuthorizationBinding,
     ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError>;
+
+    /// Preserve the publication from this exact preparation, including a
+    /// coherent refusal. Legacy owners report only what their decision retains.
+    fn prepare_observed(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> ObservedAuthorizationResult<Arc<dyn PreparedOperationAuthorization>> {
+        let result = self.prepare(binding);
+        let policy = result
+            .as_ref()
+            .ok()
+            .and_then(|decision| decision.policy_observation());
+        ObservedAuthorizationResult { result, policy }
+    }
 }
 
 struct WorkAuthorizationContextInner {
     authorization: Arc<dyn WorkAuthorization>,
     execution_scope: OperationExecutionScope,
     controller_client: Option<crate::ControllerModelClient>,
+    retained_work: Option<crate::retained_work::RetainedWorkIdentity>,
 }
 
 /// Process-local authorization context for one admitted work association.
@@ -301,6 +400,7 @@ impl WorkAuthorizationContext {
             authorization,
             execution_scope,
             controller_client: None,
+            retained_work: None,
         }))
     }
 
@@ -326,7 +426,27 @@ impl WorkAuthorizationContext {
             authorization: Arc::clone(&self.0.authorization),
             execution_scope: self.0.execution_scope.clone(),
             controller_client: Some(controller_client),
+            retained_work: self.0.retained_work.clone(),
         })))
+    }
+
+    /// Record the identity of the staged run this context authorizes. The
+    /// native owner attaches it from the batch it staged; it is identity data
+    /// for a later resume to be matched against, never a permission.
+    #[must_use]
+    pub fn with_retained_work(self, identity: crate::retained_work::RetainedWorkIdentity) -> Self {
+        Self(Arc::new(WorkAuthorizationContextInner {
+            authorization: Arc::clone(&self.0.authorization),
+            execution_scope: self.0.execution_scope.clone(),
+            controller_client: self.0.controller_client.clone(),
+            retained_work: Some(identity),
+        }))
+    }
+
+    /// Identity of the staged run this context authorizes, when the native
+    /// owner recorded one.
+    pub fn retained_work(&self) -> Option<&crate::retained_work::RetainedWorkIdentity> {
+        self.0.retained_work.as_ref()
     }
 
     pub fn controller_client(&self) -> Option<&crate::ControllerModelClient> {
@@ -366,6 +486,19 @@ impl fmt::Debug for WorkAuthorizationContext {
 /// local ordering. This interface alone supplies neither that ordering nor a
 /// one-use execution claim, and does not settle or relabel completed effects.
 pub trait PreparedOperationAuthorization: Send + Sync {
+    /// The immutable observation captured by this decision. This must never
+    /// resample a current counter or relabel an older policy evaluation. Return
+    /// stored Copy data only, without allocation, owner reads or traversal.
+    fn policy_observation(&self) -> Option<PolicyPublicationObservation> {
+        None
+    }
+
+    /// Review tier the policy owner resolved for this exact decision, under
+    /// the same publication as its permission. Required, with no default: an
+    /// owner or wrapper that forgets it fails to compile instead of silently
+    /// implying R1. Wrappers delegate; return stored Copy data only.
+    fn review_tier(&self) -> OperationReviewTier;
+
     fn check_current(
         &self,
         binding: &PreparedAuthorizationBinding,
@@ -382,6 +515,22 @@ pub trait PreparedOperationAuthorization: Send + Sync {
     ) -> Result<(), OperationObservationError> {
         Ok(())
     }
+}
+
+/// Review tier the policy owner requires for one exact prepared operation,
+/// resolved under the same publication as its permission (ADR-001).
+///
+/// Ordered by strictness, so combining owners keeps the strictest tier.
+/// Every tier retains all native permission, delegation, account, resource
+/// and confinement checks; R1 adds no review, it never widens permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OperationReviewTier {
+    /// No additional review; native permission and entry checks suffice.
+    R1,
+    /// One bound reviewer decision for this exact candidate.
+    R2,
+    /// Fresh qualified human decision; a model allow never satisfies it.
+    R3,
 }
 
 /// Internal disposition of the affected operation, not a turn/run disposition.
@@ -502,6 +651,10 @@ mod tests {
             observed: Arc<Mutex<Vec<OperationObservation>>>,
         }
         impl PreparedOperationAuthorization for Check {
+            fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+                crate::authorization::OperationReviewTier::R1
+            }
+
             fn check_current(
                 &self,
                 binding: &PreparedAuthorizationBinding,

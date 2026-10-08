@@ -2462,7 +2462,11 @@ enum ConfigCommands {
     /// Replace the config with the provided content
     Set {
         /// Path to a TOML or JSON config file
-        #[arg(value_name = "FILE", required_unless_present_any = ["json", "toml_payload"])]
+        #[arg(
+            value_name = "FILE",
+            required_unless_present_any = ["json", "toml_payload"],
+            conflicts_with_all = ["json", "toml_payload"]
+        )]
         file: Option<PathBuf>,
         /// Raw JSON config payload
         #[arg(long, conflicts_with = "toml_payload")]
@@ -2553,7 +2557,7 @@ enum SessionCommands {
         apply: bool,
         /// Allow --apply when the live transcript is SHORTER than the audited
         /// endpoint (the one shape where re-anchoring drops audited content).
-        /// The report echoes both row counts. HomeCore's expected shape is the
+        /// The report echoes both row counts. The common field shape is the
         /// longer-or-equal LivePrefixDiverges, which never needs this.
         #[arg(long, requires = "apply")]
         accept_shorter: bool,
@@ -2989,6 +2993,10 @@ enum McpCommands {
         #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
 
+        /// Write only if the realm config is at this generation (--scope realm)
+        #[arg(long = "expected-generation")]
+        expected_generation: Option<u64>,
+
         /// Command and arguments after -- (for stdio transport)
         #[arg(last = true, num_args = 0..)]
         command: Vec<String>,
@@ -3018,6 +3026,10 @@ enum McpCommands {
         /// Scope to remove from
         #[arg(long, value_enum)]
         scope: Option<CliMcpScope>,
+
+        /// Write only if the realm config is at this generation (--scope realm)
+        #[arg(long = "expected-generation")]
+        expected_generation: Option<u64>,
     },
 
     /// List configured MCP servers
@@ -3581,7 +3593,7 @@ enum DeploySurfaceArg {
     Rpc,
 }
 
-/// CLI-side scope enum (maps to McpScope)
+/// CLI-side scope enum (maps to McpServerSource)
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliMcpScope {
     /// User-level config (~/.rkat/mcp.toml)
@@ -3590,14 +3602,18 @@ enum CliMcpScope {
     Project,
     /// Alias for project (Claude compatibility)
     Local,
+    /// The selected realm's own config ([[tools.mcp_servers]]), inherited by
+    /// its child realms
+    Realm,
 }
 
 #[cfg(feature = "mcp")]
-impl From<CliMcpScope> for Option<McpScope> {
+impl From<CliMcpScope> for meerkat_core::McpServerSource {
     fn from(s: CliMcpScope) -> Self {
         match s {
-            CliMcpScope::User => Some(McpScope::User),
-            CliMcpScope::Project | CliMcpScope::Local => Some(McpScope::Project),
+            CliMcpScope::User => Self::File(McpScope::User),
+            CliMcpScope::Project | CliMcpScope::Local => Self::File(McpScope::Project),
+            CliMcpScope::Realm => Self::Realm,
         }
     }
 }
@@ -5178,6 +5194,38 @@ async fn handle_config_get(
     Ok(())
 }
 
+/// Refusal for a wrapped config given to `config set`: a read envelope
+/// (`rkat config get --format json --with-generation`, or a `config/get`
+/// response, `{config, generation, ...}`) or a set request
+/// (`{config, expected_generation}`). `Config` has no top-level `config` key;
+/// it ignores unknown top-level keys and fills every absent one with its
+/// default, so a wrapped config would replace the realm's config with
+/// defaults. It is not unwrapped either: that would silently drop a
+/// generation it carries, the only concurrency information it has.
+const WRAPPED_CONFIG_REFUSAL: &str = "the input has a top-level `config` key, which a \
+     config never has: it is a config read envelope ({config, generation, ...}) or a set \
+     request ({config, expected_generation}), not a config; writing it would replace the \
+     realm's config with defaults. Pass the inner `config` value as the config and any \
+     generation as --expected-generation";
+
+fn parse_config_set_json(content: &str) -> anyhow::Result<Config> {
+    let value: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?;
+    if value.get("config").is_some() {
+        return Err(anyhow::anyhow!(WRAPPED_CONFIG_REFUSAL));
+    }
+    serde_json::from_str(content).map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))
+}
+
+fn parse_config_set_toml(content: &str) -> anyhow::Result<Config> {
+    let table: toml::Table =
+        toml::from_str(content).map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
+    if table.contains_key("config") {
+        return Err(anyhow::anyhow!(WRAPPED_CONFIG_REFUSAL));
+    }
+    toml::from_str(content).map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))
+}
+
 async fn handle_config_set(
     file: Option<PathBuf>,
     json: Option<String>,
@@ -5185,25 +5233,28 @@ async fn handle_config_set(
     expected_generation: Option<u64>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    let config = if let Some(path) = file {
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read config file: {e}"))?;
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some("json") => serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?,
-            _ => toml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?,
+    let config = match (file, json, toml_payload) {
+        (Some(path), None, None) => {
+            let content = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read config file: {e}"))?;
+            match path.extension().and_then(|ext| ext.to_str()) {
+                Some("json") => parse_config_set_json(&content)?,
+                _ => parse_config_set_toml(&content)?,
+            }
         }
-    } else if let Some(payload) = json {
-        serde_json::from_str(&payload)
-            .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?
-    } else if let Some(payload) = toml_payload {
-        toml::from_str(&payload).map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?
-    } else {
-        return Err(anyhow::anyhow!(
-            "Provide --file, --json, or --toml to set config"
-        ));
+        (None, Some(payload), None) => parse_config_set_json(&payload)?,
+        (None, None, Some(payload)) => parse_config_set_toml(&payload)?,
+        (None, None, None) => {
+            return Err(anyhow::anyhow!(
+                "Provide FILE, --json, or --toml to set config"
+            ));
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Provide only one of FILE, --json, or --toml to set config"
+            ));
+        }
     };
 
     let (store, base_dir) = resolve_config_store(scope).await?;
@@ -5293,7 +5344,7 @@ async fn handle_config_patch(
         serde_json::from_str(&payload)
             .map_err(|e| anyhow::anyhow!("Failed to parse JSON patch: {e}"))?
     } else {
-        return Err(anyhow::anyhow!("Provide --file or --json to patch config"));
+        return Err(anyhow::anyhow!("Provide FILE or --json to patch config"));
     };
 
     let (store, base_dir) = resolve_config_store(scope).await?;
@@ -9816,7 +9867,9 @@ fn mcp_ready_wait_timeout(max_server_timeout_secs: u32, mcp_auth: CliMcpAuthMode
     }
 }
 
-/// Create MCP tool dispatcher from config files.
+/// Create the MCP tool dispatcher for a session in the scope's realm: the
+/// realm's own servers (`realm_servers`, from its composed config) plus the
+/// project and user `mcp.toml` files.
 ///
 /// Servers are staged and launched in parallel via `apply_staged()`. When
 /// `wait_for_mcp` is true, blocks until all servers finish connecting (or
@@ -9825,15 +9878,17 @@ fn mcp_ready_wait_timeout(max_server_timeout_secs: u32, mcp_auth: CliMcpAuthMode
 #[cfg(feature = "mcp")]
 async fn create_mcp_tools(
     scope: &RuntimeScope,
+    realm_servers: &[meerkat_core::McpServerConfig],
     wait_for_mcp: bool,
     mcp_auth: CliMcpAuthMode,
     external_surface_handle: Option<Arc<dyn meerkat_core::ExternalToolSurfaceHandle>>,
 ) -> anyhow::Result<Option<McpRouterAdapter>> {
-    use meerkat_core::mcp_config::{McpConfig, McpScope};
+    use meerkat_core::mcp_config::{McpConfig, McpScope, McpServerSource};
     use meerkat_mcp::{McpConnection, McpRouter};
 
-    // Load MCP config with scope info for security warnings
-    let servers_with_scope = McpConfig::load_with_scopes_from_roots(
+    // The realm's MCP set, with each server's source for security warnings.
+    let servers_with_scope = McpConfig::effective_servers_from_roots(
+        realm_servers,
         scope.context_root.as_deref(),
         scope.user_config_root.as_deref(),
     )
@@ -9847,7 +9902,7 @@ async fn create_mcp_tools(
     // Warn about project-scoped servers (potential security concern)
     let project_servers: Vec<_> = servers_with_scope
         .iter()
-        .filter(|s| s.scope == McpScope::Project)
+        .filter(|s| s.source == McpServerSource::File(McpScope::Project))
         .collect();
 
     if !project_servers.is_empty() {
@@ -9955,9 +10010,25 @@ fn resolve_keep_alive(requested: bool) -> anyhow::Result<bool> {
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// The CLI-hosted mobpack RPC host has no per-member external-tool surface to
+/// stage MCP servers through, so it does not start the realm's own servers
+/// (sessions in an ordinary `rkat run` do). When the realm has some, the host
+/// says so instead of starting none silently.
+#[cfg(all(feature = "mob", feature = "rpc-surface"))]
+fn mobpack_rpc_realm_mcp_warning(
+    realm_servers: &[meerkat_core::McpServerConfig],
+) -> Option<&'static str> {
+    (!realm_servers.is_empty()).then_some(
+        "the realm's MCP servers are not started on this mobpack RPC host; \
+         its members get no realm-configured MCP tools",
+    )
+}
+
 /// Load MCP tools as an external tool dispatcher for session build options.
+/// `realm_servers` is the scope realm's composed `tools.mcp_servers`.
 async fn load_mcp_external_tools(
     scope: &RuntimeScope,
+    realm_servers: &[meerkat_core::McpServerConfig],
     wait_for_mcp: bool,
     mcp_auth: CliMcpAuthMode,
     external_surface_handle: Option<Arc<dyn meerkat_core::ExternalToolSurfaceHandle>>,
@@ -9967,19 +10038,30 @@ async fn load_mcp_external_tools(
 )> {
     #[cfg(feature = "mcp")]
     {
-        match create_mcp_tools(scope, wait_for_mcp, mcp_auth, external_surface_handle).await {
+        match create_mcp_tools(
+            scope,
+            realm_servers,
+            wait_for_mcp,
+            mcp_auth,
+            external_surface_handle,
+        )
+        .await
+        {
             Ok(Some(adapter)) => {
                 let adapter = Arc::new(adapter);
                 let external: Arc<dyn AgentToolDispatcher> = adapter.clone();
                 Ok((Some(external), Some(adapter)))
             }
             Ok(None) => Ok((None, None)),
-            Err(e) => Err(e.context("failed to load MCP tools")),
+            // The top-level handler prints one line, so the cause rides in
+            // the message rather than in a context chain it would hide.
+            Err(e) => Err(anyhow::anyhow!("failed to load MCP tools: {e:#}")),
         }
     }
     #[cfg(not(feature = "mcp"))]
     {
         let _ = scope;
+        let _ = realm_servers;
         let _ = wait_for_mcp;
         let _ = mcp_auth;
         let _ = external_surface_handle;
@@ -10817,6 +10899,21 @@ impl meerkat_core::service::SessionServiceControlExt for RunMobSessionService {
         meerkat_core::service::SessionControlError,
     > {
         self.inner.append_system_context(id, req).await
+    }
+    async fn append_authenticated_system_context(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<meerkat_core::AppendSystemContextResult, meerkat_core::SessionControlError> {
+        self.inner
+            .append_authenticated_system_context(control)
+            .await
+    }
+
+    async fn append_authorized_system_context(
+        &self,
+        prepared: meerkat_core::service::PreparedSystemContextAppend,
+    ) -> Result<meerkat_core::AppendSystemContextResult, meerkat_core::SessionControlError> {
+        self.inner.append_authorized_system_context(prepared).await
     }
 }
 
@@ -12176,6 +12273,12 @@ async fn run_agent(
                 ctx.state.set_detached_completion_delivery(
                     meerkat_mob_mcp::DetachedCompletionDelivery::Available,
                 );
+                if let Err(error) = ctx.state.bind_continuations(
+                    persistence.runtime_delivery_inbox(),
+                    &persistence.continuation_bindings(),
+                ) {
+                    tracing::warn!(%error, "fork_off and council run in the turn: continuation owner not bound");
+                }
             }
             Some(ctx)
         } else {
@@ -12195,6 +12298,7 @@ async fn run_agent(
         // later early-return windows cannot skip adapter shutdown.
         let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(
             scope,
+            &config.tools.mcp_servers,
             wait_for_mcp,
             mcp_auth,
             Some(Arc::clone(bindings.external_tool_surface())),
@@ -12252,6 +12356,8 @@ async fn run_agent(
             budget_limits: Some(limits),
             provider_params,
             external_tools,
+            // The session service decides hosting when it creates the actor.
+            hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
             mcp_servers: Vec::new(),
             recoverable_tool_defs: None,
             llm_client_override: None,
@@ -12295,6 +12401,7 @@ async fn run_agent(
             },
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
+            initial_tool_visibility_state: None,
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,
@@ -12911,6 +13018,12 @@ async fn resume_session_with_llm_override(
                 ctx.state.set_detached_completion_delivery(
                     meerkat_mob_mcp::DetachedCompletionDelivery::Available,
                 );
+                if let Err(error) = ctx.state.bind_continuations(
+                    persistence.runtime_delivery_inbox(),
+                    &persistence.continuation_bindings(),
+                ) {
+                    tracing::warn!(%error, "fork_off and council run in the turn: continuation owner not bound");
+                }
             }
             Some(ctx)
         } else {
@@ -12930,6 +13043,7 @@ async fn resume_session_with_llm_override(
         // later early-return windows cannot skip adapter shutdown.
         let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(
             scope,
+            &config.tools.mcp_servers,
             wait_for_mcp,
             mcp_auth,
             Some(Arc::clone(resume_bindings.external_tool_surface())),
@@ -13322,6 +13436,11 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
     if let Some(existing) = cached_cli_persistent_surface(scope)? {
         return Ok(existing);
     }
+    // #1813: a realm that declares multi-process hosting refuses to start
+    // when its stores cannot provide it.
+    persistence
+        .require_hosting_mode(config.storage.hosting_mode())
+        .map_err(|error| anyhow::anyhow!(error))?;
 
     let store = persistence.session_store();
     let store_path = persistence
@@ -13938,6 +14057,8 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             peer_response_terminal_apply_intent: None,
             auth_binding: None,
             transcript_identity: Default::default(),
+            request_reasoning: None,
+            request_reasoning_disposition: None,
         };
         // The attention overlay is deliberately NOT composed here: a queued
         // prompt can sit behind a running turn that mutates the work item,
@@ -13986,6 +14107,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             objective_id: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: Utc::now(),
@@ -14299,6 +14421,21 @@ impl meerkat_core::service::SessionServiceControlExt for MobCliSessionService {
         meerkat_core::service::SessionControlError,
     > {
         self.inner.append_system_context(id, req).await
+    }
+    async fn append_authenticated_system_context(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<meerkat_core::AppendSystemContextResult, meerkat_core::SessionControlError> {
+        self.inner
+            .append_authenticated_system_context(control)
+            .await
+    }
+
+    async fn append_authorized_system_context(
+        &self,
+        prepared: meerkat_core::service::PreparedSystemContextAppend,
+    ) -> Result<meerkat_core::AppendSystemContextResult, meerkat_core::SessionControlError> {
+        self.inner.append_authorized_system_context(prepared).await
     }
 }
 
@@ -15773,12 +15910,35 @@ async fn find_session_matches(
     Ok(matches)
 }
 
-async fn persist_cli_config(config: Config, scope: &RuntimeScope) -> anyhow::Result<()> {
+/// This realm's own config document (the raw head store, never the composed
+/// view) and the runtime that writes it under the generation check.
+#[cfg(feature = "skills")]
+async fn cli_head_config_snapshot(
+    scope: &RuntimeScope,
+) -> anyhow::Result<(meerkat_core::ConfigRuntime, meerkat_core::ConfigSnapshot)> {
     let (store, base_dir) = resolve_config_store(scope).await?;
     let runtime =
         meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
+    let snapshot = runtime
+        .get()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    Ok((runtime, snapshot))
+}
+
+/// Patch `[skills]` keys of this realm's own document, refusing the write if
+/// the document changed since `generation` was read.
+#[cfg(feature = "skills")]
+async fn patch_cli_skills(
+    runtime: &meerkat_core::ConfigRuntime,
+    generation: u64,
+    skills: serde_json::Value,
+) -> anyhow::Result<()> {
     runtime
-        .set(config, None)
+        .patch(
+            ConfigDelta(serde_json::json!({ "skills": skills })),
+            Some(generation),
+        )
         .await
         .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
     Ok(())
@@ -15880,9 +16040,8 @@ async fn handle_skills_command(
 
     match command {
         SkillsCommands::Add { path, name } => {
-            let mut updated = config.clone();
             let repo = resolve_skill_repo_for_config(&path, name).await?;
-            if updated.skills.repositories.iter().any(|existing| {
+            if config.skills.repositories.iter().any(|existing| {
                 existing.name == repo.name || existing.source_uuid == repo.source_uuid
             }) {
                 return Err(anyhow::anyhow!(
@@ -15890,9 +16049,21 @@ async fn handle_skills_command(
                     repo.name
                 ));
             }
-            updated.skills.enabled = true;
-            updated.skills.repositories.push(repo.clone());
-            persist_cli_config(updated, scope).await?;
+            // `config` is the composed view, which also lists every source
+            // inherited from parent realms. Only this realm's own list is
+            // written back, or the whole chain would flatten into its document.
+            let (runtime, snapshot) = cli_head_config_snapshot(scope).await?;
+            let mut repositories = snapshot.config.skills.repositories;
+            repositories.push(repo.clone());
+            patch_cli_skills(
+                &runtime,
+                snapshot.generation,
+                serde_json::json!({
+                    "enabled": true,
+                    "repositories": serde_json::to_value(&repositories)?,
+                }),
+            )
+            .await?;
             let transport = match &repo.transport {
                 meerkat_core::skills_config::SkillRepoTransport::Filesystem { path } => {
                     path.as_str()
@@ -15907,11 +16078,10 @@ async fn handle_skills_command(
             return Ok(());
         }
         SkillsCommands::Remove { selector } => {
-            let mut updated = config.clone();
-            let before = updated.skills.repositories.len();
-            let mut kept = Vec::with_capacity(before);
+            let (runtime, snapshot) = cli_head_config_snapshot(scope).await?;
+            let mut kept = Vec::new();
             let mut removed = Vec::new();
-            for repo in updated.skills.repositories {
+            for repo in snapshot.config.skills.repositories {
                 if repo_matches_selector(&repo, &selector).await? {
                     removed.push(repo.name.clone());
                 } else {
@@ -15919,12 +16089,31 @@ async fn handle_skills_command(
                 }
             }
             if removed.is_empty() {
+                // Composition never removes an inherited source in a child
+                // realm, so only the realm that lists it can remove it.
+                for repo in &config.skills.repositories {
+                    if repo_matches_selector(repo, &selector).await? {
+                        return Err(anyhow::anyhow!(
+                            "Skill source '{}' is inherited from a parent realm; remove it in the realm that configures it",
+                            repo.name
+                        ));
+                    }
+                }
                 return Err(anyhow::anyhow!(
                     "No configured skill source matched '{selector}'"
                 ));
             }
-            updated.skills.repositories = kept;
-            persist_cli_config(updated, scope).await?;
+            let repositories = if kept.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::to_value(&kept)?
+            };
+            patch_cli_skills(
+                &runtime,
+                snapshot.generation,
+                serde_json::json!({ "repositories": repositories }),
+            )
+            .await?;
             println!("Removed skill source(s): {}", removed.join(", "));
             return Ok(());
         }
@@ -16072,6 +16261,8 @@ async fn handle_skills_command(
 /// Handle MCP subcommands
 #[cfg(feature = "mcp")]
 async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> anyhow::Result<()> {
+    use meerkat_core::McpServerSource;
+
     match command {
         McpCommands::Add {
             name,
@@ -16082,6 +16273,7 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
             headers,
             oauth_account,
             env,
+            expected_generation,
             command,
         } => {
             let transport = transport.map(|t| match t {
@@ -16089,54 +16281,92 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
                 CliTransport::Http => McpTransportKind::StreamableHttp,
                 CliTransport::Sse => McpTransportKind::Sse,
             });
-            mcp::add_server(
-                mcp::AddServerRequest {
-                    name,
-                    transport,
-                    url,
-                    positional_url,
-                    headers,
-                    oauth_account,
-                    command,
-                    env,
-                    project_scope: matches!(scope, CliMcpScope::Project | CliMcpScope::Local),
-                },
-                cli_scope.context_root.as_deref(),
-                cli_scope.user_config_root.as_deref(),
-            )
-            .await
+            let request = mcp::AddServerRequest {
+                name,
+                transport,
+                url,
+                positional_url,
+                headers,
+                oauth_account,
+                command,
+                env,
+                project_scope: matches!(scope, CliMcpScope::Project | CliMcpScope::Local),
+            };
+            match McpServerSource::from(scope) {
+                McpServerSource::Realm => {
+                    let runtime = cli_realm_config_runtime(cli_scope).await?;
+                    mcp::add_realm_server(
+                        request,
+                        &meerkat_core::McpRealmPersistTarget::new(&runtime),
+                        cli_scope.locator.realm.as_str(),
+                        expected_generation,
+                    )
+                    .await
+                }
+                McpServerSource::File(_) => {
+                    require_no_expected_generation(expected_generation)?;
+                    mcp::add_server(
+                        request,
+                        cli_scope.context_root.as_deref(),
+                        cli_scope.user_config_root.as_deref(),
+                    )
+                    .await
+                }
+            }
         }
         McpCommands::Login {
             name,
             scope,
             allow_headless,
         } => {
-            let scope = scope.map(|s| match s {
-                CliMcpScope::User => McpScope::User,
-                CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
-            });
-            login_mcp_server(name, scope, cli_scope, allow_headless).await
-        }
-        McpCommands::Remove { name, scope } => {
-            let scope = scope.map(|s| match s {
-                CliMcpScope::User => McpScope::User,
-                CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
-            });
-            mcp::remove_server(
+            login_mcp_server(
                 name,
-                scope,
-                cli_scope.context_root.as_deref(),
-                cli_scope.user_config_root.as_deref(),
+                scope.map(McpServerSource::from),
+                cli_scope,
+                allow_headless,
             )
             .await
         }
+        McpCommands::Remove {
+            name,
+            scope,
+            expected_generation,
+        } => {
+            let selection = match scope.map(McpServerSource::from) {
+                Some(selection) => selection,
+                None => mcp_remove_selection(&name, cli_scope).await?,
+            };
+            match selection {
+                McpServerSource::Realm => {
+                    let runtime = cli_realm_config_runtime(cli_scope).await?;
+                    let (config, _) = load_config(cli_scope).await?;
+                    mcp::remove_realm_server(
+                        &name,
+                        &meerkat_core::McpRealmPersistTarget::new(&runtime),
+                        cli_scope.locator.realm.as_str(),
+                        &config.tools.mcp_servers,
+                        expected_generation,
+                    )
+                    .await
+                }
+                McpServerSource::File(file_scope) => {
+                    require_no_expected_generation(expected_generation)?;
+                    mcp::remove_server(
+                        name,
+                        Some(file_scope),
+                        cli_scope.context_root.as_deref(),
+                        cli_scope.user_config_root.as_deref(),
+                    )
+                    .await
+                }
+            }
+        }
         McpCommands::List { scope, json } => {
-            let scope = scope.map(|s| match s {
-                CliMcpScope::User => McpScope::User,
-                CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
-            });
+            let selection = scope.map(McpServerSource::from);
+            let realm_servers = cli_realm_mcp_servers(selection, cli_scope).await?;
             mcp::list_servers(
-                scope,
+                selection,
+                &realm_servers,
                 json,
                 cli_scope.context_root.as_deref(),
                 cli_scope.user_config_root.as_deref(),
@@ -16144,13 +16374,12 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
             .await
         }
         McpCommands::Get { name, scope, json } => {
-            let scope = scope.map(|s| match s {
-                CliMcpScope::User => McpScope::User,
-                CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
-            });
+            let selection = scope.map(McpServerSource::from);
+            let realm_servers = cli_realm_mcp_servers(selection, cli_scope).await?;
             mcp::get_server(
                 name,
-                scope,
+                selection,
+                &realm_servers,
                 json,
                 cli_scope.context_root.as_deref(),
                 cli_scope.user_config_root.as_deref(),
@@ -16160,37 +16389,132 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
     }
 }
 
+/// `--expected-generation` checks the realm config's generation; the
+/// `mcp.toml` scopes have none.
+#[cfg(feature = "mcp")]
+fn require_no_expected_generation(expected_generation: Option<u64>) -> anyhow::Result<()> {
+    if expected_generation.is_some() {
+        anyhow::bail!("--expected-generation applies to --scope realm only");
+    }
+    Ok(())
+}
+
+/// The config runtime of the scope realm's own config document, where
+/// `--scope realm` writes.
+#[cfg(feature = "mcp")]
+async fn cli_realm_config_runtime(
+    scope: &RuntimeScope,
+) -> anyhow::Result<meerkat_core::ConfigRuntime> {
+    let (store, base_dir) = resolve_config_store(scope).await?;
+    Ok(meerkat_core::ConfigRuntime::new(
+        store,
+        base_dir.join("config_state.json"),
+    ))
+}
+
+/// The scope realm's composed MCP servers when `selection` reads the realm
+/// (`--scope realm`, or no scope), else none.
+#[cfg(feature = "mcp")]
+async fn cli_realm_mcp_servers(
+    selection: Option<meerkat_core::McpServerSource>,
+    scope: &RuntimeScope,
+) -> anyhow::Result<Vec<meerkat_core::McpServerConfig>> {
+    if matches!(selection, Some(meerkat_core::McpServerSource::File(_))) {
+        return Ok(Vec::new());
+    }
+    let (config, _) = load_config(scope).await?;
+    Ok(config.tools.mcp_servers)
+}
+
+/// Where `rkat mcp remove <NAME>` without `--scope` removes from: the one
+/// place that configures the server. A server in more than one of the realm's
+/// own config and the `mcp.toml` scopes needs `--scope`.
+#[cfg(feature = "mcp")]
+async fn mcp_remove_selection(
+    name: &str,
+    cli_scope: &RuntimeScope,
+) -> anyhow::Result<meerkat_core::McpServerSource> {
+    use meerkat_core::McpServerSource;
+    let runtime = cli_realm_config_runtime(cli_scope).await?;
+    let (realm_own, _) = meerkat_core::McpRealmPersistTarget::new(&runtime)
+        .servers()
+        .await?;
+    let mut sources: Vec<McpServerSource> = McpConfig::find_server_scopes_from_roots(
+        name,
+        cli_scope.context_root.as_deref(),
+        cli_scope.user_config_root.as_deref(),
+    )
+    .await?
+    .into_iter()
+    .map(McpServerSource::File)
+    .collect();
+    if realm_own.iter().any(|server| server.name == name) {
+        sources.insert(0, McpServerSource::Realm);
+    }
+    match sources.as_slice() {
+        // Only inherited from a parent realm: the realm path refuses it and
+        // names where it is configured.
+        [] if cli_realm_mcp_servers(None, cli_scope)
+            .await?
+            .iter()
+            .any(|server| server.name == name) =>
+        {
+            Ok(McpServerSource::Realm)
+        }
+        [] => anyhow::bail!("MCP server '{name}' not found"),
+        [source] => Ok(*source),
+        _ => anyhow::bail!(
+            "MCP server '{name}' exists in multiple scopes: {:?}. Specify --scope to remove from a specific scope.",
+            sources
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+        ),
+    }
+}
+
 #[cfg(feature = "mcp")]
 async fn load_mcp_login_servers(
     name: &str,
-    scope: Option<McpScope>,
+    selection: Option<meerkat_core::McpServerSource>,
     cli_scope: &RuntimeScope,
-) -> anyhow::Result<Vec<meerkat_core::mcp_config::McpServerWithScope>> {
-    let servers = match scope {
-        Some(scope) => {
-            let config = McpConfig::load_scope_from_roots(
-                scope,
-                cli_scope.context_root.as_deref(),
-                cli_scope.user_config_root.as_deref(),
-            )
-            .await?;
-            config
-                .servers
-                .into_iter()
-                .filter(|server| server.name == name)
-                .map(|server| meerkat_core::mcp_config::McpServerWithScope { server, scope })
-                .collect::<Vec<_>>()
-        }
-        None => McpConfig::load_with_scopes_from_roots(
+) -> anyhow::Result<Vec<meerkat_core::McpServerWithSource>> {
+    use meerkat_core::McpServerSource;
+    let realm_servers = cli_realm_mcp_servers(selection, cli_scope).await?;
+    let servers = match selection {
+        Some(McpServerSource::File(scope)) => McpConfig::load_scope_from_roots(
+            scope,
             cli_scope.context_root.as_deref(),
             cli_scope.user_config_root.as_deref(),
         )
         .await?
+        .servers
+        .into_iter()
+        .map(|server| meerkat_core::McpServerWithSource {
+            server,
+            source: McpServerSource::File(scope),
+        })
+        .collect::<Vec<_>>(),
+        // The realm's own servers, refused as a whole like any realm MCP
+        // set (an environment reference in any entry, selected or not)
+        // before one is selected.
+        Some(McpServerSource::Realm) => {
+            meerkat_core::mcp_config::compose_effective_mcp_servers(&realm_servers, Vec::new())?
+        }
+        // The realm's MCP set, as a session in this realm sees it.
+        None => {
+            McpConfig::effective_servers_from_roots(
+                &realm_servers,
+                cli_scope.context_root.as_deref(),
+                cli_scope.user_config_root.as_deref(),
+            )
+            .await?
+        }
+    };
+    Ok(servers
         .into_iter()
         .filter(|server| server.server.name == name)
-        .collect::<Vec<_>>(),
-    };
-    Ok(servers)
+        .collect())
 }
 
 /// `rkat mcp login` refuses to run headless unless explicitly allowed: a
@@ -16208,7 +16532,7 @@ fn require_mcp_login_terminal(allow_headless: bool, is_terminal: bool) -> anyhow
 #[cfg(feature = "mcp")]
 async fn login_mcp_server(
     name: String,
-    scope: Option<McpScope>,
+    scope: Option<meerkat_core::McpServerSource>,
     cli_scope: &RuntimeScope,
     allow_headless: bool,
 ) -> anyhow::Result<()> {
@@ -16222,7 +16546,7 @@ async fn login_mcp_server(
     }
     if servers.len() > 1 {
         anyhow::bail!(
-            "MCP server '{name}' exists in multiple scopes. Specify --scope user or --scope project."
+            "MCP server '{name}' exists in multiple scopes. Specify --scope user, --scope project or --scope realm."
         );
     }
     let server = servers
@@ -19428,8 +19752,11 @@ where
     // Pre-initialize the callback channel so the ExternalToolsProvider closure
     // can read callback_request_tx() during mob creation and resume.
     let callback_rx = runtime.init_callback_channel();
+    if let Some(warning) = mobpack_rpc_realm_mcp_warning(&config.tools.mcp_servers) {
+        eprintln!("warning: {warning}");
+    }
     let (mcp_external_tools, _mcp_adapter_guard) =
-        load_mcp_external_tools(scope, false, CliMcpAuthMode::Stored, None).await?;
+        load_mcp_external_tools(scope, &[], false, CliMcpAuthMode::Stored, None).await?;
 
     let external_tools_provider: Option<meerkat_mob::ExternalToolsProvider> = Some(Arc::new({
         let runtime = runtime.clone();
@@ -19510,6 +19837,12 @@ where
     // The RPC surface is a long-lived host.
     mob_state
         .set_detached_completion_delivery(meerkat_mob_mcp::DetachedCompletionDelivery::Available);
+    if let Err(error) = mob_state.bind_continuations(
+        runtime.runtime_delivery_inbox(),
+        runtime.continuation_bindings(),
+    ) {
+        tracing::warn!(%error, "fork_off and council run in the turn: continuation owner not bound");
+    }
 
     // Set mob tools factory using the SAME hydrated state the router will use.
     // This ensures agent-created mobs (via delegate/mob_create) live in the
@@ -25379,7 +25712,7 @@ default_model = "gemma"
                 .expect("mcp remove should parse");
         match remove.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
-                command: McpCommands::Remove { name, scope },
+                command: McpCommands::Remove { name, scope, .. },
             } => {
                 assert_eq!(name, "filesystem");
                 assert!(matches!(scope, Some(CliMcpScope::Project)));
@@ -25755,17 +26088,146 @@ url = "https://user.example/mcp"
         scope.context_root = Some(context_root);
         scope.user_config_root = Some(user_root);
 
-        let servers = load_mcp_login_servers("glean", Some(McpScope::User), &scope)
-            .await
-            .expect("load mcp login servers");
+        let servers = load_mcp_login_servers(
+            "glean",
+            Some(meerkat_core::McpServerSource::File(McpScope::User)),
+            &scope,
+        )
+        .await
+        .expect("load mcp login servers");
 
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].scope, McpScope::User);
+        assert_eq!(
+            servers[0].source,
+            meerkat_core::McpServerSource::File(McpScope::User)
+        );
         let url = match &servers[0].server.transport {
             McpTransportConfig::Http(http) => Some(http.url.as_str()),
             McpTransportConfig::Stdio(_) => None,
         };
         assert_eq!(url, Some("https://user.example/mcp"));
+
+        // Explicit realm selection checks the realm's whole server list, as
+        // resolving its MCP set does, before selecting one: an environment
+        // reference in the selected entry or in an unrelated one is refused,
+        // naming the server and field, never the value.
+        let realm_doc =
+            meerkat_store::realm_paths_in(&temp.path().join("realm-state"), "test").config_path;
+        tokio::fs::create_dir_all(realm_doc.parent().expect("realm config dir"))
+            .await
+            .expect("create realm config dir");
+        let literal = "[[tools.mcp_servers]]\nname = \"realm-docs\"\n\
+                       url = \"https://realm.example/mcp\"\n";
+        let cases = [
+            (
+                "[[tools.mcp_servers]]\nname = \"realm-docs\"\n\
+                 url = \"https://realm.example/mcp\"\n\
+                 headers = { Authorization = \"Bearer ${REALM_TOKEN}\" }\n"
+                    .to_string(),
+                Some("'realm-docs'"),
+            ),
+            (
+                format!(
+                    "{literal}\n[[tools.mcp_servers]]\nname = \"other\"\n\
+                     command = \"tool\"\nenv = {{ TOKEN = \"${{REALM_TOKEN}}\" }}\n"
+                ),
+                Some("'other'"),
+            ),
+            (literal.to_string(), None),
+        ];
+        for (servers, refused_server) in cases {
+            tokio::fs::write(&realm_doc, format!("[realm.test]\n\n{servers}"))
+                .await
+                .expect("write realm config");
+            let result = load_mcp_login_servers(
+                "realm-docs",
+                Some(meerkat_core::McpServerSource::Realm),
+                &scope,
+            )
+            .await;
+            match refused_server {
+                Some(server) => {
+                    let error = result.expect_err("an environment reference is refused");
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.contains(server)
+                            && message.contains("never expanded from the environment")
+                            && !message.contains("REALM_TOKEN"),
+                        "{message}"
+                    );
+                }
+                None => {
+                    let servers = result.expect("a literal realm server resolves");
+                    assert_eq!(servers.len(), 1);
+                    assert_eq!(servers[0].source, meerkat_core::McpServerSource::Realm);
+                    let url = match &servers[0].server.transport {
+                        McpTransportConfig::Http(http) => Some(http.url.as_str()),
+                        McpTransportConfig::Stdio(_) => None,
+                    };
+                    assert_eq!(url, Some("https://realm.example/mcp"));
+                }
+            }
+        }
+    }
+
+    /// `--expected-generation` checks the realm config's generation, so a
+    /// file-scope mutation refuses it instead of discarding it, and writes
+    /// nothing.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_mcp_file_scope_mutation_refuses_expected_generation() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let context_root = temp.path().join("project");
+        tokio::fs::create_dir_all(context_root.join(".rkat"))
+            .await
+            .expect("create project .rkat");
+        let mcp_toml = context_root.join(".rkat/mcp.toml");
+        let original = "[[servers]]\nname = \"docs\"\ncommand = \"docs-tool\"\n";
+        tokio::fs::write(&mcp_toml, original)
+            .await
+            .expect("write project mcp config");
+        let mut scope = test_scope(temp.path().join("realm-state"), "test");
+        scope.context_root = Some(context_root);
+
+        let error = handle_mcp_command(
+            McpCommands::Remove {
+                name: "docs".to_string(),
+                scope: Some(CliMcpScope::Project),
+                expected_generation: Some(3),
+            },
+            &scope,
+        )
+        .await
+        .expect_err("a file scope refuses --expected-generation");
+        assert!(
+            error.to_string().contains("applies to --scope realm only"),
+            "{error}"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&mcp_toml)
+                .await
+                .expect("read project mcp config"),
+            original
+        );
+    }
+
+    /// The mobpack RPC host warns when the realm has MCP servers it does not
+    /// start, and stays quiet when it has none.
+    #[cfg(all(feature = "mob", feature = "rpc-surface"))]
+    #[test]
+    fn test_mobpack_rpc_host_warns_about_unstarted_realm_mcp_servers() {
+        assert_eq!(mobpack_rpc_realm_mcp_warning(&[]), None);
+        let warning = mobpack_rpc_realm_mcp_warning(&[meerkat_core::McpServerConfig::stdio(
+            "docs",
+            "docs-tool",
+            vec![],
+            std::collections::HashMap::new(),
+        )])
+        .expect("a realm with servers is warned about");
+        assert!(
+            warning.contains("not started on this mobpack RPC host"),
+            "{warning}"
+        );
     }
 
     #[cfg(feature = "mcp")]
@@ -30389,6 +30851,315 @@ supports_reasoning = true
 
         let (config, _) = load_config(&scope).await.expect("reload config");
         assert_ne!(config.agent.model, "not-a-model");
+    }
+
+    /// A parent realm that restricts tool policy and disables capabilities
+    /// whose defaults are on, and a child that only inherits from it.
+    async fn write_policy_parent_and_child_realm_docs(state_root: &Path, parent_extra: &str) {
+        let parent = format!(
+            "[realm.parent]\n\n[tools]\nmax_concurrent = 3\nschedule_enabled = false\n\n\
+             [provider_tools.openai]\nweb_search = false\n{parent_extra}"
+        );
+        let child = "[realm.child]\nparent = \"parent\"\n".to_string();
+        for (realm, doc) in [("parent", parent), ("child", child)] {
+            let path = meerkat_store::realm_paths_in(state_root, realm).config_path;
+            tokio::fs::create_dir_all(path.parent().expect("realm config dir"))
+                .await
+                .expect("create realm config dir");
+            tokio::fs::write(&path, doc)
+                .await
+                .expect("write realm config doc");
+        }
+    }
+
+    async fn realm_doc(state_root: &Path, realm: &str) -> (String, toml::Table) {
+        let path = meerkat_store::realm_paths_in(state_root, realm).config_path;
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read realm config doc");
+        let table = toml::from_str(&text).expect("realm config doc is TOML");
+        (text, table)
+    }
+
+    fn sorted_keys(table: &toml::Table) -> Vec<&str> {
+        let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// `--default-model` in a child realm writes only `agent.model`: the
+    /// child keeps inheriting the parent's tool policy, including the
+    /// capabilities the parent disabled.
+    #[tokio::test]
+    async fn test_set_default_model_in_child_realm_keeps_inherited_tool_policy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(dir.path().to_path_buf(), "child");
+        write_policy_parent_and_child_realm_docs(dir.path(), "").await;
+
+        handle_set_default_model("claude-sonnet-4-5", &scope)
+            .await
+            .expect("default model persists");
+
+        let (text, child_doc) = realm_doc(dir.path(), "child").await;
+        assert_eq!(sorted_keys(&child_doc), vec!["agent", "realm"], "{text}");
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        assert_eq!(config.agent.model, "claude-sonnet-4-5");
+        assert_eq!(config.tools.max_concurrent, 3, "inherited restriction");
+        assert!(
+            !config.tools.schedule_enabled,
+            "the parent's disabled scheduling stays disabled"
+        );
+        assert!(
+            !config.provider_tools.openai.web_search,
+            "the parent's disabled web search stays disabled"
+        );
+    }
+
+    /// `skills add/remove` edit only the realm's own sources. The composed
+    /// view they validate against also carries the parent's sources and
+    /// values; none of those is copied into the child's document, and an
+    /// inherited source is not removable from the child.
+    #[cfg(feature = "skills")]
+    #[tokio::test]
+    async fn test_skills_add_and_remove_edit_only_the_realms_own_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(dir.path().to_path_buf(), "child");
+        let parent_source = dir.path().join("parent-skills");
+        let child_source = dir.path().join("child-skills");
+        for source in [&parent_source, &child_source] {
+            tokio::fs::create_dir_all(source)
+                .await
+                .expect("create skill source dir");
+        }
+        write_policy_parent_and_child_realm_docs(
+            dir.path(),
+            &format!(
+                "\n[[skills.repositories]]\nname = \"parent-src\"\n\
+                 source_uuid = \"dc256086-0d2f-4f61-a307-320d4148107f\"\n\
+                 type = \"filesystem\"\npath = {:?}\n",
+                parent_source.display().to_string()
+            ),
+        )
+        .await;
+
+        handle_skills_command(
+            SkillsCommands::Add {
+                path: child_source.display().to_string(),
+                name: Some("child-src".to_string()),
+            },
+            &scope,
+        )
+        .await
+        .expect("add the child's own source");
+        let (text, child_doc) = realm_doc(dir.path(), "child").await;
+        assert_eq!(sorted_keys(&child_doc), vec!["realm", "skills"], "{text}");
+        let skills = child_doc["skills"].as_table().expect("skills table");
+        assert_eq!(skills["enabled"].as_bool(), Some(true), "{text}");
+        let own: Vec<&str> = skills["repositories"]
+            .as_array()
+            .expect("own repositories")
+            .iter()
+            .filter_map(|repo| repo.get("name").and_then(toml::Value::as_str))
+            .collect();
+        assert_eq!(own, vec!["child-src"], "{text}");
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        let mut effective: Vec<&str> = config
+            .skills
+            .repositories
+            .iter()
+            .map(|repo| repo.name.as_str())
+            .collect();
+        effective.sort_unstable();
+        assert_eq!(effective, vec!["child-src", "parent-src"]);
+        assert!(!config.tools.schedule_enabled, "still inherited");
+
+        let error = handle_skills_command(
+            SkillsCommands::Remove {
+                selector: "parent-src".to_string(),
+            },
+            &scope,
+        )
+        .await
+        .expect_err("an inherited source is not removable from the child");
+        assert!(
+            error.to_string().contains("inherited from a parent realm"),
+            "{error}"
+        );
+
+        handle_skills_command(
+            SkillsCommands::Remove {
+                selector: "child-src".to_string(),
+            },
+            &scope,
+        )
+        .await
+        .expect("remove the child's own source");
+        let (text, child_doc) = realm_doc(dir.path(), "child").await;
+        assert!(
+            !child_doc["skills"]
+                .as_table()
+                .expect("skills table")
+                .contains_key("repositories"),
+            "{text}"
+        );
+        let (config, _) = load_config(&scope).await.expect("reload config");
+        assert_eq!(
+            config
+                .skills
+                .repositories
+                .iter()
+                .map(|repo| repo.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parent-src"]
+        );
+    }
+
+    async fn config_generation(scope: &RuntimeScope) -> u64 {
+        let (store, base_dir) = resolve_config_store(scope).await.expect("config store");
+        meerkat_core::ConfigRuntime::new(store, base_dir.join("config_state.json"))
+            .get()
+            .await
+            .expect("read config")
+            .generation
+    }
+
+    /// `config set` refuses a wrapped config in every input form: a
+    /// `config get --with-generation` read envelope, a set request
+    /// `{config, expected_generation}` and a bare `{config}` (each would
+    /// replace the realm's config with defaults), and a stale
+    /// `--expected-generation`; each refusal leaves the document bytes and the
+    /// generation as they were. A matching generation writes.
+    #[tokio::test]
+    async fn test_config_set_refuses_wrapped_configs_and_stale_generations_without_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(dir.path().to_path_buf(), "child");
+        write_policy_parent_and_child_realm_docs(dir.path(), "").await;
+        handle_set_default_model("claude-sonnet-4-5", &scope)
+            .await
+            .expect("default model persists");
+        let (before, _) = realm_doc(dir.path(), "child").await;
+        let generation = config_generation(&scope).await;
+
+        let (store, base_dir) = resolve_config_store(&scope).await.expect("config store");
+        let snapshot = meerkat_core::ConfigRuntime::new(store, base_dir.join("config_state.json"))
+            .get()
+            .await
+            .expect("read config");
+        let envelope = ConfigEnvelope::from_snapshot(snapshot, ConfigEnvelopePolicy::Public);
+        let envelope_json = serde_json::to_string_pretty(&envelope).expect("envelope JSON");
+        let envelope_toml = toml::to_string(&envelope).expect("envelope TOML");
+        let envelope_file = dir.path().join("envelope.json");
+        tokio::fs::write(&envelope_file, &envelope_json)
+            .await
+            .expect("write envelope file");
+        let set_request = serde_json::json!({
+            "config": {"agent": {"model": "claude-sonnet-4-5"}},
+            "expected_generation": generation,
+        })
+        .to_string();
+        let bare_file = dir.path().join("bare.json");
+        tokio::fs::write(
+            &bare_file,
+            serde_json::json!({"config": {"agent": {"model": "claude-sonnet-4-5"}}}).to_string(),
+        )
+        .await
+        .expect("write bare wrapped file");
+
+        let refused = [
+            (
+                "--json",
+                handle_config_set(None, Some(envelope_json.clone()), None, None, &scope).await,
+            ),
+            (
+                "--toml",
+                handle_config_set(None, None, Some(envelope_toml), None, &scope).await,
+            ),
+            (
+                "FILE",
+                handle_config_set(Some(envelope_file), None, None, None, &scope).await,
+            ),
+            (
+                "--json set request",
+                handle_config_set(None, Some(set_request), None, None, &scope).await,
+            ),
+            (
+                "--toml bare",
+                handle_config_set(
+                    None,
+                    None,
+                    Some("[config.agent]\nmodel = \"claude-sonnet-4-5\"\n".to_string()),
+                    None,
+                    &scope,
+                )
+                .await,
+            ),
+            (
+                "FILE bare",
+                handle_config_set(Some(bare_file), None, None, None, &scope).await,
+            ),
+            (
+                "--json non-table config",
+                handle_config_set(
+                    None,
+                    Some(r#"{"config": "x"}"#.to_string()),
+                    None,
+                    None,
+                    &scope,
+                )
+                .await,
+            ),
+        ];
+        for (source, result) in refused {
+            let error = result.expect_err("a wrapped config is refused");
+            assert!(
+                error.to_string().contains("top-level `config` key"),
+                "{source}: {error}"
+            );
+        }
+        let stale = handle_config_set(
+            None,
+            None,
+            Some("[realm.child]\nparent = \"parent\"\n".to_string()),
+            Some(generation + 1),
+            &scope,
+        )
+        .await
+        .expect_err("a stale generation is refused");
+        assert!(stale.to_string().contains("generation conflict"), "{stale}");
+        let (after, _) = realm_doc(dir.path(), "child").await;
+        assert_eq!(after, before, "refused writes leave the document bytes");
+        assert_eq!(config_generation(&scope).await, generation);
+
+        handle_config_set(
+            None,
+            None,
+            Some("[realm.child]\nparent = \"parent\"\n".to_string()),
+            Some(generation),
+            &scope,
+        )
+        .await
+        .expect("a matching generation writes");
+        assert_eq!(config_generation(&scope).await, generation + 1);
+        let (text, child_doc) = realm_doc(dir.path(), "child").await;
+        assert_eq!(
+            child_doc
+                .get("realm")
+                .and_then(|realm| realm.get("child"))
+                .and_then(|child| child.get("parent"))
+                .and_then(toml::Value::as_str),
+            Some("parent"),
+            "{text}"
+        );
+    }
+
+    /// FILE and `--json`/`--toml` are alternative sources; giving both is
+    /// refused instead of one silently winning.
+    #[test]
+    fn test_config_set_refuses_file_with_an_inline_payload() {
+        for flag in ["--json", "--toml"] {
+            let result = Cli::try_parse_from(["rkat", "config", "set", "config.toml", flag, "{}"]);
+            assert!(result.is_err(), "FILE with {flag} must be refused");
+        }
     }
 
     fn test_scope_with_context(root: PathBuf) -> RuntimeScope {

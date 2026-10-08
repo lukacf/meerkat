@@ -28,17 +28,19 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+meerkat-core = { workspace = true, features = ["test-support"] }
 meerkat-anthropic = { workspace = true, default-features = false }
 meerkat-auth-core.workspace = true
 meerkat-models.workspace = true
 async-trait.workspace = true
 futures.workspace = true
-meerkat = { path = "../meerkat", default-features = false, features = ["session-store", "memory-store", "local-authorization"] }
+meerkat = { path = "../meerkat", default-features = false, features = ["anthropic", "session-store", "memory-store", "local-authorization"] }
 meerkat-llm-core.workspace = true
 meerkat-runtime = { path = "../meerkat-runtime", features = ["local-authorization", "test-support"] }
 meerkat-tools = { workspace = true, default-features = false }
 tempfile.workspace = true
-tokio.workspace = true
+# Paused virtual time for owner-deadline tests; production features unchanged.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

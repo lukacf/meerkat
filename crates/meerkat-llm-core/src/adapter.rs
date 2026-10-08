@@ -38,6 +38,9 @@ pub struct LlmClientAdapter {
     provider_params: Option<ProviderTag>,
     /// Per-interaction event tap for streaming events to subscribers.
     event_tap: meerkat_core::EventTap,
+    /// Helper streams expose diagnostics without projecting their content as
+    /// the parent assistant's streaming output.
+    operation_observation_events_only: bool,
     /// True after this adapter emitted user-visible streaming output for the
     /// current call. The agent retry loop reads this to avoid cross-model
     /// fallback after partial output has escaped.
@@ -126,6 +129,7 @@ impl LlmClientAdapter {
             event_tx,
             provider_params: None,
             event_tap: meerkat_core::new_event_tap(),
+            operation_observation_events_only: false,
             stream_output_observed: Arc::new(AtomicBool::new(false)),
             stream_activity: Arc::new(AtomicU64::new(0)),
         }
@@ -155,6 +159,11 @@ impl LlmClientAdapter {
     /// Publish one live event to the interaction tap (best effort) and then
     /// to the run's event channel, in that order, like the agent loop does.
     async fn publish(&self, event: AgentEvent) {
+        if self.operation_observation_events_only
+            && !matches!(event, AgentEvent::OperationObservationFailed { .. })
+        {
+            return;
+        }
         meerkat_core::tap_try_send(&self.event_tap, &event);
         if let Some(ref tx) = self.event_tx {
             let _ = tx.send(event).await;
@@ -178,6 +187,20 @@ impl LlmClientAdapter {
     /// Set the event tap for interaction-scoped streaming.
     pub fn with_event_tap(mut self, tap: meerkat_core::EventTap) -> Self {
         self.event_tap = tap;
+        self
+    }
+
+    /// Share the parent's current interaction tap and optional channel for
+    /// operation-observation diagnostics only. Helper content stays in the
+    /// helper result instead of appearing as parent assistant output.
+    pub fn with_operation_observation_events(
+        mut self,
+        tap: meerkat_core::EventTap,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Self {
+        self.event_tap = tap;
+        self.event_tx = event_tx;
+        self.operation_observation_events_only = true;
         self
     }
 
@@ -290,7 +313,7 @@ impl LlmClientAdapter {
         let effective_params =
             self.apply_generic_provider_overrides(effective_params, provider_params);
         let effective_params = effective_params.map(Self::strip_non_object_provider_tool_overrides);
-        // The per-call host override intentionally wins. HomeCore uses this
+        // The per-call host override intentionally wins. Hosts use this
         // escape hatch to raise Fable 5's output allowance while older config
         // surfaces are being migrated.
         let effective_max_tokens = provider_params
@@ -1543,6 +1566,85 @@ mod tests {
             adapter.stream_output_observed(),
             "partial text delta should suppress cross-model fallback on the failed call"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn helper_observation_events_reach_parent_without_helper_content() -> Result<(), String> {
+        for with_channel in [false, true] {
+            for fail in [false, true] {
+                let operation_id = meerkat_core::OperationId::new();
+                let mut events = message_scoped_script();
+                events.insert(
+                    2,
+                    Ok(LlmEvent::OperationObservationFailed {
+                        operation_id: operation_id.clone(),
+                        phase: meerkat_core::authorization::OperationObservationPhase::Outcome,
+                    }),
+                );
+                if fail {
+                    *events
+                        .last_mut()
+                        .ok_or("script must have a terminal event")? = Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error {
+                            error: LlmError::ConnectionReset,
+                        },
+                    });
+                }
+                let control = LlmClientAdapter::new(
+                    Arc::new(ScriptedClient {
+                        events: events.clone(),
+                    }),
+                    "scripted-helper".into(),
+                );
+                let (tx, mut rx) = mpsc::channel(64);
+                let (tap_tx, mut tap_rx) = mpsc::channel(64);
+                let tap = meerkat_core::new_event_tap();
+                let adapter = LlmClientAdapter::new(
+                    Arc::new(ScriptedClient { events }),
+                    "scripted-helper".into(),
+                )
+                .with_operation_observation_events(tap.clone(), with_channel.then_some(tx));
+                // The host installs the current interaction after factory build.
+                *tap.lock() = Some(meerkat_core::EventTapState {
+                    tx: tap_tx,
+                    truncated: AtomicBool::new(false),
+                });
+                let messages = [Message::User(UserMessage::text("search"))];
+                let expected = control
+                    .stream_response(&messages, &[], 1024, None, None)
+                    .await;
+                let actual = adapter
+                    .stream_response(&messages, &[], 1024, None, None)
+                    .await;
+                if fail {
+                    assert!(matches!(expected, Err(AgentError::Llm { .. })));
+                    assert!(matches!(actual, Err(AgentError::Llm { .. })));
+                } else {
+                    let expected = expected.map_err(|error| error.to_string())?;
+                    let actual = actual.map_err(|error| error.to_string())?;
+                    assert!(!actual.blocks().is_empty());
+                    assert_eq!(actual.blocks(), expected.blocks());
+                    assert_eq!(actual.stop_reason(), expected.stop_reason());
+                }
+                let tapped = std::iter::from_fn(|| tap_rx.try_recv().ok()).collect::<Vec<_>>();
+                let channel = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+                assert_eq!(
+                    tapped.len(),
+                    1,
+                    "tap must receive only the exact diagnostic"
+                );
+                assert_eq!(channel.len(), usize::from(with_channel));
+                for event in tapped.iter().chain(channel.iter()) {
+                    assert!(matches!(event,
+                        AgentEvent::OperationObservationFailed {
+                            operation_id: actual,
+                            phase: meerkat_core::authorization::OperationObservationPhase::Outcome,
+                        } if actual == &operation_id
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 

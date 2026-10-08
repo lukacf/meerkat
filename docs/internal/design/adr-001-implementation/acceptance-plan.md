@@ -11,7 +11,7 @@
 
 Status: implementation in progress. This plan does not claim runtime support.
 Luka's objective is full ADR implementation, adversarial acceptance by the GCP
-Meerkat/MobKit lead, Homecore, OB3 and Toolkit reviewers, and PRs with green CI.
+Meerkat/MobKit lead, downstream-app, operator-deployment and Toolkit reviewers, and PRs with green CI.
 The first vertical slice is an implementation gate, not completion.
 
 Read [ADR-001](../adr-001-runtime-security.md) and
@@ -123,10 +123,10 @@ Network service latency must be reported separately, never hidden in the delta.
 Minimum advertised host class for the first local governed profile: 2 vCPU,
 4 GiB RAM and SSD storage. Measure that class explicitly with its OS, filesystem,
 CPU and memory limits; a faster workstation measurement is not a substitute.
-The local development host is an Apple M5 Max, 18 cores, 128 GiB RAM. Homecore's
-reported host is M2 Pro, 10 cores, 16 GiB, sharing memory with Home Assistant's
-VM, Elephant and the gateway; contention and active swap are required benchmark
-conditions. No tests run against Homecore or OB3 production.
+The local development host is a large developer workstation. A constrained
+downstream host class (about 10 cores and 16 GiB, sharing memory with a VM, a
+knowledge service and the gateway) makes contention and active swap required benchmark
+conditions. No tests run against downstream or operator production deployments.
 
 Receipt retention and quota are authorized policy, not permission to erase
 required recovery custody. Active attempts, unresolved appends and pending

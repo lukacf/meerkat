@@ -12,6 +12,15 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# The released recovery-migration fixture is read only by in-repo tests
+# (`#[cfg(test)]` modules and integration tests), so it stays out of the
+# published package.
+exclude = [
+    "tests/fixtures/v0_8_10_recovery_migration_session.json",
+    "tests/fixtures/v0_8_10_recovery_migration_session.provenance.json",
+    # Its integration test embeds the two files above, so it is excluded too.
+    "tests/v0_8_10_recovery_migration.rs",
+]
 
 [dependencies]
 serde = { workspace = true }

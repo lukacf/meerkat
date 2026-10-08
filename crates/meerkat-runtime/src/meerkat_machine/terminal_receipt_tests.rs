@@ -194,6 +194,7 @@ fn keyed_external_event(key: &str) -> Input {
         objective_id: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -534,6 +535,7 @@ fn response_progress(label: &str) -> Input {
         sender_taint: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),

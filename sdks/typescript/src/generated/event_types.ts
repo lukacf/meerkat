@@ -15,6 +15,7 @@ import type {
   BlobRef,
   CommsNoticeKind,
   CompactionRewriteRange,
+  ConfinementRefusal,
   ContentBlock,
   ContentInput,
   DeferredCatalogDelta,
@@ -68,12 +69,6 @@ import type {
 } from './types.js';
 
 export type AgentErrorClass = "llm" | "operation_refused" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
-
-/**
- * Bounded operation-local diagnostics. Never expose an environment value,
- * credential path, gate token, or secret-bearing command line in this error.
- */
-export type ConfinementRefusal = "invalid_requirement" | "invalid_launch" | "unsupported_requirement" | "backend_unavailable" | "preparation_failed";
 
 /**
  * Typed reason a hook execution failed (engine-level fault, not a guardrail
@@ -932,6 +927,61 @@ export interface PendingCallbackToolCall {
 }
 
 /**
+ * Reasoning/effort control level, the shared typed vocabulary behind both
+ * Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
+ *
+ * The two providers expose effort in different request shapes but draw from
+ * the same level vocabulary; modeling it as a typed enum keeps the catalog
+ * value-domain compiler-checked instead of relying on raw string literals.
+ * Each catalog row declares its accepted subset via `effort_levels`.
+ */
+export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * How one runtime batch resolved its inputs' reasoning preferences. The
+ * fold is order-independent (set semantics over the batch); every outcome
+ * other than [`Self::Apply`] leaves the baseline request unchanged, and the
+ * batch always runs.
+ */
+export type ReasoningBatchDisposition = {
+  disposition: "apply";
+  level: EffortLevel;
+} | {
+  disposition: "superseded_by_explicit";
+} | {
+  disposition: "conflicting";
+} | {
+  disposition: "mixed_with_unpreferred";
+};
+
+/**
+ * What one provider attempt's baseline request already said about effort,
+ * before any preference was considered.
+ */
+export type ReasoningLoweringBaseline = {
+  kind: "explicit";
+  level: EffortLevel;
+} | {
+  kind: "provider_default";
+};
+
+/**
+ * Why a reasoning preference left one attempt's request unchanged.
+ */
+export type ReasoningNotAppliedReason = "no_catalog_fact" | "unsupported_level" | "unknown_supported_levels" | "budget_conflict" | "thinking_mode_conflict" | "opaque_reasoning_body" | "reasoning_disabled_by_baseline";
+
+/**
+ * What one provider attempt did with the turn's reasoning preference.
+ */
+export type ReasoningLoweringOutcome = {
+  detail: EffortLevel;
+  kind: "applied";
+} | {
+  detail: ReasoningNotAppliedReason;
+  kind: "not_applied";
+};
+
+/**
  * Typed input fact for a run boundary.
  *
  * A run either starts from caller-provided content or resumes from tool
@@ -1264,6 +1314,7 @@ export interface UnmeasuredTurnUsageAccounting {
 export type AgentEvent = {
   identity?: TranscriptMessageIdentity;
   input: RunInput;
+  request_reasoning?: ReasoningBatchDisposition | null;
   session_id: SessionId;
   type: "run_started";
 } | {
@@ -1513,6 +1564,15 @@ export type AgentEvent = {
   reason: HookFailureReason;
   tool_use_id?: string | null;
   type: "hook_launch_refused";
+} | {
+  baseline: ReasoningLoweringBaseline;
+  fallback_attempt?: number | null;
+  model?: string | null;
+  outcome?: ReasoningLoweringOutcome | null;
+  provider?: Provider | null;
+  requested: ReasoningBatchDisposition;
+  turn_number?: number | null;
+  type: "request_reasoning_lowered";
 };
 
 /**

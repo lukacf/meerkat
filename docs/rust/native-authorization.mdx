@@ -178,6 +178,101 @@ This core integration does not yet wire required confinement into the native
 command-hook engine or record the refusal in protected audit. Other hook points
 still need their own local-refusal integration.
 
+## Install a bounded model reviewer for R2 tools
+
+<Note>
+This is an unreleased source preview of the model-review, audit-correlation
+and typed reviewer-error APIs. The example is source-checked, not compiled or
+qualified end to end. Use a checkout containing those changes; the earlier
+acceptance results on this page do not qualify this example.
+</Note>
+
+Install review on the trusted host's `AgentFactory`, before constructing the
+`FactoryAgentBuilder`. Your `OperationPolicyOwner` still selects the required
+`LocalPolicyAllowance.review_tier` for each exact operation. Installing a model
+neither changes that tier nor grants permission. R1 keeps its normal native
+authorization checks and makes no reviewer call.
+
+This excerpt uses your configured `factory` and `config`. Set `reviewer_model`
+to an explicit model name supported by your configured OpenAI backend, and
+`reviewer_auth_binding` to its existing `AuthBindingRef`. These are host
+configuration, not values taken from the proposed tool call. Reuse the host's
+`ApprovalService` as `approvals`.
+
+```rust
+use std::{sync::Arc, time::Duration};
+use meerkat::FactoryAgentBuilder;
+use meerkat::operation_reviewer::{
+    ModelOperationReviewer, ModelReviewerConfig,
+    NativeOperationReviewContextSource,
+};
+use meerkat_core::{Provider, SessionLlmIdentity};
+use meerkat_core::approval::review::BoundOperationReview;
+
+let reviewer_identity = SessionLlmIdentity {
+    model: reviewer_model.to_owned(),
+    provider: Provider::OpenAI,
+    self_hosted_server_id: None,
+    provider_params: None,
+    auth_binding: Some(reviewer_auth_binding),
+};
+let reviewer = ModelOperationReviewer::build(
+    &factory,
+    &config,
+    ModelReviewerConfig::new(reviewer_identity, 256)?,
+    Arc::new(NativeOperationReviewContextSource),
+).await?;
+let factory = factory.with_operation_review(Arc::new(BoundOperationReview::new(
+    Arc::new(reviewer),
+    approvals,
+    Duration::from_secs(8),
+)));
+let builder = FactoryAgentBuilder::new(factory, config);
+```
+
+Here, 256 is the output-token limit and eight seconds is the absolute review
+deadline, including context reads and the model request. Keep it below the
+effective tool timeout, including any `config.tools.tool_timeouts` override.
+An allow expires at that same deadline and is checked again at effect entry.
+The adapter makes one tool-free request, with no retry or fallback; it does not
+accept per-session provider parameter overrides in the reviewer identity.
+
+`NativeOperationReviewContextSource` reads through the candidate's retained
+native work owner. Each original source read and the reviewer's own inference
+need independent current authorization under that work. The tool's permission
+does not grant either. If those prerequisites also require review, this adapter
+refuses rather than approving them recursively. A missing context reader,
+denied source or model route, expired deadline, or unsupported reviewed entry
+produces local unavailable feedback; there is no transcript or
+ungoverned-model fallback.
+
+For an R2 tool, model deny or escalate returns local `review_unsatisfied`
+feedback, and review unavailability returns `review_unavailable`. The attempted
+effect does not run; permitted siblings can continue. An allow still needs the
+same candidate and current native permission at entry. Failure to stage the
+candidate's protected audit link prevents reviewer entry. That failure, source
+observation failure and reviewer-model observation failure retain the typed
+`operation_observation_unavailable` outcome. The engine preserves completed
+sibling results before reporting that infrastructure failure for the affected
+attempt. Fresh work requires new native admission. R3 returns
+human-consent-required feedback: this adapter provides no automatic human
+route, and a model allow cannot satisfy R3.
+
+Custom `OperationReviewer` and `OperationReviewContextSource` implementations
+return `ReviewerFailure::Unavailable` for ordinary unavailability and preserve
+`ReviewerFailure::ObservationUnavailable` for protected observation failures.
+Existing unit constructors or patterns using `ReviewerFailure` must migrate to
+`ReviewerFailure::Unavailable`.
+
+The protected input-row audit records the candidate-to-attempt link and each
+source/model operation's authorization observations. It follows the existing
+input commit and store durability rules. Optional `BoundOperationReview::with_observer`
+events are live notifications, not durable consent records. Neither those
+events nor recovered audit IDs recreate a live allowance, and review approval
+is not evidence that the tool executed. See the
+[review and consent contract](/internal/design/adr-001-model-review-and-consent)
+for the boundary and remaining acceptance scope.
+
 ## Attach and pin the controller before submitting work
 
 ### Storeless sessions
@@ -411,12 +506,20 @@ remove the controller. A terminal input can still belong to an unfinished run;
 its original contributor continues to protect that controller.
 
 Busy or unsupported custody is public `ControllerCustodyRefusal::Unavailable`,
-without a permission verdict. Persistent machines, including SQLite, are
-currently unsupported by this accessor. Completed-turn reopen and exclusive
-execution custody do not provide persistent grant-administration authority.
+without a permission verdict. The published checkpoint supports storeless
+administration. Candidate `8fe1abcd5` adds SQLite and InMemory store custody:
+the native owner holds the actual store writer and retained original-work
+observations through the change. Those new administration paths and their
+regressions have not been compiled or executed. Completed-turn reopen alone
+does not qualify administrative mutation.
 Do not replace the guard with a catalog listing, serialized association or a
 caller-owned assertion of no unfinished work. A host sharing grants with another
 machine or detached owner must include that additional scope in actual custody.
+
+Explicit credential publication and removal use that administrative custody.
+Ordinary credential acquisition, refresh and cached command reads do not scan
+historical work. Continue to use the credential owner's normal API rather than
+editing its backing files or reconstructing readiness from stored identity.
 
 The Console Access panel changes MobKit's console ABAC rules; it is not a native
 grant editor. Native permission repair belongs to the embedding's authorized
@@ -424,6 +527,122 @@ grant/resource owners. Keep local refusals as affected-call feedback while
 permitted work continues; audit availability and launch failures require their
 own infrastructure repair. No CLI grant command or universal Console permission
 control is supplied by this API.
+
+## Append external context under current permissions
+
+<Note>
+These APIs are part of source candidate `8fe1abcd5`. The native control path and
+its tests have not been compiled or executed. Concrete Mob, LiveResponses and job
+producer integration remains in progress; a raw governed notification currently
+returns authorization unavailable. This section describes the host contract,
+not completed activation of those producers.
+</Note>
+
+External context needs authority for the exact source and destination as well
+as permission to invoke the control. A `source` annotation, session ID or previous
+run is insufficient. The trusted producer supplies a process-only receipt from
+its actual owner, alongside `ContextControlFacts` for the authenticated requester,
+executor, realm, source and destination.
+
+Implement `AdmittedWorkPolicyOwner::authorize_context_control` to validate that
+receipt and the current invocation or service mandate. Implement
+`OperationPolicyOwner::authorize_context_control` for the exact source hydration
+and destination publication checks. Their defaults return unavailable. Both
+participate in the same local publication ordering as other native policy reads.
+
+With the actual receipt and facts already obtained from those owners, submit
+through `SessionServiceControlExt`:
+
+```rust
+use meerkat_core::service::{SessionServiceControlExt, SystemContextControlRequest};
+
+let control = SystemContextControlRequest::from_trusted_ingress(
+    session_id, request, facts, producer_receipt,
+)?;
+let result = service.append_authenticated_system_context(control).await?;
+```
+
+The constructor binds data; it does not authenticate a producer or grant access.
+The installed native owner prepares the checks, and the Session owner rechecks
+them after actor or staging waits, immediately before mutation. This operation
+adds no input and borrows no current run. For a control already prepared by that
+same native owner, `append_authorized_system_context` preserves its exact binding.
+Reusing the same process control cannot settle another attempt. A fresh attempt
+needs a fresh control; the request's normal idempotency key still detects an
+already appended message after current authorization succeeds.
+
+Handle `SessionControlError::Authorization` by its typed variant. `Refused`
+returns local feedback without appending the content. `Unavailable` means no
+usable authorization was established. `ObservationUnavailable` is a separate
+audit failure and does not prove that an earlier effect never happened. A raw
+`append_system_context` call supplies no authenticated receipt in governed mode.
+
+The Session retains protected control observations with its existing commit.
+They do not enter model context or public history, and they cannot authorize a
+retry. A persistent service commits the refusal observation before returning it;
+a persistence failure remains infrastructure failure. Preserve the actual
+result and any settlement error rather than inferring delivery from a log line.
+
+## Settle job delivery recipients independently
+
+<Note>
+The recipient APIs and projector integration below are candidate source.
+Canonical generated integration is included; executable qualification is pending.
+They implement
+the [local permission and refusal contract](/internal/design/adr-001-local-governed-default),
+without establishing authorization for a producer that has not supplied its
+actual owner-bound evidence.
+</Note>
+
+`JobRuntimeDeliveryApplier` derives the complete recipient manifest from the
+unchanged committed producer payload, including legacy/default-origin targets.
+Each `RuntimeDeliveryRecipient` binds a subscription ID to its exact subscription
+and target. Before any recipient enters, `RuntimeDeliveryInbox::bind_recipients`
+re-reads the committed row and retains the supplied manifest. The producer owns
+complete manifest extraction; the generic inbox does not parse opaque payloads
+or confer execution authority. Enrollment supports only
+`JobTerminal` and `JobNotification`; single-target continuations use their own
+admission path. Enrollment retains the existing payload and writes authority
+envelope v3, which older readers refuse. A runtime authority without recipient
+enrollment retains v1, or v2 when it contains whole-row refusals.
+
+Use `settle_recipient` with the actual local result:
+
+- `RuntimeDeliveryRecipientOutcome::Applied` records successful application.
+- `Refused` records an actual native permission refusal before entry.
+- `OperationAuthorizationUnavailable` records the native owner's explicit
+  unavailable-authorization result.
+
+`JobDeliveryApplyError::Infrastructure` and authorization
+`ObservationUnavailable` leave the recipient pending and the pass blocked.
+They are not local permission verdicts, and neither proves that an effect did
+not occur. Retry reads retained settlements and skips every settled recipient;
+permission repair does not revive a previously refused recipient.
+
+Call `finish_recipients` only after every bound recipient has settled. The
+call advances the ordered cursor and returns `RuntimeDeliveryRecipientGroupOutcome`.
+Read the parent `RuntimeDeliveryStatus` through `delivery_status`:
+
+| Recipient outcomes | Parent status |
+| --- | --- |
+| All applied | `Applied` |
+| All refused | `Refused` with `AuthorityDenied` |
+| All authorization unavailable | `Refused` with `OperationAuthorizationUnavailable` |
+| Differing settled outcomes | `Mixed { delivery_sequence, recipients }`, with each exact retained target and disposition |
+
+Completed groups remain settled across reopen under the store's durability
+guarantees; retry neither replays successful siblings nor revives refused ones.
+`RuntimeJobDeliveryDrain::applied` contains
+rows with established applied results, including already acknowledged effects;
+`locally_settled` contains other completed groups. Paging
+counts both lists so a page of local refusals cannot strand later work, while
+`RuntimeDeliveryPass::applied` counts only the applied list. A recipient refusal
+does not change the producer job's completed result.
+
+The sink effect and its settlement commit are separate. A crash or error between
+them can leave an uncertain effect with no committed settlement. This API does
+not provide effect/commit atomicity or exactly-once execution, and a missing
+settlement is not evidence that replay is safe.
 
 ## Bind the final input to authenticated ingress
 
@@ -616,8 +835,8 @@ observations through these existing commit boundaries. This does not prove
 crash-safe recovery.
 Route controller grant/policy removal and credential maintenance through their
 custody-aware owners so unfinished work retains its controller. Persistent
-controller/grant administrative mutation remains unavailable in this checkpoint;
-the memory-backed admission path does not remove that limit.
+controller/grant administration in candidate `8fe1abcd5` still requires its own
+executed acceptance; memory-backed admission does not establish that evidence.
 
 The repository fixture
 `crates/meerkat-authorization/tests/native_governed_loop/e1_policy_control.rs`

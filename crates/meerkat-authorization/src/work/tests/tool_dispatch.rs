@@ -44,6 +44,12 @@ struct ToolPolicyOwner {
     native_scope: OperationExecutionScope,
     relation: ExactOperationRelation,
     revoked: AtomicBool,
+    /// Narrow revocation of one tool only, keeping the controller and other
+    /// tools permitted (unlike `revoked`, which refuses all work).
+    revoked_tool: Mutex<Option<String>>,
+    /// Owner-resolved review tier for `write_record`; every other operation
+    /// is explicit R1. Changed only under the owner publication.
+    write_tier: Mutex<meerkat_core::authorization::OperationReviewTier>,
     calls: AtomicUsize,
 }
 
@@ -81,6 +87,7 @@ impl LocalWorkPolicy for ToolPolicyOwner {
                 operation_values: vec![tuple("infer", "fixture-controller")],
                 restrictions: ExecutionRestrictions::unrestricted(),
                 expires_at_ms: 2_000,
+                review_tier: meerkat_core::authorization::OperationReviewTier::R1,
             });
         }
         let AuthorizationOperation::Tool(tool) = &binding.facts().operation else {
@@ -94,16 +101,25 @@ impl LocalWorkPolicy for ToolPolicyOwner {
             "write_record" => "write",
             _ => return Err(denied().into()),
         };
+        if self.revoked_tool.lock().expect("revoked tool").as_deref() == Some(tool.name.as_str()) {
+            return Err(denied().into());
+        }
         let arguments: RecordArguments =
             serde_json::from_str(tool.arguments.get()).map_err(|_| malformed())?;
         let actual = tuple(action, &arguments.namespace);
         if !self.relation.contains(&actual) {
             return Err(denied().into());
         }
+        let review_tier = if tool.name.as_str() == "write_record" {
+            *self.write_tier.lock().expect("write tier")
+        } else {
+            meerkat_core::authorization::OperationReviewTier::R1
+        };
         Ok(LocalPolicyAllowance {
             operation_values: vec![actual],
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: 2_000,
+            review_tier,
         })
     }
 }
@@ -135,6 +151,8 @@ impl ToolWork {
                 tuple("write", "private"),
             ]),
             revoked: AtomicBool::new(false),
+            revoked_tool: Mutex::new(None),
+            write_tier: Mutex::new(meerkat_core::authorization::OperationReviewTier::R1),
             calls: AtomicUsize::new(0),
         });
         let publication = LocalAuthorizationPublication::new();
@@ -157,6 +175,36 @@ impl ToolWork {
             .begin_owner_change()
             .expect("owner publication");
         self.owner.revoked.store(true, Ordering::Relaxed);
+        drop(publication);
+    }
+
+    /// Change the owner-resolved `write_record` tier under the publication.
+    fn set_write_tier(&self, tier: meerkat_core::authorization::OperationReviewTier) {
+        let publication = self
+            .publication
+            .begin_owner_change()
+            .expect("owner publication");
+        *self.owner.write_tier.lock().expect("write tier") = tier;
+        drop(publication);
+    }
+
+    /// Publish an owner change that keeps every permission and tier: the
+    /// reviewed context is no longer the one the reviewer saw.
+    fn republish(&self) {
+        drop(
+            self.publication
+                .begin_owner_change()
+                .expect("owner publication"),
+        );
+    }
+
+    /// Revoke one tool through the same owner publication.
+    fn revoke_tool(&self, name: &str) {
+        let publication = self
+            .publication
+            .begin_owner_change()
+            .expect("owner publication");
+        *self.owner.revoked_tool.lock().expect("revoked tool") = Some(name.to_string());
         drop(publication);
     }
 }
@@ -190,6 +238,9 @@ impl Call {
 struct RecordingDispatcher {
     bodies: Mutex<Vec<(String, String, String)>>,
     entered_contexts: Mutex<Vec<ToolDispatchContext>>,
+    /// Typed entry signal: woken after each recorded body, so tests await
+    /// entry instead of polling on a timer.
+    body_entered: Notify,
 }
 
 #[async_trait]
@@ -218,6 +269,7 @@ impl AgentToolDispatcher for RecordingDispatcher {
             call.name.into(),
             call.args.get().into(),
         ));
+        self.body_entered.notify_waiters();
         Ok(ToolResult::new(call.id.into(), "executed".into(), false).into())
     }
 
@@ -756,3 +808,5 @@ async fn fixture_controller_checks_current_work_before_recording_model_input() {
     ));
     assert!(client.0.lock().expect("model requests").is_empty());
 }
+
+mod operation_review;

@@ -378,6 +378,44 @@ pub struct RemoteHostBindRequestEvent {
     pub replacement: bool,
 }
 
+/// The committed terminal outcome of one fork_off job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ForkJobTerminalEvent {
+    /// The job id the forker was given.
+    pub job_id: String,
+    /// The fork child that ran the job.
+    pub child: AgentIdentity,
+    /// The forker's session, which the outcome is owed to.
+    pub owner_session_id: meerkat_core::SessionId,
+    /// The dispatching run's retained work, when its native owner recorded
+    /// one; identity only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+    pub status: meerkat_core::event::BackgroundJobTerminalStatus,
+    /// The outcome exactly as delivered.
+    pub outcome: serde_json::Value,
+    /// [`detached_outcome_digest`] of `outcome`, computed once.
+    pub result_digest: String,
+}
+
+/// The result digest of a detached job's outcome, computed once from the
+/// outcome exactly as it is delivered.
+pub fn detached_outcome_digest(outcome: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let bytes = serde_json::to_vec(outcome).unwrap_or_default();
+    let digest = Sha256::digest(bytes);
+    let mut rendered = String::with_capacity("sha256:".len() + digest.len() * 2);
+    rendered.push_str("sha256:");
+    for byte in digest {
+        // Writing to a String is infallible; the formatter error is discarded
+        // deliberately rather than unwrapped.
+        let _ = write!(rendered, "{byte:02x}");
+    }
+    rendered
+}
+
 /// Structural event kinds covering all mob state transitions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -549,6 +587,13 @@ pub enum MobEventKind {
     /// authority; this event is the crash-recovery fact that preserves a
     /// machine-authorized rebind across the next process restart.
     MemberSessionBindingRecovered(MemberSessionBindingRecoveredEvent),
+
+    /// A fork_off job reached its terminal outcome. Recorded once, before the
+    /// child is retired and before the outcome is delivered, so the outcome
+    /// survives the child and the process; it is the committed record a
+    /// governed completion is confirmed against. Not a MobMachine fact: it is
+    /// replayed into the fork job projection only.
+    ForkJobTerminal(ForkJobTerminalEvent),
 
     /// Kickoff state for an existing member changed.
     MemberKickoffUpdated {

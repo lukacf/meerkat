@@ -312,6 +312,7 @@ fn make_operation_input(operation_id: OperationId, event: OpEvent) -> Input {
     Input::Operation(OperationInput {
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),

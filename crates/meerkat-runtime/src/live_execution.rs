@@ -1214,6 +1214,179 @@ pub(crate) fn bridge_submission_state_to_dsl(
     }
 }
 
+/// Why a committed bridge operation's original work binding could not be read
+/// or resolved for its outcome.
+#[derive(Debug, thiserror::Error)]
+pub enum LiveBridgeOutcomeBindingError {
+    /// The binding is absent, malformed, mismatched or from another runtime,
+    /// or its original rows are missing or changed, or this runtime no longer
+    /// hosts the session: a governed outcome is unavailable and settles once.
+    #[error("live bridge original work binding is unavailable: {0}")]
+    Unavailable(crate::traits::RuntimeDriverError),
+    /// Infrastructure that may clear without any change to the binding (the
+    /// runtime not ready, recovering or busy, an in-progress saga, store I/O,
+    /// a hosting claim that can be taken later): the outcome stays pending and
+    /// may be retried.
+    #[error("live bridge original work binding is temporarily unresolvable: {0}")]
+    Transient(crate::traits::RuntimeDriverError),
+}
+
+impl From<crate::traits::RuntimeDriverError> for LiveBridgeOutcomeBindingError {
+    /// Exhaustive over the runtime's errors: only conditions that can clear
+    /// on their own are transient.
+    fn from(error: crate::traits::RuntimeDriverError) -> Self {
+        use crate::traits::RuntimeDriverError as E;
+        match error {
+            E::NotReady { .. }
+            | E::ControllerReadinessUnavailable { .. }
+            | E::RecoveryBackoff { .. }
+            | E::UnregisterFinalizationOutcomeUnknown { .. }
+            | E::UnregisterInProgress { .. }
+            | E::RuntimeStopInProgress { .. }
+            | E::RuntimeTerminalPublicationInProgress { .. }
+            // Keeps live reconciliation and retry by contract.
+            | E::InterruptDispatchOutcomeUnknown { .. }
+            // A callback unwind releases the retry slot for the same run.
+            | E::InterruptDispatchPanicked { .. }
+            // The session's hosting claim clears once it can be taken.
+            | E::HostingUnavailable { .. }
+            | E::Internal(_) => Self::Transient(error),
+            E::InputRefused { .. }
+            | E::ControllerInUse
+            | E::NotFound { .. }
+            | E::ValidationFailed { .. }
+            | E::InputIdempotencyConflict { .. }
+            | E::RetainedResumeRefused { .. }
+            | E::Destroyed
+            | E::LiveContextBarrierRevoked { .. }
+            | E::RecoveryCorruption { .. }
+            | E::InputTerminalWithoutReceipt { .. }
+            | E::RecoveryRepairBlocked { .. }
+            // Superseded exact witnesses: a same-state retry is wrong.
+            | E::StaleAuthority { .. }
+            | E::MaterializationRegistrationNotCurrent { .. }
+            | E::MaterializationRegistrationOwned { .. }
+            // This runtime no longer hosts the session; another owner never
+            // resolves this runtime's bridge rows.
+            | E::ServedElsewhere { .. }
+            // A broken hosting invariant, as recovery corruption.
+            | E::HostingClaimInvariantViolated { .. } => Self::Unavailable(error),
+        }
+    }
+}
+
+/// The historical binding of one committed bridge operation to the original
+/// work whose dispatch admitted it, re-resolved from this runtime's own rows at
+/// outcome time. It names who requested the work (every original contributor
+/// in staged order, the represented subject and the mandates they carry); it
+/// is never current permission, which the work, source and audience owners
+/// decide at append time. No serde and no public constructor.
+pub struct LiveBridgeOutcomeAuthority {
+    identity: meerkat_core::retained_work::RetainedWorkIdentity,
+    contributors: Vec<crate::input_authority::RetainedInputAuthority>,
+    requester: meerkat_core::PrincipalRef,
+    logical_executor: meerkat_core::PrincipalRef,
+    represented_subject: Option<meerkat_core::PrincipalRef>,
+    realm: meerkat_core::connection::RealmId,
+}
+
+impl LiveBridgeOutcomeAuthority {
+    /// Every contributor must share the participants one native turn may
+    /// share (requester, represented subject, logical executor, realm, target,
+    /// controller), and the set must be the identity's complete one; an empty
+    /// or incompatible set is refused. The participants are taken from the
+    /// canonical (first staged) contributor.
+    #[cfg(feature = "live")]
+    pub(crate) fn new(
+        identity: meerkat_core::retained_work::RetainedWorkIdentity,
+        contributors: Vec<crate::input_authority::RetainedInputAuthority>,
+    ) -> Result<Self, crate::traits::RuntimeDriverError> {
+        let canonical = contributors
+            .first()
+            .ok_or_else(crate::input_authority::unavailable)?;
+        if contributors.len() != identity.contributors().len()
+            || contributors.iter().any(|contributor| {
+                !canonical
+                    .association()
+                    .batch_compatible_with(contributor.association())
+            })
+        {
+            return Err(crate::input_authority::unavailable());
+        }
+        let candidate = canonical.association().candidate();
+        let requester = candidate.requester.clone();
+        let logical_executor = candidate.logical_executor.clone();
+        let represented_subject = candidate.represented_subject.clone();
+        let realm = candidate.ingress_namespace.realm.clone();
+        Ok(Self {
+            identity,
+            contributors,
+            requester,
+            logical_executor,
+            represented_subject,
+            realm,
+        })
+    }
+
+    /// An authority with the given participants and no resolved contributor
+    /// rows, for tests of outcome-append consumers.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_new(
+        identity: meerkat_core::retained_work::RetainedWorkIdentity,
+        requester: meerkat_core::PrincipalRef,
+        logical_executor: meerkat_core::PrincipalRef,
+        realm: meerkat_core::connection::RealmId,
+    ) -> Self {
+        Self {
+            identity,
+            contributors: Vec::new(),
+            requester,
+            logical_executor,
+            represented_subject: None,
+            realm,
+        }
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &meerkat_core::retained_work::RetainedWorkIdentity {
+        &self.identity
+    }
+
+    /// Every original contributor, in staged order.
+    #[must_use]
+    pub fn contributors(&self) -> &[crate::input_authority::RetainedInputAuthority] {
+        &self.contributors
+    }
+
+    #[must_use]
+    pub fn requester(&self) -> &meerkat_core::PrincipalRef {
+        &self.requester
+    }
+
+    #[must_use]
+    pub fn logical_executor(&self) -> &meerkat_core::PrincipalRef {
+        &self.logical_executor
+    }
+
+    #[must_use]
+    pub fn represented_subject(&self) -> Option<&meerkat_core::PrincipalRef> {
+        self.represented_subject.as_ref()
+    }
+
+    #[must_use]
+    pub fn realm(&self) -> &meerkat_core::connection::RealmId {
+        &self.realm
+    }
+}
+
+impl std::fmt::Debug for LiveBridgeOutcomeAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiveBridgeOutcomeAuthority([REDACTED])")
+    }
+}
+
 /// Read-only durable projection of one generated bridge operation.
 ///
 /// This contains only correlation and lifecycle facts already owned by the
@@ -1234,6 +1407,33 @@ pub struct LiveBridgeRecoverySnapshot {
 }
 
 impl LiveBridgeRecoverySnapshot {
+    /// A committed (or uncommitted, with `terminal: None`) snapshot for tests
+    /// of recovery consumers.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_new(
+        session_id: SessionId,
+        operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+        canonical_context_revision: impl Into<String>,
+        request_digest: impl Into<String>,
+        terminal: Option<MeerkatExecutionTerminal>,
+        result_digest: Option<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            operation,
+            source_agent_identity: "test-durable-member".to_string(),
+            canonical_context_revision: canonical_context_revision.into(),
+            request_digest: request_digest.into(),
+            phase: LiveBridgeOperationPhase::PreFinalInference,
+            terminal,
+            result_digest,
+            cancellation_reason: None,
+            submission_state: None,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "live")]
     pub(crate) fn new(
@@ -1507,6 +1707,24 @@ pub struct LiveBridgeRecoveredTerminalReceipt {
 }
 
 impl LiveBridgeRecoveredTerminalReceipt {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_new(
+        session_id: SessionId,
+        operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+        terminal: MeerkatExecutionTerminal,
+        result_digest: Option<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            operation,
+            terminal,
+            result_digest,
+            replayed: false,
+        }
+    }
+
     #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         snapshot: &LiveBridgeRecoverySnapshot,
@@ -2779,6 +2997,10 @@ pub struct LiveDelegationExecutionAdmission {
     worker_identity: String,
     worker_ownership: LiveDelegationWorkerOwnership,
     tool_gate: Arc<LiveToolExecutionAdmissionGate>,
+    /// The member-turn reasoning preference the channel's open sealed,
+    /// copied from the generated start authorization (#1823).
+    member_turn_reasoning:
+        Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
 }
 
 impl std::fmt::Debug for LiveDelegationExecutionAdmission {
@@ -2814,6 +3036,7 @@ impl LiveDelegationExecutionAdmission {
             operation_id,
             worker_identity: authorized_worker_identity,
             worker_ownership,
+            member_turn_reasoning,
         } = effect
         else {
             return Ok(None);
@@ -2833,7 +3056,18 @@ impl LiveDelegationExecutionAdmission {
             worker_identity: worker_identity.to_string(),
             worker_ownership: *worker_ownership,
             tool_gate: Arc::new(LiveToolExecutionAdmissionGate::new(operation.clone())),
+            member_turn_reasoning: member_turn_reasoning
+                .map(crate::meerkat_machine::dsl::LiveMemberTurnReasoning::into_domain),
         }))
+    }
+
+    /// The reasoning-effort preference for this worker's member turn, as the
+    /// channel's open sealed it; `None` takes the member's profile as is.
+    #[must_use]
+    pub fn member_turn_reasoning(
+        &self,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference> {
+        self.member_turn_reasoning
     }
 
     #[must_use]

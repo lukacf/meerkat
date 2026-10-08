@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use meerkat_authorization_contracts::audit::{
     AuditModelTarget, AuditModelUse, AuditObservation, AuditPolicyRead, AuditPublicationMode,
-    AuditRecipient, AuditSourceUse, AuditTarget, AuditToolOwner, AuthorizationAuditObservation,
-    AuthorizationAuditSink,
+    AuditRecipient, AuditReviewAttribution, AuditReviewRole, AuditSourceUse, AuditTarget,
+    AuditToolOwner, AuthorizationAuditObservation, AuthorizationAuditSink,
 };
 use meerkat_authorization_contracts::constraints::ResourceDomain;
 use meerkat_authorization_contracts::evidence::EvidenceDigest;
@@ -44,117 +44,154 @@ impl WorkAuthorization for AuditedWorkAuthorization {
         &self,
         binding: &PreparedAuthorizationBinding,
     ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
-        let target = Arc::new(target(binding));
-        let now = match self.clock.now() {
-            Ok(now) => now,
-            Err(_) => {
-                self.sink.append(observation(
-                    binding,
-                    AuditObservation::AuthorizationUnavailable { target },
-                ))?;
-                return Err(OperationAuthorizationError::Unavailable);
-            }
-        };
-        // This enclosing observation binds the audit's diagnostic revision to
-        // the same successful compiler read. It cannot retag an old decision.
-        // A changed stamp invalidates policy data, but must not erase a known
-        // infrastructure failure or turn it into another refusal to observe.
-        let mut known_failure = None;
-        let observed = self.publication.observe(|| {
-            let result = self.inner.prepare(binding);
-            if matches!(
-                result,
-                Err(OperationAuthorizationError::Unavailable
-                    | OperationAuthorizationError::ObservationUnavailable(_))
-            ) {
-                known_failure = result.as_ref().err().copied();
-            }
-            result
-        });
-        let (result, revision) = if let Some(error) = known_failure {
-            (Err(error), None)
-        } else {
-            match observed {
-                Ok((result, stamp)) => (result, Some(stamp.observation_sequence())),
-                Err(PublicationError::Changed) => (
-                    Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into()),
-                    None,
-                ),
-                Err(PublicationError::Unavailable) => {
-                    (Err(OperationAuthorizationError::Unavailable), None)
-                }
-            }
-        };
-        match result {
-            Ok(inner) => {
-                let controller = matches!(&binding.facts().operation,
-                    AuthorizationOperation::Model(facts) if facts.usage == ModelAuthorizationUse::ControllerInference);
-                let operation = !matches!(&binding.facts().operation,
-                    AuthorizationOperation::Model(facts) if facts.usage == ModelAuthorizationUse::ControllerInference && facts.hosted_capabilities.is_empty());
-                let policy = AuditPolicyRead {
-                    publication_sequence: revision.ok_or_else(denied)?,
-                    observed_at_ms: now.unix_ms,
-                    operation_authorities: if operation {
-                        self.associations
-                            .iter()
-                            .map(|item| item.candidate().authority_basis.clone())
-                            .collect()
-                    } else {
-                        Vec::new()
-                    },
-                    controller_lineages: if controller {
-                        self.associations
-                            .iter()
-                            .map(|item| item.candidate().controller_grant_lineage.clone())
-                            .collect()
-                    } else {
-                        Vec::new()
-                    },
+        self.prepare_observed(binding).result
+    }
+
+    fn prepare_observed(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> meerkat_core::authorization::ObservedAuthorizationResult<
+        Arc<dyn PreparedOperationAuthorization>,
+    > {
+        let mut policy_observation = None;
+        let result =
+            (|| -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+                let target = Arc::new(target(binding));
+                let now = match self.clock.now() {
+                    Ok(now) => now,
+                    Err(_) => {
+                        self.sink.append(observation(
+                            binding,
+                            AuditObservation::AuthorizationUnavailable { target },
+                        ))?;
+                        return Err(OperationAuthorizationError::Unavailable);
+                    }
                 };
-                self.sink.append(observation(
-                    binding,
-                    AuditObservation::Prepared {
-                        target: Arc::clone(&target),
-                        policy,
-                    },
-                ))?;
-                Ok(Arc::new(AuditedPrepared {
-                    inner,
-                    binding: binding.clone(),
-                    target,
-                    sink: Arc::clone(&self.sink),
-                }))
-            }
-            Err(OperationAuthorizationError::Unavailable) => {
-                self.sink.append(observation(
-                    binding,
-                    AuditObservation::AuthorizationUnavailable { target },
-                ))?;
-                Err(OperationAuthorizationError::Unavailable)
-            }
-            Err(OperationAuthorizationError::Refused(refusal)) => {
-                self.sink.append(observation(
-                    binding,
-                    AuditObservation::Refused {
-                        target,
-                        reason: refusal.kind(),
-                    },
-                ))?;
-                Err(refusal.into())
-            }
-            Err(error @ OperationAuthorizationError::ObservationUnavailable(_)) => Err(error),
+                // This enclosing observation binds the audit's diagnostic revision to
+                // the same successful compiler read. It cannot retag an old decision.
+                // A changed stamp invalidates policy data, but must not erase a known
+                // infrastructure failure or turn it into another refusal to observe.
+                let mut known_failure = None;
+                let observed = self.publication.observe(|| {
+                    let result = self.inner.prepare(binding);
+                    if matches!(
+                        result,
+                        Err(OperationAuthorizationError::Unavailable
+                            | OperationAuthorizationError::ObservationUnavailable(_))
+                    ) {
+                        known_failure = result.as_ref().err().copied();
+                    }
+                    result
+                });
+                let (result, revision) = if let Some(error) = known_failure {
+                    (Err(error), None)
+                } else {
+                    match observed {
+                        Ok((result, stamp)) => {
+                            policy_observation = Some(stamp.policy_observation());
+                            (result, Some(stamp.observation_sequence()))
+                        }
+                        Err(PublicationError::Changed) => (
+                            Err(
+                                OperationRefused::new(OperationRefusalKind::ReprepareRequired)
+                                    .into(),
+                            ),
+                            None,
+                        ),
+                        Err(PublicationError::Unavailable) => {
+                            (Err(OperationAuthorizationError::Unavailable), None)
+                        }
+                    }
+                };
+                match result {
+                    Ok(inner) => {
+                        let controller = matches!(&binding.facts().operation,
+                    AuthorizationOperation::Model(facts) if facts.usage == ModelAuthorizationUse::ControllerInference);
+                        let operation = !matches!(&binding.facts().operation,
+                    AuthorizationOperation::Model(facts) if facts.usage == ModelAuthorizationUse::ControllerInference && facts.hosted_capabilities.is_empty());
+                        let policy = AuditPolicyRead {
+                            publication_sequence: revision.ok_or_else(denied)?,
+                            observed_at_ms: now.unix_ms,
+                            operation_authorities: if operation {
+                                self.associations
+                                    .iter()
+                                    .map(|item| item.candidate().authority_basis.clone())
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            },
+                            controller_lineages: if controller {
+                                self.associations
+                                    .iter()
+                                    .map(|item| item.candidate().controller_grant_lineage.clone())
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            },
+                        };
+                        self.sink.append(observation(
+                            binding,
+                            AuditObservation::Prepared {
+                                target: Arc::clone(&target),
+                                policy,
+                            },
+                        ))?;
+                        Ok(Arc::new(AuditedPrepared {
+                            inner,
+                            policy_observation,
+                            binding: binding.clone(),
+                            target,
+                            sink: Arc::clone(&self.sink),
+                        }))
+                    }
+                    Err(OperationAuthorizationError::Unavailable) => {
+                        self.sink.append(observation(
+                            binding,
+                            AuditObservation::AuthorizationUnavailable { target },
+                        ))?;
+                        Err(OperationAuthorizationError::Unavailable)
+                    }
+                    Err(OperationAuthorizationError::Refused(refusal)) => {
+                        self.sink.append(observation(
+                            binding,
+                            AuditObservation::Refused {
+                                target,
+                                reason: refusal.kind(),
+                            },
+                        ))?;
+                        Err(refusal.into())
+                    }
+                    Err(error @ OperationAuthorizationError::ObservationUnavailable(_)) => {
+                        Err(error)
+                    }
+                }
+            })();
+        meerkat_core::authorization::ObservedAuthorizationResult {
+            result,
+            policy: policy_observation,
         }
     }
 }
 
 struct AuditedPrepared {
     inner: Arc<dyn PreparedOperationAuthorization>,
+    policy_observation: Option<meerkat_core::authorization::PolicyPublicationObservation>,
     binding: PreparedAuthorizationBinding,
     target: Arc<AuditTarget>,
     sink: Arc<dyn AuthorizationAuditSink>,
 }
 
 impl PreparedOperationAuthorization for AuditedPrepared {
+    fn policy_observation(
+        &self,
+    ) -> Option<meerkat_core::authorization::PolicyPublicationObservation> {
+        self.policy_observation
+    }
+
+    fn review_tier(&self) -> meerkat_core::authorization::OperationReviewTier {
+        self.inner.review_tier()
+    }
+
     fn check_current(
         &self,
         binding: &PreparedAuthorizationBinding,
@@ -172,6 +209,11 @@ impl PreparedOperationAuthorization for AuditedPrepared {
             return Err(OperationObservationError);
         }
         let event = match event {
+            OperationObservation::ReviewAttemptStarted { attempt_ref } => {
+                AuditObservation::ReviewAttemptStarted {
+                    attempt_ref: attempt_ref.to_string(),
+                }
+            }
             OperationObservation::Entry => AuditObservation::Entry,
             OperationObservation::AuthorizationUnavailable => {
                 AuditObservation::AuthorizationUnavailable {
@@ -201,6 +243,25 @@ fn observation(
             .context_revision
             .as_ref()
             .map(|revision| revision.as_str().to_owned()),
+        review_attribution: binding
+            .review_attribution()
+            .map(|link| AuditReviewAttribution {
+                candidate_operation_id: link
+                    .origin()
+                    .candidate_binding()
+                    .facts()
+                    .operation_id
+                    .clone(),
+                attempt_ref: link.origin().attempt_ref().to_string(),
+                role: match link.role() {
+                    meerkat_core::approval::review::ReviewOperationRole::ContextRead => {
+                        AuditReviewRole::ContextRead
+                    }
+                    meerkat_core::approval::review::ReviewOperationRole::ReviewerInference => {
+                        AuditReviewRole::ReviewerInference
+                    }
+                },
+            }),
         observation: event,
     }
 }
@@ -275,6 +336,16 @@ fn target(binding: &PreparedAuthorizationBinding) -> AuditTarget {
                         usage,
                     }
                 }
+                SourceAuthorizationTarget::RuntimeInput {
+                    owner_session_id,
+                    runtime_epoch_id,
+                    input_id,
+                } => AuditTarget::RuntimeInput {
+                    owner_session_id: owner_session_id.clone(),
+                    runtime_epoch_id: runtime_epoch_id.clone(),
+                    input_id: input_id.clone(),
+                    usage,
+                },
                 SourceAuthorizationTarget::External(resource) => AuditTarget::ExternalSource {
                     resource: ResourceRef {
                         domain: ResourceDomain {

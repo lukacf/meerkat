@@ -111,7 +111,15 @@ fn host_auth_error_response(id: Option<RpcId>, error_value: meerkat::HostAuthErr
         meerkat::HostAuthError::Connector(_) => error::INTERNAL_ERROR,
         meerkat::HostAuthError::ConnectorTarget(_) => error::INVALID_PARAMS,
     };
-    RpcResponse::error(id, code, error_value.to_string())
+    let reason = error_value.reason();
+    if reason == meerkat_contracts::WireAuthErrorReason::Infrastructure {
+        // Protected diagnostics only: the public text is fixed.
+        tracing::warn!(target: "meerkat::auth", error = %error_value, "auth infrastructure failure");
+    }
+    match serde_json::to_value(meerkat_contracts::WireAuthErrorData { reason }) {
+        Ok(data) => RpcResponse::error_with_data(id, code, error_value.public_message(), data),
+        Err(_) => RpcResponse::error(id, code, error_value.public_message()),
+    }
 }
 
 /// Effective config the auth-resolution read path consumes.
@@ -1518,13 +1526,26 @@ pub async fn handle_auth_profile_delete(
 // --- OAuth login ------------------------------------------------------
 
 /// Resolve a requested MCP target against this runtime's configured MCP
-/// servers; a client-supplied name or URL is never an authority.
+/// servers: the realm's own (from its composed config) and the `mcp.toml`
+/// scopes. A client-supplied name or URL is never an authority.
 async fn configured_mcp_target(
+    id: &Option<RpcId>,
     runtime: &SessionRuntime,
     mcp: &meerkat_contracts::WireMcpAuthTarget,
-) -> Result<meerkat::McpServerIdentity, meerkat::HostAuthError> {
+) -> Result<meerkat::McpServerIdentity, RpcResponse> {
+    let realm_config = runtime
+        .effective_config()
+        .await
+        .map_err(|error| RpcResponse::error(id.clone(), error.code, error.message))?;
     let (context_root, user_root) = runtime.skill_identity_roots();
-    meerkat::resolve_configured_mcp_target(mcp, context_root.as_deref(), user_root.as_deref()).await
+    meerkat::resolve_configured_mcp_target_in_realm(
+        mcp,
+        &realm_config.tools.mcp_servers,
+        context_root.as_deref(),
+        user_root.as_deref(),
+    )
+    .await
+    .map_err(|error_value| host_auth_error_response(id.clone(), error_value))
 }
 
 pub async fn handle_auth_login_start(
@@ -1543,9 +1564,9 @@ pub async fn handle_auth_login_start(
     let provider_target = match parsed.target {
         WireLoginTarget::Provider(target) => target,
         WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match configured_mcp_target(runtime, &mcp).await {
+            let target = match configured_mcp_target(&id, runtime, &mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return host_auth_error_response(id, error_value),
+                Err(response) => return response,
             };
             // Discovery falls back to the server's well-known metadata.
             let started = match service
@@ -1644,9 +1665,9 @@ pub async fn handle_auth_login_complete(
     let provider_target = match parsed.target {
         WireLoginTarget::Provider(target) => target,
         WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match configured_mcp_target(runtime, &mcp).await {
+            let target = match configured_mcp_target(&id, runtime, &mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return host_auth_error_response(id, error_value),
+                Err(response) => return response,
             };
             let completed = match service
                 .mcp_login_complete(
@@ -1788,18 +1809,18 @@ pub async fn handle_auth_login_cancel(
     };
     let cancelled = match parsed {
         LoginCancelParams::Mcp(parsed) => {
-            let target = match configured_mcp_target(runtime, &parsed.mcp).await {
+            let target = match configured_mcp_target(&id, runtime, &parsed.mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return host_auth_error_response(id, error_value),
+                Err(response) => return response,
             };
             service
                 .mcp_login_cancel_by_state(&target, &parsed.state)
                 .map(|()| WireLoginCancelledTarget::Mcp(WireMcpLoginTarget { mcp: parsed.mcp }))
         }
         LoginCancelParams::McpAttempt(parsed) => {
-            let target = match configured_mcp_target(runtime, &parsed.mcp).await {
+            let target = match configured_mcp_target(&id, runtime, &parsed.mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return host_auth_error_response(id, error_value),
+                Err(response) => return response,
             };
             service
                 .mcp_login_cancel_by_attempt_ref(&target, &parsed.attempt_ref)
@@ -2111,9 +2132,9 @@ pub async fn handle_auth_status_get(
     let parsed = match parsed {
         AuthStatusParams::Binding(parsed) => parsed,
         AuthStatusParams::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match configured_mcp_target(runtime, &mcp).await {
+            let target = match configured_mcp_target(&id, runtime, &mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return host_auth_error_response(id, error_value),
+                Err(response) => return response,
             };
             let service = match host_auth_service(runtime) {
                 Ok(service) => service,
@@ -2299,9 +2320,9 @@ pub async fn handle_auth_logout(
     let parsed = match parsed {
         AuthLogoutParams::Binding(parsed) => parsed,
         AuthLogoutParams::Mcp(WireMcpLoginTarget { mcp }) => {
-            let target = match configured_mcp_target(runtime, &mcp).await {
+            let target = match configured_mcp_target(&id, runtime, &mcp).await {
                 Ok(target) => target,
-                Err(error_value) => return host_auth_error_response(id, error_value),
+                Err(response) => return response,
             };
             let service = match host_auth_service(runtime) {
                 Ok(service) => service,
@@ -2815,6 +2836,35 @@ mod tests {
     }
 
     #[test]
+    fn every_auth_error_reason_is_carried_in_rpc_error_data() {
+        use meerkat::test_fixtures::auth_errors::{
+            INTERNAL_DETAIL_CANARY, all_reasons, reason_examples,
+        };
+        let examples = reason_examples();
+        for reason in all_reasons() {
+            assert!(
+                examples.iter().any(|(_, expected)| *expected == reason),
+                "{reason:?} has an example"
+            );
+        }
+        for (error, expected) in examples {
+            let display = error.to_string();
+            let response = host_auth_error_response(Some(RpcId::Num(1)), error);
+            let error = response.error.expect("error response");
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("reason")),
+                Some(&serde_json::to_value(expected).unwrap()),
+                "{display}"
+            );
+            assert!(!error.message.contains(INTERNAL_DETAIL_CANARY));
+            if expected == meerkat_contracts::WireAuthErrorReason::Infrastructure {
+                assert_eq!(error.code, error::INTERNAL_ERROR);
+                assert_eq!(error.message, "auth infrastructure failure");
+            }
+        }
+    }
+
+    #[test]
     fn connector_errors_map_refusals_to_invalid_params_and_failures_to_internal() {
         use meerkat::{ConnectorLoginError, HostAuthError};
         use meerkat_core::auth::token_store::CredentialSlotRefusal;
@@ -2845,7 +2895,7 @@ mod tests {
         }
         assert_eq!(
             code(HostAuthError::Connector(
-                ConnectorLoginError::RefreshFailed("closure rejected".into())
+                ConnectorLoginError::RefreshFailed("token endpoint refused the refresh".into())
             )),
             error::INTERNAL_ERROR
         );
@@ -3848,6 +3898,193 @@ mod tests {
         assert_eq!(status(13).await["phase"], "authorization_required");
     }
 
+    /// A realm-only MCP server (in the realm's composed `tools.mcp_servers`,
+    /// absent from every `mcp.toml`) resolves to the same identity for login
+    /// start, cancel by attempt reference and logout, and a stored-config
+    /// fault on that path is a host fault (INTERNAL_ERROR), not the caller's.
+    #[tokio::test]
+    async fn realm_only_mcp_server_login_cancel_by_reference_and_logout_over_rpc() {
+        use meerkat::test_fixtures::mcp_oauth::{McpOAuthFixture, SUBJECT, follow_authorize_url};
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let realm_server: meerkat_core::McpServerConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "realm-attempts",
+                "url": fixture.mcp_url(),
+                "oauth_account": SUBJECT,
+            }))
+            .unwrap();
+        let mut config = meerkat_core::Config::default();
+        config.tools.mcp_servers = vec![realm_server];
+        let runtime = test_runtime_with_config(config);
+        // A project root with no `mcp.toml`: the realm is the only source.
+        let project = tempfile::tempdir().unwrap();
+        runtime.set_skill_identity_roots(Some(project.path().to_path_buf()), None);
+        let mcp = serde_json::json!({
+            "server_name": "realm-attempts",
+            "server_url": fixture.mcp_url(),
+            "oauth_account": SUBJECT,
+        });
+        let status = |id: i64| {
+            let mcp = mcp.clone();
+            let runtime = &runtime;
+            async move {
+                rpc_result(
+                    handle_auth_status_get(
+                        Some(RpcId::Num(id)),
+                        Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                        runtime,
+                    )
+                    .await,
+                )
+            }
+        };
+
+        // Negative control: without the realm entry the target is unknown.
+        let bare = test_runtime();
+        bare.set_skill_identity_roots(Some(project.path().to_path_buf()), None);
+        let unknown = handle_auth_logout(
+            Some(RpcId::Num(1)),
+            Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+            &bare,
+        )
+        .await;
+        assert!(
+            unknown.error.is_some(),
+            "only the realm installs the server"
+        );
+
+        rpc_result(
+            handle_auth_login_start(
+                Some(RpcId::Num(2)),
+                Some(
+                    raw_params(serde_json::json!({
+                        "mcp": mcp,
+                        "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+                    }))
+                    .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        let attempt_ref = status(3).await["attempt"]["ref"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let cancelled = rpc_result(
+            handle_auth_login_cancel(
+                Some(RpcId::Num(4)),
+                Some(
+                    raw_params(serde_json::json!({ "mcp": mcp, "attempt_ref": attempt_ref }))
+                        .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(cancelled["cancelled"], true, "the started attempt is found");
+        assert_eq!(cancelled["mcp"], mcp);
+        assert!(status(5).await.get("attempt").is_none());
+
+        // Log in through the host's loopback, then log out over the wire.
+        let binding =
+            meerkat_providers::auth_oauth::bind_loopback_callback(meerkat::MCP_OAUTH_CALLBACK_PATH)
+                .await
+                .unwrap();
+        let start = rpc_result(
+            handle_auth_login_start(
+                Some(RpcId::Num(6)),
+                Some(
+                    raw_params(serde_json::json!({
+                        "mcp": mcp,
+                        "redirect_uri": binding.redirect_url,
+                    }))
+                    .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        let callback = binding.expect_state(start["state"].as_str().unwrap().to_owned());
+        follow_authorize_url(start["authorize_url"].as_str().unwrap())
+            .await
+            .unwrap();
+        let outcome = callback
+            .wait(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT)
+            .await
+            .unwrap();
+        rpc_result(
+            handle_auth_login_complete(
+                Some(RpcId::Num(7)),
+                Some(
+                    raw_params(serde_json::json!({
+                        "mcp": mcp,
+                        "code": outcome.code,
+                        "state": outcome.state,
+                        "redirect_uri": start["redirect_uri"],
+                    }))
+                    .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(status(8).await["phase"], "authorized");
+        let logged_out = rpc_result(
+            handle_auth_logout(
+                Some(RpcId::Num(9)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(
+            logged_out,
+            serde_json::json!({ "mcp": mcp, "cleared": true }),
+            "logout clears the credential the realm-only login stored"
+        );
+        assert_eq!(status(10).await["phase"], "authorization_required");
+
+        // A stored document refused on load is a host fault on this path.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[agent]\nprovider_params = { provider_tag = { provider = \"anthropic\", cache_control = \"disabled\" } }\n",
+        )
+        .unwrap();
+        runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::new(meerkat_core::FileConfigStore::new(
+                path,
+                meerkat_models::canonical(),
+            )),
+            temp.path().join("config_state.json"),
+        )));
+        for response in [
+            handle_auth_login_cancel(
+                Some(RpcId::Num(11)),
+                Some(
+                    raw_params(serde_json::json!({ "mcp": mcp, "attempt_ref": attempt_ref }))
+                        .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+            handle_auth_logout(
+                Some(RpcId::Num(12)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                &runtime,
+            )
+            .await,
+        ] {
+            assert_eq!(
+                response.error.expect("stored-config fault").code,
+                error::INTERNAL_ERROR
+            );
+        }
+    }
+
     #[tokio::test]
     async fn login_complete_requires_explicit_realm_and_binding() {
         let runtime = test_runtime();
@@ -4385,11 +4622,13 @@ mod tests {
             .error
             .expect("missing provider auth persistence should fail");
         assert_eq!(error.code, crate::error::INTERNAL_ERROR);
-        assert!(
-            error
-                .message
-                .contains("provider auth persistence is not configured")
+        // Typed, not prose: the public text of an infrastructure failure is
+        // fixed and its detail stays in protected diagnostics.
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("reason")),
+            Some(&serde_json::json!("infrastructure"))
         );
+        assert_eq!(error.message, "auth infrastructure failure");
         let flow = runtime
             .oauth_flow_authority()
             .consume(

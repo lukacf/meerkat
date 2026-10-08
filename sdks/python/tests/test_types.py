@@ -3000,6 +3000,63 @@ def test_parse_event_envelope_preserves_optional_mob_id():
     assert event.mob_id == "00000000-0000-4000-8000-000000000020"
 
 
+@pytest.mark.parametrize("refusal", [None, "invalid_requirement", "invalid_launch",
+    "unsupported_requirement", "backend_unavailable", "preparation_failed"])
+def test_optional_mcp_setup_refusal_retains_native_reason_and_transcript(refusal):
+    from meerkat.events import ExternalToolDeltaToolConfigChangeStatus
+    for present in [False, True]:
+        field = {"confinement_refusal": refusal} if present else {}
+        status = {"kind": "external_tool_delta", "phase": "failed",
+            "detail": "required execution confinement is unsupported by this backend", **field}
+        payload = {"operation": "reload", "target": "local-server", "persisted": True,
+            "status_info": status}
+        event = parse_event({"type": "tool_config_changed", "payload": payload})
+        assert isinstance(event, ToolConfigChanged)
+        assert isinstance(event.payload.status_info, ExternalToolDeltaToolConfigChangeStatus)
+        assert event.payload.status_info.phase == "failed"
+        assert event.payload.status_info.confinement_refusal == (refusal if present else None)
+        for block in [
+            {"type": "mcp", "server_id": "local-server", "phase": "failed", "persisted": True, **field},
+            {"type": "tool_config", "payload": payload},
+        ]:
+            message = {"role": "system_notice", "kind": "mcp", "body": "Continue with available tools.",
+                "blocks": [block], "created_at": "2026-05-26T10:00:00Z"}
+            parsed = MeerkatClient._parse_session_message(message)
+            assert MeerkatClient._serialize_transcript_rewrite_message(parsed) == message
+
+
+@pytest.mark.parametrize("refusal", ["future_reason", "", 7, False, {}, []])
+def test_malformed_mcp_refusal_preserves_raw_event_without_hiding_sibling(refusal):
+    payload = {"operation": "add", "target": "local-server", "persisted": True,
+        "status_info": {"kind": "external_tool_delta", "phase": "failed", "confinement_refusal": refusal}}
+    raw = {"type": "tool_config_changed", "payload": payload}
+    events = [parse_event(value) for value in [raw, {"type": "text_delta", "delta": "permitted sibling"}]]
+    assert isinstance(events[0], UnknownEvent)
+    assert events[0].type == "malformed_event"
+    assert events[0].data == raw
+    assert isinstance(events[1], TextDelta)
+    assert events[1].delta == "permitted sibling"
+    for block in [{"type": "mcp", "confinement_refusal": refusal}, {"type": "tool_config", "payload": payload}]:
+        with pytest.raises(MeerkatError) as error:
+            MeerkatClient._parse_session_message({
+                "role": "system_notice", "kind": "mcp", "blocks": [block], "created_at": "2026-05-26T10:00:00Z",
+            })
+        assert error.value.code == "INVALID_RESPONSE"
+
+
+def test_generated_mcp_setup_fields_keep_closed_optional_native_reason():
+    from meerkat import ConfinementRefusal
+    from meerkat.events import ExternalToolDeltaToolConfigChangeStatus
+    from meerkat.generated.types import SystemNoticeBlockMcp, ToolConfigChangeStatusExternalToolDelta
+    for carrier in [SystemNoticeBlockMcp, ToolConfigChangeStatusExternalToolDelta,
+        ExternalToolDeltaToolConfigChangeStatus]:
+        hint = get_type_hints(carrier)["confinement_refusal"]
+        assert set(get_args(hint)) == {ConfinementRefusal, type(None)}
+    assert "confinement_refusal" in SystemNoticeBlockMcp.__optional_keys__
+    assert "confinement_refusal" in ToolConfigChangeStatusExternalToolDelta.__optional_keys__
+    assert ExternalToolDeltaToolConfigChangeStatus(phase="failed").confinement_refusal is None
+
+
 def test_parse_tool_config_changed():
     raw = {
         "type": "tool_config_changed",
@@ -4643,8 +4700,8 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
     timestamp = "2026-05-12T12:00:00Z"
     item = {
         "id": "prep-dentist-ride",
-        "realm_id": "homecore",
-        "namespace": "family/appointments",
+        "realm_id": "example",
+        "namespace": "team/appointments",
         "title": "Prep A for non-preferred dentist car",
         "status": "open",
         "priority": "high",
@@ -4662,8 +4719,8 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
     attention_binding = {
         "binding_id": "attn-1",
         "work_ref": {
-            "realm_id": "homecore",
-            "namespace": "family/appointments",
+            "realm_id": "example",
+            "namespace": "team/appointments",
             "item_id": "prep-dentist-ride",
         },
         "target": {
@@ -4685,8 +4742,8 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
             return {"items": [item]}
         if method == "workgraph/snapshot":
             return {
-                "realm_id": "homecore",
-                "namespace": "family/appointments",
+                "realm_id": "example",
+                "namespace": "team/appointments",
                 "all_namespaces": False,
                 "captured_at": timestamp,
                 "event_high_water_mark": 7,
@@ -4700,8 +4757,8 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
                 "events": [
                     {
                         "seq": 7,
-                        "realm_id": "homecore",
-                        "namespace": "family/appointments",
+                        "realm_id": "example",
+                        "namespace": "team/appointments",
                         "item_id": "prep-dentist-ride",
                         "kind": "created",
                         "at": timestamp,
@@ -4719,23 +4776,23 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
 
     fetched = await client.get_workgraph_item(
         "prep-dentist-ride",
-        realm_id="homecore",
-        namespace="family/appointments",
+        realm_id="example",
+        namespace="team/appointments",
     )
-    listed = await client.list_workgraph_items({"realm_id": "homecore", "limit": 5})
+    listed = await client.list_workgraph_items({"realm_id": "example", "limit": 5})
     ready = await client.list_ready_workgraph_items(
-        {"namespace": "family/appointments", "limit": 3}
+        {"namespace": "team/appointments", "limit": 3}
     )
     snapshot = await client.get_workgraph_snapshot(
-        {"realm_id": "homecore", "namespace": "family/appointments"}
+        {"realm_id": "example", "namespace": "team/appointments"}
     )
-    events = await client.list_workgraph_events({"realm_id": "homecore", "limit": 10})
+    events = await client.list_workgraph_events({"realm_id": "example", "limit": 10})
     goal = await client.get_workgraph_goal_status(
-        {"binding_id": "attn-1", "namespace": "family/appointments"}
+        {"binding_id": "attn-1", "namespace": "team/appointments"}
     )
     attention = await client.list_workgraph_attention(
         {
-            "realm_id": "homecore",
+            "realm_id": "example",
             "status": {"state": "paused", "until": timestamp},
             "target": {
                 "kind": "session",
@@ -4771,17 +4828,17 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
     ]
     assert calls[0][1] == {
         "id": "prep-dentist-ride",
-        "realm_id": "homecore",
-        "namespace": "family/appointments",
+        "realm_id": "example",
+        "namespace": "team/appointments",
     }
-    assert calls[1][1] == {"realm_id": "homecore", "limit": 5}
-    assert calls[2][1] == {"namespace": "family/appointments", "limit": 3}
+    assert calls[1][1] == {"realm_id": "example", "limit": 5}
+    assert calls[2][1] == {"namespace": "team/appointments", "limit": 3}
     assert calls[5][1] == {
         "binding_id": "attn-1",
-        "namespace": "family/appointments",
+        "namespace": "team/appointments",
     }
     assert calls[6][1] == {
-        "realm_id": "homecore",
+        "realm_id": "example",
         "status": {"state": "paused", "until": timestamp},
         "target": {
             "kind": "session",
@@ -7550,7 +7607,7 @@ async def test_list_workgraph_items_rejects_non_list_items() -> None:
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError) as excinfo:
-        await client.list_workgraph_items({"realm_id": "homecore"})
+        await client.list_workgraph_items({"realm_id": "example"})
     assert excinfo.value.code == "INVALID_RESPONSE"
 
 
@@ -7564,7 +7621,7 @@ async def test_list_ready_workgraph_items_rejects_non_list_items() -> None:
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError) as excinfo:
-        await client.list_ready_workgraph_items({"realm_id": "homecore"})
+        await client.list_ready_workgraph_items({"realm_id": "example"})
     assert excinfo.value.code == "INVALID_RESPONSE"
 
 
@@ -7578,7 +7635,7 @@ async def test_list_workgraph_events_rejects_non_list_events() -> None:
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError) as excinfo:
-        await client.list_workgraph_events({"realm_id": "homecore"})
+        await client.list_workgraph_events({"realm_id": "example"})
     assert excinfo.value.code == "INVALID_RESPONSE"
 
 
@@ -7600,7 +7657,7 @@ async def test_list_workgraph_items_rejects_malformed_entry() -> None:
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError) as excinfo:
-        await client.list_workgraph_items({"realm_id": "homecore"})
+        await client.list_workgraph_items({"realm_id": "example"})
     assert excinfo.value.code == "INVALID_RESPONSE"
 
 

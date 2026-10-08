@@ -539,6 +539,15 @@ where
         self.active_turn_request_contexts = contexts;
     }
 
+    /// Stage the runtime batch's resolved reasoning preference for the next
+    /// run; `None` clears it.
+    pub fn set_active_turn_request_reasoning(
+        &mut self,
+        disposition: Option<crate::lifecycle::run_primitive::ReasoningBatchDisposition>,
+    ) {
+        self.active_turn_request_reasoning = disposition;
+    }
+
     /// Clear invocation-local authorization after the session owner has
     /// dropped the run future. This is infallible mechanical cleanup only.
     pub fn clear_work_authorization(&mut self) {
@@ -550,6 +559,7 @@ where
         self.runtime_execution_kind = None;
         self.active_transcript_identity = None;
         self.active_turn_request_contexts.clear();
+        self.active_turn_request_reasoning = None;
         self.runtime_started_run_id = None;
     }
 
@@ -1130,6 +1140,18 @@ where
         self.cancel_after_boundary_rx.len()
     }
 
+    /// Observe entry into CallingLlm before boundary notices or request work.
+    /// The test owns any clock and recorder; the callback receives no authority
+    /// and returns no decision. It is not retained by isolated operation agents.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __test_set_model_preparation_observer(
+        &mut self,
+        observer: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        self.model_preparation_observer = observer;
+    }
+
     /// Get the runtime-backed turn-state handle, when this agent was built with one.
     pub fn turn_state_handle(&self) -> Option<Arc<dyn crate::TurnStateHandle>> {
         self.turn_state_handle.clone()
@@ -1211,7 +1233,10 @@ where
             name: &call.name,
             args: args.as_ref(),
         };
-        let dispatch_context = self.tool_dispatch_context.clone();
+        let dispatch_context = self
+            .tool_dispatch_context
+            .clone()
+            .with_operation_review(self.operation_review.clone());
         let resolution_started = crate::time_compat::Instant::now();
         let caller_deadline = timeout_policy.timeout().map_or_else(
             || ToolDeadlineContributor::unbounded(ToolDeadlineOwner::DirectCaller),
@@ -1771,7 +1796,7 @@ where
     }
 
     async fn run_started_hooks(
-        &self,
+        &mut self,
         input: &RunInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
@@ -1914,6 +1939,7 @@ where
                 session_id: self.session.id().clone(),
                 identity: self.live_run_identity(),
                 input,
+                request_reasoning: self.active_turn_request_reasoning,
             },
         )
         .await;
@@ -1968,7 +1994,7 @@ where
     }
 
     async fn handle_run_failure(
-        &self,
+        &mut self,
         error: &AgentError,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
@@ -2037,7 +2063,7 @@ where
     }
 
     async fn run_failed_hooks(
-        &self,
+        &mut self,
         error: &AgentError,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
@@ -2194,6 +2220,7 @@ where
         let saved_active_transcript_identity = self.active_transcript_identity.take();
         let saved_active_turn_request_contexts =
             std::mem::take(&mut self.active_turn_request_contexts);
+        let saved_active_turn_request_reasoning = self.active_turn_request_reasoning.take();
         let saved_latest_run_checkpoint_receipt = self.latest_run_checkpoint_receipt.take();
         let saved_terminal_error_detail = self.terminal_error_detail.take();
         let saved_terminal_error_metadata = self.terminal_error_metadata.take();
@@ -2285,6 +2312,7 @@ where
         self.runtime_terminal_failure_witness = saved_runtime_terminal_failure_witness;
         self.active_transcript_identity = saved_active_transcript_identity;
         self.active_turn_request_contexts = saved_active_turn_request_contexts;
+        self.active_turn_request_reasoning = saved_active_turn_request_reasoning;
         self.latest_run_checkpoint_receipt = saved_latest_run_checkpoint_receipt;
         self.terminal_error_detail = saved_terminal_error_detail;
         self.terminal_error_metadata = saved_terminal_error_metadata;
@@ -3154,6 +3182,8 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             skill_engine: self.skill_engine.clone(),
             pending_skill_references: None,
             event_tap: crate::event_tap::new_event_tap(),
+            #[cfg(any(test, feature = "test-support"))]
+            model_preparation_observer: None,
             transient_turn_context_state: crate::session::TransientTurnContextStateHandle::new(),
             default_event_tx: None,
             checkpointer: None,
@@ -3190,6 +3220,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),
+            active_turn_request_reasoning: None,
             external_tool_surface_handle: None,
             auth_lease_handle: None,
             auth_credential_identity: self.auth_credential_identity.clone(),
@@ -3202,6 +3233,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             last_hidden_deferred_catalog_names: Default::default(),
             last_pending_catalog_sources: Default::default(),
             tool_dispatch_context: Default::default(),
+            operation_review: self.operation_review.clone(),
             live_bridge_dispatch_admission: Some(dispatch_admission),
             live_bridge_tool_defs: Some(frozen_tool_defs),
             noncommitting_live_bridge_run: true,
@@ -4082,6 +4114,8 @@ mod skill_activation_effect_tests {
             Ok(crate::HookExecutionReport {
                 started: Vec::new(),
                 outcomes: Vec::new(),
+                launch_refusals: Vec::new(),
+                background_skips: Vec::new(),
                 decision: (invocation.point == HookPoint::RunStarted).then(|| {
                     crate::HookDecision::deny(
                         crate::HookId::new("deny-skill-turn"),
@@ -4358,6 +4392,10 @@ mod skill_activation_effect_tests {
     struct AttachmentRunPermit(crate::PreparedAuthorizationBinding);
 
     impl crate::PreparedOperationAuthorization for AttachmentRunPermit {
+        fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+            crate::authorization::OperationReviewTier::R1
+        }
+
         fn check_current(
             &self,
             binding: &crate::PreparedAuthorizationBinding,

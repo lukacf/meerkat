@@ -346,6 +346,7 @@ pub struct SessionLlmIdentity {
 pub struct SessionToolVisibilityState {
     pub capability_base_filter: ToolFilter,
     pub inherited_base_filter: ToolFilter,
+    pub policy_base_filter: ToolFilter,
     pub active_filter: ToolFilter,
     pub staged_filter: ToolFilter,
     pub active_requested_deferred_names: std::collections::BTreeSet<ToolName>,
@@ -1783,6 +1784,20 @@ pub enum LiveDelegationWorkerOwnership {
     #[default]
     OwnedMember,
     ExistingMember,
+}
+
+/// The reasoning-effort preference a live channel's open sealed for the
+/// member turns its delegations start (#1823). Mirrors the accepted subset
+/// of the core effort ladder; `minimal` is never accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveMemberTurnReasoning {
+    #[default]
+    None,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
 }
 
 /// Machine-derived reason for cancelling one exact live delegation worker.
@@ -3788,6 +3803,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             // rather than minting independently.
             next_staged_visibility_revision: u64,
             inherited_base_filter: ToolFilter,
+            // The tools the session's execution policy makes unreachable by
+            // name, hidden from visibility. Set with the rest of the
+            // visibility state on every build (ReplaceVisibilityState) and
+            // never changed by an LLM reconfiguration; carries no witnesses,
+            // since a deny may name a tool the build never mounted.
+            policy_base_filter: ToolFilter,
             active_filter: ToolFilter,
             staged_filter: ToolFilter,
             active_visibility_revision: u64,
@@ -3951,6 +3972,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_active_channel_by_session: Map<String, String>,
             live_channel_session_by_channel: Map<String, String>,
             live_channel_identity_by_channel: Map<String, SessionLlmIdentity>,
+            // The member-turn reasoning preference each open sealed, keyed by
+            // the freshly minted channel id; absent means no preference.
+            live_member_turn_reasoning_by_channel: Map<String, Enum<LiveMemberTurnReasoning>>,
             // Channel-scoped execution authority. These facts bind semantic
             // callbacks to the exact runtime incarnation that admitted the
             // live channel. Provider transport ids never enter this state.
@@ -4052,6 +4076,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_bridge_agent_identity_by_operation: Map<OperationId, AgentIdentity>,
             live_bridge_context_revision_by_operation: Map<OperationId, String>,
             live_bridge_request_digest_by_operation: Map<OperationId, String>,
+            // Canonical passive identity of the staged run whose dispatch
+            // admitted the operation, compared in full against the actual
+            // dispatching batch before this commit. Immutable once admitted.
+            // Operations admitted on a runtime with no native work
+            // authorization host (an empty original_work), or before this
+            // field existed, have no entry and a governed outcome for them is
+            // unavailable, so this map is a subset of the admitted operations
+            // rather than key-equal to them.
+            live_bridge_original_work_by_operation: Map<OperationId, String>,
             live_bridge_phase_by_operation: Map<OperationId, Enum<LiveBridgeOperationPhase>>,
             live_bridge_effect_operation_by_authority: Map<String, OperationId>,
             live_bridge_effect_kind_by_authority: Map<String, Enum<LiveBridgeEffectKind>>,
@@ -4528,6 +4561,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Visibility substate
             next_staged_visibility_revision = 0,
             inherited_base_filter = ToolFilter::All,
+            policy_base_filter = ToolFilter::All,
             active_filter = ToolFilter::All,
             staged_filter = ToolFilter::All,
             active_visibility_revision = 0,
@@ -4616,6 +4650,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_active_channel_by_session = EmptyMap,
             live_channel_session_by_channel = EmptyMap,
             live_channel_identity_by_channel = EmptyMap,
+            live_member_turn_reasoning_by_channel = EmptyMap,
             live_execution_runtime_id_by_channel = EmptyMap,
             live_execution_fence_by_channel = EmptyMap,
             live_execution_generation_by_channel = EmptyMap,
@@ -4696,6 +4731,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_bridge_agent_identity_by_operation = EmptyMap,
             live_bridge_context_revision_by_operation = EmptyMap,
             live_bridge_request_digest_by_operation = EmptyMap,
+            live_bridge_original_work_by_operation = EmptyMap,
             live_bridge_phase_by_operation = EmptyMap,
             live_bridge_effect_operation_by_authority = EmptyMap,
             live_bridge_effect_kind_by_authority = EmptyMap,
@@ -5780,6 +5816,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id: String,
                 channel_id: String,
                 llm_identity: SessionLlmIdentity,
+                member_turn_reasoning: Option<Enum<LiveMemberTurnReasoning>>,
             },
             BindLiveExecutionChannel {
                 session_id: String,
@@ -6149,6 +6186,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 agent_identity: AgentIdentity,
                 canonical_context_revision: String,
                 request_digest: String,
+                original_work: String,
                 structural_lineage_proven: bool,
             },
             ConfirmLiveBridgeFinalInput {
@@ -6531,6 +6569,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             ReplaceVisibilityState {
                 capability_base_filter: ToolFilter,
                 inherited_base_filter: ToolFilter,
+                policy_base_filter: ToolFilter,
                 active_filter: ToolFilter,
                 staged_filter: ToolFilter,
                 active_revision: u64,
@@ -7488,6 +7527,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 worker_identity: String,
                 worker_ownership: Enum<LiveDelegationWorkerOwnership>,
+                member_turn_reasoning: Option<Enum<LiveMemberTurnReasoning>>,
             },
             LiveDelegationWorkerStartResolved {
                 channel_id: String,
@@ -8879,6 +8919,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             view_image_tool_available
             && meerkat_session_llm_filter_allows_view_image(visibility_state.capability_base_filter)
             && meerkat_session_llm_filter_allows_view_image(visibility_state.inherited_base_filter)
+            && meerkat_session_llm_filter_allows_view_image(visibility_state.policy_base_filter)
             && meerkat_session_llm_filter_allows_view_image(visibility_state.active_filter)
         }
 
@@ -8927,6 +8968,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             previous_visibility_state.capability_base_filter == previous_capability_base_filter
             && next_visibility_state.capability_base_filter == next_capability_base_filter
             && previous_visibility_state.inherited_base_filter == next_visibility_state.inherited_base_filter
+            && previous_visibility_state.policy_base_filter == next_visibility_state.policy_base_filter
             && previous_visibility_state.active_filter == next_visibility_state.active_filter
             && previous_visibility_state.staged_filter == next_visibility_state.staged_filter
             && previous_visibility_state.active_requested_deferred_names == next_visibility_state.active_requested_deferred_names
@@ -9072,6 +9114,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 == self.live_bridge_context_revision_by_operation.keys()
             && self.live_bridge_channel_by_operation.keys()
                 == self.live_bridge_request_digest_by_operation.keys()
+            && for_all(operation_id in self.live_bridge_original_work_by_operation.keys(),
+                self.live_bridge_channel_by_operation.contains_key(operation_id))
             && self.live_bridge_channel_by_operation.keys()
                 == self.live_bridge_phase_by_operation.keys()
             && for_all(channel_id in self.live_bridge_operation_by_channel.keys(),
@@ -9329,6 +9373,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
                     && self.live_bridge_operation_by_channel == EmptyMap
                     && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_member_turn_reasoning_by_channel == EmptyMap
                     && self.live_channel_session_by_channel == EmptyMap
                     && self.live_client_context_capable_channels == EmptySet
                     && self.live_context_cursor_by_channel == EmptyMap
@@ -11246,6 +11291,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
                 && self.live_bridge_operation_by_channel == EmptyMap
                 && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_member_turn_reasoning_by_channel == EmptyMap
                 && self.live_channel_session_by_channel == EmptyMap
                 && self.live_context_cursor_by_channel == EmptyMap
                 && self.live_context_pending_append_by_channel == EmptyMap
@@ -11405,6 +11451,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
                 && self.live_bridge_operation_by_channel == EmptyMap
                 && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_member_turn_reasoning_by_channel == EmptyMap
                 && self.live_channel_session_by_channel == EmptyMap
                 && self.live_context_cursor_by_channel == EmptyMap
                 && self.live_context_pending_append_by_channel == EmptyMap
@@ -11562,6 +11609,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
                 && self.live_bridge_operation_by_channel == EmptyMap
                 && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_member_turn_reasoning_by_channel == EmptyMap
                 && self.live_channel_session_by_channel == EmptyMap
                 && self.live_context_cursor_by_channel == EmptyMap
                 && self.live_context_pending_append_by_channel == EmptyMap
@@ -11721,6 +11769,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
                 && self.live_bridge_operation_by_channel == EmptyMap
                 && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_member_turn_reasoning_by_channel == EmptyMap
                 && self.live_channel_session_by_channel == EmptyMap
                 && self.live_context_cursor_by_channel == EmptyMap
                 && self.live_context_pending_append_by_channel == EmptyMap
@@ -11878,6 +11927,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_awaiting_assistant_interaction_by_channel == EmptyMap
                 && self.live_bridge_operation_by_channel == EmptyMap
                 && self.live_channel_identity_by_channel == EmptyMap
+                && self.live_member_turn_reasoning_by_channel == EmptyMap
                 && self.live_channel_session_by_channel == EmptyMap
                 && self.live_context_cursor_by_channel == EmptyMap
                 && self.live_context_pending_append_by_channel == EmptyMap
@@ -12226,6 +12276,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "previous_visibility_matches_current" {
                 previous_visibility_state.capability_base_filter == self.current_session_capability_base_filter
                 && previous_visibility_state.inherited_base_filter == self.inherited_base_filter
+                && previous_visibility_state.policy_base_filter == self.policy_base_filter
                 && previous_visibility_state.active_filter == self.active_filter
                 && previous_visibility_state.staged_filter == self.staged_filter
                 && previous_visibility_state.active_requested_deferred_names == self.active_deferred_names
@@ -12267,6 +12318,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.model_routing_baseline_realtime = Some(target_realtime_capable);
                 self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
                 self.inherited_base_filter = next_visibility_state.inherited_base_filter;
+                self.policy_base_filter = next_visibility_state.policy_base_filter;
                 self.active_filter = next_visibility_state.active_filter;
                 self.staged_filter = next_visibility_state.staged_filter;
                 self.active_deferred_names = next_visibility_state.active_requested_deferred_names;
@@ -23566,7 +23618,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // rebinds it unconditionally, so guarding on its ABSENCE guarded
         // "this input was never staged before" - false as a staging
         // precondition, and the exact 0.8.22 field wedge: after a recovery pass
-        // rolled two household members' head-of-line inputs from Staged back to
+        // rolled two members' head-of-line inputs from Staged back to
         // Queued, every later run was refused for those inputs forever, and
         // under `queue_mode fifo` all 11 inputs behind the two heads starved
         // (~4h down). `input_queued` + `input_lane_bound` already prove the
@@ -25958,7 +26010,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         // here as generated behavior authority for later config propagation.
         transition ResolveLiveOpenAdmissionUnregistered {
             per_phase [Idle]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             guard "session_unregistered" { self.session_id == None }
@@ -25978,7 +26032,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveLiveOpenAdmissionAccepted {
             per_phase [Idle, Attached, Running]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             guard "session_registered" { self.session_id != None }
@@ -25996,6 +26052,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_active_channel_by_session.insert(session_id, channel_id);
                 self.live_channel_session_by_channel.insert(channel_id, session_id);
                 self.live_channel_identity_by_channel.insert(channel_id, llm_identity);
+                if member_turn_reasoning != None {
+                    self.live_member_turn_reasoning_by_channel.insert(
+                        channel_id,
+                        member_turn_reasoning.get("value")
+                    );
+                }
             }
             to Idle
             emit LiveOpenAdmissionResolved {
@@ -26010,7 +26072,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveLiveOpenAdmissionSessionAlreadyBound {
             per_phase [Idle, Attached, Running]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             guard "session_registered" { self.session_id != None }
@@ -26034,7 +26098,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveLiveOpenAdmissionChannelAlreadyBound {
             per_phase [Idle, Attached, Running]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             guard "session_registered" { self.session_id != None }
@@ -26059,7 +26125,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveLiveOpenAdmissionRevokedChannelId {
             per_phase [Idle, Attached, Running]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             guard "session_registered" { self.session_id != None }
@@ -26088,7 +26156,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveLiveOpenAdmissionDraining {
             per_phase [Idle, Attached, Running]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             guard "session_registered" { self.session_id != None }
@@ -26110,7 +26180,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveLiveOpenAdmissionStopDeferred {
             per_phase [Attached, Running]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             guard "session_registered" { self.session_id != None }
@@ -26133,7 +26205,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveLiveOpenAdmissionRetired {
             per_phase [Retired]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             update {
@@ -26152,7 +26226,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveLiveOpenAdmissionStopped {
             per_phase [Stopped]
-            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            on input ResolveLiveOpenAdmission {
+                session_id, channel_id, llm_identity, member_turn_reasoning
+            }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
             update {
@@ -26215,6 +26291,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_media_health_requested_output_by_channel.remove(channel_id);
                 self.live_media_health_judged_channels.remove(channel_id);
                 self.live_channel_identity_by_channel.remove(channel_id);
+                self.live_member_turn_reasoning_by_channel.remove(channel_id);
                 self.live_execution_runtime_id_by_channel.remove(channel_id);
                 self.live_execution_fence_by_channel.remove(channel_id);
                 self.live_execution_generation_by_channel.remove(channel_id);
@@ -27291,7 +27368,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: interaction_id,
                 operation_id: operation_id,
                 worker_identity: worker_identity,
-                worker_ownership: worker_ownership
+                worker_ownership: worker_ownership,
+                member_turn_reasoning: self.live_member_turn_reasoning_by_channel.get_copied(channel_id)
             }
         }
 
@@ -29191,7 +29269,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, channel_id, runtime_id, fence_token, generation,
                 interaction_id, operation_id, provider_turn_ref,
                 provider_delegation_ref, provider_call_ref, agent_identity,
-                canonical_context_revision, request_digest,
+                canonical_context_revision, request_digest, original_work,
                 structural_lineage_proven
             }
             guard "identities_present" {
@@ -29234,6 +29312,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_bridge_agent_identity_by_operation.insert(operation_id, agent_identity);
                 self.live_bridge_context_revision_by_operation.insert(operation_id, canonical_context_revision);
                 self.live_bridge_request_digest_by_operation.insert(operation_id, request_digest);
+                // Empty: admitted on a runtime with no native work
+                // authorization host, so there is no original work binding.
+                if original_work != "" {
+                    self.live_bridge_original_work_by_operation.insert(operation_id, original_work);
+                }
                 self.live_bridge_phase_by_operation.insert(
                     operation_id,
                     LiveBridgeOperationPhase::PreFinalInference
@@ -29261,7 +29344,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, channel_id, runtime_id, fence_token, generation,
                 interaction_id, operation_id, provider_turn_ref,
                 provider_delegation_ref, provider_call_ref, agent_identity,
-                canonical_context_revision, request_digest,
+                canonical_context_revision, request_digest, original_work,
                 structural_lineage_proven
             }
             guard "active_channel_binding_matches" {
@@ -29296,6 +29379,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_bridge_request_digest_by_operation.get_cloned(
                     self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
                     == Some(request_digest)
+                // An operation recorded without original work (no host, or
+                // admitted before the field) is recognized as a duplicate
+                // whatever the caller now carries; nothing is filled in, so a
+                // legacy replay is never authority for a governed outcome. A
+                // recorded identity must match exactly; a mismatch matches no
+                // arm and only this admission is rejected.
+                && (!self.live_bridge_original_work_by_operation.contains_key(
+                        self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                    || self.live_bridge_original_work_by_operation.get_cloned(
+                        self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                        == Some(original_work))
             }
             to Idle
             emit LiveBridgeOperationReplayObserved {
@@ -29314,7 +29408,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, channel_id, runtime_id, fence_token, generation,
                 interaction_id, operation_id, provider_turn_ref,
                 provider_delegation_ref, provider_call_ref, agent_identity,
-                canonical_context_revision, request_digest,
+                canonical_context_revision, request_digest, original_work,
                 structural_lineage_proven
             }
             guard "active_channel_binding_matches" {
@@ -29737,6 +29831,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_bridge_agent_identity_by_operation.remove(operation_id);
                 self.live_bridge_context_revision_by_operation.remove(operation_id);
                 self.live_bridge_request_digest_by_operation.remove(operation_id);
+                self.live_bridge_original_work_by_operation.remove(operation_id);
                 self.live_bridge_phase_by_operation.remove(operation_id);
                 self.live_bridge_model_computation_authorized_operations.remove(operation_id);
                 self.live_bridge_read_snapshot_authorized_operations.remove(operation_id);
@@ -29772,6 +29867,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_bridge_agent_identity_by_operation.contains_key(operation_id)
                 && !self.live_bridge_context_revision_by_operation.contains_key(operation_id)
                 && !self.live_bridge_request_digest_by_operation.contains_key(operation_id)
+                && !self.live_bridge_original_work_by_operation.contains_key(operation_id)
                 && !self.live_bridge_phase_by_operation.contains_key(operation_id)
                 && !self.live_bridge_execution_started_operations.contains(operation_id)
                 && !self.live_bridge_outcome_receipt_required_operations.contains(operation_id)
@@ -32148,6 +32244,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_media_health_requested_output_by_channel.remove(channel_id);
                 self.live_media_health_judged_channels.remove(channel_id);
                 self.live_channel_identity_by_channel.remove(channel_id);
+                self.live_member_turn_reasoning_by_channel.remove(channel_id);
                 self.live_execution_runtime_id_by_channel.remove(channel_id);
                 self.live_execution_fence_by_channel.remove(channel_id);
                 self.live_execution_generation_by_channel.remove(channel_id);
@@ -33748,10 +33845,32 @@ macro_rules! meerkat_catalog_machine_dsl {
                 meerkat_tool_visibility_filter_has_catalog_witnesses(
                     filter, witnesses, self.filter_visibility_authority_catalog)
             }
+            // The inherited ceiling's witnesses live in the same map; a stage
+            // may restate them but never re-associate a ceiling name with
+            // another identity.
+            guard "inherited_filter_witnesses_are_not_replaced" {
+                for_all(name in meerkat_tool_visibility_filter_names(self.inherited_base_filter),
+                    !witnesses.contains_key(name)
+                    || !self.filter_visibility_witnesses.contains_key(name)
+                    || witnesses.get_cloned(name).get("value")
+                        == self.filter_visibility_witnesses.get_cloned(name).get("value"))
+            }
             update {
                 self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_filter = filter;
-                self.filter_visibility_witnesses = witnesses;
+                // Keep the witnesses the inherited ceiling and the live active
+                // filter still need; drop only those no live filter names.
+                for name in self.filter_visibility_witnesses.keys() {
+                    if !witnesses.contains_key(name)
+                        && !meerkat_tool_visibility_filter_names(self.inherited_base_filter).contains(name)
+                        && !meerkat_tool_visibility_filter_names(self.active_filter).contains(name)
+                    {
+                        self.filter_visibility_witnesses.remove(name);
+                    }
+                }
+                for name in witnesses.keys() {
+                    self.filter_visibility_witnesses.insert(name, witnesses.get_cloned(name).get("value"));
+                }
                 self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
@@ -33817,13 +33936,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_filter = filter;
                 self.active_visibility_revision = revision;
                 // Witnesses authorize named filters only. Once the staged
-                // default becomes active, retaining witnesses from the
-                // predecessor filter would falsely preserve that filter's
+                // filter becomes active, retaining witnesses only the retired
+                // predecessor filter named would falsely preserve its
                 // authority and can pin a resumed session to obsolete tool
-                // visibility. Capability and inherited-base filters have
-                // separate state and are intentionally untouched here.
-                if filter == ToolFilter::All {
-                    self.filter_visibility_witnesses = EmptyMap;
+                // visibility. The inherited ceiling stays live and shares
+                // this map, so its witnesses are kept.
+                for name in self.filter_visibility_witnesses.keys() {
+                    if !meerkat_tool_visibility_filter_names(self.inherited_base_filter).contains(name)
+                        && !meerkat_tool_visibility_filter_names(filter).contains(name)
+                    {
+                        self.filter_visibility_witnesses.remove(name);
+                    }
                 }
             }
             to Idle
@@ -33950,7 +34073,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ReplaceVisibilityState {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ReplaceVisibilityState {
-                capability_base_filter, inherited_base_filter,
+                capability_base_filter, inherited_base_filter, policy_base_filter,
                 active_filter, staged_filter,
                 active_revision, staged_revision,
                 active_deferred_names, staged_deferred_names,
@@ -34002,6 +34125,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_session_capability_base_filter = capability_base_filter;
                 self.inherited_base_filter = inherited_base_filter;
+                self.policy_base_filter = policy_base_filter;
                 self.active_filter = active_filter;
                 self.staged_filter = staged_filter;
                 self.active_deferred_names = active_deferred_names;
@@ -37820,6 +37944,7 @@ mod live_close_classification_tests {
         "live_experimental_staged_generation_by_channel",
         "live_experimental_staged_runtime_by_channel",
         "live_experimental_staged_seed_cursor_by_channel",
+        "live_member_turn_reasoning_by_channel",
         "live_playback_owner_by_channel",
         "live_playback_readiness_by_channel",
         "live_provider_turn_by_channel",

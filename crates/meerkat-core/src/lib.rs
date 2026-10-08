@@ -45,6 +45,8 @@ pub mod compact;
 pub mod completion_feed;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
+mod config_document;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod config_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_store;
@@ -94,6 +96,7 @@ pub mod realtime_transcript;
 pub mod realtime_transcript_revision;
 pub mod realtime_transcript_sidecar;
 pub mod redact;
+pub mod retained_work;
 pub mod retry;
 pub mod runtime_bootstrap;
 pub mod runtime_epoch;
@@ -104,6 +107,7 @@ pub mod service;
 pub mod session;
 pub mod session_component_sidecar;
 pub mod session_durable_config_authority;
+pub mod session_hosting;
 pub mod session_recovery;
 pub mod session_store;
 pub mod skills;
@@ -133,6 +137,7 @@ mod wasm_task;
 pub mod web_search;
 
 // Re-export main types at crate root
+pub use agent::ReviewedEntryTicket;
 pub use agent::{
     Agent, AgentBuildPolicyError, AgentBuilder, AgentControlStateError, AgentExecutionSnapshot,
     AgentLlmClient, AgentLlmClientDecorator, AgentLlmFallbackSkippedTarget, AgentLlmFallbackSwitch,
@@ -145,6 +150,9 @@ pub use agent::{
     StickyModelFallbackActivationProof, ToolDispatchContext, dispatch_tool_execution_plan_fenced,
     resolve_tool_execution_plan_fenced, select_tool_catalog_mode,
     should_compose_tool_catalog_control_plane,
+};
+pub use approval::review::{
+    OperationReviewRefusal, ReviewUnavailableKind, ReviewUnsatisfiedKind, ReviewedEntryCustody,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
@@ -167,7 +175,7 @@ pub use auth::{
 pub use authorization::{
     AuthorizationOperation, ModelAuthorizationFacts, ModelAuthorizationUse,
     OperationAuthorizationError, OperationAuthorizationFacts, OperationRefusalKind,
-    OperationRefused, OwnerQualifiedTarget, PreparedAuthorizationBinding,
+    OperationRefused, OperationReviewTier, OwnerQualifiedTarget, PreparedAuthorizationBinding,
     PreparedOperationAuthorization, PublicationAuthorizationFacts, PublicationMode,
     PublicationRecipient, SourceAuthorizationFacts, SourceAuthorizationTarget,
     SourceAuthorizationUse, ToolAuthorizationFacts, ToolAuthorizationTarget, WorkAuthorization,
@@ -273,9 +281,9 @@ pub use handles::{
 pub use hooks::{
     HookCapability, HookDecision, HookDenial, HookEngine, HookEngineError, HookExecutionMode,
     HookExecutionReport, HookFailureReason, HookId, HookInteractionCompleted, HookInvocation,
-    HookLlmRequest, HookLlmResponse, HookObservation, HookOutcome, HookPeerEgressCommitted,
-    HookPeerEgressKind, HookPeerIngressCommitted, HookPoint, HookReasonCode,
-    HookRuntimeInputAccepted, HookRuntimeInputDeduplicated, HookRuntimeInputKind,
+    HookLaunchRefusal, HookLlmRequest, HookLlmResponse, HookObservation, HookOutcome,
+    HookPeerEgressCommitted, HookPeerEgressKind, HookPeerIngressCommitted, HookPoint,
+    HookReasonCode, HookRuntimeInputAccepted, HookRuntimeInputDeduplicated, HookRuntimeInputKind,
     HookRuntimeInputRejected, HookRuntimeInputRejection, HookRuntimeState, HookToolCall,
     HookToolResult, PostCommitHookDispatcher,
 };
@@ -337,7 +345,12 @@ pub use live_execution::{
     NormalizedLiveUserInputDigest, OpaqueProviderCorrelation, ProvisionalLiveHandoff,
     RepresentedLiveUserRow,
 };
-pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
+pub use mcp_config::{
+    EffectiveMcpServersError, McpConfig, McpConfigError, McpScope, McpServerConfig,
+    McpServerDefinitionConflict, McpServerSource, McpServerWithScope, McpServerWithSource,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use mcp_config::{McpRealmPersistError, McpRealmPersistTarget};
 pub use memory::{
     CompactionCommitCoordinationError, CompactionCommitCoordinator, CompactionHandoffRefusal,
     CompactionProjectionId, CompactionProjectionIntent, CompactionProjectionPersistence,
@@ -602,8 +615,7 @@ pub use types::{
 };
 pub use web_search::*;
 
-// === Provider auth v2 (landed ahead of wiring — see
-// /Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md) ===
+// === Provider auth v2 (landed ahead of wiring) ===
 pub use auth::{
     AnthropicAuthMetadata, AnthropicRouteHints, AuthConstraints, AuthError, AuthErrorKind,
     AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,

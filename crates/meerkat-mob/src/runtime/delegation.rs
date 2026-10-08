@@ -760,7 +760,8 @@ impl DelegationExecutionService {
                     render_live_delegation_execution_context(&task),
                     WorkOrigin::Internal,
                 )
-                .with_interaction_id(admission.interaction_id());
+                .with_interaction_id(admission.interaction_id())
+                .with_request_reasoning(admission.member_turn_reasoning());
                 let turn_handle = self
                     .handle
                     .start_runtime_work_with_delivery_identity_bounded(
@@ -912,7 +913,11 @@ impl DelegationExecutionService {
             None => false,
         };
 
-        let mut work = WorkSpec::new(task, WorkOrigin::Internal);
+        let mut work = WorkSpec::new(task, WorkOrigin::Internal).with_request_reasoning(
+            live_admission
+                .as_ref()
+                .and_then(|admission| admission.member_turn_reasoning()),
+        );
         if let Some(objective_id) = member.objective_id {
             work = work.with_objective_id(objective_id);
         }

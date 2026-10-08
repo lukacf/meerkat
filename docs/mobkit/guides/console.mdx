@@ -4,7 +4,7 @@ description: "Embedded MobKit console with configurable branding, grouped roster
 icon: "desktop"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 MobKit ships a web-based operator console through its HTTP composition. The
 console/admin `mobkit_gateway` serves it directly. A persistent, SDK-driven
@@ -114,6 +114,35 @@ Each agent row shows:
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 
+### Approvals
+
+Open **Approvals** from the sidebar or **Needs you** to inspect current requests.
+Expand **Complete request details** before deciding. Stale or unavailable approval
+data does not mean there are no pending requests; use **Refresh approvals** to
+reload it. Read-only consoles cannot submit decisions.
+
+| Tab | What it shows |
+| --- | --- |
+| Pending | Current requests with Approve, Reject, and Escalate controls when decisions are available. |
+| Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
+| Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
+| Policies | A placeholder; policy details and editing are not available in this console. |
+
+Audit tiers display the recorded `r0`, `r1`, `r2`, or `r3`; missing or unrecognized
+tiers display as unknown. The current MobKit R2 path normally allows with audit.
+It does not run the proposed native model reviewer. An approval record does not
+confirm execution: the caller remains responsible for enforcing the returned
+outcome and carrying out any permitted action. See [Gating](/mobkit/concepts/gating) for
+current tier, timeout, and decision behavior.
+
+The stock console submits decisions with `approver_id: "console-ops-lead"`. There
+is no approver selector in this inbox. A request pinned to a different approver
+needs a host-provided approval surface that authenticates and maps the approver.
+
+Configure action tiers through the host's gating configuration. For SDK-launched
+stdio gateways, see [`gating_config_path`](/mobkit/reference/configuration#sdk-and-gateway-runtime-options).
+That option does not configure unrelated HTTP or library entrypoints.
+
 ### Dock — Chat panels
 
 The center area is a multi-panel tabbed workspace. Each panel contains a `ConversationPane` with a `ConsoleComposer`.
@@ -129,6 +158,38 @@ The center area is a multi-panel tabbed workspace. Each panel contains a `Conver
 - Textarea with "Message {agent}..." placeholder
 - Send button (↑) — also supports Enter to send, Shift+Enter for newline
 - Footer shows: target agent, member ID, profile, and status
+
+### Local action feedback
+
+When a host supplies a recognized native refusal or audit fact, the Console
+shows feedback for the affected action. A permitted sibling or later reply
+can still appear in the same run.
+
+| Card | Meaning |
+|------|---------|
+| Permission denied | The request's operation permission was refused. |
+| Action could not start | Required process confinement was refused before the action ran. The card retains the exact typed cause. |
+| Action blocked by hook | A pre-tool hook explicitly denied this call. Its typed hook reason remains distinct from operation permission. |
+| Hook could not start | A pre-tool hook failed to launch. This is infrastructure feedback, without an invented permission or confinement cause. |
+| Audit update unavailable | Recording the action's outcome failed. Its actual result is unchanged; this notice does not justify repeating the action. |
+
+Custom workspace hosts should retain `ConversationMessageEntry.operationFeedback`
+when transforming shared timeline entries. The reusable `ConversationTranscript`
+renders this metadata automatically. A custom renderer can display its `title`,
+`detail` and supplied `toolCallId` or `operationId`; preserve those identifiers
+verbatim. The shared projection classifies supported typed payloads, rather than
+interpreting arbitrary tool messages as decisions.
+
+Cards cover recognized current typed payloads. An unknown cause or malformed
+payload does not acquire a permission or confinement classification. Unrecognized
+tool results use the ordinary tool-result display and may show raw output; no
+dedicated fallback card is promised for every event. A missing card is not a permission decision or evidence
+of success. Preserve unfamiliar payloads in the host's authorized diagnostics.
+
+Keep run state attached to the controller's runtime lifecycle events. A local
+feedback card does not end a run. Rendering these cards does not configure
+native authorization, process confinement or durable audit; the host supplies
+those runtime capabilities separately.
 
 ### Voice conversations
 
@@ -376,12 +437,12 @@ The stock console can be shaped by `config/console.toml` in the conventional wor
 The parsed config is projected through `GET /console/experience` as `console_config`.
 
 ```toml
-title = "OB3"
+title = "Ops"
 
 [brand]
-label = "Open Brain"
-logo_url = "/assets/ob3.svg"
-logo_alt = "OB3"
+label = "Ops Console"
+logo_url = "/assets/ops.svg"
+logo_alt = "Ops"
 
 [appearance]
 default_theme = "dark"
@@ -412,9 +473,9 @@ visible_controls = ["topology", "roster", "logs", "health"]
 hidden_controls = []
 
 [[sidebar.buttons]]
-id = "ob3-board"
-label = "OB3 Board"
-href = "https://example.test/ob3"
+id = "ops-board"
+label = "Ops Board"
+href = "https://example.test/ops"
 target = "_blank"
 icon_name = "external-link"
 
@@ -448,10 +509,10 @@ retire_label = "Retire"
 reset_label = "Reset"
 show_reset = false
 
-[realms.ob3]
-title = "OB3"
+[realms.ops]
+title = "Ops"
 
-[realms.ob3.agent_list]
+[realms.ops.agent_list]
 subgroup_by = ["labels.org"]
 ```
 
@@ -520,20 +581,30 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
 
 <Steps>
   <Step title="Seed the timeline">
-    Panels load recent visible frames with `GET /console/timeline?identity=identity:luka&mode=recent&limit=...`. Older history is paged with `before`; live continuation uses `latest_cursor`.
+    Panels load recent visible frames with `GET /console/timeline?identity=identity:alice&mode=recent&limit=...`. Older history is paged with `before`; live continuation uses `latest_cursor`.
   </Step>
   <Step title="Send message">
     Identity-addressed panels call `mobkit/console/send` through `POST /console/rpc`:
     ```json
     {
-      "identity": "identity:luka",
+      "identity": "identity:alice",
       "content": "What is on my calendar tomorrow?",
       "origin": "console:panel-1",
+      "origin_kind": "operator",
       "idempotency_key": "panel-1:3f9c1c2e-6f7a-4c1b-9d2e-0b1a2c3d4e5f",
       "handling_mode": "queue"
     }
     ```
     Returns `{ "interaction_id": "...", "identity": "..." }`.
+
+    `origin` is the caller's free-form identifier for audit and routing.
+    `origin_kind` is optional and typed: `operator`, `operator_probe`,
+    `connector`, `scheduler`, `policy`, `flow` or `system`. It is stored on
+    the `user_input` frame, and the transcript labels the turn from it
+    ("Operator", "Operator probe", "Scheduled turn", ...). Any other value
+    is refused. Automated checks such as release-gate probes should send
+    `operator_probe`; the stock console sends `operator`. A declared
+    `origin_kind` is part of the idempotent request, so a retry must repeat it.
 
     `idempotency_key` must be unique per send; the stock console mints one
     UUID per send. An idempotent retry reuses the same key in the same
@@ -544,6 +615,16 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     `-32009 idempotency_conflict`. A different identity or origin is a
     different send namespace, not a guaranteed replay.
 
+    `skill_refs` is optional: typed, source-pinned skills selected for this
+    turn (`[{"kind": "structured", "source_uuid": "...", "skill_name": "..."}]`,
+    the same shape as meerkat `turn/start`). The addressed member resolves
+    them natively and commits a durable `SkillContext`; the console never
+    renders skill bodies into the message. A nonempty selection is part of the
+    idempotent request: a replay must repeat the same selection in the same
+    order, and a changed selection under the same key is
+    `-32009 idempotency_conflict`. Only local session-backed members accept a
+    selection.
+
     The legacy `POST /console/send` route still exists for compatibility. New console clients should prefer JSON-RPC.
   </Step>
   <Step title="Receive response frames">
@@ -551,7 +632,7 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     ```
     id: console:241
     event: console_frame
-    data: {"type":"console_frame","frame":{"id":"frame-1","cursor":"console:241","dedupe_key":"example:frame-1","timestamp_ms":1750000000000,"runtime_key":"example","identity":"identity:luka","kind":"text_delta","status":"delivered","frame_version":1,"payload":{"text":"done"},"source":{"kind":"console_event"},"interaction_id":"example-interaction"}}
+    data: {"type":"console_frame","frame":{"id":"frame-1","cursor":"console:241","dedupe_key":"example:frame-1","timestamp_ms":1750000000000,"runtime_key":"example","identity":"identity:alice","kind":"text_delta","status":"delivered","frame_version":1,"payload":{"text":"done"},"source":{"kind":"console_event"},"interaction_id":"example-interaction"}}
     ```
     This is the SSE wire envelope: `type` wraps a `frame` with `kind` and
     `payload`. The frontend normalizes these into its internal `event`/`data`
@@ -691,6 +772,13 @@ REST, JSON-RPC, and SSE. JSON-RPC denials use code `-32030` with
 authorizes mob-level observation but does not grant `agent.view` for every
 agent. To observe everything, a principal needs both `mob.observe` and an
 applicable `agent.view` grant.
+
+In **Console access**, open **Groups** and choose **Inspect access** beside a
+member to prefill that exact subject in **Preview**. Select an action and
+optional agent, then choose **Evaluate** to ask the access controller. The
+shortcut does not evaluate automatically or change policy, and remains
+available to authorized administrators on a read-only connection. A preview is
+an observation, not permission for a later action or a native tool grant.
 
 Upstream hosts that already know a user's ACL can also force the stock console UI
 into view-only mode without changing MobKit auth: set

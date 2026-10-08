@@ -64,6 +64,13 @@ pub struct PersistentRuntimeDriver {
     /// checkpoint-restore contract for that arm.
     #[cfg(test)]
     pub(crate) force_input_snapshot_failure_for_test: bool,
+    /// Test-only typed pause just before an admission's durable commit: the
+    /// driver signals the first half, then waits for the second.
+    #[cfg(test)]
+    pub(crate) admission_commit_gate_for_test: Option<(
+        crate::tokio::sync::oneshot::Sender<()>,
+        crate::tokio::sync::oneshot::Receiver<()>,
+    )>,
 }
 
 enum PreparedProvisionalPromotion {
@@ -539,6 +546,8 @@ impl PersistentRuntimeDriver {
             input_state_write_fence: None,
             #[cfg(test)]
             force_input_snapshot_failure_for_test: false,
+            #[cfg(test)]
+            admission_commit_gate_for_test: None,
         }
     }
 
@@ -591,6 +600,8 @@ impl PersistentRuntimeDriver {
             input_state_write_fence: None,
             #[cfg(test)]
             force_input_snapshot_failure_for_test: false,
+            #[cfg(test)]
+            admission_commit_gate_for_test: None,
         }
     }
 
@@ -1964,11 +1975,50 @@ impl PersistentRuntimeDriver {
                 ));
             }
         };
+        #[cfg(test)]
+        if let Some((reached, release)) = self.admission_commit_gate_for_test.take() {
+            let _ = reached.send(());
+            let _ = release.await;
+        }
         if let Err(error) = self
             .store
             .persist_input_states_atomically(&self.runtime_id, &records)
             .await
         {
+            // #1813 (ADR R6): the duplicate check above found no durable
+            // holder of this key, and this driver admits serially, so a
+            // conflict on the idempotency index after the transition is
+            // another writer for this runtime: one that bypassed the
+            // session's owner-scoped hosting claim. Fail closed exactly as any
+            // failed admission commit, and name the broken invariant typed.
+            if let crate::store::RuntimeStoreError::InputIdempotencyIndexConflict {
+                runtime_id,
+                input_id,
+                idempotency_key,
+                constraint,
+            } = &error
+            {
+                let violation = RuntimeDriverError::HostingClaimInvariantViolated {
+                    runtime_id: runtime_id.clone(),
+                    input_id: input_id.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    constraint: *constraint,
+                };
+                tracing::error!(
+                    runtime_id = %runtime_id,
+                    input_id = %input_id,
+                    idempotency_key = ?idempotency_key,
+                    %constraint,
+                    "admission met another writer on the input idempotency index: a session \
+                     hosting claim was bypassed; the registration fails closed (reload required)"
+                );
+                let _reload_required = self.post_transition_failure(
+                    checkpoint,
+                    "admission_commit",
+                    violation.to_string(),
+                );
+                return Err(violation);
+            }
             return Err(self.post_transition_failure(
                 checkpoint,
                 "admission_commit",
@@ -3237,6 +3287,7 @@ mod tests {
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -3251,6 +3302,204 @@ mod tests {
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
+    }
+
+    /// A SQLite store with cross-process hosting claims, as a realm opens it.
+    #[cfg(feature = "sqlite-store")]
+    fn cross_process_sqlite_store(dir: &std::path::Path) -> Arc<dyn RuntimeStore> {
+        let store: Arc<dyn RuntimeStore> = Arc::new(
+            crate::store::SqliteRuntimeStore::new(dir.join("runtime.sqlite3"))
+                .unwrap()
+                .with_hosting_paths(crate::session_hosting::HostingPaths {
+                    hosting_lock_dir: dir.join("hosting"),
+                    cold_delivery_lock: dir.join("delivery").join("cold-delivery.lock"),
+                    database: None,
+                }),
+        );
+        assert!(store.hosting_capability().is_cross_process());
+        store
+    }
+
+    /// A persistent driver as a registration builds it: with the shared
+    /// durability health a failed commit degrades.
+    #[cfg(feature = "sqlite-store")]
+    fn registered_driver(
+        runtime_id: &LogicalRuntimeId,
+        store: &Arc<dyn RuntimeStore>,
+        blobs: &Arc<dyn BlobStore>,
+    ) -> PersistentRuntimeDriver {
+        PersistentRuntimeDriver::new_with_control_and_durability_health(
+            runtime_id.clone(),
+            Arc::clone(store),
+            Arc::clone(blobs),
+            Arc::new(StdRwLock::new(
+                crate::driver::ephemeral::RuntimeControlProjection::default(),
+            )),
+            crate::driver::ephemeral::new_ingress_dsl_authority(),
+            crate::meerkat_machine::driver::ready_durability_health_for_test(),
+        )
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    fn keyed_prompt(text: &str, key: &str) -> Input {
+        let mut input = make_prompt(text);
+        if let Input::Prompt(prompt) = &mut input {
+            prompt.header.idempotency_key = Some(crate::identifiers::IdempotencyKey::new(key));
+        }
+        input
+    }
+
+    /// #1813 (ADR R6): an admission whose duplicate check found no holder of
+    /// its key, then met another writer's mapping for it at its
+    /// post-transition commit (a writer that bypassed the session's hosting
+    /// claim), fails closed under either replay policy: the typed
+    /// claim-invariant violation, the shared durability health
+    /// reload-required, nothing of the admission written, and no
+    /// Deduplicated answer manufactured from the race.
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn a_post_transition_idempotency_conflict_fails_closed_with_a_typed_claim_violation() {
+        use crate::accept::InputReplayPolicy;
+
+        for replay_policy in [InputReplayPolicy::KeyOnly, InputReplayPolicy::ExactPrompt] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = cross_process_sqlite_store(dir.path());
+            let blobs: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+            let runtime_id = LogicalRuntimeId::new("claim-invariant");
+            let mut admitting = registered_driver(&runtime_id, &store, &blobs);
+            let (reached_tx, reached_rx) = crate::tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+            admitting.admission_commit_gate_for_test = Some((reached_tx, release_rx));
+            let input = keyed_prompt("the admitted prompt", "raced-key");
+            let input_id = input.id().clone();
+            let admission = tokio::spawn(async move {
+                let resolved = admitting
+                    .resolve_admission(&input)
+                    .unwrap()
+                    .with_replay_policy(replay_policy);
+                let outcome = admitting.accept_resolved_input(input, resolved).await;
+                (outcome, admitting)
+            });
+            // Past its duplicate check and its transition, before its commit.
+            reached_rx.await.unwrap();
+
+            // A writer that bypassed the claim commits the same key first.
+            let mut bypassing = PersistentRuntimeDriver::new(
+                runtime_id.clone(),
+                Arc::clone(&store),
+                Arc::clone(&blobs),
+            );
+            let other = keyed_prompt("another writer's prompt", "raced-key");
+            let other_id = other.id().clone();
+            let resolved = bypassing.resolve_admission(&other).unwrap();
+            assert!(
+                bypassing
+                    .accept_resolved_input(other, resolved)
+                    .await
+                    .unwrap()
+                    .is_accepted()
+            );
+            release_tx.send(()).unwrap();
+
+            let (outcome, admitting) = admission.await.unwrap();
+            match outcome {
+                Err(RuntimeDriverError::HostingClaimInvariantViolated {
+                    runtime_id: violated_runtime,
+                    input_id: violated_input,
+                    idempotency_key,
+                    constraint,
+                }) => {
+                    assert_eq!(violated_runtime, runtime_id.to_string());
+                    assert_eq!(violated_input, input_id.to_string());
+                    assert_eq!(idempotency_key.as_deref(), Some("raced-key"));
+                    assert_eq!(
+                        constraint,
+                        crate::store::InputIdempotencyIndexConstraint::RuntimeKey
+                    );
+                }
+                other => {
+                    panic!("{replay_policy:?}: expected the typed claim violation, got {other:?}")
+                }
+            }
+            assert!(
+                matches!(
+                    admitting.require_durability_ready(),
+                    Err(RuntimeDriverError::RecoveryRepairBlocked { .. })
+                ),
+                "{replay_policy:?}: the registration fails closed (reload required)"
+            );
+            assert!(
+                store
+                    .load_input_state(&runtime_id, &input_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{replay_policy:?}: nothing of the failed admission was written"
+            );
+            assert!(
+                store
+                    .load_input_state(&runtime_id, &other_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{replay_policy:?}: the other writer's committed row stands"
+            );
+        }
+    }
+
+    /// #1813 (ADR R6 condition 4): ordinary authenticated durable replay is
+    /// unchanged on a cross-process store. A key already durable is answered
+    /// before the transition (Deduplicated under key-only replay,
+    /// `InputIdempotencyConflict` under strict replay of different content)
+    /// and never reaches the invariant path; the registration stays ready.
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn ordinary_durable_replay_is_unchanged_on_a_cross_process_store() {
+        use crate::accept::InputReplayPolicy;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = cross_process_sqlite_store(dir.path());
+        let blobs: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime_id = LogicalRuntimeId::new("ordinary-replay");
+        let mut driver = registered_driver(&runtime_id, &store, &blobs);
+        let first = keyed_prompt("the human intent", "replayed-key");
+        let first_id = first.id().clone();
+        let resolved = driver
+            .resolve_admission(&first)
+            .unwrap()
+            .with_replay_policy(InputReplayPolicy::ExactPrompt);
+        assert!(
+            driver
+                .accept_resolved_input(first, resolved)
+                .await
+                .unwrap()
+                .is_accepted()
+        );
+
+        let retry = keyed_prompt("the human intent", "replayed-key");
+        let resolved = driver
+            .resolve_admission(&retry)
+            .unwrap()
+            .with_replay_policy(InputReplayPolicy::KeyOnly);
+        match driver.accept_resolved_input(retry, resolved).await {
+            Ok(AcceptOutcome::Deduplicated { existing_id, .. }) => {
+                assert_eq!(existing_id, first_id);
+            }
+            other => panic!("key-only replay deduplicates: {other:?}"),
+        }
+        let changed = keyed_prompt("a different intent", "replayed-key");
+        let resolved = driver
+            .resolve_admission(&changed)
+            .unwrap()
+            .with_replay_policy(InputReplayPolicy::ExactPrompt);
+        assert!(matches!(
+            driver.accept_resolved_input(changed, resolved).await,
+            Err(RuntimeDriverError::InputIdempotencyConflict { existing_id }) if existing_id == first_id
+        ));
+        assert!(
+            driver.require_durability_ready().is_ok(),
+            "replay never degrades the registration"
+        );
     }
 
     #[tokio::test]

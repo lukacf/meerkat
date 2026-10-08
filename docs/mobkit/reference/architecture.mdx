@@ -4,7 +4,7 @@ description: "MobKit ownership boundaries, gateway profiles, composition, storag
 icon: "layer-group"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 MobKit is a Rust composition crate plus gateway binaries, SDKs, examples, a
 Flow Editor, and a React console. It is a companion to Meerkat, not a second
@@ -64,7 +64,7 @@ graph TD
     subgraph subsystems["Application-supplied MCP modules"]
         ROUTER["Router"]
         DELIVERY["Delivery"]
-        MEMORY["Memory backend<br/>(Elephant optional)"]
+        MEMORY["Memory backend<br/>(external memory hub optional)"]
     end
 
     APP --> SDK
@@ -107,7 +107,7 @@ need the SDK callback plane uses `mobkit_gateway`.
 The core Rust crate is organized around explicit boundary modules:
 
 ```
-meerkat-mobkit/src/
+crates/meerkat-mobkit/src/
 ├── lib.rs                    # Public API exports and module map
 ├── access/                   # Optional deny-by-default console ABAC
 ├── auth/                     # JWT/OIDC validation and signed peer keys
@@ -175,7 +175,7 @@ module boundary.
 
 This module-facing memory path is separate from MobKit's identity-scoped agent
 memory record layer under `memory/`. The bundled hot record store is SQLite
-with deterministic recall and staged write validation. Elephant is an optional
+with deterministic recall and staged write validation. An external memory hub is an optional
 deeper backend, not the definition of all MobKit memory.
 
 ### Subprocess path (custom modules)

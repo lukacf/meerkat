@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use meerkat_authorization_contracts::constraints::LifetimeBound;
 use meerkat_authorization_contracts::work_association::InputAuthorityAssociation;
+use meerkat_core::authorization::OperationReviewTier;
 use meerkat_core::authorization::{
     AuthorizationOperation, ModelAuthorizationUse, OperationRefusalKind, OperationRefused,
     PreparedAuthorizationBinding, PreparedOperationAuthorization, WorkAuthorization,
@@ -83,7 +84,7 @@ impl LocalWorkAuthorization {
         let mut known_failure = None;
         let observed = self.publication.observe(|| {
             let result = (|| -> Result<_, meerkat_core::OperationAuthorizationError> {
-                let mut combined: Option<(u64, u64, Instant)> = None;
+                let mut combined: Option<(u64, u64, Instant, OperationReviewTier)> = None;
                 let purposes: &[LocalPolicyPurpose] = match &binding.facts().operation {
                     AuthorizationOperation::Model(facts)
                         if facts.usage == ModelAuthorizationUse::ControllerInference =>
@@ -108,10 +109,13 @@ impl LocalWorkAuthorization {
                             self.validate_allowance(association, binding, purpose, allowance, now)?;
                         combined = Some(match combined {
                             None => current,
+                            // Every contributor's owner tier applies; keep
+                            // the strictest.
                             Some(previous) => (
                                 previous.0.max(current.0),
                                 previous.1.min(current.1),
                                 previous.2.min(current.2),
+                                previous.3.max(current.3),
                             ),
                         });
                     }
@@ -131,7 +135,7 @@ impl LocalWorkAuthorization {
             return Err(error);
         }
         let (prepared, publication) = observed.map_err(publication_refusal)?;
-        let (not_before_ms, expires_at_ms, deadline) = prepared?;
+        let (not_before_ms, expires_at_ms, deadline, review_tier) = prepared?;
         Ok(CompiledLocalAuthorization {
             binding: binding.clone(),
             publication,
@@ -139,6 +143,7 @@ impl LocalWorkAuthorization {
             not_before_ms,
             expires_at_ms,
             deadline,
+            review_tier,
         })
     }
 
@@ -149,7 +154,7 @@ impl LocalWorkAuthorization {
         purpose: LocalPolicyPurpose,
         allowance: LocalPolicyAllowance,
         now: LocalAuthorizationTime,
-    ) -> Result<(u64, u64, Instant), OperationRefused> {
+    ) -> Result<(u64, u64, Instant, OperationReviewTier), OperationRefused> {
         if allowance.operation_values.is_empty() || allowance.expires_at_ms <= now.unix_ms {
             return Err(denied());
         }
@@ -197,7 +202,12 @@ impl LocalWorkAuthorization {
             .monotonic
             .checked_add(Duration::from_millis(remaining_ms))
             .ok_or_else(denied)?;
-        Ok((not_before_ms, expires_at_ms, deadline))
+        Ok((
+            not_before_ms,
+            expires_at_ms,
+            deadline,
+            allowance.review_tier,
+        ))
     }
 }
 
@@ -231,6 +241,116 @@ impl WorkAuthorization for LocalWorkAuthorization {
     }
 }
 
+/// Use the same actual publication, local clock and exact-entry check as
+/// admitted work, while retaining non-input control semantics. Each distinct
+/// source/destination rule keeps its correlated values and restrictions.
+pub(crate) fn compile_context_control(
+    publication: &LocalAuthorizationPublication,
+    clock: &Arc<dyn LocalAuthorizationClock>,
+    binding: &PreparedAuthorizationBinding,
+    evaluate: impl FnOnce(
+        u64,
+    ) -> Result<
+        Vec<LocalPolicyAllowance>,
+        meerkat_core::OperationAuthorizationError,
+    >,
+) -> meerkat_core::authorization::ObservedAuthorizationResult<Arc<dyn PreparedOperationAuthorization>>
+{
+    use meerkat_core::authorization::ObservedAuthorizationResult;
+    let now = match clock.now() {
+        Ok(now) => now,
+        Err(_) => {
+            return ObservedAuthorizationResult::unobserved(Err(
+                meerkat_core::OperationAuthorizationError::Unavailable,
+            ));
+        }
+    };
+    let mut known_failure = None;
+    let observed = publication.observe(|| {
+        let result = (|| -> Result<_, meerkat_core::OperationAuthorizationError> {
+            let allowances = evaluate(now.unix_ms)?;
+            if allowances.is_empty() {
+                return Err(denied().into());
+            }
+            let mut not_before = 0;
+            let mut expires = u64::MAX;
+            let mut review_tier = OperationReviewTier::R1;
+            for allowance in allowances {
+                if allowance.operation_values.is_empty() || allowance.expires_at_ms <= now.unix_ms {
+                    return Err(denied().into());
+                }
+                let (start, end) = match allowance.restrictions.lifetime.bound() {
+                    LifetimeBound::Unrestricted => (0, allowance.expires_at_ms),
+                    LifetimeBound::Window {
+                        not_before_ms,
+                        expires_at_ms,
+                    } => (not_before_ms, expires_at_ms.min(allowance.expires_at_ms)),
+                    LifetimeBound::Empty => return Err(denied().into()),
+                };
+                for values in &allowance.operation_values {
+                    allowance
+                        .restrictions
+                        .check_bounds(values.at(now.unix_ms))
+                        .map_err(|_| denied())?;
+                }
+                not_before = not_before.max(start);
+                expires = expires.min(end);
+                review_tier = review_tier.max(allowance.review_tier);
+            }
+            let remaining = expires
+                .checked_sub(now.unix_ms)
+                .filter(|value| *value > 0)
+                .ok_or_else(denied)?;
+            let deadline = now
+                .monotonic
+                .checked_add(Duration::from_millis(remaining))
+                .ok_or_else(denied)?;
+            Ok((not_before, expires, deadline, review_tier))
+        })();
+        if matches!(
+            result,
+            Err(meerkat_core::OperationAuthorizationError::Unavailable
+                | meerkat_core::OperationAuthorizationError::ObservationUnavailable(_))
+        ) {
+            known_failure = result.as_ref().err().copied();
+        }
+        result
+    });
+    if let Some(error) = known_failure {
+        return ObservedAuthorizationResult::unobserved(Err(error));
+    }
+    let (result, publication) = match observed {
+        Ok(observed) => observed,
+        Err(error) => {
+            return ObservedAuthorizationResult::unobserved(Err(publication_refusal(error)));
+        }
+    };
+    let policy = Some(publication.policy_observation());
+    let result = result.and_then(|(not_before_ms, expires_at_ms, deadline, review_tier)| {
+        let prepared = CompiledLocalAuthorization {
+            binding: binding.clone(),
+            publication,
+            clock: Arc::clone(clock),
+            not_before_ms,
+            expires_at_ms,
+            deadline,
+            review_tier,
+        };
+        prepared.check_current(binding)?;
+        Ok(Arc::new(prepared) as Arc<dyn PreparedOperationAuthorization>)
+    });
+    let policy = if matches!(
+        result,
+        Err(meerkat_core::OperationAuthorizationError::Unavailable
+            | meerkat_core::OperationAuthorizationError::ObservationUnavailable(_))
+    ) {
+        None
+    } else {
+        policy
+    };
+    ObservedAuthorizationResult { result, policy }
+}
+
 struct CompiledLocalAuthorization {
     binding: PreparedAuthorizationBinding,
     publication: LocalPublicationStamp,
@@ -238,9 +358,20 @@ struct CompiledLocalAuthorization {
     not_before_ms: u64,
     expires_at_ms: u64,
     deadline: Instant,
+    review_tier: OperationReviewTier,
 }
 
 impl PreparedOperationAuthorization for CompiledLocalAuthorization {
+    fn policy_observation(
+        &self,
+    ) -> Option<meerkat_core::authorization::PolicyPublicationObservation> {
+        Some(self.publication.policy_observation())
+    }
+
+    fn review_tier(&self) -> OperationReviewTier {
+        self.review_tier
+    }
+
     fn check_current(
         &self,
         binding: &PreparedAuthorizationBinding,

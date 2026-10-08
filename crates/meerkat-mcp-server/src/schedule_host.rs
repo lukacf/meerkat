@@ -45,6 +45,7 @@ struct McpScheduleContext {
     service: Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
+    realm_config_source: Arc<dyn meerkat_core::RealmConfigSource>,
     realm_id: meerkat_core::connection::RealmId,
     instance_id: Option<String>,
     backend: String,
@@ -63,6 +64,7 @@ impl McpScheduleContext {
             service: Arc::clone(&state.service),
             runtime_adapter: Arc::clone(&state.runtime_adapter),
             config_runtime: Arc::clone(&state.config_runtime),
+            realm_config_source: Arc::clone(&state.realm_config_source),
             realm_id: state.realm_id.clone(),
             instance_id: state.instance_id.clone(),
             backend: state.backend.clone(),
@@ -290,6 +292,8 @@ impl McpScheduleContext {
                     provider_params: create.provider_params.clone(),
                     call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
                     external_tools,
+                    // The session service decides hosting when it creates the actor.
+                    hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
                     mcp_servers: Vec::new(),
                     recoverable_tool_defs: None,
                     llm_client_override: {
@@ -343,6 +347,7 @@ impl McpScheduleContext {
                         .then(|| create.additional_instructions.clone()),
                     initial_metadata_entries: std::collections::BTreeMap::new(),
                     initial_tool_filter: None,
+                    initial_tool_visibility_state: None,
                     tool_access_policy: None,
                     declared_tool_restriction: None,
                     tool_dispatch_admission: None,
@@ -412,13 +417,12 @@ impl McpScheduleContext {
         let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new_with_surface_handle(
             external_tool_surface,
         )));
-        let server_configs = self
-            .config_runtime
-            .get()
-            .await
-            .ok()
-            .map(|snapshot| snapshot.config.tools.mcp_servers)
-            .unwrap_or_default();
+        let server_configs = scheduled_realm_mcp_servers(
+            &self.config_runtime,
+            &self.realm_config_source,
+            &self.realm_id,
+        )
+        .await?;
 
         for config in &server_configs {
             adapter
@@ -435,6 +439,38 @@ impl McpScheduleContext {
 
         Ok(adapter)
     }
+}
+
+/// The MCP servers a scheduled session in `realm_id` is seeded with: the
+/// realm's own servers, composed along its parent chain over the head
+/// document. This surface seeds no session from `mcp.toml`, so no file roots
+/// are read. A config that cannot be read or composed fails the
+/// materialization; it never seeds a silently empty set.
+async fn scheduled_realm_mcp_servers(
+    config_runtime: &meerkat_core::ConfigRuntime,
+    realm_config_source: &Arc<dyn meerkat_core::RealmConfigSource>,
+    realm_id: &meerkat_core::connection::RealmId,
+) -> Result<Vec<meerkat_core::McpServerConfig>, ScheduleDomainError> {
+    let head = config_runtime
+        .get()
+        .await
+        .map_err(|error| ScheduleDomainError::Internal(format!("read realm config: {error}")))?
+        .config;
+    let effective = meerkat_core::EffectiveConfigReader::new(Arc::clone(realm_config_source))
+        .effective_config_over_head(realm_id, head)
+        .await
+        .map_err(|error| ScheduleDomainError::Internal(format!("compose realm config: {error}")))?;
+    let servers = meerkat_core::McpConfig::effective_servers_from_roots(
+        &effective.tools.mcp_servers,
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+    Ok(servers
+        .into_iter()
+        .map(|configured| configured.server)
+        .collect())
 }
 
 struct McpScheduleTargetAdapter {
@@ -638,6 +674,8 @@ async fn deliver_scheduled_prompt(
         directed_interaction_ids: Vec::new(),
         auth_binding: None,
         transcript_identity: Default::default(),
+        request_reasoning: None,
+        request_reasoning_disposition: None,
     };
     let mut prompt_input = PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
     prompt_input.header.source = InputOrigin::System;
@@ -687,6 +725,7 @@ async fn deliver_scheduled_event(
         objective_id: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -970,6 +1009,105 @@ mod tests {
                 .current_attachment_witness(&session_id)
                 .await
                 .is_some()
+        );
+    }
+
+    /// A scheduled session in a child realm is seeded with the server its
+    /// parent realm installed (the composed chain, not the head document
+    /// alone), and an unreadable chain fails instead of seeding nothing.
+    #[tokio::test]
+    async fn scheduled_realm_mcp_servers_compose_the_realm_chain() {
+        use meerkat_core::connection::RealmId;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            temp.path().join("realms"),
+            temp.path().join("home/.rkat/config.toml"),
+            meerkat_models::canonical(),
+        ));
+        let parent = RealmId::parse("parent").expect("realm id");
+        let child = RealmId::parse("child").expect("realm id");
+        let child_doc = source.config_doc_path(&child);
+        for (path, content) in [
+            (
+                source.config_doc_path(&parent),
+                "[realm.parent]\n\n[[tools.mcp_servers]]\nname = \"installed\"\ncommand = \"sentinel\"\n",
+            ),
+            (child_doc.clone(), "[realm.child]\nparent = \"parent\"\n"),
+        ] {
+            tokio::fs::create_dir_all(path.parent().expect("realm dir"))
+                .await
+                .expect("create realm dir");
+            tokio::fs::write(&path, content)
+                .await
+                .expect("write realm doc");
+        }
+        let runtime = meerkat_core::ConfigRuntime::new(
+            Arc::new(meerkat_core::FileConfigStore::new(
+                child_doc.clone(),
+                meerkat_models::canonical(),
+            )),
+            temp.path().join("config_state.json"),
+        );
+        let realm_source: Arc<dyn meerkat_core::RealmConfigSource> = source.clone();
+
+        let servers = scheduled_realm_mcp_servers(&runtime, &realm_source, &child)
+            .await
+            .expect("compose the child realm's servers");
+        assert_eq!(
+            servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["installed"]
+        );
+
+        // Composition walks only up the chain: a server the child installs
+        // is the child's, and the parent never sees it.
+        tokio::fs::write(
+            &child_doc,
+            "[realm.child]\nparent = \"parent\"\n\n\
+             [[tools.mcp_servers]]\nname = \"child-only\"\ncommand = \"child-tool\"\n",
+        )
+        .await
+        .expect("write child doc");
+        let child_servers = scheduled_realm_mcp_servers(&runtime, &realm_source, &child)
+            .await
+            .expect("compose the child realm's servers");
+        assert_eq!(
+            child_servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["installed", "child-only"]
+        );
+        let parent_runtime = meerkat_core::ConfigRuntime::new(
+            Arc::new(meerkat_core::FileConfigStore::new(
+                source.config_doc_path(&parent),
+                meerkat_models::canonical(),
+            )),
+            temp.path().join("parent_config_state.json"),
+        );
+        let parent_servers = scheduled_realm_mcp_servers(&parent_runtime, &realm_source, &parent)
+            .await
+            .expect("compose the parent realm's servers");
+        assert_eq!(
+            parent_servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["installed"],
+            "the parent never sees its child's servers"
+        );
+
+        tokio::fs::write(source.config_doc_path(&parent), "[tools\n")
+            .await
+            .expect("break the parent doc");
+        assert!(
+            scheduled_realm_mcp_servers(&runtime, &realm_source, &child)
+                .await
+                .is_err(),
+            "an unreadable chain must fail, not seed an empty set"
         );
     }
 }

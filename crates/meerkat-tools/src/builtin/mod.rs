@@ -223,6 +223,16 @@ pub trait BuiltinTool: Send + Sync {
         self.call(args).await
     }
 
+    /// Whether this tool carries operation review to its physical entry: its
+    /// `call_with_context` calls `context.enter_reviewed_effect` exactly once,
+    /// after its own argument and preparation work, immediately before the
+    /// effect, and maps a refusal to [`BuiltinToolError::EntryRefused`]. The
+    /// default is fail-closed: a required review settles as local unavailable
+    /// feedback.
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::Unsupported
+    }
+
     /// Async operation IDs started by this tool call, if any.
     ///
     /// Default is none. Tools that start background or delegated work should
@@ -234,6 +244,72 @@ pub trait BuiltinTool: Send + Sync {
     /// - `AsyncOpRef::detached(id)` — runs independently, does not block
     fn async_ops_for_output(&self, _output: &ToolOutput) -> Vec<AsyncOpRef> {
         Vec::new()
+    }
+}
+
+/// The single native entry step of a built-in leaf, spent once immediately
+/// before the tool's first effect (after its own argument and preparation
+/// work). It owns a [`meerkat_core::ReviewedEntryTicket`], so it can move into
+/// a worker. Context-free calls carry none and enter trivially.
+pub(crate) struct LeafEntry(LeafEntryKind);
+
+enum LeafEntryKind {
+    /// Not yet entered, or a context-free call.
+    Open,
+    Ticket(meerkat_core::ReviewedEntryTicket),
+    /// Entered: custody of the effect is held until this entry is dropped,
+    /// so the review `Used` projection follows the effect, not the dispatch.
+    /// Held only for its drop, never read.
+    Entered(#[allow(dead_code)] meerkat_core::ReviewedEntryCustody),
+    /// Test-only refusal standing in for a refused native entry.
+    #[cfg(test)]
+    Refuse(meerkat_core::ToolError),
+}
+
+impl LeafEntry {
+    pub(crate) fn none() -> Self {
+        Self(LeafEntryKind::Open)
+    }
+
+    /// Bind the entry to the exact binding-owned call of this dispatch.
+    pub(crate) fn for_call(
+        context: &meerkat_core::ToolDispatchContext,
+        call: ToolCallView<'_>,
+    ) -> Result<Self, BuiltinToolError> {
+        context
+            .reviewed_entry_ticket(call, None)
+            .map(|ticket| Self(LeafEntryKind::Ticket(ticket)))
+            .map_err(|error| BuiltinToolError::EntryRefused(Box::new(error)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refusing(error: meerkat_core::ToolError) -> Self {
+        Self(LeafEntryKind::Refuse(error))
+    }
+
+    /// Enter before the first effect. Later calls for the same invocation are
+    /// no-ops: the effect has already begun under this single entry. Keep
+    /// the entry alive for the effect body; it holds the effect custody.
+    pub(crate) fn enter(&mut self) -> Result<(), BuiltinToolError> {
+        match std::mem::replace(&mut self.0, LeafEntryKind::Open) {
+            LeafEntryKind::Open => Ok(()),
+            entered @ LeafEntryKind::Entered(_) => {
+                self.0 = entered;
+                Ok(())
+            }
+            LeafEntryKind::Ticket(ticket) => {
+                let custody = ticket
+                    .enter()
+                    .map_err(|error| BuiltinToolError::EntryRefused(Box::new(error)))?;
+                self.0 = LeafEntryKind::Entered(custody);
+                Ok(())
+            }
+            #[cfg(test)]
+            LeafEntryKind::Refuse(error) => {
+                self.0 = LeafEntryKind::Refuse(error.clone());
+                Err(BuiltinToolError::EntryRefused(Box::new(error)))
+            }
+        }
     }
 }
 
@@ -275,10 +351,22 @@ pub enum BuiltinToolError {
     OperationObservationUnavailable,
     #[error("operation authorization unavailable")]
     OperationAuthorizationUnavailable,
+    /// The tool's own governed operation was refused by its authorization
+    /// owner. Kept typed so the dispatcher reports an ordinary refusal result.
+    #[error("{refusal}")]
+    OperationRefused {
+        refusal: meerkat_core::authorization::OperationRefused,
+    },
 
     /// An async task error occurred
     #[error("Task error: {0}")]
     TaskError(String),
+
+    /// The native entry step immediately before the tool's effect refused it
+    /// (current authorization or required operation review). The typed tool
+    /// error is carried unchanged; the effect did not run.
+    #[error(transparent)]
+    EntryRefused(Box<meerkat_core::ToolError>),
 
     /// Mechanical requirements refused this launch before target code entered.
     #[error("{refusal}")]

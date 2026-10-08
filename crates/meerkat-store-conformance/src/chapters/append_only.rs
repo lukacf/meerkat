@@ -1,7 +1,7 @@
 //! Append-only media chapter: what a revision guard MEANS for backends that
 //! emulate CAS with windowed reads over append-only sibling rows.
 //!
-//! Pinned contracts (from the ob3 zombie incident):
+//! Pinned contracts (from the zombie-member incident):
 //!
 //! - **Superseded-sibling-row deduplication is the store's job.** A failed or
 //!   racing write attempt on append-only media may leave an orphan
@@ -38,7 +38,7 @@ pub async fn append_only(factory: &dyn SessionStoreFactory) -> Result<(), Confor
     Ok(())
 }
 
-/// The ob3 zombie pin.
+/// The zombie-member pin.
 ///
 /// A committed writer holds the token of its own last committed row. A stale
 /// interloper's guarded save fails (on append-only media this typically

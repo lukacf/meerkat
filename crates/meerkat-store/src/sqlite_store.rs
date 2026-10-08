@@ -67,7 +67,7 @@ const CREATE_SESSIONS_UPDATED_INDEX_SQL: &str = r"
 CREATE INDEX IF NOT EXISTS sessions_updated_idx
 ON sessions(updated_at_ms DESC, session_id ASC)";
 
-// Incremental session persistence (OB3 ask 11).
+// Incremental session persistence (a downstream ask).
 //
 // Canonical-representation rule (per session): a `session_heads` row exists
 // => the head representation is canonical and the blob row (if any) is a
@@ -8982,6 +8982,10 @@ impl SqliteSessionStore {
 }
 
 impl SqliteSessionStore {
+    /// Run `op` in one immediate write transaction on a blocking thread. The
+    /// thread holds the calling task's scoped session hosting claims until it
+    /// returns (#1813), so a store-only write's claim outlives a cancelled
+    /// caller.
     async fn in_write_txn<T, F>(&self, op: F) -> Result<T, SessionStoreError>
     where
         T: Send + 'static,
@@ -8989,20 +8993,22 @@ impl SqliteSessionStore {
     {
         let path = self.path.clone();
         let options = self.options;
-        tokio::task::spawn_blocking(move || -> Result<T, SessionStoreError> {
-            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            let mut conn =
-                open_session_connection(&path, options).map_err(into_session_store_error)?;
-            let tx = begin_immediate_transaction_with_options(&mut conn, options)
-                .map_err(into_session_store_error)?;
-            let value = op(&tx)?;
-            tx.commit()
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            Ok(value)
-        })
+        meerkat_core::session_hosting::spawn_blocking_holding_claim(
+            move || -> Result<T, SessionStoreError> {
+                let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                let mut conn =
+                    open_session_connection(&path, options).map_err(into_session_store_error)?;
+                let tx = begin_immediate_transaction_with_options(&mut conn, options)
+                    .map_err(into_session_store_error)?;
+                let value = op(&tx)?;
+                tx.commit()
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                Ok(value)
+            },
+        )
         .await
         .map_err(StoreError::Join)
         .map_err(into_session_store_error)?
@@ -9016,22 +9022,24 @@ impl SqliteSessionStore {
     {
         let path = self.path.clone();
         let options = self.options;
-        tokio::task::spawn_blocking(move || -> Result<T, SessionStoreError> {
-            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            let mut conn =
-                open_session_connection(&path, options).map_err(into_session_store_error)?;
-            let tx = conn
-                .transaction()
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            let value = op(&tx)?;
-            tx.commit()
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            Ok(value)
-        })
+        meerkat_core::session_hosting::spawn_blocking_holding_claim(
+            move || -> Result<T, SessionStoreError> {
+                let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                let mut conn =
+                    open_session_connection(&path, options).map_err(into_session_store_error)?;
+                let tx = conn
+                    .transaction()
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                let value = op(&tx)?;
+                tx.commit()
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                Ok(value)
+            },
+        )
         .await
         .map_err(StoreError::Join)
         .map_err(into_session_store_error)?
@@ -9175,43 +9183,47 @@ impl SessionStore for SqliteSessionStore {
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
         let path = self.path.clone();
         let options = self.options;
-        tokio::task::spawn_blocking(move || -> Result<Vec<SessionMeta>, SessionStoreError> {
-            enum ListedSession {
-                Head {
-                    raw_id: String,
-                    head_json: Vec<u8>,
-                    stored_token: String,
-                },
-                Legacy(SessionMeta),
-            }
+        meerkat_core::session_hosting::spawn_blocking_holding_claim(
+            move || -> Result<Vec<SessionMeta>, SessionStoreError> {
+                enum ListedSession {
+                    Head {
+                        raw_id: String,
+                        head_json: Vec<u8>,
+                        stored_token: String,
+                    },
+                    Legacy(SessionMeta),
+                }
 
-            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            let conn = open_session_connection(&path, options).map_err(into_session_store_error)?;
-            let created_after = filter.created_after.map(system_time_millis);
-            let updated_after = filter.updated_after.map(system_time_millis);
-            let offset = i64::try_from(filter.offset.unwrap_or(0)).map_err(|_| {
-                SessionStoreError::Internal("session list offset exceeds SQLite range".to_string())
-            })?;
-            // SQLite's documented LIMIT -1 form means "no limit" while still
-            // admitting an OFFSET. This keeps pagination in the query for both
-            // bounded and unbounded callers.
-            let limit = match filter.limit {
-                Some(limit) => i64::try_from(limit).map_err(|_| {
+                let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                let conn =
+                    open_session_connection(&path, options).map_err(into_session_store_error)?;
+                let created_after = filter.created_after.map(system_time_millis);
+                let updated_after = filter.updated_after.map(system_time_millis);
+                let offset = i64::try_from(filter.offset.unwrap_or(0)).map_err(|_| {
                     SessionStoreError::Internal(
-                        "session list limit exceeds SQLite range".to_string(),
+                        "session list offset exceeds SQLite range".to_string(),
                     )
-                })?,
-                None => -1,
-            };
+                })?;
+                // SQLite's documented LIMIT -1 form means "no limit" while still
+                // admitting an OFFSET. This keeps pagination in the query for both
+                // bounded and unbounded callers.
+                let limit = match filter.limit {
+                    Some(limit) => i64::try_from(limit).map_err(|_| {
+                        SessionStoreError::Internal(
+                            "session list limit exceeds SQLite range".to_string(),
+                        )
+                    })?,
+                    None => -1,
+                };
 
-            // Page the compact head/legacy projections first. In particular,
-            // do not resolve every digest-addressed metadata payload only to
-            // discard most of them during in-memory pagination.
-            let mut statement = conn
-                .prepare(
-                    r"
+                // Page the compact head/legacy projections first. In particular,
+                // do not resolve every digest-addressed metadata payload only to
+                // discard most of them during in-memory pagination.
+                let mut statement = conn
+                    .prepare(
+                        r"
                     SELECT session_id, created_at_ms, updated_at_ms, message_count,
                            total_tokens, projection_json, cas_token, is_head
                     FROM (
@@ -9239,57 +9251,58 @@ impl SessionStore for SqliteSessionStore {
                     ORDER BY updated_at_ms DESC, session_id ASC
                     LIMIT ?3 OFFSET ?4
                     ",
-                )
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            let selected = statement
-                .query_map(
-                    params![created_after, updated_after, limit, offset],
-                    |row| {
-                        if row.get::<_, i64>(7)? == 1 {
-                            Ok(ListedSession::Head {
-                                raw_id: row.get(0)?,
-                                head_json: row.get::<_, JsonColumnBytes>(5)?.into_bytes(),
-                                stored_token: row.get(6)?,
-                            })
-                        } else {
-                            Ok(ListedSession::Legacy(session_meta_from_row(row)?))
-                        }
-                    },
-                )
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            drop(statement);
+                    )
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                let selected = statement
+                    .query_map(
+                        params![created_after, updated_after, limit, offset],
+                        |row| {
+                            if row.get::<_, i64>(7)? == 1 {
+                                Ok(ListedSession::Head {
+                                    raw_id: row.get(0)?,
+                                    head_json: row.get::<_, JsonColumnBytes>(5)?.into_bytes(),
+                                    stored_token: row.get(6)?,
+                                })
+                            } else {
+                                Ok(ListedSession::Legacy(session_meta_from_row(row)?))
+                            }
+                        },
+                    )
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                drop(statement);
 
-            let mut metas = Vec::with_capacity(selected.len());
-            for selected in selected {
-                match selected {
-                    ListedSession::Head {
-                        raw_id,
-                        head_json,
-                        stored_token,
-                    } => {
-                        let id = parse_session_id(raw_id).map_err(into_session_store_error)?;
-                        let mut head: SessionHead = serde_json::from_slice(&head_json)
-                            .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
-                        if head.id != id || session_head_cas_token(&head)? != stored_token {
-                            return Err(SessionStoreError::Corrupted(id));
+                let mut metas = Vec::with_capacity(selected.len());
+                for selected in selected {
+                    match selected {
+                        ListedSession::Head {
+                            raw_id,
+                            head_json,
+                            stored_token,
+                        } => {
+                            let id = parse_session_id(raw_id).map_err(into_session_store_error)?;
+                            let mut head: SessionHead = serde_json::from_slice(&head_json)
+                                .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+                            if head.id != id || session_head_cas_token(&head)? != stored_token {
+                                return Err(SessionStoreError::Corrupted(id));
+                            }
+                            attach_head_metadata_projection(
+                                &conn,
+                                &mut head,
+                                HeadMetadataProjectionOwner::PhysicalHead,
+                            )?;
+                            metas.push(session_meta_from_head(&head)?);
                         }
-                        attach_head_metadata_projection(
-                            &conn,
-                            &mut head,
-                            HeadMetadataProjectionOwner::PhysicalHead,
-                        )?;
-                        metas.push(session_meta_from_head(&head)?);
+                        ListedSession::Legacy(meta) => metas.push(meta),
                     }
-                    ListedSession::Legacy(meta) => metas.push(meta),
                 }
-            }
-            Ok(metas)
-        })
+                Ok(metas)
+            },
+        )
         .await
         .map_err(StoreError::Join)
         .map_err(into_session_store_error)?
@@ -9302,56 +9315,59 @@ impl SessionStore for SqliteSessionStore {
         let path = self.path.clone();
         let options = self.options;
         let id = id.clone();
-        tokio::task::spawn_blocking(move || -> Result<Option<SessionMeta>, SessionStoreError> {
-            let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            let conn = open_session_connection(&path, options).map_err(into_session_store_error)?;
-            let head_row = conn
-                .query_row(
-                    r"
+        meerkat_core::session_hosting::spawn_blocking_holding_claim(
+            move || -> Result<Option<SessionMeta>, SessionStoreError> {
+                let _guard = meerkat_sqlite::OperationGuard::for_database(&path)
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                let conn =
+                    open_session_connection(&path, options).map_err(into_session_store_error)?;
+                let head_row = conn
+                    .query_row(
+                        r"
                     SELECT head_json, cas_token
                     FROM session_heads
                     WHERE session_id = ?1
                     ",
-                    params![id.to_string()],
-                    |row| {
-                        Ok((
-                            row.get::<_, JsonColumnBytes>(0)?.into_bytes(),
-                            row.get::<_, String>(1)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(StoreError::from)
-                .map_err(into_session_store_error)?;
-            if let Some((head_json, stored_token)) = head_row {
-                let mut head: SessionHead = serde_json::from_slice(&head_json)
-                    .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
-                if head.id != id || session_head_cas_token(&head)? != stored_token {
-                    return Err(SessionStoreError::Corrupted(id));
+                        params![id.to_string()],
+                        |row| {
+                            Ok((
+                                row.get::<_, JsonColumnBytes>(0)?.into_bytes(),
+                                row.get::<_, String>(1)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                if let Some((head_json, stored_token)) = head_row {
+                    let mut head: SessionHead = serde_json::from_slice(&head_json)
+                        .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+                    if head.id != id || session_head_cas_token(&head)? != stored_token {
+                        return Err(SessionStoreError::Corrupted(id));
+                    }
+                    attach_head_metadata_projection(
+                        &conn,
+                        &mut head,
+                        HeadMetadataProjectionOwner::PhysicalHead,
+                    )?;
+                    return Ok(Some(session_meta_from_head(&head)?));
                 }
-                attach_head_metadata_projection(
-                    &conn,
-                    &mut head,
-                    HeadMetadataProjectionOwner::PhysicalHead,
-                )?;
-                return Ok(Some(session_meta_from_head(&head)?));
-            }
-            conn.query_row(
-                r"
+                conn.query_row(
+                    r"
                 SELECT session_id, created_at_ms, updated_at_ms, message_count,
                        total_tokens, metadata_json
                 FROM sessions
                 WHERE session_id = ?1
                 ",
-                params![id.to_string()],
-                session_meta_from_row,
-            )
-            .optional()
-            .map_err(StoreError::from)
-            .map_err(into_session_store_error)
-        })
+                    params![id.to_string()],
+                    session_meta_from_row,
+                )
+                .optional()
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)
+            },
+        )
         .await
         .map_err(StoreError::Join)
         .map_err(into_session_store_error)?
@@ -10346,7 +10362,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Incremental session persistence (OB3 ask 11)
+    // Incremental session persistence (a downstream ask)
     // -----------------------------------------------------------------------
 
     fn user(text: &str) -> Message {
@@ -13329,7 +13345,7 @@ mod tests {
     fn released_prompt_row(generation: usize) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "role": "system",
-            "content": format!("HomeCore prompt generation {generation}"),
+            "content": format!("Example prompt generation {generation}"),
             "mutation_kind": "explicit_build",
             "created_at": "2026-07-30T13:43:00Z",
         }))
@@ -13384,7 +13400,7 @@ mod tests {
                     "released prompt refresh {}",
                     index + 1
                 )),
-                actor: Some("released-homecore-fixture".to_string()),
+                actor: Some("released-example-fixture".to_string()),
                 committed_at: SystemTime::UNIX_EPOCH,
             };
             let child_strand = TranscriptStrandId::from_rewrite(&commit);

@@ -3270,7 +3270,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
 
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
-async fn e2e_scenario_85_workgraph_homecore_agent_spine() -> Result<(), Box<dyn std::error::Error>>
+async fn e2e_scenario_85_workgraph_downstream_agent_spine() -> Result<(), Box<dyn std::error::Error>>
 {
     let rkat = binary_path("rkat");
     let rkat_rpc = binary_path("rkat-rpc");
@@ -3291,20 +3291,20 @@ async fn e2e_scenario_85_workgraph_homecore_agent_spine() -> Result<(), Box<dyn 
     tokio::fs::create_dir_all(&state_root).await?;
     write_project_config_with_workgraph(&project_dir).await?;
 
-    let realm_id = "scenario-85-workgraph-homecore";
+    let realm_id = "scenario-85-workgraph-example";
     write_realm_workgraph_config(&state_root, realm_id).await?;
-    let prompt = r#"You are running Homecore household operations. Use the WorkGraph tools before answering.
+    let prompt = r#"You are running team operations. Use the WorkGraph tools before answering.
 
-Situation: L is taking A to the dentist tomorrow. A has autism and a very strong preference for car P, but car P is unexpectedly in the workshop. A needs preparation the day before for irregularities.
+Situation: M is hosting client C for a review tomorrow. C has a very strong preference for meeting room R, but room R is unexpectedly closed for maintenance. C needs preparation the day before for any changes.
 
-Create a durable WorkGraph spine with label scenario-85-homecore:
-- create a completed/closed item for verifying that car P is in the workshop;
-- create an open ready item for sending L a reminder the day before to explain the alternate car to A;
-- create at least one related or dependent item for preparing A for the alternate car;
+Create a durable WorkGraph spine with label scenario-85-example:
+- create a completed/closed item for verifying that room R is closed for maintenance;
+- create an open ready item for sending M a reminder the day before to explain the alternate room to C;
+- create at least one related or dependent item for preparing C for the alternate room;
 - add at least one WorkGraph edge connecting the work;
 - call workgraph_ready before the final answer.
 
-Final answer: one short paragraph naming the ready work and the label scenario-85-homecore."#;
+Final answer: one short paragraph naming the ready work and the label scenario-85-example."#;
 
     let run_args = [
         "--state-root",
@@ -3341,7 +3341,7 @@ Final answer: one short paragraph naming the ready work and the label scenario-8
     let run_stdout = output_ok_or_err(run_out, "rkat", &run_args).map_err(std::io::Error::other)?;
     let run_json: Value = serde_json::from_str(&run_stdout)?;
     assert!(
-        run_json.to_string().contains("scenario-85-homecore"),
+        run_json.to_string().contains("scenario-85-example"),
         "agent response should mention the durable WorkGraph label: {run_json}"
     );
 
@@ -3354,14 +3354,14 @@ Final answer: one short paragraph naming the ready work and the label scenario-8
         "snapshot",
         "--include-terminal",
         "--label",
-        "scenario-85-homecore",
+        "scenario-85-example",
         "--json",
     ];
     let snapshot_out = run_binary(&rkat, &project_dir, &snapshot_args, Some(&api_key)).await?;
     let snapshot_stdout =
         output_ok_or_err(snapshot_out, "rkat", &snapshot_args).map_err(std::io::Error::other)?;
     let snapshot: Value = serde_json::from_str(&snapshot_stdout)?;
-    assert_homecore_workgraph_snapshot(&snapshot, realm_id)?;
+    assert_downstream_workgraph_snapshot(&snapshot, realm_id)?;
 
     let mut rpc = spawn_stdio_process(
         &rkat_rpc,
@@ -3383,17 +3383,17 @@ Final answer: one short paragraph naming the ready work and the label scenario-8
         "workgraph/snapshot",
         json!({
             "include_terminal": true,
-            "labels": ["scenario-85-homecore"],
+            "labels": ["scenario-85-example"],
         }),
         20,
     )
     .await?;
-    assert_homecore_workgraph_snapshot(&rpc_snapshot, realm_id)?;
+    assert_downstream_workgraph_snapshot(&rpc_snapshot, realm_id)?;
     shutdown_stdio_process(rpc).await?;
     Ok(())
 }
 
-fn assert_homecore_workgraph_snapshot(
+fn assert_downstream_workgraph_snapshot(
     snapshot: &Value,
     realm_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3403,14 +3403,14 @@ fn assert_homecore_workgraph_snapshot(
         .ok_or("snapshot missing items")?;
     assert!(
         items.len() >= 3,
-        "expected at least three Homecore WorkGraph items: {snapshot}"
+        "expected at least three WorkGraph items: {snapshot}"
     );
     assert!(
         items
             .iter()
             .all(|item| item["labels"].as_array().is_some_and(|labels| labels
                 .iter()
-                .any(|label| label.as_str() == Some("scenario-85-homecore")))),
+                .any(|label| label.as_str() == Some("scenario-85-example")))),
         "all asserted items should carry the scenario label: {snapshot}"
     );
     assert!(

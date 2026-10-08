@@ -240,7 +240,8 @@ fn map_auth_machine_error(
         auth_dsl::AuthMachineTransitionError::GuardRejected { .. } => {
             DslTransitionError::guard_rejected(context, reason)
         }
-        auth_dsl::AuthMachineTransitionError::NoMatchingTransition { .. } => {
+        auth_dsl::AuthMachineTransitionError::NoMatchingTransition { .. }
+        | auth_dsl::AuthMachineTransitionError::AbsentMapKey { .. } => {
             DslTransitionError::no_matching(context, reason)
         }
         auth_dsl::AuthMachineTransitionError::RecoveredStateInvariantRejected { .. } => {
@@ -419,6 +420,17 @@ fn maybe_auth_lease_transition_from_generated_publication(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait AuthLeaseReleaseObserver: Send + Sync {
+    /// Retain the actual native owner's synchronous custody through Acquire.
+    /// This is distinct from OAuth cleanup during release: no callback may
+    /// perform I/O, and no copied absence observation authorizes replacement.
+    fn with_auth_lease_replacement(
+        &self,
+        _lease_key: &LeaseKey,
+        operation: &mut dyn FnMut() -> Result<AuthLeaseTransition, DslTransitionError>,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        operation()
+    }
+
     fn begin_auth_lease_release<'a>(
         &'a self,
         _lease_key: &LeaseKey,
@@ -1306,6 +1318,33 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::acquire_lease",
             true,
         )
+    }
+
+    fn acquire_lease_for_credential_publication(
+        &self,
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fn under_observers(
+                observers: &[Arc<dyn AuthLeaseReleaseObserver>],
+                key: &LeaseKey,
+                operation: &mut dyn FnMut() -> Result<AuthLeaseTransition, DslTransitionError>,
+            ) -> Result<AuthLeaseTransition, DslTransitionError> {
+                match observers.split_first() {
+                    Some((observer, remaining)) => observer
+                        .with_auth_lease_replacement(key, &mut || {
+                            under_observers(remaining, key, operation)
+                        }),
+                    None => operation(),
+                }
+            }
+            let mut acquire = || self.acquire_lease(lease_key, expires_at);
+            under_observers(&self.live_release_observers(), lease_key, &mut acquire)
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.acquire_lease(lease_key, expires_at)
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -2474,6 +2513,62 @@ mod tests {
         let snap = h.snapshot(&key);
         assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(snap.expires_at, Some(1_900_000_000));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn administrative_publication_veto_does_not_enter_normal_acquire_or_refresh() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Veto(AtomicUsize);
+        impl AuthLeaseReleaseObserver for Veto {
+            fn with_auth_lease_replacement(
+                &self,
+                _: &LeaseKey,
+                _: &mut dyn FnMut() -> Result<AuthLeaseTransition, DslTransitionError>,
+            ) -> Result<AuthLeaseTransition, DslTransitionError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(DslTransitionError::no_matching(
+                    "native-custody",
+                    "controller in use",
+                ))
+            }
+            fn auth_lease_released(
+                &self,
+                _: &ReleasedOAuthFlows,
+            ) -> Result<(), DslTransitionError> {
+                Ok(())
+            }
+        }
+        let handle = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "normal-owner");
+        let veto = Arc::new(Veto(AtomicUsize::new(0)));
+        let observer: Arc<dyn AuthLeaseReleaseObserver> = veto.clone();
+        handle.add_release_observer(Arc::downgrade(&observer));
+        handle.acquire_lease(&key, 1_800_000_000).unwrap();
+        handle.begin_refresh(&key).unwrap();
+        handle
+            .complete_refresh(&key, 1_900_000_000, 1_700_000_000)
+            .unwrap();
+        assert_eq!(
+            veto.0.load(Ordering::SeqCst),
+            0,
+            "ordinary preparation and refresh perform no administration scan"
+        );
+        let before = handle.snapshot(&key);
+        assert!(
+            handle
+                .acquire_lease_for_credential_publication(&key, u64::MAX)
+                .is_err()
+        );
+        assert_eq!(veto.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            handle.snapshot(&key),
+            before,
+            "veto precedes lifecycle publication"
+        );
+        handle.acquire_lease(&key, u64::MAX).unwrap();
+        assert_eq!(veto.0.load(Ordering::SeqCst), 1);
     }
 
     #[test]

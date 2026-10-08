@@ -118,7 +118,7 @@ pub(crate) const RUN_EXECUTION_START_BOUND: Duration = Duration::from_secs(3_600
 // A notice tier at or past the hard bound would mean the window is escalated
 // before it is ever reported, and the emitted `bound_secs` would stop
 // describing the deadline actually used. Escalation terminalizes a run and
-// abandons a household instruction, so the ordering is a compile-time fact
+// abandons a user instruction, so the ordering is a compile-time fact
 // rather than a runtime clamp.
 const _: () = assert!(
     RUN_EXECUTION_START_NOTICE.as_secs() < RUN_EXECUTION_START_BOUND.as_secs(),
@@ -389,7 +389,7 @@ pub(crate) fn observe_run_start_window(
 /// is its wake-up latency, not a turn. Two minutes of parked-with-work-while-
 /// idle is already the wedge.
 ///
-/// The bound is meerkat-derived on purpose. The household fleet's own
+/// The bound is meerkat-derived on purpose. A downstream app's own
 /// input-queue fuse fires at 300s; that number reflects their turn mix and
 /// remains their layer of defense in depth. A wire claim published by this
 /// runtime should not import another system's tuning.

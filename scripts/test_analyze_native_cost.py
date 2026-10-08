@@ -53,6 +53,20 @@ def small_raw(warmup=100):
             "failures": 0, "timeouts": 0, "unsupported": [], "samples": samples}
 
 
+def native_model_raw(profile=None):
+    raw = small_raw()
+    for sample in raw["samples"]:
+        sample["native_model_preparation_ns"] = (
+            [10, 90] if sample["mode"] == "trusted_host" else [15, 80]
+        ) if sample["instrumentation"] == "boundaries" else []
+    if profile is not None:
+        raw["measurement_profile"] = profile
+        raw["measurement_status"] = "complete"
+        raw["samples"] = [sample for sample in raw["samples"]
+                          if sample["instrumentation"] == "boundaries"]
+    return raw
+
+
 def representative_raw():
     samples = []
     for depth in (1, 3):
@@ -95,7 +109,109 @@ class NativeCostAnalysisTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.small = small_raw()
+        cls.native_model = native_model_raw("model_dispatch_tail")
         cls.representative = representative_raw()
+
+    def test_native_model_tail_pairs_same_request_without_extra_mean_cells(self):
+        result = analyzer.analyze(self.native_model)
+        self.assertEqual(result["measurement_profile"], "model_dispatch_tail")
+        self.assertEqual(len(result["summaries"]), 2)
+        for cell in result["summaries"]:
+            self.assertEqual(cell["instrumentation"], "boundaries")
+            self.assertEqual(cell["modes"]["trusted_host"]["native_model_preparation_ns"],
+                             {"p50": 10, "p95": 90, "p99": 90, "n": 2 * PAIRS})
+            self.assertEqual([s["p99"] for s in cell["paired_native_model_preparation_delta_ns_by_request_index"]],
+                             [5, -10])
+            self.assertEqual(cell["paired_native_model_preparation_delta_ns"]["p99"], 5)
+            strata = cell["first_mode_strata"]["native_model_preparation_ns_by_request_index"]
+            self.assertEqual(strata[0]["strata"]["trusted_first"]["fixture_pairs"], PAIRS // 2)
+            self.assertEqual(strata[1]["strata"]["governed_first"]["paired_delta_ns"]["p99"], -10)
+            self.assertIn("CallingLlm", cell["native_model_preparation_interpretation"])
+            self.assertIn("two correlated", cell["native_model_preparation_interpretation"])
+        self.assertTrue(result["acceptance"].startswith("UNPROVEN:"))
+
+    def test_native_span_can_be_analyzed_in_existing_four_cell_matrix(self):
+        result = analyzer.analyze(native_model_raw())
+        self.assertEqual(len(result["summaries"]), 4)
+        self.assertNotIn("native_model_preparation_ns", result["summaries"][0]["modes"]["trusted_host"])
+        self.assertIn("native_model_preparation_ns", result["summaries"][1]["modes"]["trusted_host"])
+
+    def test_legacy_raw_does_not_acquire_a_native_span_from_provider_diagnostic(self):
+        result = analyzer.analyze(self.small)
+        self.assertIn("native model preparation absent", result["acceptance"])
+        for cell in result["summaries"]:
+            self.assertNotIn("native_model_preparation_interpretation", cell)
+            for mode in cell["modes"].values():
+                self.assertNotIn("native_model_preparation_ns", mode)
+
+    def test_native_model_profile_requires_fixed_plan_and_only_boundary_cells(self):
+        for changes in ({"measurement_profile": "unknown"}, {"warmup_pairs": 99},
+                        {"pairs_per_cell": 2001}, {"pairs_per_cell": 2000.0}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                analyzer.analyze(dict(self.native_model, **changes))
+        for instrumentation in ("turn_only", "unknown"):
+            with self.subTest(instrumentation=instrumentation), self.assertRaises(ValueError):
+                analyzer.analyze(replace_sample(self.native_model, instrumentation=instrumentation))
+
+    def test_native_model_cardinality_and_positive_integer_durations_are_required(self):
+        for values in (None, [], [1], [1, 2, 3], [0, 2], [-1, 2], [True, 2], [1.5, 2]):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                analyzer.analyze(replace_sample(self.native_model, native_model_preparation_ns=values))
+        for remove_all in (False, True):
+            raw = dict(self.native_model, samples=[dict(sample) for sample in self.native_model["samples"]])
+            for sample in raw["samples"] if remove_all else raw["samples"][:1]:
+                del sample["native_model_preparation_ns"]
+            with self.subTest(remove_all=remove_all), self.assertRaises(ValueError):
+                analyzer.analyze(raw)
+        # An ordinary matrix also cannot mix old and new instrumentation.
+        raw = native_model_raw()
+        del raw["samples"][0]["native_model_preparation_ns"]
+        with self.assertRaises(ValueError):
+            analyzer.analyze(raw)
+        with self.assertRaises(ValueError):
+            analyzer.analyze(replace_sample(native_model_raw(), native_model_preparation_ns=[1, 2]))
+
+    def test_native_model_counters_require_exact_integers(self):
+        for field in ("failures", "timeouts"):
+            for value in (False, None, "", [], 0.0, -1):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    analyzer.analyze(dict(self.native_model, **{field: value}))
+        for field, value in (("model_requests", 2.0), ("read_effects", 4.0),
+                             ("audit_records", False), ("audit_records", 0.0)):
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                analyzer.analyze(replace_sample(self.native_model, **{field: value}))
+
+    def test_truncated_model_tail_reports_counts_without_any_timing_summary(self):
+        raw = dict(self.native_model, measurement_status="budget_exhausted", timeouts=1,
+                   samples=self.native_model["samples"][:2801])
+        result = analyzer.analyze(raw)
+        self.assertEqual(result["analysis_status"], "INCOMPLETE")
+        self.assertEqual(result["summaries"], [])
+        self.assertEqual(result["cells"][0]["sample_counts"],
+                         {"trusted_host": 1401, "local_governed": 1400})
+        self.assertEqual(result["cells"][1]["sample_counts"],
+                         {"trusted_host": 0, "local_governed": 0})
+        self.assertTrue(all(not cell["complete"] for cell in result["cells"]))
+        self.assertTrue(result["acceptance"].startswith("UNPROVEN:"))
+        # Failure to finish the later depth cannot turn the earlier depth into
+        # a selective performance report from an incomplete allocation.
+        raw["samples"] = self.native_model["samples"][:2 * PAIRS]
+        result = analyzer.analyze(raw)
+        self.assertTrue(result["cells"][0]["complete"])
+        self.assertEqual(result["summaries"], [])
+
+    def test_truncated_model_tail_still_rejects_corrupt_or_duplicate_samples(self):
+        raw = dict(self.native_model, measurement_status="budget_exhausted", timeouts=1,
+                   samples=self.native_model["samples"][:2])
+        for candidate in (replace_sample(raw, native_model_preparation_ns=[]),
+                          dict(raw, samples=raw["samples"] + raw["samples"][:1]),
+                          replace_sample(raw, pair=PAIRS)):
+            with self.assertRaises(ValueError):
+                analyzer.analyze(candidate)
+        for changes in ({"measurement_status": "unknown"}, {"timeouts": 0},
+                        {"measurement_status": "complete"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                analyzer.analyze(dict(raw, **changes))
 
     def test_signed_nearest_rank_and_ratio_of_means_are_distinct(self):
         result = analyzer.analyze(self.small)
@@ -362,6 +478,136 @@ class FixedMeanAnalysisTests(unittest.TestCase):
         self.assertEqual({s["conditional_classification"] for s in result["summaries"]}, {"UNCERTAIN"})
         self.assertTrue(all(s["order_strata"]["trusted_first"]["ratio_of_means"] > 1.10 for s in result["summaries"]))
 
+
+
+def tool_tail_raw():
+    samples, cells = [], []
+    warmup = 100
+    for depth in (1, 3):
+        for mode in ("trusted_host", "local_governed"):
+            governed = mode == "local_governed"
+            cells.append({
+                "depth": depth, "mode": mode,
+                "old_rows": 252, "active_rows": 4, "total_rows": 256,
+                "contributor_ids": [f"{depth}-{mode}-input-{i}" for i in range(4)],
+                "run_id": f"{depth}-{mode}-run",
+                "prefix_audit_records": 1002 if governed else 0,
+                "prefix_audit_digest": [0] * 32,
+                "prefix_reads": 333,
+                "final_reads": 333 + warmup + PAIRS,
+                "final_audit_records": (335 + warmup + PAIRS) * 3 if governed else 0,
+                "model_requests": 2,
+            })
+            for pair in range(PAIRS):
+                ordinal = warmup + pair
+                # Matched deltas alternate between -100 and +100 ns. A
+                # difference between marginal p99s would incorrectly be zero.
+                baseline = 200 if pair % 2 == 0 else 100
+                samples.append({
+                    "depth": depth, "mode": mode, "pair": pair,
+                    "first_in_pair": (ordinal % 2 == 0) == (mode == "trusted_host"),
+                    "call_ordinal": ordinal, "call_id": f"tool-tail-{ordinal}",
+                    "audit_records_before": 1002 + 3 * ordinal if governed else 0,
+                    "dispatch_ns": (300 - baseline) if governed else baseline,
+                })
+    return {"schema": 3, "suite": "tool_dispatch_tail", "measurement_status": "complete",
+            "warmup_pairs": warmup, "pairs_per_cell": PAIRS, "failures": 0, "timeouts": 0,
+            "cells": cells, "samples": samples}
+
+
+class ToolDispatchTailAnalysisTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.raw = tool_tail_raw()
+
+    def test_individual_signed_p99_uses_matched_calls_and_keeps_correlation_limits(self):
+        result = analyzer.analyze_tool_dispatch_tail(self.raw)
+        self.assertEqual(len(result["summaries"]), 2)
+        for cell in result["summaries"]:
+            self.assertEqual(cell["paired_delta_estimate_ns"],
+                             {"p50": -100, "p95": 100, "p99": 100, "n": PAIRS})
+            self.assertEqual(cell["modes_ns"]["trusted_host"]["p99"], 200)
+            self.assertEqual(cell["modes_ns"]["local_governed"]["p99"], 200)
+            self.assertTrue(cell["empirical_p99_below_1ms"])
+            self.assertEqual(cell["first_mode_strata"]["trusted_first"]["paired_delta_ns"]["p99"], -100)
+            self.assertEqual(cell["first_mode_strata"]["governed_first"]["paired_delta_ns"]["p99"], 100)
+            for stratum in cell["first_mode_strata"].values():
+                self.assertEqual(stratum["paired_calls"], PAIRS // 2)
+                self.assertNotIn("fixture_pairs", stratum)
+        self.assertIn("correlated", result["scope"])
+        self.assertIn("model", result["scope"])
+        self.assertTrue(result["acceptance"].startswith("UNPROVEN:"))
+
+    def test_p99_nearest_rank_and_one_millisecond_limit_are_strict(self):
+        for delta, below in ((999999, True), (1000000, False)):
+            raw = tool_tail_raw()
+            for sample in raw["samples"]:
+                sample["dispatch_ns"] = 100 if sample["mode"] == "trusted_host" else 100 + delta
+                if sample["mode"] == "local_governed" and sample["pair"] >= 1980:
+                    sample["dispatch_ns"] += 5000000
+            result = analyzer.analyze_tool_dispatch_tail(raw)
+            with self.subTest(delta=delta):
+                for cell in result["summaries"]:
+                    self.assertEqual(cell["paired_delta_estimate_ns"]["p99"], delta)
+                    self.assertEqual(cell["empirical_p99_below_1ms"], below)
+
+    def test_rejects_nonpositive_nonfinite_and_noninteger_raw_durations(self):
+        for value in (0, -1, float("nan"), float("inf"), -float("inf"), True, 1.0, "1", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                analyzer.analyze_tool_dispatch_tail(replace_sample(self.raw, dispatch_ns=value))
+
+    def test_requires_complete_unique_pairs_and_exact_call_ordinals(self):
+        cases = [
+            self.raw | {"samples": self.raw["samples"][1:]},
+            self.raw | {"samples": self.raw["samples"] + [self.raw["samples"][0]]},
+            replace_sample(self.raw, pair=True),
+            replace_sample(self.raw, pair=1),
+            replace_sample(self.raw, pair=PAIRS),
+            replace_sample(self.raw, call_ordinal=101),
+            replace_sample(self.raw, call_ordinal=100.0),
+            replace_sample(self.raw, call_id="tool-tail-101"),
+            replace_sample(self.raw, first_in_pair=False),
+            replace_sample(self.raw, first_in_pair=1),
+            replace_sample(self.raw, depth=True),
+            replace_sample(self.raw, mode="unknown"),
+            replace_sample(self.raw, audit_records_before=3),
+        ]
+        for index, raw in enumerate(cases):
+            with self.subTest(case=index), self.assertRaises(ValueError):
+                analyzer.analyze_tool_dispatch_tail(raw)
+
+    def test_rejects_suite_mixups_changed_counts_and_unsuccessful_work(self):
+        for changes in ({"schema": 2}, {"schema": 3.0}, {"suite": "representative"},
+                        {"measurement_status": "budget_exhausted"}, {"failures": 1},
+                        {"timeouts": 1}, {"failures": False}, {"pairs_per_cell": 32},
+                        {"pairs_per_cell": 2000.0}, {"warmup_pairs": 20}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                analyzer.analyze_tool_dispatch_tail(self.raw | changes)
+
+    def test_requires_both_fixture_modes_depths_and_actual_work_shape(self):
+        for cells in (self.raw["cells"][1:], self.raw["cells"] + [self.raw["cells"][0]]):
+            with self.subTest(cell_count=len(cells)), self.assertRaises(ValueError):
+                analyzer.analyze_tool_dispatch_tail(self.raw | {"cells": cells})
+        for changes in ({"old_rows": 251}, {"active_rows": True}, {"total_rows": 255},
+                        {"contributor_ids": ["same"] * 4}, {"run_id": ""},
+                        {"prefix_reads": 332}, {"prefix_audit_digest": [True] * 32},
+                        {"prefix_audit_records": 1002}, {"final_reads": 2432},
+                        {"final_audit_records": 3}, {"model_requests": 1}):
+            cells = [self.raw["cells"][0] | changes] + self.raw["cells"][1:]
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                analyzer.analyze_tool_dispatch_tail(self.raw | {"cells": cells})
+
+    def test_cli_routes_the_new_suite_and_rejects_json_nan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tool-tail.json"
+            path.write_text(json.dumps(self.raw), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(SCRIPT), str(path)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["suite"], "tool_dispatch_tail")
+            path.write_text(json.dumps(replace_sample(self.raw, dispatch_ns=float("nan"))), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(SCRIPT), str(path)], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("non-finite", result.stderr)
 
 
 if __name__ == "__main__":

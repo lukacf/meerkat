@@ -91,6 +91,59 @@ pub struct OperationGuard {
 }
 
 impl OperationGuard {
+    /// Require actual descriptor-scoped shared custody for online administration.
+    /// Unlike ordinary I/O this has no maintenance-holder shortcut or fail-open
+    /// fallback. Validate the database before creating any lock sidecar.
+    pub fn try_for_database_strict(db_path: &Path) -> Result<Self, SqliteStoreError> {
+        if db_path.file_name().is_none() || db_path.as_os_str() == ":memory:" {
+            return Err(SqliteStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "strict operation custody requires an existing physical database",
+            )));
+        }
+        crate::profile::validate_database_file(db_path)?;
+        if !db_path.is_file() {
+            return Err(SqliteStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "strict operation database is missing",
+            )));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            Err(SqliteStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "strict operation custody requires descriptor-scoped locking",
+            )))
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        {
+            let path = fence_lock_path(db_path);
+            crate::profile::validate_database_file(&path)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)?;
+            crate::profile::validate_database_file(&path)?;
+            if !file.metadata()?.is_file() {
+                return Err(SqliteStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "strict operation lock is not a regular file",
+                )));
+            }
+            match file.try_lock_shared() {
+                Ok(()) => Ok(Self { _lock: Some(file) }),
+                Err(error) if is_would_block(&error) => {
+                    Err(SqliteStoreError::MaintenanceFenceHeld {
+                        path: db_path.to_path_buf(),
+                    })
+                }
+                Err(error) => Err(SqliteStoreError::Io(std::io::Error::other(error))),
+            }
+        }
+    }
+
     /// Acquire the shared guard for an operation on `db_path`.
     ///
     /// Returns [`SqliteStoreError::MaintenanceFenceHeld`] when the exclusive

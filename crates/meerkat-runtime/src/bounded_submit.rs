@@ -939,6 +939,7 @@ mod tests {
         Input::Prompt(PromptInput {
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),

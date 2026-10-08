@@ -13,6 +13,175 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_runtime_delivery_machine()
 }
 
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DeliveryRecipientGroupOutcome {
+    #[default]
+    #[serde(rename = "AllApplied")]
+    AllApplied,
+    #[serde(rename = "AllRefused")]
+    AllRefused,
+    #[serde(rename = "AllAuthorizationUnavailable")]
+    AllAuthorizationUnavailable,
+    #[serde(rename = "Mixed")]
+    Mixed,
+}
+impl DeliveryRecipientGroupOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AllApplied => "AllApplied",
+            Self::AllRefused => "AllRefused",
+            Self::AllAuthorizationUnavailable => "AllAuthorizationUnavailable",
+            Self::Mixed => "Mixed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeliveryRecipientGroupOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AllApplied" => Ok(Self::AllApplied),
+            "AllRefused" => Ok(Self::AllRefused),
+            "AllAuthorizationUnavailable" => Ok(Self::AllAuthorizationUnavailable),
+            "Mixed" => Ok(Self::Mixed),
+            other => Err(format!(
+                "invalid DeliveryRecipientGroupOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeliveryRecipientGroupOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeliveryRecipientGroupOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DeliveryRecipientOutcome {
+    #[default]
+    #[serde(rename = "Applied")]
+    Applied,
+    #[serde(rename = "Refused")]
+    Refused,
+    #[serde(rename = "OperationAuthorizationUnavailable")]
+    OperationAuthorizationUnavailable,
+}
+impl DeliveryRecipientOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Applied => "Applied",
+            Self::Refused => "Refused",
+            Self::OperationAuthorizationUnavailable => "OperationAuthorizationUnavailable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeliveryRecipientOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Applied" => Ok(Self::Applied),
+            "Refused" => Ok(Self::Refused),
+            "OperationAuthorizationUnavailable" => Ok(Self::OperationAuthorizationUnavailable),
+            other => Err(format!("invalid DeliveryRecipientOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeliveryRecipientOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeliveryRecipientOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DeliveryRefusalReason {
+    #[default]
+    #[serde(rename = "NoAdmissibleWorkBinding")]
+    NoAdmissibleWorkBinding,
+    #[serde(rename = "AuthorityDenied")]
+    AuthorityDenied,
+    #[serde(rename = "OperationAuthorizationUnavailable")]
+    OperationAuthorizationUnavailable,
+}
+impl DeliveryRefusalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoAdmissibleWorkBinding => "NoAdmissibleWorkBinding",
+            Self::AuthorityDenied => "AuthorityDenied",
+            Self::OperationAuthorizationUnavailable => "OperationAuthorizationUnavailable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeliveryRefusalReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoAdmissibleWorkBinding" => Ok(Self::NoAdmissibleWorkBinding),
+            "AuthorityDenied" => Ok(Self::AuthorityDenied),
+            "OperationAuthorizationUnavailable" => Ok(Self::OperationAuthorizationUnavailable),
+            other => Err(format!("invalid DeliveryRefusalReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeliveryRefusalReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeliveryRefusalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 pub trait Context {}
 pub struct EmptyContext;
 impl Context for EmptyContext {}
@@ -33,6 +202,14 @@ pub struct State {
     pub next_sequence: u64,
     pub applied_cursor: u64,
     pub acknowledged_sequences: std::collections::BTreeSet<u64>,
+    pub refused_deliveries: std::collections::BTreeMap<String, DeliveryRefusalReason>,
+    pub delivery_recipient_bindings:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    pub recipient_outcomes: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, DeliveryRecipientOutcome>,
+    >,
+    pub recipient_group_outcomes: std::collections::BTreeMap<String, DeliveryRecipientGroupOutcome>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -43,6 +220,25 @@ impl Default for State {
 pub mod inputs {
     #[allow(unused_imports)]
     use super::*;
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindDeliveryRecipients {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+        pub recipients: std::collections::BTreeMap<String, String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleDeliveryRecipient {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+        pub recipient_id: String,
+        pub target_binding: String,
+        pub outcome: DeliveryRecipientOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishDeliveryRecipients {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitDelivery {
         pub delivery_id: String,
@@ -60,36 +256,86 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdvanceAcknowledgedPrefix {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleRefusedDelivery {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+        pub reason: DeliveryRefusalReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyDeliveryStatus {
+        pub delivery_id: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
+    BindDeliveryRecipients(inputs::BindDeliveryRecipients),
+    SettleDeliveryRecipient(inputs::SettleDeliveryRecipient),
+    FinishDeliveryRecipients(inputs::FinishDeliveryRecipients),
     CommitDelivery(inputs::CommitDelivery),
     MarkDeliveryApplied(inputs::MarkDeliveryApplied),
     AcknowledgeDelivery(inputs::AcknowledgeDelivery),
     AdvanceAcknowledgedPrefix(inputs::AdvanceAcknowledgedPrefix),
+    SettleRefusedDelivery(inputs::SettleRefusedDelivery),
+    ClassifyDeliveryStatus(inputs::ClassifyDeliveryStatus),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
+            Self::BindDeliveryRecipients(_) => InputKind::BindDeliveryRecipients,
+            Self::SettleDeliveryRecipient(_) => InputKind::SettleDeliveryRecipient,
+            Self::FinishDeliveryRecipients(_) => InputKind::FinishDeliveryRecipients,
             Self::CommitDelivery(_) => InputKind::CommitDelivery,
             Self::MarkDeliveryApplied(_) => InputKind::MarkDeliveryApplied,
             Self::AcknowledgeDelivery(_) => InputKind::AcknowledgeDelivery,
             Self::AdvanceAcknowledgedPrefix(_) => InputKind::AdvanceAcknowledgedPrefix,
+            Self::SettleRefusedDelivery(_) => InputKind::SettleRefusedDelivery,
+            Self::ClassifyDeliveryStatus(_) => InputKind::ClassifyDeliveryStatus,
         }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
+    BindDeliveryRecipients,
+    SettleDeliveryRecipient,
+    FinishDeliveryRecipients,
     CommitDelivery,
     MarkDeliveryApplied,
     AcknowledgeDelivery,
     AdvanceAcknowledgedPrefix,
+    SettleRefusedDelivery,
+    ClassifyDeliveryStatus,
 }
 
 pub mod effects {
     #[allow(unused_imports)]
     use super::*;
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryRecipientsBound {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryRecipientSettled {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+        pub recipient_id: String,
+        pub outcome: DeliveryRecipientOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryRecipientsSettled {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+        pub outcome: DeliveryRecipientGroupOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryStatusMixed {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+        pub bindings: std::collections::BTreeMap<String, String>,
+        pub outcomes: std::collections::BTreeMap<String, DeliveryRecipientOutcome>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeliveryCommitted {
         pub delivery_id: String,
@@ -120,25 +366,84 @@ pub mod effects {
     pub struct AcknowledgedPrefixAtRest {
         pub applied_cursor: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryRefused {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+        pub reason: DeliveryRefusalReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitRejectedSourceSequenceConflict {
+        pub delivery_id: String,
+        pub source_sequence: u64,
+        pub committed_source_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryStatusNotCommitted {
+        pub delivery_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryStatusApplied {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryStatusAcknowledgedAhead {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryStatusPending {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeliveryStatusRefused {
+        pub delivery_id: String,
+        pub delivery_sequence: u64,
+        pub reason: DeliveryRefusalReason,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
+    DeliveryRecipientsBound(effects::DeliveryRecipientsBound),
+    DeliveryRecipientSettled(effects::DeliveryRecipientSettled),
+    DeliveryRecipientsSettled(effects::DeliveryRecipientsSettled),
+    DeliveryStatusMixed(effects::DeliveryStatusMixed),
     DeliveryCommitted(effects::DeliveryCommitted),
     DeliveryReused(effects::DeliveryReused),
     DeliveryApplied(effects::DeliveryApplied),
     DeliveryAcknowledged(effects::DeliveryAcknowledged),
     AcknowledgedPrefixAdvanced(effects::AcknowledgedPrefixAdvanced),
     AcknowledgedPrefixAtRest(effects::AcknowledgedPrefixAtRest),
+    DeliveryRefused(effects::DeliveryRefused),
+    CommitRejectedSourceSequenceConflict(effects::CommitRejectedSourceSequenceConflict),
+    DeliveryStatusNotCommitted(effects::DeliveryStatusNotCommitted),
+    DeliveryStatusApplied(effects::DeliveryStatusApplied),
+    DeliveryStatusAcknowledgedAhead(effects::DeliveryStatusAcknowledgedAhead),
+    DeliveryStatusPending(effects::DeliveryStatusPending),
+    DeliveryStatusRefused(effects::DeliveryStatusRefused),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
+    DeliveryRecipientsBound,
+    DeliveryRecipientSettled,
+    DeliveryRecipientsSettled,
+    DeliveryStatusMixed,
     DeliveryCommitted,
     DeliveryReused,
     DeliveryApplied,
     DeliveryAcknowledged,
     AcknowledgedPrefixAdvanced,
     AcknowledgedPrefixAtRest,
+    DeliveryRefused,
+    CommitRejectedSourceSequenceConflict,
+    DeliveryStatusNotCommitted,
+    DeliveryStatusApplied,
+    DeliveryStatusAcknowledgedAhead,
+    DeliveryStatusPending,
+    DeliveryStatusRefused,
 }
 
 #[allow(non_camel_case_types)]
@@ -146,6 +451,7 @@ pub enum EffectKind {
 pub enum TransitionId {
     CommitNewDelivery,
     ReuseCommittedDelivery,
+    RejectSourceSequenceConflict,
     ApplyNextDelivery,
     ObserveAlreadyAppliedDelivery,
     AcknowledgeNextDelivery,
@@ -153,6 +459,20 @@ pub enum TransitionId {
     ObserveAlreadyAppliedAcknowledgement,
     AdvanceOverAcknowledgedDelivery,
     AdvanceAcknowledgedPrefixNothingParked,
+    SettleRefusedDeliveryAtCursor,
+    ObserveAlreadyRefusedDelivery,
+    ClassifyNotCommitted,
+    ClassifyRefused,
+    ClassifyApplied,
+    ClassifyAcknowledgedAhead,
+    ClassifyPending,
+    ClassifyMixed,
+    BindNewDeliveryRecipients,
+    ObserveBoundDeliveryRecipients,
+    SettlePendingDeliveryRecipient,
+    ObserveSettledDeliveryRecipient,
+    FinishSettledDeliveryRecipients,
+    ObserveFinishedDeliveryRecipients,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -232,5 +552,9 @@ pub fn initial_state() -> State {
         next_sequence: 0,
         applied_cursor: 0,
         acknowledged_sequences: Default::default(),
+        refused_deliveries: Default::default(),
+        delivery_recipient_bindings: Default::default(),
+        recipient_outcomes: Default::default(),
+        recipient_group_outcomes: Default::default(),
     }
 }

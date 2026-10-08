@@ -3,14 +3,16 @@
 //! only: a reconcile pass at arming, then job outbox commits, runtime delivery
 //! commits, and attachment commits. No pass ever runs on a timer.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat::{
     AttemptClaim, CanonicalArgumentsHash, DetachedJobService, InteractionLineageId,
-    JobDeliveryApplication, JobDeliverySink, JobId, JobResultRef, JobSpec, JobSubmissionKey,
-    MemoryDetachedJobStore, RestartClass, RunnerHandleRef, RunnerIdentity, RuntimeDeliveryHost,
-    RuntimeDeliveryOwner, RuntimeDeliveryPass, SessionId, ToolIdentity, WorkerId,
+    JobDeliveryApplication, JobDeliveryApplyError, JobDeliverySink, JobId, JobResultRef, JobSpec,
+    JobSubmissionKey, MemoryDetachedJobStore, RestartClass, RunnerHandleRef, RunnerIdentity,
+    RuntimeDeliveryHost, RuntimeDeliveryOwner, RuntimeDeliveryPass, SessionId, ToolIdentity,
+    WorkerId,
 };
 use meerkat_runtime::{
     InMemoryRuntimeStore, RuntimeDeliveryInbox, RuntimeDeliveryOwnerAlreadyArmed,
@@ -26,11 +28,19 @@ const EVENT_GUARD: Duration = Duration::from_secs(10);
 #[derive(Default)]
 struct RecordingSink {
     poisoned: std::sync::Mutex<Option<JobId>>,
+    locally_refused: std::sync::Mutex<HashSet<JobId>>,
     applied: Mutex<Vec<JobId>>,
     commit_during_first_apply: Mutex<Option<(DetachedJobService, SessionId)>>,
 }
 
 impl RecordingSink {
+    fn refuse(&self, job_id: JobId) {
+        self.locally_refused
+            .lock()
+            .expect("refusal lock")
+            .insert(job_id);
+    }
+
     fn poison(&self, job_id: JobId) {
         *self.poisoned.lock().expect("poison lock") = Some(job_id);
     }
@@ -46,14 +56,30 @@ impl RecordingSink {
 
 #[async_trait::async_trait]
 impl JobDeliverySink for RecordingSink {
-    async fn apply(&self, application: JobDeliveryApplication) -> Result<(), String> {
+    async fn apply(
+        &self,
+        application: JobDeliveryApplication,
+    ) -> Result<(), JobDeliveryApplyError> {
         let job_id = match &application {
             JobDeliveryApplication::Record { job_id, .. }
             | JobDeliveryApplication::Notification { job_id, .. }
             | JobDeliveryApplication::Event { job_id, .. } => job_id.clone(),
         };
+        if self
+            .locally_refused
+            .lock()
+            .expect("refusal lock")
+            .contains(&job_id)
+        {
+            return Err(meerkat_core::OperationAuthorizationError::Refused(
+                meerkat_core::OperationRefused::new(meerkat_core::OperationRefusalKind::Denied),
+            )
+            .into());
+        }
         if self.poisoned.lock().expect("poison lock").as_ref() == Some(&job_id) {
-            return Err(format!("sink rejects deliveries for job {job_id}"));
+            return Err(JobDeliveryApplyError::Infrastructure(format!(
+                "sink rejects deliveries for job {job_id}"
+            )));
         }
         if let Some((jobs, session_id)) = self.commit_during_first_apply.lock().await.take() {
             completed_job(&jobs, "default", session_id, "committed-during-pass").await;
@@ -69,8 +95,20 @@ struct StaticHost {
 
 #[async_trait::async_trait]
 impl RuntimeDeliveryHost for StaticHost {
-    async fn delivery_sink(&self, _session_id: &SessionId) -> Option<Arc<dyn JobDeliverySink>> {
-        Some(self.sink.clone())
+    async fn delivery_route(&self, _session_id: &SessionId) -> Option<meerkat::DeliveryRoute> {
+        Some(meerkat::DeliveryRoute::ServedHere(self.sink.clone()))
+    }
+
+    async fn claim_cold_delivery(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Result<meerkat_runtime::HostingClaim, meerkat_runtime::HostingRefused>> {
+        // Every recipient is served here: a single-process host.
+        Some(meerkat_runtime::grant_session_hosting(
+            &meerkat_runtime::HostingCapability::ProcessLocal,
+            &meerkat_runtime::HostingOwner::mint(),
+            session_id,
+        ))
     }
 }
 
@@ -225,6 +263,73 @@ async fn armed_owner_reconciles_existing_rows_then_delivers_new_commits_without_
         "no pass ran without a typed wake (still at generation {settled})"
     );
     assert!(!handle.is_stopped());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_full_locally_refused_page_does_not_hide_the_next_permitted_delivery() {
+    let fixture = Fixture::new();
+    let session_id = SessionId::new();
+    let projector =
+        meerkat::JobOutboxProjector::new(fixture.job_store.clone(), fixture.inbox.clone());
+    let mut permitted = None;
+    // The owner's page size is 256. Project each real job before submitting
+    // the next so the final permitted job has durable sequence 257, regardless
+    // of the job store's enumeration order. No owner is armed during setup.
+    for index in 0..257 {
+        let job = completed_job(
+            &fixture.jobs,
+            "default",
+            session_id.clone(),
+            &format!("page-{index}"),
+        )
+        .await;
+        if index < 256 {
+            fixture.sink.refuse(job);
+        } else {
+            permitted = Some(job);
+        }
+        let projected = projector.project_pending(1).await.expect("project one job");
+        assert!(projected.is_fully_projected());
+        assert_eq!(projected.projected.len(), 1);
+    }
+    drop(projector);
+    let handle = fixture
+        .owner()
+        .arm(fixture.host())
+        .expect("arm owner after setup");
+    let mut passes = handle.subscribe_passes();
+    let reconciled = wait_for_pass(&mut passes, "one complete reconcile pass", |pass| {
+        pass.generation >= 1
+    })
+    .await;
+    assert_eq!(reconciled.generation, 1);
+    assert_eq!(reconciled.projected, 0);
+    assert_eq!(
+        reconciled.applied, 1,
+        "refused recipients are progress, not applied effects"
+    );
+    assert!(reconciled.blocked_sessions.is_empty());
+    assert!(reconciled.failures.is_empty());
+    assert_eq!(
+        fixture.sink.applied().await,
+        vec![permitted.expect("last job")]
+    );
+    assert_eq!(
+        fixture
+            .inbox
+            .pending_delivery_total()
+            .await
+            .expect("pending count"),
+        0
+    );
+    assert_eq!(
+        fixture
+            .inbox
+            .applied_cursor(&meerkat_runtime::LogicalRuntimeId::for_session(&session_id))
+            .await
+            .expect("settled cursor"),
+        257,
+    );
 }
 
 #[tokio::test]

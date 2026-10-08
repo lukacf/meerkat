@@ -34,6 +34,8 @@ struct ObservedCall {
     user_text: String,
     task_text: String,
     conversational_text: String,
+    /// The OpenAI reasoning effort the request carried, if any.
+    reasoning_effort: Option<meerkat_core::lifecycle::run_primitive::ReasoningEffort>,
 }
 
 struct ScriptedClient {
@@ -127,6 +129,12 @@ impl meerkat_client::LlmClient for ScriptedClient {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let reasoning_effort = match request.provider_params.as_ref() {
+            Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(tag)) => {
+                tag.reasoning_effort
+            }
+            _ => None,
+        };
         let response = futures::stream::once(async move {
             let index = self.calls.fetch_add(1, Ordering::SeqCst);
             let mut call = InFlightCall {
@@ -139,6 +147,7 @@ impl meerkat_client::LlmClient for ScriptedClient {
                 user_text,
                 task_text,
                 conversational_text,
+                reasoning_effort,
             });
             self.gate(index)
                 .acquire()
@@ -196,6 +205,16 @@ async fn fixture(with_workgraph: bool) -> Fixture {
 async fn fixture_with_policy(
     with_workgraph: bool,
     policy: LiveDelegationExecutionPolicy,
+) -> Fixture {
+    fixture_with_reasoning(with_workgraph, policy, None).await
+}
+
+async fn fixture_with_reasoning(
+    with_workgraph: bool,
+    policy: LiveDelegationExecutionPolicy,
+    member_turn_reasoning: Option<
+        meerkat_core::lifecycle::run_primitive::RequestReasoningPreference,
+    >,
 ) -> Fixture {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -308,7 +327,11 @@ async fn fixture_with_policy(
     // path, exactly as a public GPT Live open leaves it: result delivery
     // authority requires that binding, so releases reach the control plane.
     let binding = runtime
-        .__test_open_live_context_channel(&session_id, 0)
+        .__test_open_live_context_channel_with_member_turn_reasoning(
+            &session_id,
+            0,
+            member_turn_reasoning,
+        )
         .await
         .expect("binding");
     let provider_binding = provider_binding_from_runtime(&binding);
@@ -675,6 +698,49 @@ impl Fixture {
     /// coordinator. A close with a result still queued for the provider
     /// merges that result into the source member as a new turn (the
     /// post-close path), which these scheduling tests do not drive.
+    /// Close this channel's binding and open a replacement on the same
+    /// runtime incarnation (same generation) sealing `member_turn_reasoning`.
+    async fn reopen_with(
+        &mut self,
+        member_turn_reasoning: Option<
+            meerkat_core::lifecycle::run_primitive::RequestReasoningPreference,
+        >,
+    ) {
+        wait_until(WAIT, || async {
+            self.coordinator.retained.lock().await.is_empty()
+                && self
+                    .coordinator
+                    .result_delivery_tasks
+                    .lock()
+                    .await
+                    .is_empty()
+        })
+        .await;
+        self.coordinator
+            .cancel_channel_binding(&self.provider_binding)
+            .await;
+        self.runtime
+            .abandon_live_open_admission(&self.session_id, self.binding.channel_id())
+            .await
+            .expect("close the first channel");
+        let previous_generation = self.binding.generation();
+        self.binding = self
+            .runtime
+            .__test_open_live_context_channel_with_member_turn_reasoning(
+                &self.session_id,
+                0,
+                member_turn_reasoning,
+            )
+            .await
+            .expect("replacement binding");
+        assert_eq!(
+            self.binding.generation(),
+            previous_generation,
+            "the replacement channel shares the runtime incarnation"
+        );
+        self.provider_binding = provider_binding_from_runtime(&self.binding);
+    }
+
     async fn close(self) {
         assert_eq!(
             self.handle.resolve_bridge_session_id(&self.identity).await,
@@ -850,13 +916,16 @@ async fn two_delegations_run_in_parallel_and_both_complete() {
         }
     }
 
-    let items = fx.voice_items().await;
-    assert_eq!(items.len(), 2);
-    assert!(
-        items
+    // Each item's close settles after its result's release, off that path.
+    wait_until(WAIT, || async {
+        fx.voice_items()
+            .await
             .iter()
             .all(|item| item.status == meerkat::WorkStatus::Completed)
-    );
+    })
+    .await;
+    let items = fx.voice_items().await;
+    assert_eq!(items.len(), 2);
     assert!(items.iter().all(|item| {
         item.evidence_refs
             .iter()
@@ -1114,10 +1183,169 @@ async fn blocked_worker_is_retired_and_requeued_with_the_dependency_result() {
         ],
         "{second_narrations:?}"
     );
+    wait_until(WAIT, || async {
+        fx.voice_item_titled("write the summary from the numbers")
+            .await
+            .status
+            == meerkat::WorkStatus::Completed
+    })
+    .await;
+    fx.close().await;
+}
+
+/// #1820: an item's WorkGraph close is maintenance, not the result's release
+/// path. With the first item's close held, its result still reaches the
+/// provider, and the item that waits on it stays parked. Once the close
+/// settles, the item carries its evidence and the waiting operation restarts
+/// with no new user event.
+#[tokio::test]
+async fn a_result_is_released_before_its_work_item_close_settles() {
+    let mut fx = fixture(true).await;
+    let first = fx.delegate("first", "collect the quarterly numbers").await;
+    let second = fx
+        .delegate("second", "write the summary from the numbers")
+        .await;
+    let first_call = fx.next_call().await;
+    let second_call = fx.next_call().await;
+    let first_call_index = if first_call.task_text.contains("quarterly") {
+        first_call.index
+    } else {
+        second_call.index
+    };
+    let second_call_index = 1 - first_call_index;
+    let workgraph = fx.workgraph.clone().expect("workgraph");
+    let first_item = fx.voice_item_titled("collect the quarterly numbers").await;
     let second_item = fx
         .voice_item_titled("write the summary from the numbers")
         .await;
-    assert_eq!(second_item.status, meerkat::WorkStatus::Completed);
+    workgraph
+        .link(meerkat::LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: meerkat::WorkEdgeKind::Blocks,
+            from_id: first_item.id.clone(),
+            to_id: second_item.id.clone(),
+        })
+        .await
+        .expect("blocks edge");
+    let second_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .release(meerkat::ReleaseWorkItemRequest {
+            id: second_item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: second_item.revision,
+        })
+        .await
+        .expect("release behind the blocker");
+    fx.client.release(second_call_index);
+    fx.wait_for_schedule_state(
+        &second,
+        meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked,
+    )
+    .await;
+
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    *fx.coordinator
+        .deferred_close_gate_for_test
+        .lock()
+        .expect("gate") = Some((entered_tx, resume_rx));
+    fx.client.release(first_call_index);
+    tokio::time::timeout(WAIT, entered_rx)
+        .await
+        .expect("the first item's close reached its gate")
+        .expect("gate sender");
+    wait_until(WAIT, || async {
+        fx.control
+            .releases
+            .lock()
+            .await
+            .iter()
+            .any(|(key, _)| key == "first-delegation")
+    })
+    .await;
+    assert_eq!(
+        fx.voice_item_titled("collect the quarterly numbers")
+            .await
+            .status,
+        meerkat::WorkStatus::InProgress,
+        "the result was released while its item's close was held"
+    );
+    fx.expect_no_call().await;
+
+    resume_tx.send(()).expect("release the close");
+    let restarted = fx.next_call().await;
+    assert!(
+        restarted
+            .user_text
+            .contains("write the summary from the numbers"),
+        "{}",
+        restarted.user_text
+    );
+    let first_item = fx.voice_item_titled("collect the quarterly numbers").await;
+    assert_eq!(first_item.status, meerkat::WorkStatus::Completed);
+    assert!(
+        first_item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "live_delegation_result")
+    );
+    fx.client.release(restarted.index);
+    fx.wait_for_completed(&[first, second]).await;
+    fx.close().await;
+}
+
+/// An item its worker leaves Open with no Blocks edge is ready only when the
+/// WorkGraph says so: a not-before time still in the future keeps it
+/// waiting, and nothing is released for it.
+#[tokio::test]
+async fn an_open_item_not_yet_due_keeps_its_worker_waiting() {
+    let mut fx = fixture(true).await;
+    let operation = fx.delegate("later", "call the venue tomorrow").await;
+    let call = fx.next_call().await;
+    let workgraph = fx.workgraph.clone().expect("workgraph");
+    let item = fx.voice_item_titled("call the venue tomorrow").await;
+    let item = workgraph
+        .update(meerkat::UpdateWorkItemRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: item.revision,
+            title: None,
+            description: None,
+            priority: None,
+            completion_policy: None,
+            labels: None,
+            due_at: None,
+            not_before: Some(chrono::Utc::now() + chrono::Duration::days(1)),
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect("defer the item");
+    workgraph
+        .release(meerkat::ReleaseWorkItemRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: item.revision,
+        })
+        .await
+        .expect("release the deferred item");
+    fx.client.release(call.index);
+    fx.wait_for_schedule_state(
+        &operation,
+        meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked,
+    )
+    .await;
+    assert!(fx.control.releases.lock().await.is_empty());
+    assert_eq!(
+        fx.voice_item_titled("call the venue tomorrow").await.status,
+        meerkat::WorkStatus::Open
+    );
     fx.close().await;
 }
 
@@ -1191,11 +1419,13 @@ async fn channel_close_cancels_only_queued_work_and_running_forks_merge_into_the
         fx.control.releases.lock().await.is_empty(),
         "nothing reaches the closed provider channel"
     );
+    // Completed work whose channel closed never dispatches a result; its
+    // item still settles.
     for title in (0..4).map(|index| format!("long task {index}")) {
-        assert_eq!(
-            fx.voice_item_titled(&title).await.status,
-            meerkat::WorkStatus::Completed
-        );
+        wait_until(WAIT, || async {
+            fx.voice_item_titled(&title).await.status == meerkat::WorkStatus::Completed
+        })
+        .await;
     }
     fx.assert_nothing_cancelled();
     fx.handle.shutdown().await.expect("shutdown");
@@ -1817,4 +2047,252 @@ async fn channel_close_returns_without_awaiting_a_running_existing_member_turn()
         "an existing member is never retired by the post-close path"
     );
     fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// Number of LiveResponses outcome appends in the source session's transcript.
+async fn responses_outcomes_in_transcript(fx: &Fixture) -> usize {
+    let session = fx
+        .service
+        .export_realtime_refresh_session_snapshot(&fx.session_id)
+        .await
+        .expect("source session snapshot");
+    session
+        .messages()
+        .iter()
+        .filter(|message| {
+            serde_json::to_string(message)
+                .is_ok_and(|text| text.contains("MEERKAT_LIVE_EXECUTOR_OUTCOME_V1"))
+        })
+        .count()
+}
+
+/// Committed-snapshot revalidation (B7): an already committed bridge snapshot
+/// is re-read through its runtime owner just before its outcome append.
+/// Evidence limit: this re-reads one live in-memory runtime store with a plain
+/// append; it does not close and reopen the runtime or change the current
+/// authority, so it is not a restart test.
+/// - Unchanged control: the committed terminal and digest still match, so the
+///   evidence names exactly that operation and its outcome is appended once.
+/// - Changed: a terminal or digest that differs from the committed record
+///   yields no evidence, so nothing is appended.
+/// - Independent fresh work on the same runtime owner is matched by its own
+///   exact operation, never by the original's. It runs in a second session: a
+///   channel holds one bridge operation until it retires (a different call on
+///   an occupied channel is protocol drift that revokes the channel), and a
+///   session holds one live channel.
+#[tokio::test]
+async fn committed_snapshot_revalidation_appends_only_when_unchanged() {
+    use meerkat_core::MeerkatExecutionTerminal::{Completed, Failed};
+
+    let fx = fixture(false).await;
+    let original = fx
+        .runtime
+        .__test_admit_started_live_bridge_operation(
+            &fx.binding,
+            "provider:turn:original",
+            "check the garden irrigation",
+        )
+        .await
+        .expect("admit original work");
+    fx.runtime
+        .record_live_bridge_execution_terminal(&original, Completed, Some("sha256:original"))
+        .await
+        .expect("commit original terminal");
+    let fresh_session = SessionId::new();
+    fx.runtime
+        .register_session(fresh_session.clone())
+        .await
+        .expect("register the fresh work's session");
+    fx.runtime
+        .prepare_bindings(fresh_session.clone())
+        .await
+        .expect("bind the fresh work's runtime");
+    let fresh_binding = fx
+        .runtime
+        .__test_open_live_context_channel(&fresh_session, 0)
+        .await
+        .expect("the fresh work's live channel");
+    let fresh = fx
+        .runtime
+        .__test_admit_started_live_bridge_operation(
+            &fresh_binding,
+            "provider:turn:fresh",
+            "water the roses",
+        )
+        .await
+        .expect("admit independent fresh work");
+    fx.runtime
+        .record_live_bridge_execution_terminal(&fresh, Failed, None)
+        .await
+        .expect("commit fresh terminal");
+    let mut snapshots = fx
+        .runtime
+        .live_bridge_recovery_snapshots(&fx.session_id)
+        .await
+        .expect("recovery snapshots");
+    snapshots.extend(
+        fx.runtime
+            .live_bridge_recovery_snapshots(&fresh_session)
+            .await
+            .expect("fresh work recovery snapshots"),
+    );
+    let snapshot_of = |admission: &LiveBridgeOperationAdmission| {
+        snapshots
+            .iter()
+            .find(|snapshot| snapshot.operation() == admission.operation())
+            .cloned()
+            .expect("committed snapshot")
+    };
+    let original_snapshot = snapshot_of(&original);
+    let fresh_snapshot = snapshot_of(&fresh);
+
+    // Changed: the recovered executor disagrees with the committed record.
+    assert!(
+        revalidate_committed_responses_snapshot(
+            fx.runtime.as_ref(),
+            &original_snapshot,
+            Completed,
+            Some("sha256:other"),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        revalidate_committed_responses_snapshot(
+            fx.runtime.as_ref(),
+            &original_snapshot,
+            Failed,
+            Some("sha256:original"),
+        )
+        .await
+        .is_err()
+    );
+    // Independent fresh work: the original's expectations never validate it.
+    assert!(
+        revalidate_committed_responses_snapshot(
+            fx.runtime.as_ref(),
+            &fresh_snapshot,
+            Completed,
+            Some("sha256:original"),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(responses_outcomes_in_transcript(&fx).await, 0);
+
+    // Unchanged control: the evidence names exactly the original operation
+    // and its outcome is appended once (no host installed: plain route).
+    let evidence = revalidate_committed_responses_snapshot(
+        fx.runtime.as_ref(),
+        &original_snapshot,
+        Completed,
+        Some("sha256:original"),
+    )
+    .await
+    .expect("unchanged committed snapshot");
+    assert_eq!(evidence.operation(), original.operation());
+    assert_eq!(evidence.terminal(), Completed);
+    assert_eq!(evidence.result_digest(), Some("sha256:original"));
+    assert_eq!(
+        evidence.original_request_digest(),
+        original.request_digest().as_str()
+    );
+    let fresh_evidence =
+        revalidate_committed_responses_snapshot(fx.runtime.as_ref(), &fresh_snapshot, Failed, None)
+            .await
+            .expect("fresh work revalidates on its own record");
+    assert_eq!(fresh_evidence.operation(), fresh.operation());
+    assert_ne!(fresh_evidence.operation(), evidence.operation());
+
+    let request = responses_outcome_append_request(
+        original.operation().operation_id(),
+        DurableExecutorTerminalKind::Completed,
+        Some("irrigation checked"),
+    );
+    assert!(!fx.runtime.has_native_work_authorization_host());
+    append_live_responses_outcome(
+        &fx.runtime,
+        fx.service.as_ref(),
+        &fx.session_id,
+        request,
+        evidence,
+        None,
+    )
+    .await
+    .expect("plain outcome append");
+    assert_eq!(responses_outcomes_in_transcript(&fx).await, 1);
+}
+
+/// #1823: the reasoning preference a channel's open sealed reaches the
+/// delegated member turn's provider request (both execution policies); a
+/// channel opened without one leaves the request at the member's profile.
+#[tokio::test]
+async fn a_delegated_member_turn_carries_its_channel_reasoning_preference() {
+    use meerkat_core::lifecycle::run_primitive::{ReasoningEffort, RequestReasoningPreference};
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    for policy in [
+        LiveDelegationExecutionPolicy::DurableFork,
+        LiveDelegationExecutionPolicy::ExistingMember,
+    ] {
+        let mut fx = fixture_with_reasoning(
+            false,
+            policy,
+            Some(RequestReasoningPreference::set(EffortLevel::Low).expect("low")),
+        )
+        .await;
+        let operation = fx.delegate("prefers", "summarize the notes").await;
+        let call = fx.next_call().await;
+        assert_eq!(
+            call.reasoning_effort,
+            Some(ReasoningEffort::Low),
+            "{policy:?}: the delegated turn carries the sealed preference"
+        );
+        fx.client.release(call.index);
+        fx.wait_for_completed(std::slice::from_ref(&operation))
+            .await;
+        fx.close().await;
+
+        let mut fx = fixture_with_reasoning(false, policy, None).await;
+        let operation = fx.delegate("plain", "summarize the notes").await;
+        let call = fx.next_call().await;
+        assert_eq!(
+            call.reasoning_effort, None,
+            "{policy:?}: no preference leaves the member's profile"
+        );
+        fx.client.release(call.index);
+        fx.wait_for_completed(std::slice::from_ref(&operation))
+            .await;
+        fx.close().await;
+    }
+}
+
+/// #1823: a replacement channel on the same runtime incarnation (same
+/// generation) uses the preference its own open sealed, never the previous
+/// channel's.
+#[tokio::test]
+async fn a_replacement_channel_uses_its_own_reasoning_preference() {
+    use meerkat_core::lifecycle::run_primitive::{ReasoningEffort, RequestReasoningPreference};
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    let mut fx = fixture_with_reasoning(
+        false,
+        LiveDelegationExecutionPolicy::DurableFork,
+        Some(RequestReasoningPreference::set(EffortLevel::Low).expect("low")),
+    )
+    .await;
+    let first = fx.delegate("first", "draft the outline").await;
+    let call = fx.next_call().await;
+    assert_eq!(call.reasoning_effort, Some(ReasoningEffort::Low));
+    fx.client.release(call.index);
+    fx.wait_for_completed(std::slice::from_ref(&first)).await;
+
+    fx.reopen_with(Some(
+        RequestReasoningPreference::set(EffortLevel::High).expect("high"),
+    ))
+    .await;
+    let second = fx.delegate("second", "draft the summary").await;
+    let call = fx.next_call().await;
+    assert_eq!(call.reasoning_effort, Some(ReasoningEffort::High));
+    fx.client.release(call.index);
+    fx.wait_for_completed(std::slice::from_ref(&second)).await;
+    fx.close().await;
 }

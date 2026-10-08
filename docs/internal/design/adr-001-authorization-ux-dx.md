@@ -4,7 +4,7 @@
 
 Research and design r4, 2026-10-01. **Root accepted the product model and first existing-contract implementation slice after reviewing r1.** The acceptance and sequence are recorded below; they are not implementation or full-feature acceptance. This is a product design over the [local authorization decision](adr-001-local-governed-default.md) and [confinement and consent addendum](adr-001-confinement-and-consent.md), not a new permission authority or a claim that every described surface exists. A different agent implements the accepted scope. The partial console feedback UI and tests are inputs to validation, not constraints on this design.
 
-The 2026-10-05 [model review and consent amendment](adr-001-model-review-and-consent.md) records the coordinator-accepted direction and the focused HomeCore delta for 0.9 review, batch, policy-edit and delivery UX below. This updates the design contract, not the availability of an implemented API. Earlier research and execution receipts remain historical evidence.
+The 2026-10-05 [model review and consent amendment](adr-001-model-review-and-consent.md) records the coordinator-accepted direction and the focused downstream-app delta for review, batch, policy-edit and delivery UX below. This updates the design contract, not the availability of an implemented API. Earlier research and execution receipts remain historical evidence.
 
 Make the primary experience an answer to four questions:
 
@@ -23,9 +23,9 @@ This proposal combines a read of the actual contracts and UI with a small set of
 
 Source trees inspected:
 
-- Meerkat integrated source: `/Users/luka/.codex/worktrees/security-adr/meerkat-native-governed-m1`.
-- MobKit and console: `/Users/luka/.codex/worktrees/e57f/meerkat-mobkit`.
-- Elephant: `/Users/luka/.codex/worktrees/security-adr/integration/elephant`.
+- Meerkat integrated source: `(operator-retained path)`.
+- MobKit and console: `(operator-retained path)`.
+- Elephant: `(operator-retained path)`.
 - Documentation: this worktree, especially [authorization concepts](../../concepts/authorization.mdx), [integration guide](../../guides/authorization-integration.mdx), [configuration](../../concepts/configuration.mdx), and [auth bindings](../../concepts/auth-and-bindings.mdx).
 
 The design preserves these observed product idioms:
@@ -70,9 +70,9 @@ Calendar assistant                                      Permissions
 Scope: this agent | this request
 Asked by: Sam                  Acting for: Sam
 
-Read availability             Family calendar only
+Read availability             Team calendar only
 Create or change events       Not allowed
-Send messages                 Household coordinator only
+Send messages                 Team coordinator only
 Connected account             Luka's calendar [View connection]
 
 These permissions apply to Sam's request.
@@ -125,7 +125,7 @@ flowchart LR
 ```
 
 1. **Choose the scope.** Identify the agent and authenticated requester/group or service mandate. Reuse realm and identity selection. Display inherited settings and their owner; do not copy inherited configuration into a child merely because it is being viewed.
-2. **Choose connections and allowed uses.** Select an existing connection or start its actual login/configuration workflow. Then select operations and resources from the adapter's authoritative vocabulary. For example: read availability on Family, create events on Planning, no deletion. Keep each action/resource/account clause together. Independent checklists must not accidentally create a Cartesian product of permissions.
+2. **Choose connections and allowed uses.** Select an existing connection or start its actual login/configuration workflow. Then select operations and resources from the adapter's authoritative vocabulary. For example: read availability on Team, create events on Planning, no deletion. Keep each action/resource/account clause together. Independent checklists must not accidentally create a Cartesian product of permissions.
 3. **Review.** Summarize additions and removals, effective limits, lifetime, delegation, and affected work. Offer optional owner-side example checks for an allowed action and a refused action; do not require an extra preview round trip for every save. A preview is advisory and cannot authorize a later attempt. Show its input and revision/time; invalidate the presentation after edits or a relevant refresh.
 4. **Save.** Use the actual owner's validated mutation and concurrency contract. On conflict, preserve the draft, reload owner state, and show the difference. Never silently retry a whole-document replacement over someone else's edit. A successful save acknowledges configuration, not successful execution of a pending action.
 
@@ -143,7 +143,7 @@ Keep handling instructions visible as instructions, for example `Do not include 
 
 ## Identity and connection experience
 
-Present a concise sentence on an action: **Sam asked Calendar assistant to read Family availability using Luka's calendar connection.** If Sam is explicitly acting for someone else, show that separate subject. Expansion reveals the authenticated ingress actor when different, delegation scope, credential owner, and stable qualified references permitted for that viewer.
+Present a concise sentence on an action: **Sam asked Calendar assistant to read Team availability using Luka's calendar connection.** If Sam is explicitly acting for someone else, show that separate subject. Expansion reveals the authenticated ingress actor when different, delegation scope, credential owner, and stable qualified references permitted for that viewer.
 
 There are three separate operations:
 
@@ -151,7 +151,7 @@ There are three separate operations:
 2. **Connect a service** establishes a credential/backend binding. Label configured identity separately from an external account verified by the provider. Never infer the account from a friendly binding name, an arbitrary header, or a user's email string.
 3. **Allow use of that connection** grants a particular agent/requester bounded actions and resources. The trusted connector enforces this even when the OAuth credential is broader.
 
-Show authentication assurance separately from the displayed identity. A person-authenticated session, a service credential, and a device/network-trusted session are different facts supplied by the ingress owner. HomeCore reports that its current network-trusted console can mint an owner-email token for a LAN client. Until that host supplies stronger evidence, display that access as network/device trust, not proof that the named person is present. Do not infer assurance from IP address, email, or a successful console login. The human approval owner must refuse insufficient assurance; hiding a button is not enforcement. This is an outstanding backend integration requirement, not a new browser authentication system.
+Show authentication assurance separately from the displayed identity. A person-authenticated session, a service credential, and a device/network-trusted session are different facts supplied by the ingress owner. The downstream app reports that its current network-trusted console can mint an owner-email token for a LAN client. Until that host supplies stronger evidence, display that access as network/device trust, not proof that the named person is present. Do not infer assurance from IP address, email, or a successful console login. The human approval owner must refuse insufficient assurance; hiding a button is not enforcement. This is an outstanding backend integration requirement, not a new browser authentication system.
 
 The connection detail should show `Owned in <realm>`, `Used by <authorized count/list>`, and available account/route status. An inherited connection is edited at its owner, with an explicit navigation step. Logging out can affect multiple bindings sharing one credential account. The backend must supply that impact and protect unfinished controller work; the UI cannot discover it by scanning visible sessions. The currently documented CLI logout inheritance exception is an existing ownership gap, not behavior to copy into a new UI; use the actual owning realm for credential changes.
 
@@ -194,13 +194,13 @@ Approval expires at 14:32 Europe/Stockholm
 [View exact details]            [Decline] [Approve once]
 ```
 
-The owner must supply readable exact details, authentication assurance and eligibility before these controls exist. Respect its declared self-approval policy, including explicitly allowed self-approval; do not add a browser blanket prohibition or allowance. HomeCore routes a person's own agent to that person and a child's hold to parent-1. Executable actions include the actual prepared artifact, not just an unchanged pathname. Unknown recipients, account, or critical content are not harmless placeholders. If the viewer cannot inspect what is necessary to consent, do not offer approval. Show a risk category only when the owning policy supplies it; the UI must not classify unknown actions as low risk from their names or missing metadata. Reviewer rationale is separate from audience-safe native feedback and is not automatically forwarded to the requester.
+The owner must supply readable exact details, authentication assurance and eligibility before these controls exist. Respect its declared self-approval policy, including explicitly allowed self-approval; do not add a browser blanket prohibition or allowance. The downstream app routes a person's own agent to that person and a member's hold to lead-1. Executable actions include the actual prepared artifact, not just an unchanged pathname. Unknown recipients, account, or critical content are not harmless placeholders. If the viewer cannot inspect what is necessary to consent, do not offer approval. Show a risk category only when the owning policy supplies it; the UI must not classify unknown actions as low risk from their names or missing metadata. Reviewer rationale is separate from audience-safe native feedback and is not automatically forwarded to the requester.
 
 After Approve once, say **Approved, awaiting a new authorized attempt**, until the owner reports consumption/entry/outcome. Distinguish Approved, Declined, Expired, Cancelled, Used, and Outcome unknown. The delivery owner must reliably admit the typed decision notice and wake the owning session, including after the original run completed, without requiring the person to nudge it. The agent or host makes a fresh explicit attempt through the native owner; the decision callback never executes it. Show that attempt's result or a visible continuation/delivery failure to the eligible person and session. Retry notice delivery through its existing owner with deduplication; never replay an effect to repair a missing notice. Keyboard and duplicate clicks address the same retained decision.
 
 Host argument validation and preparation precede consumption. If they fail before the designated physical-entry boundary, still-valid consent for the unchanged candidate remains unspent. Changing the candidate still requires its owner's fresh decision. Consume immediately at that boundary after final currentness checks; failure afterward never automatically refunds a use. **Used** means consent was consumed, not that the provider confirmed the effect. Unknown outcomes retain the existing reconciliation/idempotency requirement, with no exactly-once external execution claim.
 
-The host sets a finite human-decision expiry; HomeCore's pilot uses four hours, not a platform-wide default. Show its absolute time and timezone. The owner delivers expiry notices to both the eligible person and the owning session, including after recovery, and makes expired buttons inert. Approval does not remove validity-at-use expiry: a decision accepted before expiry can still expire before entry.
+The host sets a finite human-decision expiry; the downstream app's pilot uses four hours, not a platform-wide default. Show its absolute time and timezone. The owner delivers expiry notices to both the eligible person and the owning session, including after recovery, and makes expired buttons inert. Approval does not remove validity-at-use expiry: a decision accepted before expiry can still expire before entry.
 
 Pending consent must be revalidated against the exact current candidate. A relevant policy/candidate change requires fresh approval. An unrelated change is adjudicated by the existing candidate/currentness owner; do not invalidate everything in the browser or promise a new scoped-generation mechanism. The UI reports stale/invalid status only when the owner supplies it.
 
@@ -212,7 +212,7 @@ For **Don't ask for two hours**, offer an explicit scoped review-policy edit, no
 
 The policy-change preview names the qualified actor/requester, tool/action, typed argument constraints, current and requested tier, policy owner, duration and absolute expiry. For example: `Sam / calendar.create_event / Planning calendar, Party event, these twenty recipients / R3 to R2 / two hours`. Show that R2 still reviews future candidates and may escalate. A non-expiring edit requires a separately explicit owner choice, never an unchecked default. Active edits are visible and revocable; a timed edit automatically ceases to apply at expiry under the policy owner, without restoring an old snapshot over later edits.
 
-The same administration path may accept authenticated channel events, including Telegram, when the host advertises it. The native reviewer receives applicable mandates and active scoped edits as authenticated owner context, not text supplied by the requesting agent. Missing tier coverage is a configuration/activation error naming the tool; invalid changes leave admitted work intact. Explicit owner-scoped defaults are supported, including HomeCore's deny default, but the UI never infers R1 for an unknown tool. Standing consent, where separately configured, remains distinct from this policy edit and cannot satisfy unresolved review.
+The same administration path may accept authenticated channel events, including Telegram, when the host advertises it. The native reviewer receives applicable mandates and active scoped edits as authenticated owner context, not text supplied by the requesting agent. Missing tier coverage is a configuration/activation error naming the tool; invalid changes leave admitted work intact. Explicit owner-scoped defaults are supported, including the downstream app's deny default, but the UI never infers R1 for an unknown tool. Standing consent, where separately configured, remains distinct from this policy edit and cannot satisfy unresolved review.
 
 ### Decisions outside the console
 
@@ -220,7 +220,7 @@ Telegram, Slack and similar delivery surfaces should offer the same exact-action
 
 Deliver readable exact details only to an owner-eligible audience allowed to inspect them. An authenticated private Telegram prompt showing the necessary recipients, content, account and scope is itself a full-detail surface; a console visit or pairing is not additionally required. A public channel may show a redacted pending notice and a link to an eligible private view, never protected arguments or account details. If the platform truncates the action, exceeds its limits, cannot prove the private audience, or cannot display critical details readably, omit Approve and direct the person to an authorized full-detail surface. Decline or dismiss must preserve the owner's actual semantics. Expired, duplicate, forwarded and stale buttons are checked by the same owner. These adapters require implementation and acceptance; the existing MobKit gating inbox does not establish this native-consent join.
 
-HomeCore's separate Scope C policy permits one uncertain resend only for ordinary conversational Telegram replies. It does not cover consent- or approval-governed effects, recreate spent consent, or relax native uncertainty rules for this workflow.
+The downstream app's separate Scope C policy permits one uncertain resend only for ordinary conversational Telegram replies. It does not cover consent- or approval-governed effects, recreate spent consent, or relax native uncertainty rules for this workflow.
 
 For a gate, show a route such as `Research agent -> Review agent -> External channel`. The review agent has its own executor permissions and still acts within the original requester's mandate. A can submit a candidate for R, while G may publish for R even though A cannot publish directly. The configuration review includes shared publication queues, shell/HTTP/browser tools, MCP, hosted tools, peers, schedules, and live output. Each egress capability is explicitly gate-only or accepted ungated; unknown paths are not implicitly safe. A queue item without its original requester/work association cannot be published.
 
@@ -260,14 +260,14 @@ The following examples illustrate different existing controls. They do **not** c
 enabled = true
 admins = ["admin@example.test"]
 
-[groups.family]
+[groups.team]
 description = "People allowed to talk to the calendar assistant"
 members = ["sam@example.test"]
 
 [[rules]]
-id = "family-calendar-console"
+id = "team-calendar-console"
 effect = "allow"
-groups = ["family"]
+groups = ["team"]
 actions = ["agent.view", "agent.send"]
 agents = ["identity:calendar-assistant"]
 ```
@@ -322,7 +322,7 @@ For example, the design intent below is a **review table, not executable configu
 | Requester | Sam, resolved by the application's identity owner |
 | Agent | Calendar assistant |
 | Connection | Luka's configured calendar connection |
-| Clause 1 | Read availability on Family calendar |
+| Clause 1 | Read availability on Team calendar |
 | Clause 2 | Create events on Planning calendar, with exact-action consent |
 | Excluded | Delete events; change account; delegate calendar access |
 | Duration | Selected bounded mandate, separately from controller continuity |
@@ -406,9 +406,9 @@ Test the following on a mock-backed local frontend harness, then on actual integ
 - **Accessibility:** keyboard-only setup/consent, error-summary focus, screen-reader announcement once, no focus theft during streaming, 200/400 percent zoom and mobile layout, contrast and textual state.
 - **Recovery/coverage:** reconnect and native restart use their real owners; no grant reconstructed from UI data. Repeat the execution coverage matrix at actual entry points. Mock screens are not proof of backend protection.
 
-Existing tests are preserved separately: `/tmp/adr-001-console-tests-paused-r1.json`. Three adapter cases reached behavioral RED on the prior frontend. Access-panel cases did not execute because the warm frontend dependency set lacked `react-markdown`. No browser validation was run for the research draft. Within root's accepted scope, the implementation agent should agree on exact fixtures, demonstrate the relevant RED results, implement, and run targeted unit/component tests plus the local mock-backed browser harness. Do not start a Rust gateway or use a user deployment for UI validation.
+Existing tests are preserved separately: `(operator-retained path)`. Three adapter cases reached behavioral RED on the prior frontend. Access-panel cases did not execute because the warm frontend dependency set lacked `react-markdown`. No browser validation was run for the research draft. Within root's accepted scope, the implementation agent should agree on exact fixtures, demonstrate the relevant RED results, implement, and run targeted unit/component tests plus the local mock-backed browser harness. Do not start a Rust gateway or use a user deployment for UI validation.
 
-### 0.9 HomeCore pilot contract tests
+### Downstream app pilot contract tests
 
 These are required future controls, not executed tests. Extend existing owner, adapter and smoke targets with deterministic completion barriers, a controlled clock and fixture sinks; no new runner is needed. Reviewer stubs test enforcement; a separate evaluation records the real reviewer's judgments under the selected model and policy.
 
@@ -417,11 +417,11 @@ These are required future controls, not executed tests. Extend existing owner, a
 | C1: useful R2 judgment | The real selected reviewer allows the Louise/appointment and friend/dinner cases without a human prompt using authenticated owner ingress and calendar context. Password email escalates without sending secrets. Missing evidence access and reviewer deadline expiry stay typed unavailable and follow the declared fallback, with permitted siblings continuing. |
 | C2: one closed batch | A host-built twenty-recipient manifest spans twenty constituent calls with at most one human decision and one batch review. Added recipients/content fail binding; concurrent re-issue consumes each authorized effect only once. This proves serialized consumption, not exactly-once external delivery. |
 | C3-C5: scoped administration | Console and authenticated Telegram edits preview actor/tool/typed arguments, requested tier and TTL. Reject unauthorized editors and missing tier coverage. Show partial approval/edit failure accurately. Expiry removes only the timed edit without overwriting a newer edit. The reviewer sees owner-authenticated active mandates/edits; forged model text cannot supply them. |
-| C6-C8: actual human channel | Verify host-allowed self-approval and child-to-parent-1 routing. Accept a complete private Telegram presentation without a console visit. Reject wrong approver, copied ID, forwarded/stale button and agent-relayed approval; truncated or unauthorized detail never offers Approve. |
+| C6-C8: actual human channel | Verify host-allowed self-approval and member-to-lead-1 routing. Accept a complete private Telegram presentation without a console visit. Reject wrong approver, copied ID, forwarded/stale button and agent-relayed approval; truncated or unauthorized detail never offers Approve. |
 | C9: notice and progress | An authenticated decision after the original run reliably wakes the correct owning session and produces a visible fresh-attempt result or continuation failure without a human nudge. Duplicate notice delivery neither executes an effect nor adds authority. Lost delivery is visible and retried by its owner; unrelated work continues. |
 | C10: entry boundary | A host argument-validation failure before entry leaves valid unchanged approval unspent and the fixture sink untouched. After successful validation, concurrent attempts share one consumption. Entry failure or lost provider reply cannot refund it or automatically resend; changed arguments require fresh binding. |
 | C11: expiry and recovery | Restart with an open pending approval, advance the controlled clock past the host's four-hour pilot expiry, then observe notices to person and session and rejection of a late decision. Also approve before expiry but attempt after expiry: no entry. |
-| C12: adoption | Keep HomeCore's `approvals.py` and `_human_approval_hold` until slice C proves all seven owner cases and these regression controls on the real Telegram adapter, including R3 fresh judgment, child routing, concurrency, restart/expiry, authenticated decisions and pre-entry spendability. Toolkit parity and native entry evidence remain separate requirements. |
+| C12: adoption | Keep the downstream app's `approvals.py` and `_human_approval_hold` until slice C proves all seven owner cases and these regression controls on the real Telegram adapter, including R3 fresh judgment, member routing, concurrency, restart/expiry, authenticated decisions and pre-entry spendability. Toolkit parity and native entry evidence remain separate requirements. |
 
 ## Root acceptance and implementation sequence
 
@@ -436,9 +436,9 @@ These are accepted implementation design decisions, not a request for the end us
 
 ## r3/r4 review clarifications and unresolved owner seams
 
-The r3/r4 design incorporates the relayed HomeCore, OB3, Toolkit and GCP feedback. It does not expand the current console implementation slice or claim that backend changes are installed.
+The r3/r4 design incorporates the relayed downstream-app, operator-deployment, Toolkit and GCP feedback. It does not expand the current console implementation slice or claim that backend changes are installed.
 
-- **Assurance producer:** Which ingress owner supplies authenticated-person versus device/network/service assurance, and which human-consent owner enforces its minimum? HomeCore's reported LAN-to-owner-email mapping must not be treated as personal authentication. Delegated service administration remains valid when the administration owner permits it.
+- **Assurance producer:** Which ingress owner supplies authenticated-person versus device/network/service assurance, and which human-consent owner enforces its minimum? The downstream app's reported LAN-to-owner-email mapping must not be treated as personal authentication. Delegated service administration remains valid when the administration owner permits it.
 - **Off-console decisions:** The platform identity mapper, eligible private audience, exact candidate reference and same-owner decision transport must be implemented before Telegram/Slack approval is advertised. Long/unreadable detail must remove the Approve affordance.
 - **Candidate invalidation:** The existing owner decides whether a change invalidates exact pending consent, including self-approval eligibility. No browser revision heuristic or new scoped-generation protocol is implied.
 - **Service lifecycle:** Service activation, audience, pause/removal and shared-resource impact must project the existing owners independently of agent frontends. Separately authorized setup execution must not grant installer/shell rights to the business agent. This is a next-slice contract gap.

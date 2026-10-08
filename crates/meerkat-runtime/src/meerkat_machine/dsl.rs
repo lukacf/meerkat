@@ -559,6 +559,7 @@ impl TryFrom<SessionLlmIdentity> for meerkat_core::SessionLlmIdentity {
 pub struct SessionToolVisibilityState {
     pub capability_base_filter: ToolFilter,
     pub inherited_base_filter: ToolFilter,
+    pub policy_base_filter: ToolFilter,
     pub active_filter: ToolFilter,
     pub staged_filter: ToolFilter,
     pub active_requested_deferred_names: std::collections::BTreeSet<ToolName>,
@@ -574,6 +575,7 @@ impl SessionToolVisibilityState {
         Self {
             capability_base_filter: ToolFilter::from(&id.capability_base_filter),
             inherited_base_filter: ToolFilter::from(&id.inherited_base_filter),
+            policy_base_filter: ToolFilter::from(&id.policy_base_filter),
             active_filter: ToolFilter::from(&id.active_filter),
             staged_filter: ToolFilter::from(&id.staged_filter),
             active_requested_deferred_names: id.active_requested_deferred_names.clone(),
@@ -2651,6 +2653,67 @@ pub enum LiveDelegationWorkerOwnership {
     #[default]
     OwnedMember,
     ExistingMember,
+}
+
+/// Bridging copy of the catalog-owned member-turn reasoning preference a
+/// live channel's open sealed (#1823).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveMemberTurnReasoning {
+    #[default]
+    None,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl LiveMemberTurnReasoning {
+    /// The machine's carrier for a core preference. A directly constructed
+    /// `Set(Minimal)` is refused, as `RequestReasoningPreference::set`
+    /// refuses it, never mapped to an absent preference.
+    pub fn try_from_domain(
+        preference: meerkat_core::lifecycle::run_primitive::RequestReasoningPreference,
+    ) -> Result<Self, meerkat_core::lifecycle::run_primitive::UnsupportedReasoningPreference> {
+        use meerkat_core::lifecycle::run_primitive::UnsupportedReasoningPreference;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        match preference.level() {
+            EffortLevel::None => Ok(Self::None),
+            EffortLevel::Low => Ok(Self::Low),
+            EffortLevel::Medium => Ok(Self::Medium),
+            EffortLevel::High => Ok(Self::High),
+            EffortLevel::Xhigh => Ok(Self::Xhigh),
+            EffortLevel::Max => Ok(Self::Max),
+            level @ EffortLevel::Minimal => Err(UnsupportedReasoningPreference(level)),
+        }
+    }
+
+    /// The core preference this carrier names.
+    #[must_use]
+    pub fn into_domain(self) -> meerkat_core::lifecycle::run_primitive::RequestReasoningPreference {
+        use meerkat_core::lifecycle::run_primitive::RequestReasoningPreference;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        RequestReasoningPreference::Set(match self {
+            Self::None => EffortLevel::None,
+            Self::Low => EffortLevel::Low,
+            Self::Medium => EffortLevel::Medium,
+            Self::High => EffortLevel::High,
+            Self::Xhigh => EffortLevel::Xhigh,
+            Self::Max => EffortLevel::Max,
+        })
+    }
 }
 
 /// Bridging copy of the machine-derived live delegation cancellation reason.

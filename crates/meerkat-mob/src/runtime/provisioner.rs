@@ -6001,6 +6001,7 @@ impl SessionBackend {
         Ok(Input::Prompt(PromptInput {
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::InputId::new(),
                 timestamp: chrono::Utc::now(),

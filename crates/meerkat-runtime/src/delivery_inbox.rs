@@ -18,7 +18,16 @@ use crate::store::{
 
 pub mod dsl;
 
+/// Authority envelope version for a runtime without refused settlements;
+/// every released reader accepts it.
 const AUTHORITY_ENVELOPE_VERSION: u16 = 1;
+/// Authority envelope version once a runtime holds a refused settlement.
+/// Readers that predate refused settlement accept only
+/// [`AUTHORITY_ENVELOPE_VERSION`], so they refuse such a runtime instead of
+/// reading its refused rows as applied through the cursor.
+const REFUSAL_AUTHORITY_ENVELOPE_VERSION: u16 = 2;
+// Enrollment itself fences whole-row readers, before the first effect.
+const RECIPIENT_AUTHORITY_ENVELOPE_VERSION: u16 = 3;
 const SUBMISSION_ENVELOPE_VERSION: u16 = 1;
 const MAX_CAS_ATTEMPTS: usize = 32;
 
@@ -48,6 +57,9 @@ impl std::fmt::Display for RuntimeDeliveryId {
 pub enum RuntimeDeliveryKind {
     JobTerminal,
     JobNotification,
+    /// An original-task continuation: a result delivered to its owner as a
+    /// new durable input, keyed by a host-owned continuation key.
+    Continuation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +151,142 @@ pub struct RuntimeDeliveryRecord {
     pub submission: RuntimeDeliverySubmission,
 }
 
+/// Exact subscription identity and target supplied by the trusted producer
+/// owner after decoding the complete immutable delivery payload. These bytes
+/// are a binding, not proof of source, audience, or execution permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeDeliveryRecipient {
+    id: String,
+    target_binding: String,
+}
+
+impl RuntimeDeliveryRecipient {
+    pub fn new(
+        id: impl Into<String>,
+        target_binding: impl Into<String>,
+    ) -> Result<Self, RuntimeDeliveryError> {
+        let value = Self {
+            id: validate_component("recipient id", id.into())?,
+            target_binding: target_binding.into(),
+        };
+        if value.target_binding.is_empty() {
+            return Err(RuntimeDeliveryError::InvalidInput(
+                "recipient target binding must not be empty".into(),
+            ));
+        }
+        Ok(value)
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn target_binding(&self) -> &str {
+        &self.target_binding
+    }
+}
+
+/// A completed local disposition. Transport, store, observation, and unknown
+/// effect failures are not dispositions and must remain pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDeliveryRecipientOutcome {
+    Applied,
+    Refused,
+    OperationAuthorizationUnavailable,
+}
+
+impl From<RuntimeDeliveryRecipientOutcome> for dsl::DeliveryRecipientOutcome {
+    fn from(value: RuntimeDeliveryRecipientOutcome) -> Self {
+        match value {
+            RuntimeDeliveryRecipientOutcome::Applied => Self::Applied,
+            RuntimeDeliveryRecipientOutcome::Refused => Self::Refused,
+            RuntimeDeliveryRecipientOutcome::OperationAuthorizationUnavailable => {
+                Self::OperationAuthorizationUnavailable
+            }
+        }
+    }
+}
+impl From<dsl::DeliveryRecipientOutcome> for RuntimeDeliveryRecipientOutcome {
+    fn from(value: dsl::DeliveryRecipientOutcome) -> Self {
+        match value {
+            dsl::DeliveryRecipientOutcome::Applied => Self::Applied,
+            dsl::DeliveryRecipientOutcome::Refused => Self::Refused,
+            dsl::DeliveryRecipientOutcome::OperationAuthorizationUnavailable => {
+                Self::OperationAuthorizationUnavailable
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDeliveryRecipientGroupOutcome {
+    AllApplied,
+    AllRefused,
+    AllAuthorizationUnavailable,
+    Mixed,
+}
+
+impl From<RuntimeDeliveryRecipientGroupOutcome> for dsl::DeliveryRecipientGroupOutcome {
+    fn from(value: RuntimeDeliveryRecipientGroupOutcome) -> Self {
+        match value {
+            RuntimeDeliveryRecipientGroupOutcome::AllApplied => Self::AllApplied,
+            RuntimeDeliveryRecipientGroupOutcome::AllRefused => Self::AllRefused,
+            RuntimeDeliveryRecipientGroupOutcome::AllAuthorizationUnavailable => {
+                Self::AllAuthorizationUnavailable
+            }
+            RuntimeDeliveryRecipientGroupOutcome::Mixed => Self::Mixed,
+        }
+    }
+}
+impl From<dsl::DeliveryRecipientGroupOutcome> for RuntimeDeliveryRecipientGroupOutcome {
+    fn from(value: dsl::DeliveryRecipientGroupOutcome) -> Self {
+        match value {
+            dsl::DeliveryRecipientGroupOutcome::AllApplied => Self::AllApplied,
+            dsl::DeliveryRecipientGroupOutcome::AllRefused => Self::AllRefused,
+            dsl::DeliveryRecipientGroupOutcome::AllAuthorizationUnavailable => {
+                Self::AllAuthorizationUnavailable
+            }
+            dsl::DeliveryRecipientGroupOutcome::Mixed => Self::Mixed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDeliveryRecipientState {
+    pub recipient: RuntimeDeliveryRecipient,
+    pub outcome: Option<RuntimeDeliveryRecipientOutcome>,
+}
+
+// A read result from the committed owner, scoped to the requested delivery.
+// Returning it must not clone historical deliveries after every recipient CAS.
+struct RecipientTransitionProjection {
+    outcomes: std::collections::BTreeMap<String, RuntimeDeliveryRecipientOutcome>,
+    group: Option<RuntimeDeliveryRecipientGroupOutcome>,
+}
+
+impl RecipientTransitionProjection {
+    fn from_state(
+        state: &dsl::RuntimeDeliveryMachineState,
+        delivery_id: &str,
+    ) -> Result<Self, RuntimeDeliveryError> {
+        let outcomes = state.recipient_outcomes.get(delivery_id).ok_or_else(|| {
+            RuntimeDeliveryError::Authority("recipient operation emitted no outcome map".into())
+        })?;
+        Ok(Self {
+            outcomes: outcomes
+                .iter()
+                .map(|(recipient, outcome)| (recipient.clone(), (*outcome).into()))
+                .collect(),
+            group: state
+                .recipient_group_outcomes
+                .get(delivery_id)
+                .copied()
+                .map(Into::into),
+        })
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeDeliveryError {
@@ -162,6 +310,51 @@ pub enum RuntimeDeliveryError {
     Store(#[from] RuntimeStoreError),
 }
 
+/// Why a delivery was settled as refused: a terminal policy outcome. The
+/// cursor passes a refused delivery, so the rows after it proceed, and it is
+/// never applied. Infrastructure failures are not refusals: they stay pending
+/// and block the ordered inbox until they succeed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RuntimeDeliveryRefusalReason {
+    /// The delivery's original native work binding is missing or invalid, and
+    /// immutably so: it can never be admitted on a governed runtime.
+    NoAdmissibleWorkBinding,
+    /// The native work authorization owner's current verdict on the
+    /// delivery's original work is an actual denial (never an unavailable
+    /// owner, an observation failure or a store error).
+    AuthorityDenied,
+    /// The native work authorization owner actually reported the operation
+    /// authorization as unavailable for this delivery: a settled verdict,
+    /// never an observation or store failure (those stay pending).
+    OperationAuthorizationUnavailable,
+}
+
+impl From<RuntimeDeliveryRefusalReason> for dsl::DeliveryRefusalReason {
+    fn from(reason: RuntimeDeliveryRefusalReason) -> Self {
+        match reason {
+            RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding => Self::NoAdmissibleWorkBinding,
+            RuntimeDeliveryRefusalReason::AuthorityDenied => Self::AuthorityDenied,
+            RuntimeDeliveryRefusalReason::OperationAuthorizationUnavailable => {
+                Self::OperationAuthorizationUnavailable
+            }
+        }
+    }
+}
+
+impl From<dsl::DeliveryRefusalReason> for RuntimeDeliveryRefusalReason {
+    fn from(reason: dsl::DeliveryRefusalReason) -> Self {
+        match reason {
+            dsl::DeliveryRefusalReason::NoAdmissibleWorkBinding => Self::NoAdmissibleWorkBinding,
+            dsl::DeliveryRefusalReason::AuthorityDenied => Self::AuthorityDenied,
+            dsl::DeliveryRefusalReason::OperationAuthorizationUnavailable => {
+                Self::OperationAuthorizationUnavailable
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AuthorityEnvelope {
     version: u16,
@@ -179,6 +372,24 @@ struct PersistedAuthorityState {
     // Absent on authorities written before out-of-band acknowledgement.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     acknowledged_sequences: std::collections::BTreeSet<u64>,
+    // Absent on authorities written before refused settlement.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    refused_deliveries: std::collections::BTreeMap<String, RuntimeDeliveryRefusalReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recipients: Option<PersistedRecipientState>,
+}
+
+// The v3 cell is all-or-nothing. Missing fields must not silently erase
+// partial progress on restore, while v1/v2 retain their exact old shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedRecipientState {
+    bindings: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    outcomes: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, RuntimeDeliveryRecipientOutcome>,
+    >,
+    groups: std::collections::BTreeMap<String, RuntimeDeliveryRecipientGroupOutcome>,
 }
 
 impl From<&dsl::RuntimeDeliveryMachineState> for PersistedAuthorityState {
@@ -191,12 +402,43 @@ impl From<&dsl::RuntimeDeliveryMachineState> for PersistedAuthorityState {
             next_sequence: state.next_sequence,
             applied_cursor: state.applied_cursor,
             acknowledged_sequences: state.acknowledged_sequences.clone(),
+            recipients: (!state.delivery_recipient_bindings.is_empty()).then(|| {
+                PersistedRecipientState {
+                    bindings: state.delivery_recipient_bindings.clone(),
+                    outcomes: state
+                        .recipient_outcomes
+                        .iter()
+                        .map(|(id, outcomes)| {
+                            (
+                                id.clone(),
+                                outcomes
+                                    .iter()
+                                    .map(|(recipient, outcome)| {
+                                        (recipient.clone(), (*outcome).into())
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                    groups: state
+                        .recipient_group_outcomes
+                        .iter()
+                        .map(|(id, outcome)| (id.clone(), (*outcome).into()))
+                        .collect(),
+                }
+            }),
+            refused_deliveries: state
+                .refused_deliveries
+                .iter()
+                .map(|(id, reason)| (id.clone(), (*reason).into()))
+                .collect(),
         }
     }
 }
 
 impl From<PersistedAuthorityState> for dsl::RuntimeDeliveryMachineState {
     fn from(state: PersistedAuthorityState) -> Self {
+        let recipients = state.recipients.unwrap_or_default();
         Self {
             lifecycle_phase: dsl::RuntimeDeliveryPhase::Active,
             delivery_ids: state.delivery_ids,
@@ -206,6 +448,30 @@ impl From<PersistedAuthorityState> for dsl::RuntimeDeliveryMachineState {
             next_sequence: state.next_sequence,
             applied_cursor: state.applied_cursor,
             acknowledged_sequences: state.acknowledged_sequences,
+            delivery_recipient_bindings: recipients.bindings,
+            recipient_outcomes: recipients
+                .outcomes
+                .into_iter()
+                .map(|(id, outcomes)| {
+                    (
+                        id,
+                        outcomes
+                            .into_iter()
+                            .map(|(recipient, outcome)| (recipient, outcome.into()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            recipient_group_outcomes: recipients
+                .groups
+                .into_iter()
+                .map(|(id, outcome)| (id, outcome.into()))
+                .collect(),
+            refused_deliveries: state
+                .refused_deliveries
+                .into_iter()
+                .map(|(id, reason)| (id, reason.into()))
+                .collect(),
         }
     }
 }
@@ -282,6 +548,33 @@ impl PersistedAuthorityState {
                 "runtime delivery acknowledgement lies outside the pending committed range".into(),
             ));
         }
+        if self.refused_deliveries.keys().any(|delivery_id| {
+            self.delivery_sequences
+                .get(delivery_id)
+                .is_none_or(|sequence| *sequence > self.applied_cursor)
+        }) {
+            return Err(RuntimeDeliveryError::Corrupt(
+                "runtime delivery refusal names a delivery the cursor has not passed".into(),
+            ));
+        }
+        if let Some(recipients) = &self.recipients {
+            if recipients.bindings.is_empty() {
+                return Err(RuntimeDeliveryError::Corrupt(
+                    "recipient authority has no enrolled group".into(),
+                ));
+            }
+            for bindings in recipients.bindings.values() {
+                for (recipient, target) in bindings {
+                    if target.is_empty() {
+                        return Err(RuntimeDeliveryError::Corrupt(
+                            "invalid runtime delivery recipient binding".into(),
+                        ));
+                    }
+                    validate_component_ref("persisted recipient id", recipient)
+                        .map_err(|error| RuntimeDeliveryError::Corrupt(error.to_string()))?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -320,6 +613,79 @@ pub struct RuntimeDeliveryInbox {
     /// Whether a [`RuntimeDeliveryOwnership`] is outstanding, shared by all
     /// clones.
     owner_claimed: Arc<AtomicBool>,
+}
+
+/// The generated authority's verdict for one delivery id.
+///
+/// Read from the store only, through the machine's read-only
+/// `ClassifyDeliveryStatus`, whose arms partition every id: exactly one
+/// verdict holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeDeliveryStatus {
+    /// No row under this id in this runtime.
+    NotCommitted,
+    /// Every bound recipient settled with differing outcomes. Exact retained
+    /// target bindings and dispositions are readable without replaying effects.
+    Mixed {
+        delivery_sequence: u64,
+        recipients: Vec<RuntimeDeliveryRecipientState>,
+    },
+    /// Committed and not yet applied.
+    Pending { delivery_sequence: u64 },
+    /// Committed ahead of the cursor and acknowledged out of band: its effect
+    /// reached the runtime by another path while an earlier row is pending.
+    AcknowledgedAhead { delivery_sequence: u64 },
+    /// Applied as a legacy whole row or as an all-applied recipient group.
+    Applied { delivery_sequence: u64 },
+    /// Settled as refused: the cursor passed it and it was never applied.
+    Refused {
+        delivery_sequence: u64,
+        reason: RuntimeDeliveryRefusalReason,
+    },
+}
+
+/// Lowercase hex SHA-256 of `parts`, each length-prefixed so the encoding
+/// is unambiguous. Used for continuation submission digests and derived
+/// delivery ids.
+pub fn delivery_digest_hex(parts: &[&[u8]]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
+    let mut rendered = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        // Writing to a String is infallible; the formatter error is discarded
+        // deliberately rather than unwrapped.
+        let _ = write!(rendered, "{byte:02x}");
+    }
+    rendered
+}
+
+/// The first binding a keyed submit records, minus what the inbox decides
+/// (the address and delivery id come from the submission itself).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuationKeyClaim {
+    pub owner: String,
+    pub key: String,
+    pub submission_digest: String,
+    pub committed_at_ms: u64,
+}
+
+/// Outcome of [`RuntimeDeliveryInbox::submit_with_key_claim`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyedSubmitOutcome {
+    /// The row and the key's first binding committed together.
+    Committed {
+        receipt: RuntimeDeliveryReceipt,
+        binding: crate::store::ContinuationKeyBinding,
+    },
+    /// The `(owner, key)` pair was already bound; nothing was written. The
+    /// caller compares digests to tell a replay from a conflict.
+    AlreadyBound(crate::store::ContinuationKeyBinding),
 }
 
 /// Exclusive delivery ownership of one [`RuntimeDeliveryInbox`].
@@ -425,6 +791,29 @@ impl RuntimeDeliveryInbox {
     /// example [`Self::runtimes_with_pending_deliveries`]).
     pub fn subscribe_commits(&self) -> crate::tokio::sync::watch::Receiver<u64> {
         self.commits.subscribe()
+    }
+
+    /// Record a newly committed row for the delivery owner, then advance the
+    /// commit generation (in that order, see `take_committed_runtimes`).
+    fn record_committed_runtime(&self, runtime_id: &LogicalRuntimeId) {
+        self.committed_runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(runtime_id.clone());
+        self.commits
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    /// The store's durable delivery generation (#1813); see
+    /// [`RuntimeStore::load_delivery_generation`].
+    pub async fn delivery_generation(&self) -> Result<u64, RuntimeDeliveryError> {
+        Ok(self.store.load_delivery_generation().await?)
+    }
+
+    /// How sessions on this inbox's store are hosted across processes
+    /// (#1813): delivery owners route rows and wake by it.
+    pub fn hosting_capability(&self) -> crate::session_hosting::HostingCapability {
+        self.store.hosting_capability()
     }
 
     /// Whether `other` shares this inbox's commit signal, i.e. is the same
@@ -555,12 +944,7 @@ impl RuntimeDeliveryInbox {
                 .await?
             {
                 RuntimeDeliveryAuthorityCasOutcome::Applied(_) => {
-                    self.committed_runtimes
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(runtime_id.clone());
-                    self.commits
-                        .send_modify(|generation| *generation = generation.wrapping_add(1));
+                    self.record_committed_runtime(runtime_id);
                     return Ok(RuntimeDeliveryReceipt {
                         delivery_id,
                         sequence,
@@ -656,6 +1040,219 @@ impl RuntimeDeliveryInbox {
         Ok(records)
     }
 
+    /// Enroll the complete recipient manifest decoded by the trusted producer
+    /// owner from this exact stored row, including any legacy/default target.
+    /// This API re-reads and compares the immutable row and binds the complete
+    /// manifest once. It does not authenticate caller-created records, infer
+    /// recipients from opaque payload bytes, or confer execution authority.
+    ///
+    /// Existing pending grouped rows may enroll without rewriting their
+    /// payload. The authority becomes version 3 before any recipient executes.
+    /// Retry uses the returned settlements to skip every completed recipient.
+    /// Only job terminal and job notification deliveries support enrollment;
+    /// single-target delivery kinds must retain their own admission path.
+    pub async fn bind_recipients(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        record: &RuntimeDeliveryRecord,
+        recipients: &[RuntimeDeliveryRecipient],
+    ) -> Result<Vec<RuntimeDeliveryRecipientState>, RuntimeDeliveryError> {
+        if !matches!(
+            record.submission.kind(),
+            RuntimeDeliveryKind::JobTerminal | RuntimeDeliveryKind::JobNotification
+        ) {
+            return Err(RuntimeDeliveryError::InvalidInput(
+                "this delivery kind does not support recipient enrollment".into(),
+            ));
+        }
+        let mut bindings = std::collections::BTreeMap::new();
+        for recipient in recipients {
+            // Revalidate because this type also supports deserialization.
+            RuntimeDeliveryRecipient::new(recipient.id.clone(), recipient.target_binding.clone())?;
+            if bindings
+                .insert(recipient.id.clone(), recipient.target_binding.clone())
+                .is_some()
+            {
+                return Err(RuntimeDeliveryError::InvalidInput(
+                    "duplicate delivery recipient id".into(),
+                ));
+            }
+        }
+        let state = self
+            .apply_recipient_transition(
+                runtime_id,
+                record,
+                dsl::RuntimeDeliveryInput::BindDeliveryRecipients {
+                    delivery_id: record.submission.delivery_id().as_str().into(),
+                    delivery_sequence: record.sequence,
+                    recipients: bindings,
+                },
+            )
+            .await?;
+        recipients
+            .iter()
+            .map(|recipient| {
+                Ok(RuntimeDeliveryRecipientState {
+                    recipient: recipient.clone(),
+                    outcome: state.outcomes.get(&recipient.id).copied(),
+                })
+            })
+            .collect()
+    }
+
+    /// Persist a truthful completed local outcome for one exact bound target.
+    /// Exact repeats observe it; a different outcome or target is rejected.
+    /// This is not atomic with a sink effect and never makes an unknown
+    /// external outcome safe to replay.
+    pub async fn settle_recipient(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        record: &RuntimeDeliveryRecord,
+        recipient: &RuntimeDeliveryRecipient,
+        outcome: RuntimeDeliveryRecipientOutcome,
+    ) -> Result<RuntimeDeliveryRecipientState, RuntimeDeliveryError> {
+        self.apply_recipient_transition(
+            runtime_id,
+            record,
+            dsl::RuntimeDeliveryInput::SettleDeliveryRecipient {
+                delivery_id: record.submission.delivery_id().as_str().into(),
+                delivery_sequence: record.sequence,
+                recipient_id: recipient.id.clone(),
+                target_binding: recipient.target_binding.clone(),
+                outcome: outcome.into(),
+            },
+        )
+        .await?;
+        Ok(RuntimeDeliveryRecipientState {
+            recipient: recipient.clone(),
+            outcome: Some(outcome),
+        })
+    }
+
+    /// Advance the ordered cursor only when every bound recipient has a
+    /// completed local disposition. The generated owner derives the summary.
+    /// An empty committed manifest is an all-applied zero-effect group.
+    pub async fn finish_recipients(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        record: &RuntimeDeliveryRecord,
+    ) -> Result<RuntimeDeliveryRecipientGroupOutcome, RuntimeDeliveryError> {
+        let state = self
+            .apply_recipient_transition(
+                runtime_id,
+                record,
+                dsl::RuntimeDeliveryInput::FinishDeliveryRecipients {
+                    delivery_id: record.submission.delivery_id().as_str().into(),
+                    delivery_sequence: record.sequence,
+                },
+            )
+            .await?;
+        state.group.ok_or_else(|| {
+            RuntimeDeliveryError::Authority("recipient finish emitted no group outcome".into())
+        })
+    }
+
+    async fn apply_recipient_transition(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        record: &RuntimeDeliveryRecord,
+        input: dsl::RuntimeDeliveryInput,
+    ) -> Result<RecipientTransitionProjection, RuntimeDeliveryError> {
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            let observed = self
+                .store
+                .load_runtime_delivery_authority(runtime_id)
+                .await?
+                .ok_or_else(|| {
+                    RuntimeDeliveryError::Corrupt(
+                        "recipient operation has no committed authority".into(),
+                    )
+                })?;
+            let stored = self
+                .store
+                .load_runtime_delivery_record(runtime_id, record.submission.delivery_id().as_str())
+                .await?
+                .ok_or_else(|| {
+                    RuntimeDeliveryError::Corrupt("recipient operation has no committed row".into())
+                })?;
+            if stored.sequence() != record.sequence
+                || decode_submission(&stored)? != record.submission
+            {
+                return Err(RuntimeDeliveryError::IdempotencyConflict(
+                    record.submission.delivery_id().clone(),
+                ));
+            }
+            let mut authority = decode_authority(&observed)?;
+            if authority
+                .state()
+                .delivery_source_sequences
+                .get(record.submission.delivery_id().as_str())
+                != Some(&record.submission.source_sequence())
+            {
+                return Err(RuntimeDeliveryError::Corrupt(
+                    "recipient row disagrees with committed source sequence".into(),
+                ));
+            }
+            let transition =
+                dsl::RuntimeDeliveryMachineMutator::apply(&mut authority, input.clone())
+                    .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
+            if transition.effects().len() != 1
+                || !matches!(
+                    (&input, &transition.effects()[0]),
+                    (
+                        dsl::RuntimeDeliveryInput::BindDeliveryRecipients { .. },
+                        dsl::RuntimeDeliveryEffect::DeliveryRecipientsBound { .. }
+                    ) | (
+                        dsl::RuntimeDeliveryInput::SettleDeliveryRecipient { .. },
+                        dsl::RuntimeDeliveryEffect::DeliveryRecipientSettled { .. }
+                    ) | (
+                        dsl::RuntimeDeliveryInput::FinishDeliveryRecipients { .. },
+                        dsl::RuntimeDeliveryEffect::DeliveryRecipientsSettled { .. }
+                    )
+                )
+            {
+                return Err(RuntimeDeliveryError::Authority(
+                    "recipient operation emitted an unexpected effect".into(),
+                ));
+            }
+            advance_acknowledged_prefix(&mut authority)?;
+            let bytes = encode_authority(&authority)?;
+            if bytes == observed.state_json() {
+                return RecipientTransitionProjection::from_state(
+                    authority.state(),
+                    record.submission.delivery_id().as_str(),
+                );
+            }
+            let replacement = RuntimeDeliveryAuthorityRecord::from_parts(
+                next_revision(observed.revision())?,
+                bytes,
+            );
+            match self
+                .store
+                .compare_and_swap_runtime_delivery_authority(
+                    runtime_id,
+                    Some(observed.revision()),
+                    replacement,
+                    None,
+                )
+                .await?
+            {
+                RuntimeDeliveryAuthorityCasOutcome::Applied(_) => {
+                    return RecipientTransitionProjection::from_state(
+                        authority.state(),
+                        record.submission.delivery_id().as_str(),
+                    );
+                }
+                RuntimeDeliveryAuthorityCasOutcome::Conflict(_) => continue,
+            }
+        }
+        Err(RuntimeDeliveryError::Store(RuntimeStoreError::WriteFailed(
+            format!(
+                "runtime delivery recipient CAS did not converge after {MAX_CAS_ATTEMPTS} attempts"
+            ),
+        )))
+    }
+
     pub async fn mark_applied(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -706,6 +1303,91 @@ impl RuntimeDeliveryInbox {
             )
             .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
             classify_applied_effects(transition.effects(), delivery_id, sequence)?;
+            advance_acknowledged_prefix(&mut authority)?;
+            let applied_cursor = authority.state().applied_cursor;
+            if applied_cursor == current {
+                return Ok(applied_cursor);
+            }
+
+            let replacement = RuntimeDeliveryAuthorityRecord::from_parts(
+                next_revision(observed.revision())?,
+                encode_authority(&authority)?,
+            );
+            match self
+                .store
+                .compare_and_swap_runtime_delivery_authority(
+                    runtime_id,
+                    Some(observed.revision()),
+                    replacement,
+                    None,
+                )
+                .await?
+            {
+                RuntimeDeliveryAuthorityCasOutcome::Applied(_) => return Ok(applied_cursor),
+                RuntimeDeliveryAuthorityCasOutcome::Conflict(_) => continue,
+            }
+        }
+        Err(RuntimeDeliveryError::Store(RuntimeStoreError::WriteFailed(
+            format!(
+                "runtime delivery cursor CAS did not converge after {MAX_CAS_ATTEMPTS} attempts"
+            ),
+        )))
+    }
+
+    /// Settle the delivery at the cursor as refused for `reason`: a terminal
+    /// policy outcome. The cursor passes it without applying it, so the rows
+    /// after it proceed; repeating the settlement observes it. Only the row
+    /// at the cursor can be refused, and never one whose effect already
+    /// reached its runtime out of band.
+    pub async fn mark_refused(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        delivery_id: &RuntimeDeliveryId,
+        sequence: u64,
+        reason: RuntimeDeliveryRefusalReason,
+    ) -> Result<u64, RuntimeDeliveryError> {
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            let observed = self
+                .store
+                .load_runtime_delivery_authority(runtime_id)
+                .await?
+                .ok_or_else(|| {
+                    RuntimeDeliveryError::Corrupt(format!(
+                        "runtime {runtime_id} has no delivery authority"
+                    ))
+                })?;
+            let mut authority = decode_authority(&observed)?;
+            let current = authority.state().applied_cursor;
+            let transition = dsl::RuntimeDeliveryMachineMutator::apply(
+                &mut authority,
+                dsl::RuntimeDeliveryInput::SettleRefusedDelivery {
+                    delivery_id: delivery_id.as_str().to_string(),
+                    delivery_sequence: sequence,
+                    reason: reason.into(),
+                },
+            )
+            .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
+            let refused = transition
+                .effects()
+                .iter()
+                .filter(|effect| {
+                    matches!(
+                        effect,
+                        dsl::RuntimeDeliveryEffect::DeliveryRefused {
+                            delivery_id: emitted_id,
+                            delivery_sequence: emitted_sequence,
+                            reason: emitted_reason,
+                        } if emitted_id == delivery_id.as_str()
+                            && *emitted_sequence == sequence
+                            && RuntimeDeliveryRefusalReason::from(*emitted_reason) == reason
+                    )
+                })
+                .count();
+            if refused != 1 {
+                return Err(RuntimeDeliveryError::Authority(format!(
+                    "generated refusal emitted {refused} matching settlements"
+                )));
+            }
             advance_acknowledged_prefix(&mut authority)?;
             let applied_cursor = authority.state().applied_cursor;
             if applied_cursor == current {
@@ -813,6 +1495,297 @@ impl RuntimeDeliveryInbox {
         )))
     }
 
+    /// The first binding of a continuation key, if any.
+    pub async fn continuation_key_binding(
+        &self,
+        owner: &str,
+        key: &str,
+    ) -> Result<Option<crate::store::ContinuationKeyBinding>, RuntimeDeliveryError> {
+        Ok(self.store.load_continuation_key_binding(owner, key).await?)
+    }
+
+    /// The admission recorded for one continuation delivery, if any.
+    pub async fn continuation_admission(
+        &self,
+        address: &LogicalRuntimeId,
+        delivery_id: &RuntimeDeliveryId,
+    ) -> Result<Option<crate::store::ContinuationAdmission>, RuntimeDeliveryError> {
+        Ok(self
+            .store
+            .load_continuation_admission(address, delivery_id.as_str())
+            .await?)
+    }
+
+    /// Mint the request to resume retained work from the committed delivery
+    /// `delivery_id` at `sequence`, which must be the unacknowledged row at
+    /// the head of `runtime_id`'s inbox (the row the delivery owner is
+    /// draining). The row is reread from the store: `identity_from_row`
+    /// extracts the retained work from the stored submission bytes, and the
+    /// request binds that exact committed submission. Nothing the caller
+    /// holds about the row is trusted.
+    pub async fn retained_resume_request(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        delivery_id: &RuntimeDeliveryId,
+        sequence: u64,
+        identity_from_row: impl FnOnce(
+            &RuntimeDeliverySubmission,
+        ) -> Result<
+            meerkat_core::retained_work::RetainedWorkIdentity,
+            String,
+        >,
+    ) -> Result<crate::retained_work::RetainedResumeRequest, RuntimeDeliveryError> {
+        let observed = self
+            .store
+            .load_runtime_delivery_authority(runtime_id)
+            .await?;
+        let authority = decode_or_new_authority(observed.as_ref())?;
+        let state = authority.state();
+        if state.delivery_sequences.get(delivery_id.as_str()) != Some(&sequence)
+            || sequence != state.applied_cursor.saturating_add(1)
+            || state.acknowledged_sequences.contains(&sequence)
+            || state.refused_deliveries.contains_key(delivery_id.as_str())
+        {
+            return Err(RuntimeDeliveryError::Authority(format!(
+                "delivery {delivery_id} is not the pending head of runtime {runtime_id}"
+            )));
+        }
+        let head = self
+            .list_pending(runtime_id, 1)
+            .await?
+            .into_iter()
+            .next()
+            .filter(|row| row.sequence == sequence && row.submission.delivery_id() == delivery_id)
+            .ok_or_else(|| {
+                RuntimeDeliveryError::Authority(format!(
+                    "delivery {delivery_id} is not the committed head row"
+                ))
+            })?;
+        let submission = &head.submission;
+        let identity = identity_from_row(submission).map_err(RuntimeDeliveryError::Corrupt)?;
+        let submission_digest = delivery_digest_hex(&[
+            b"retained-resume-delivery",
+            submission.delivery_id().as_str().as_bytes(),
+            submission.source_id().as_bytes(),
+            &submission.source_sequence().to_be_bytes(),
+            submission.payload(),
+        ]);
+        Ok(crate::retained_work::RetainedResumeRequest {
+            identity,
+            delivery: crate::retained_work::RetainedResumeDelivery {
+                address: runtime_id.clone(),
+                delivery_id: delivery_id.clone(),
+                delivery_sequence: sequence,
+                submission_digest,
+            },
+        })
+    }
+
+    /// Change the admission index entry of one continuation delivery; see
+    /// [`crate::store::ContinuationAdmissionTransition`].
+    pub async fn transition_continuation_admission(
+        &self,
+        address: &LogicalRuntimeId,
+        delivery_id: &RuntimeDeliveryId,
+        transition: crate::store::ContinuationAdmissionTransition,
+    ) -> Result<crate::store::ContinuationAdmissionOutcome, RuntimeDeliveryError> {
+        Ok(self
+            .store
+            .transition_continuation_admission(address, delivery_id.as_str(), transition)
+            .await?)
+    }
+
+    /// Commit a new delivery together with the first binding of its
+    /// continuation key, in one store transaction.
+    ///
+    /// When the key is already bound nothing is written and the existing
+    /// binding is returned. A new key never reuses a committed delivery id:
+    /// ids are derived from the first-bound address and the key, so a
+    /// committed row without its binding is corruption.
+    pub async fn submit_with_key_claim(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        submission: RuntimeDeliverySubmission,
+        claim: ContinuationKeyClaim,
+    ) -> Result<KeyedSubmitOutcome, RuntimeDeliveryError> {
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            if let Some(existing) = self
+                .store
+                .load_continuation_key_binding(&claim.owner, &claim.key)
+                .await?
+            {
+                return Ok(KeyedSubmitOutcome::AlreadyBound(existing));
+            }
+            let observed = self
+                .store
+                .load_runtime_delivery_authority(runtime_id)
+                .await?;
+            let mut authority = decode_or_new_authority(observed.as_ref())?;
+            let delivery_id = submission.delivery_id.clone();
+            let transition = dsl::RuntimeDeliveryMachineMutator::apply(
+                &mut authority,
+                dsl::RuntimeDeliveryInput::CommitDelivery {
+                    delivery_id: delivery_id.as_str().to_string(),
+                    source_sequence: submission.source_sequence,
+                },
+            )
+            .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
+            let (sequence, deduplicated) = classify_commit_effects(
+                transition.effects(),
+                &delivery_id,
+                submission.source_sequence,
+            )?;
+            if deduplicated {
+                return Err(RuntimeDeliveryError::Corrupt(format!(
+                    "continuation delivery {delivery_id} is committed without its key binding"
+                )));
+            }
+            let next_revision = observed
+                .as_ref()
+                .map_or(Ok(1), |record| next_revision(record.revision()))?;
+            let replacement = RuntimeDeliveryAuthorityRecord::from_parts(
+                next_revision,
+                encode_authority(&authority)?,
+            );
+            let inserted = RuntimeDeliveryStoreRecord::from_parts(
+                delivery_id.as_str(),
+                sequence,
+                encode_submission(&submission)?,
+            );
+            let binding = crate::store::ContinuationKeyBinding {
+                owner: claim.owner.clone(),
+                key: claim.key.clone(),
+                address: runtime_id.clone(),
+                delivery_id: delivery_id.as_str().to_string(),
+                submission_digest: claim.submission_digest.clone(),
+                committed_at_ms: claim.committed_at_ms,
+            };
+            match self
+                .store
+                .compare_and_swap_runtime_delivery_authority_with_key_binding(
+                    runtime_id,
+                    observed
+                        .as_ref()
+                        .map(RuntimeDeliveryAuthorityRecord::revision),
+                    replacement,
+                    inserted,
+                    binding.clone(),
+                )
+                .await?
+            {
+                crate::store::KeyedRuntimeDeliveryCasOutcome::Applied(_) => {
+                    self.record_committed_runtime(runtime_id);
+                    return Ok(KeyedSubmitOutcome::Committed {
+                        receipt: RuntimeDeliveryReceipt {
+                            delivery_id,
+                            sequence,
+                            deduplicated: false,
+                        },
+                        binding,
+                    });
+                }
+                crate::store::KeyedRuntimeDeliveryCasOutcome::KeyAlreadyBound(existing) => {
+                    return Ok(KeyedSubmitOutcome::AlreadyBound(existing));
+                }
+                crate::store::KeyedRuntimeDeliveryCasOutcome::Conflict(_) => continue,
+            }
+        }
+        Err(RuntimeDeliveryError::Store(RuntimeStoreError::WriteFailed(
+            format!(
+                "keyed runtime delivery CAS did not converge after {MAX_CAS_ATTEMPTS} attempts"
+            ),
+        )))
+    }
+
+    /// Classify one delivery id against this runtime's durable authority.
+    ///
+    /// A store read only: it never consults live state and never writes. A
+    /// store error is an error, never `NotCommitted`.
+    pub async fn delivery_status(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        delivery_id: &RuntimeDeliveryId,
+    ) -> Result<RuntimeDeliveryStatus, RuntimeDeliveryError> {
+        let observed = self
+            .store
+            .load_runtime_delivery_authority(runtime_id)
+            .await?;
+        let mut authority = decode_or_new_authority(observed.as_ref())?;
+        let transition = dsl::RuntimeDeliveryMachineMutator::apply(
+            &mut authority,
+            dsl::RuntimeDeliveryInput::ClassifyDeliveryStatus {
+                delivery_id: delivery_id.as_str().to_string(),
+            },
+        )
+        .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
+        let mut verdicts = transition
+            .effects()
+            .iter()
+            .filter_map(|effect| match effect {
+                dsl::RuntimeDeliveryEffect::DeliveryStatusNotCommitted { delivery_id: id }
+                    if id == delivery_id.as_str() =>
+                {
+                    Some(RuntimeDeliveryStatus::NotCommitted)
+                }
+                dsl::RuntimeDeliveryEffect::DeliveryStatusPending {
+                    delivery_id: id,
+                    delivery_sequence,
+                } if id == delivery_id.as_str() => Some(RuntimeDeliveryStatus::Pending {
+                    delivery_sequence: *delivery_sequence,
+                }),
+                dsl::RuntimeDeliveryEffect::DeliveryStatusAcknowledgedAhead {
+                    delivery_id: id,
+                    delivery_sequence,
+                } if id == delivery_id.as_str() => Some(RuntimeDeliveryStatus::AcknowledgedAhead {
+                    delivery_sequence: *delivery_sequence,
+                }),
+                dsl::RuntimeDeliveryEffect::DeliveryStatusApplied {
+                    delivery_id: id,
+                    delivery_sequence,
+                } if id == delivery_id.as_str() => Some(RuntimeDeliveryStatus::Applied {
+                    delivery_sequence: *delivery_sequence,
+                }),
+                dsl::RuntimeDeliveryEffect::DeliveryStatusMixed {
+                    delivery_id: id,
+                    delivery_sequence,
+                    bindings,
+                    outcomes,
+                } if id == delivery_id.as_str() => Some(RuntimeDeliveryStatus::Mixed {
+                    delivery_sequence: *delivery_sequence,
+                    // The canonical group invariants require an outcome for
+                    // every bound target. Project only this delivery's maps.
+                    recipients: bindings
+                        .iter()
+                        .map(|(recipient, target)| RuntimeDeliveryRecipientState {
+                            recipient: RuntimeDeliveryRecipient {
+                                id: recipient.clone(),
+                                target_binding: target.clone(),
+                            },
+                            outcome: outcomes.get(recipient).copied().map(Into::into),
+                        })
+                        .collect(),
+                }),
+                dsl::RuntimeDeliveryEffect::DeliveryStatusRefused {
+                    delivery_id: id,
+                    delivery_sequence,
+                    reason,
+                } if id == delivery_id.as_str() => Some(RuntimeDeliveryStatus::Refused {
+                    delivery_sequence: *delivery_sequence,
+                    reason: (*reason).into(),
+                }),
+                _ => None,
+            });
+        let verdict = verdicts.next().ok_or_else(|| {
+            RuntimeDeliveryError::Authority("generated classification emitted no verdict".into())
+        })?;
+        if verdicts.next().is_some() {
+            return Err(RuntimeDeliveryError::Authority(
+                "generated classification emitted more than one verdict".into(),
+            ));
+        }
+        Ok(verdict)
+    }
+
     /// Sequences of this runtime's pending rows that were acknowledged out of
     /// band and await the cursor. An applier marks such a row applied without
     /// re-running its sink.
@@ -916,11 +1889,16 @@ fn next_revision(current: u64) -> Result<u64, RuntimeDeliveryError> {
 fn encode_authority(
     authority: &dsl::RuntimeDeliveryMachineAuthority,
 ) -> Result<Vec<u8>, RuntimeDeliveryError> {
-    serde_json::to_vec(&AuthorityEnvelope {
-        version: AUTHORITY_ENVELOPE_VERSION,
-        state: PersistedAuthorityState::from(authority.state()),
-    })
-    .map_err(|error| RuntimeDeliveryError::Corrupt(error.to_string()))
+    let state = PersistedAuthorityState::from(authority.state());
+    let version = if state.recipients.is_some() {
+        RECIPIENT_AUTHORITY_ENVELOPE_VERSION
+    } else if state.refused_deliveries.is_empty() {
+        AUTHORITY_ENVELOPE_VERSION
+    } else {
+        REFUSAL_AUTHORITY_ENVELOPE_VERSION
+    };
+    serde_json::to_vec(&AuthorityEnvelope { version, state })
+        .map_err(|error| RuntimeDeliveryError::Corrupt(error.to_string()))
 }
 
 /// Committed-but-unapplied delivery count for one runtime's authority.
@@ -951,11 +1929,33 @@ fn decode_authority(
 ) -> Result<dsl::RuntimeDeliveryMachineAuthority, RuntimeDeliveryError> {
     let envelope: AuthorityEnvelope = serde_json::from_slice(record.state_json())
         .map_err(|error| RuntimeDeliveryError::Corrupt(error.to_string()))?;
-    if envelope.version != AUTHORITY_ENVELOPE_VERSION {
-        return Err(RuntimeDeliveryError::Corrupt(format!(
-            "unsupported runtime delivery authority envelope version {}",
-            envelope.version
-        )));
+    if envelope.version < RECIPIENT_AUTHORITY_ENVELOPE_VERSION
+        && envelope.state.recipients.is_some()
+    {
+        return Err(RuntimeDeliveryError::Corrupt(
+            "legacy runtime delivery authority carries recipient state".into(),
+        ));
+    }
+    if envelope.version == RECIPIENT_AUTHORITY_ENVELOPE_VERSION
+        && envelope.state.recipients.is_none()
+    {
+        return Err(RuntimeDeliveryError::Corrupt(
+            "runtime delivery authority version 3 is missing recipient state".into(),
+        ));
+    }
+    match envelope.version {
+        AUTHORITY_ENVELOPE_VERSION if envelope.state.refused_deliveries.is_empty() => {}
+        AUTHORITY_ENVELOPE_VERSION => {
+            return Err(RuntimeDeliveryError::Corrupt(
+                "runtime delivery authority envelope version 1 carries refused settlements".into(),
+            ));
+        }
+        REFUSAL_AUTHORITY_ENVELOPE_VERSION | RECIPIENT_AUTHORITY_ENVELOPE_VERSION => {}
+        version => {
+            return Err(RuntimeDeliveryError::Corrupt(format!(
+                "unsupported runtime delivery authority envelope version {version}"
+            )));
+        }
     }
     envelope.state.validate()?;
     dsl::RuntimeDeliveryMachineAuthority::recover_from_state(envelope.state.into())
@@ -1011,6 +2011,22 @@ fn classify_commit_effects(
     delivery_id: &RuntimeDeliveryId,
     source_sequence: u64,
 ) -> Result<(u64, bool), RuntimeDeliveryError> {
+    // The same delivery id was committed with another source sequence: the
+    // generated machine refuses it with a typed verdict and the existing row
+    // stands.
+    if effects.iter().any(|effect| {
+        matches!(
+            effect,
+            dsl::RuntimeDeliveryEffect::CommitRejectedSourceSequenceConflict {
+                delivery_id: emitted_id,
+                ..
+            } if emitted_id == delivery_id.as_str()
+        )
+    }) {
+        return Err(RuntimeDeliveryError::IdempotencyConflict(
+            delivery_id.clone(),
+        ));
+    }
     let mut matching = effects.iter().filter_map(|effect| match effect {
         dsl::RuntimeDeliveryEffect::DeliveryCommitted {
             delivery_id: emitted_id,

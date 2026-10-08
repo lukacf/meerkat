@@ -114,6 +114,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `drain_mode`: `Option<DrainMode>`
 - `next_staged_visibility_revision`: `u64`
 - `inherited_base_filter`: `ToolFilter`
+- `policy_base_filter`: `ToolFilter`
 - `active_filter`: `ToolFilter`
 - `staged_filter`: `ToolFilter`
 - `active_visibility_revision`: `u64`
@@ -197,6 +198,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_active_channel_by_session`: `Map<String, String>`
 - `live_channel_session_by_channel`: `Map<String, String>`
 - `live_channel_identity_by_channel`: `Map<String, SessionLlmIdentity>`
+- `live_member_turn_reasoning_by_channel`: `Map<String, LiveMemberTurnReasoning>`
 - `live_execution_runtime_id_by_channel`: `Map<String, AgentRuntimeId>`
 - `live_execution_fence_by_channel`: `Map<String, FenceToken>`
 - `live_execution_generation_by_channel`: `Map<String, Generation>`
@@ -277,6 +279,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_bridge_agent_identity_by_operation`: `Map<OperationId, AgentIdentity>`
 - `live_bridge_context_revision_by_operation`: `Map<OperationId, String>`
 - `live_bridge_request_digest_by_operation`: `Map<OperationId, String>`
+- `live_bridge_original_work_by_operation`: `Map<OperationId, String>`
 - `live_bridge_phase_by_operation`: `Map<OperationId, LiveBridgeOperationPhase>`
 - `live_bridge_effect_operation_by_authority`: `Map<String, OperationId>`
 - `live_bridge_effect_kind_by_authority`: `Map<String, LiveBridgeEffectKind>`
@@ -700,7 +703,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PublishSurfaceRequest`(request_key: String)
 - `PublishOrCancelSurfaceRequest`(request_key: String)
 - `FinishSurfaceRequestUnpublished`(request_key: String)
-- `ResolveLiveOpenAdmission`(session_id: String, channel_id: String, llm_identity: SessionLlmIdentity)
+- `ResolveLiveOpenAdmission`(session_id: String, channel_id: String, llm_identity: SessionLlmIdentity, member_turn_reasoning: Option<LiveMemberTurnReasoning>)
 - `BindLiveExecutionChannel`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
 - `StageExperimentalLiveExecution`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64, pending_receipt: String)
 - `AdvanceLiveExperimentalStagedSeed`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, previous_seed_cursor: u64, next_seed_cursor: u64)
@@ -739,7 +742,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
 - `ResolveLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveDelegationResultDeliveryObservation)
 - `BindLiveDelegationResultRecoveryChannel`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64)
-- `AdmitLiveBridgeOperation`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String, provider_delegation_ref: String, provider_call_ref: String, agent_identity: AgentIdentity, canonical_context_revision: String, request_digest: String, structural_lineage_proven: Bool)
+- `AdmitLiveBridgeOperation`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String, provider_delegation_ref: String, provider_call_ref: String, agent_identity: AgentIdentity, canonical_context_revision: String, request_digest: String, original_work: String, structural_lineage_proven: Bool)
 - `ConfirmLiveBridgeFinalInput`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String)
 - `AuthorizeLiveBridgeExecutionStart`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, request_digest: String)
 - `AuthorizeLiveBridgeEffect`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
@@ -804,7 +807,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CommitDeferredNames`(authorities: Map<ToolName, ToolVisibilityWitness>)
 - `SetTurnToolOverlay`(allow_active: Bool, allow_names: Set<ToolName>, deny_names: Set<ToolName>)
 - `ClearTurnToolOverlay`
-- `ReplaceVisibilityState`(capability_base_filter: ToolFilter, inherited_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_revision: u64, staged_revision: u64, active_deferred_names: Set<ToolName>, staged_deferred_names: Set<ToolName>, requested_witnesses: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>)
+- `ReplaceVisibilityState`(capability_base_filter: ToolFilter, inherited_base_filter: ToolFilter, policy_base_filter: ToolFilter, active_filter: ToolFilter, staged_filter: ToolFilter, active_revision: u64, staged_revision: u64, active_deferred_names: Set<ToolName>, staged_deferred_names: Set<ToolName>, requested_witnesses: Map<ToolName, ToolVisibilityWitness>, filter_witnesses: Map<ToolName, ToolVisibilityWitness>, active_deferred_authorities: Map<ToolName, ToolVisibilityWitness>, staged_deferred_authorities: Map<ToolName, ToolVisibilityWitness>)
 - `SurfaceRegister`(surface_id: String)
 - `SurfaceSetRemovalTimeout`(timeout_ms: u64)
 - `SurfaceStageAdd`(surface_id: String, now_ms: u64)
@@ -1026,7 +1029,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveDelegationAdmitted`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
 - `LiveInteractionDelegationAdmitted`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
 - `LiveDelegationTranscriptReconciled`(channel_id: String, interaction_id: String, operation_id: OperationId, reconciliation: LiveDelegationReconciliation, cancellation_required: Bool)
-- `LiveDelegationWorkerStartAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, worker_ownership: LiveDelegationWorkerOwnership)
+- `LiveDelegationWorkerStartAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, worker_ownership: LiveDelegationWorkerOwnership, member_turn_reasoning: Option<LiveMemberTurnReasoning>)
 - `LiveDelegationWorkerStartResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, started: Bool)
 - `LiveDelegationCancellationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, reason: LiveDelegationCancellationReason, superseding_interaction_id: Option<String>)
 - `LiveDelegationCancellationResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, outcome: LiveDelegationCancellationOutcome)
@@ -14510,7 +14513,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionUnregisteredIdle`
 - From: `Idle`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14520,7 +14523,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionAcceptedIdle`
 - From: `Idle`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14536,7 +14539,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionAcceptedAttached`
 - From: `Attached`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14552,7 +14555,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionAcceptedRunning`
 - From: `Running`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14568,7 +14571,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionSessionAlreadyBoundIdle`
 - From: `Idle`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14582,7 +14585,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionSessionAlreadyBoundAttached`
 - From: `Attached`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14596,7 +14599,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionSessionAlreadyBoundRunning`
 - From: `Running`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14610,7 +14613,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionChannelAlreadyBoundIdle`
 - From: `Idle`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14625,7 +14628,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionChannelAlreadyBoundAttached`
 - From: `Attached`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14640,7 +14643,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionChannelAlreadyBoundRunning`
 - From: `Running`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14655,7 +14658,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionRevokedChannelIdIdle`
 - From: `Idle`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14671,7 +14674,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionRevokedChannelIdAttached`
 - From: `Attached`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14687,7 +14690,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionRevokedChannelIdRunning`
 - From: `Running`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14703,7 +14706,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionDrainingIdle`
 - From: `Idle`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14715,7 +14718,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionDrainingAttached`
 - From: `Attached`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14727,7 +14730,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionDrainingRunning`
 - From: `Running`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14739,7 +14742,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionStopDeferredAttached`
 - From: `Attached`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14752,7 +14755,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionStopDeferredRunning`
 - From: `Running`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14765,7 +14768,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionRetiredRetired`
 - From: `Retired`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -14774,7 +14777,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveOpenAdmissionStoppedStopped`
 - From: `Stopped`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity, member_turn_reasoning)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
@@ -17046,7 +17049,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationFreshIdle`
 - From: `Idle`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `identities_present`
   - `active_channel_binding_matches`
@@ -17058,7 +17061,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationFreshAttached`
 - From: `Attached`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `identities_present`
   - `active_channel_binding_matches`
@@ -17070,7 +17073,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationFreshRunning`
 - From: `Running`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `identities_present`
   - `active_channel_binding_matches`
@@ -17082,7 +17085,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationExactReplayIdle`
 - From: `Idle`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `active_channel_binding_matches`
   - `exact_replay_matches_existing_operation`
@@ -17091,7 +17094,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationExactReplayAttached`
 - From: `Attached`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `active_channel_binding_matches`
   - `exact_replay_matches_existing_operation`
@@ -17100,7 +17103,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationExactReplayRunning`
 - From: `Running`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `active_channel_binding_matches`
   - `exact_replay_matches_existing_operation`
@@ -17109,7 +17112,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationProtocolDriftIdle`
 - From: `Idle`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `active_channel_binding_matches`
   - `different_call_while_delegation_is_occupied`
@@ -17118,7 +17121,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationProtocolDriftAttached`
 - From: `Attached`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `active_channel_binding_matches`
   - `different_call_while_delegation_is_occupied`
@@ -17127,7 +17130,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitLiveBridgeOperationProtocolDriftRunning`
 - From: `Running`
-- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, original_work, structural_lineage_proven)
 - Guards:
   - `active_channel_binding_matches`
   - `different_call_while_delegation_is_occupied`
@@ -21476,6 +21479,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Idle`
 
@@ -21486,6 +21490,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Attached`
 
@@ -21496,6 +21501,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Running`
 
@@ -21506,6 +21512,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Retired`
 
@@ -21516,6 +21523,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Stopped`
 
@@ -21871,7 +21879,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ReplaceVisibilityStateIdle`
 - From: `Idle`
-- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, policy_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -21887,7 +21895,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ReplaceVisibilityStateAttached`
 - From: `Attached`
-- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, policy_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -21903,7 +21911,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ReplaceVisibilityStateRunning`
 - From: `Running`
-- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, policy_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -21919,7 +21927,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ReplaceVisibilityStateRetired`
 - From: `Retired`
-- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, policy_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`
@@ -21935,7 +21943,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ReplaceVisibilityStateStopped`
 - From: `Stopped`
-- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
+- On: `ReplaceVisibilityState`(capability_base_filter, inherited_base_filter, policy_base_filter, active_filter, staged_filter, active_revision, staged_revision, active_deferred_names, staged_deferred_names, requested_witnesses, filter_witnesses, active_deferred_authorities, staged_deferred_authorities)
 - Guards:
   - `session_registered`
   - `visibility_state_replacement_matches_fields`

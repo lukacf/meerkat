@@ -3647,7 +3647,138 @@ pub fn render_auth_lease_durable_lifecycle_marker_contract(
     generate_auth_lease_durable_lifecycle_marker_contract(compositions)
 }
 
+/// Strict map reads in a protocol-authority guard (#1811) must be covered by
+/// the generator's definedness conjunct: a `MapContainsKey` on the same map
+/// and key in the same guard. The generated `*_value()?` accessor then never
+/// sees an absent key, so the authority refuses per arm exactly like TLA+
+/// and the `machine!` mutator. Fails generation, naming the transition and
+/// field, if any strict read is unguarded.
+fn ensure_strict_reads_guarded(machine: &MachineSchema) -> Result<()> {
+    for transition in &machine.transitions {
+        for guard in &transition.guards {
+            let mut reads = Vec::new();
+            let mut memberships = Vec::new();
+            collect_strict_reads(&guard.expr, &mut reads, &mut memberships);
+            for (map, key) in reads {
+                if !memberships.iter().any(|(m, k)| *m == map && *k == key) {
+                    bail!(
+                        "{} transition {} reads {:?} strictly without a membership guard on the same key",
+                        machine.machine,
+                        transition.name,
+                        map
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_strict_reads<'a>(
+    expr: &'a Expr,
+    reads: &mut Vec<(&'a Expr, &'a Expr)>,
+    memberships: &mut Vec<(&'a Expr, &'a Expr)>,
+) {
+    match expr {
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::U64Max
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
+        Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. }
+        | Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner) => collect_strict_reads(inner, reads, memberships),
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_strict_reads(item, reads, memberships);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_strict_reads(arg, reads, memberships);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_strict_reads(condition, reads, memberships);
+            collect_strict_reads(then_expr, reads, memberships);
+            collect_strict_reads(else_expr, reads, memberships);
+        }
+        Expr::Eq(l, r)
+        | Expr::Neq(l, r)
+        | Expr::Add(l, r)
+        | Expr::Sub(l, r)
+        | Expr::Gt(l, r)
+        | Expr::Gte(l, r)
+        | Expr::Lt(l, r)
+        | Expr::Lte(l, r)
+        | Expr::Contains {
+            collection: l,
+            value: r,
+        }
+        | Expr::SeqStartsWith { seq: l, prefix: r }
+        | Expr::Count {
+            collection: l,
+            value: r,
+        }
+        | Expr::MapGet { map: l, key: r } => {
+            collect_strict_reads(l, reads, memberships);
+            collect_strict_reads(r, reads, memberships);
+        }
+        Expr::MapContainsKey { map, key } => {
+            memberships.push((map, key));
+            collect_strict_reads(map, reads, memberships);
+            collect_strict_reads(key, reads, memberships);
+        }
+        Expr::MapLiteral(entries) => {
+            for (key, value) in entries {
+                collect_strict_reads(key, reads, memberships);
+                collect_strict_reads(value, reads, memberships);
+            }
+        }
+        Expr::MapValue { map, key } => {
+            reads.push((map, key));
+            collect_strict_reads(map, reads, memberships);
+            collect_strict_reads(key, reads, memberships);
+        }
+        Expr::Quantified { over, body, .. } => {
+            collect_strict_reads(over, reads, memberships);
+            collect_strict_reads(body, reads, memberships);
+        }
+    }
+}
+
+/// Named string enums owned by `ApprovalLifecycleMachine`, with the variant
+/// each generated Rust enum derives as `Default`. The review-attempt enums
+/// belong to the same single approval owner (ADR-001 model review).
+const APPROVAL_LIFECYCLE_NAMED_ENUMS: &[(&str, &str)] = &[
+    ("ApprovalLifecycleStatus", "Pending"),
+    ("ApprovalLifecycleDecision", "Approve"),
+    ("ApprovalLifecycleRejectionReason", "NotFound"),
+    ("ReviewAttemptStatus", "Pending"),
+    ("ReviewVerdict", "Allow"),
+    ("ReviewRetirementReason", "ContextChanged"),
+];
+
 fn generate_approval_lifecycle_authority(machine: &MachineSchema) -> Result<String> {
+    ensure_strict_reads_guarded(machine)?;
     validate_approval_lifecycle_schema(machine)?;
 
     let mut out = String::new();
@@ -3671,11 +3802,7 @@ fn generate_approval_lifecycle_authority(machine: &MachineSchema) -> Result<Stri
     )?;
     writeln!(&mut out)?;
 
-    for enum_name in [
-        "ApprovalLifecycleStatus",
-        "ApprovalLifecycleDecision",
-        "ApprovalLifecycleRejectionReason",
-    ] {
+    for (enum_name, _) in APPROVAL_LIFECYCLE_NAMED_ENUMS {
         emit_approval_named_string_enum(&mut out, machine, enum_name)?;
     }
     emit_approval_variant_enum(&mut out, "ApprovalLifecycleInput", &machine.inputs.variants)?;
@@ -3730,12 +3857,13 @@ fn approval_named_string_enum_variants(machine: &MachineSchema, name: &str) -> R
 }
 
 fn approval_default_variant<'a>(name: &str, variants: &'a [String]) -> Result<&'a str> {
-    let wanted = match name {
-        "ApprovalLifecycleStatus" => "Pending",
-        "ApprovalLifecycleDecision" => "Approve",
-        "ApprovalLifecycleRejectionReason" => "NotFound",
-        other => bail!("unknown ApprovalLifecycleMachine enum `{other}`"),
+    let Some((_, wanted)) = APPROVAL_LIFECYCLE_NAMED_ENUMS
+        .iter()
+        .find(|(enum_name, _)| *enum_name == name)
+    else {
+        bail!("unknown ApprovalLifecycleMachine enum `{name}`");
     };
+    let wanted = *wanted;
     if variants.iter().any(|variant| variant == wanted) {
         Ok(wanted)
     } else {
@@ -3780,6 +3908,7 @@ fn emit_approval_outcome_and_error(out: &mut String) -> Result<()> {
     writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
     writeln!(out, "pub enum ApprovalLifecycleOutcome {{")?;
     writeln!(out, "    Status(ApprovalLifecycleStatus),")?;
+    writeln!(out, "    ReviewStatus(ReviewAttemptStatus),")?;
     writeln!(out, "    Rejected(ApprovalLifecycleRejectionReason),")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -3931,6 +4060,8 @@ fn emit_approval_map_lookup_methods(out: &mut String, machine: &MachineSchema) -
         } else {
             "cloned"
         };
+        // Not every map field is read by a generated guard or emit.
+        writeln!(out, "    #[allow(dead_code)]")?;
         writeln!(out, "    fn {}_value(", field.name)?;
         writeln!(out, "        &self,")?;
         writeln!(out, "        approval_id: &str,")?;
@@ -4153,6 +4284,14 @@ fn render_approval_update(
             "self.state.{field}.insert({});",
             render_approval_owned_expr(value, binding_types, machine)?
         )),
+        Update::MapRemove { field, key } => Ok(format!(
+            "self.state.{field}.remove({});",
+            render_approval_borrowed_string_expr(key, binding_types)?
+        )),
+        Update::SetRemove { field, value } => Ok(format!(
+            "self.state.{field}.remove({});",
+            render_approval_borrowed_string_expr(value, binding_types)?
+        )),
         other => bail!("unsupported ApprovalLifecycleMachine update `{other:?}`"),
     }
 }
@@ -4208,11 +4347,12 @@ fn emit_approval_outcome_from_effects(out: &mut String, machine: &MachineSchema)
     for effect in &machine.effects.variants {
         let outcome = approval_outcome_for_effect(effect)?;
         let field = match outcome {
-            ApprovalEffectOutcome::Status => "status",
+            ApprovalEffectOutcome::Status | ApprovalEffectOutcome::ReviewStatus => "status",
             ApprovalEffectOutcome::Rejected => "reason",
         };
         let outcome_ctor = match outcome {
             ApprovalEffectOutcome::Status => "Status",
+            ApprovalEffectOutcome::ReviewStatus => "ReviewStatus",
             ApprovalEffectOutcome::Rejected => "Rejected",
         };
         writeln!(
@@ -4237,6 +4377,7 @@ fn emit_approval_outcome_from_effects(out: &mut String, machine: &MachineSchema)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApprovalEffectOutcome {
     Status,
+    ReviewStatus,
     Rejected,
 }
 
@@ -4245,6 +4386,12 @@ fn approval_outcome_for_effect(effect: &VariantSchema) -> Result<ApprovalEffectO
         matches!(&field.ty, TypeRef::Enum(enum_name) if enum_name.as_str() == "ApprovalLifecycleStatus")
     }) {
         return Ok(ApprovalEffectOutcome::Status);
+    }
+    if effect.fields.iter().any(|field| {
+        field.name.as_str() == "status"
+            && matches!(&field.ty, TypeRef::Enum(enum_name) if enum_name.as_str() == "ReviewAttemptStatus")
+    }) {
+        return Ok(ApprovalEffectOutcome::ReviewStatus);
     }
     if effect.fields.iter().any(|field| {
         matches!(&field.ty, TypeRef::Enum(enum_name) if enum_name.as_str() == "ApprovalLifecycleRejectionReason")
@@ -4444,6 +4591,18 @@ fn render_approval_expr(
             render_approval_collection_expr(map)?,
             render_approval_borrowed_string_expr(key, binding_types)?
         )),
+        // Strict read (#1811): the same fail-closed accessor as the
+        // optional-projection form; an absent key refuses the input.
+        Expr::MapValue { map, key } => {
+            let Expr::Field(field) = map.as_ref() else {
+                bail!("ApprovalLifecycleMachine MapValue must read a state field: {map:?}");
+            };
+            Ok(format!(
+                "self.{}_value({})?",
+                field,
+                render_approval_borrowed_string_expr(key, binding_types)?
+            ))
+        }
         Expr::MapGet { map, key } => {
             if let Some(rendered) = render_approval_optional_map_value_get(map, key, binding_types)?
             {
@@ -4619,6 +4778,9 @@ fn approval_type_is_copy(type_name: &str) -> bool {
             | "ApprovalLifecycleStatus"
             | "ApprovalLifecycleDecision"
             | "ApprovalLifecycleRejectionReason"
+            | "ReviewAttemptStatus"
+            | "ReviewVerdict"
+            | "ReviewRetirementReason"
     )
 }
 
@@ -4647,17 +4809,32 @@ fn validate_approval_lifecycle_schema(machine: &MachineSchema) -> Result<()> {
             .variant_named(required)
             .with_context(|| format!("ApprovalLifecycleMachine missing input `{required}`"))?;
     }
-    for required in ["ApprovalStatusResolved", "ApprovalLifecycleRejected"] {
+    for required in [
+        "BeginReview",
+        "RecordReviewVerdict",
+        "RecordReviewUnavailable",
+        "RetireReview",
+        "ConsumeReviewForEntry",
+        "ReleaseReview",
+    ] {
+        machine
+            .inputs
+            .variant_named(required)
+            .with_context(|| format!("ApprovalLifecycleMachine missing input `{required}`"))?;
+    }
+    for required in [
+        "ApprovalStatusResolved",
+        "ApprovalLifecycleRejected",
+        "ReviewStatusResolved",
+        "ReviewLifecycleRejected",
+    ] {
         machine
             .effects
             .variant_named(required)
             .with_context(|| format!("ApprovalLifecycleMachine missing effect `{required}`"))?;
     }
-    for required in [
-        "ApprovalLifecycleStatus",
-        "ApprovalLifecycleDecision",
-        "ApprovalLifecycleRejectionReason",
-    ] {
+    for (required, _) in APPROVAL_LIFECYCLE_NAMED_ENUMS {
+        let required = *required;
         let binding = machine
             .named_types
             .iter()
@@ -4696,6 +4873,7 @@ pub fn render_session_document_authority(machine: &MachineSchema) -> Result<Stri
 }
 
 fn generate_session_document_authority(machine: &MachineSchema) -> Result<String> {
+    ensure_strict_reads_guarded(machine)?;
     validate_session_document_authority_schema(machine)?;
 
     let mut out = String::new();
@@ -5567,6 +5745,18 @@ fn render_session_document_expr(
             render_session_document_collection_expr(map)?,
             render_session_document_borrowed_key_expr(key, binding_types)?
         )),
+        // Strict read (#1811): the same fail-closed accessor as the
+        // optional-projection form; an absent key refuses the input.
+        Expr::MapValue { map, key } => {
+            let Expr::Field(field) = map.as_ref() else {
+                bail!("SessionDocumentMachine MapValue must read a state field: {map:?}");
+            };
+            Ok(format!(
+                "self.{}_value({})?",
+                field,
+                render_session_document_borrowed_key_expr(key, binding_types)?
+            ))
+        }
         Expr::MapGet { map, key } => {
             if let Some(rendered) =
                 render_session_document_optional_map_value_get(map, key, binding_types)?
@@ -8609,6 +8799,51 @@ mod write_tests {
                 "an unchanged sibling of a changed artifact was rewritten"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod strict_read_guard_tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::ensure_strict_reads_guarded;
+    use meerkat_machine_schema::Expr;
+    use meerkat_machine_schema::catalog::dsl;
+
+    #[test]
+    fn protocol_authority_machines_guard_every_strict_read() {
+        ensure_strict_reads_guarded(&dsl::dsl_session_document_machine_production_schema())
+            .expect("session document strict reads are guarded");
+        ensure_strict_reads_guarded(&dsl::dsl_approval_lifecycle_machine_production_schema())
+            .expect("approval lifecycle strict reads are guarded");
+    }
+
+    /// Dropping the generator's definedness conjunct from one guard leaves a
+    /// strict read the `*_value()?` accessor could reach with an absent key;
+    /// generation must refuse it.
+    #[test]
+    fn a_strict_read_without_its_membership_guard_fails_generation() {
+        let mut machine = dsl::dsl_session_document_machine_production_schema();
+        let guard = machine
+            .transitions
+            .iter_mut()
+            .find(|t| t.name.as_str() == "ResolveRuntimeCheckpointProjectionActive")
+            .expect("transition")
+            .guards
+            .iter_mut()
+            .find(|g| matches!(&g.expr, Expr::And(items) if items.len() == 2))
+            .expect("guard with a definedness conjunct");
+        let Expr::And(items) = &guard.expr else {
+            panic!("checked above");
+        };
+        guard.expr = items[1].clone();
+        let error = ensure_strict_reads_guarded(&machine).expect_err("unguarded strict read");
+        assert!(
+            error
+                .to_string()
+                .contains("ResolveRuntimeCheckpointProjectionActive"),
+            "{error}"
+        );
     }
 }
 

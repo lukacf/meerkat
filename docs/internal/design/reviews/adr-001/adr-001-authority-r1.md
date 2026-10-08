@@ -2,7 +2,7 @@
 
 Verdict: RED.
 
-Target: `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md`, 444-line draft reviewed against Meerkat commit `54d14e91bd426fcaaafc156227b0b5ab0e23d9a6`.
+Target: `(operator-retained path)/docs/internal/design/adr-001-runtime-security.md`, 444-line draft reviewed against Meerkat commit `54d14e91bd426fcaaafc156227b0b5ab0e23d9a6`.
 
 This is a static architectural review. No builds, tests, fault injections, or exploit demonstrations were run. The ADR is explicitly a proposal; findings below concern its normative contract and the implementation assumptions used to justify that contract. They are not claims that the proposed security feature already exists. Source paths below are relative to the Meerkat checkout above.
 

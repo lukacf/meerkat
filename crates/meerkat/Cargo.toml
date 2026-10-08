@@ -52,6 +52,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meerkat-sandbox = { workspace = true }
 tokio = { workspace = true }
 meerkat-sqlite = { workspace = true }
 meerkat-providers = { workspace = true, default-features = false, features = [
@@ -249,9 +250,10 @@ test-realtime-fixtures = [
     "meerkat-openai/test-realtime-fixtures",
     "meerkat-live/test-support",
 ]
-# OAuth-protected MCP fixture server for the MCP OAuth canaries
-# (`meerkat::test_fixtures::mcp_oauth`). Test-support only.
-test-mcp-oauth-fixtures = []
+# MCP fixture server and per-factory router observer for deterministic canaries
+# (`meerkat::test_fixtures::mcp_oauth`). Test-support only. Weak forwarding keeps
+# this fixture feature from independently activating the optional MCP client.
+test-mcp-oauth-fixtures = ["meerkat-mcp?/test-support"]
 
 [package.metadata.cargo-machete]
 ignored = ["which"]  # dev-dependency used in e2e tests

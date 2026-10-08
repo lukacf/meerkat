@@ -542,6 +542,76 @@ pub fn preflight_schema_eligibility(
     Ok(())
 }
 
+/// Check an already installed current schema without waiting for or building
+/// the expected-catalog cache. Ordinary store open prepares that immutable
+/// catalog. This administrative path never migrates or adopts older records.
+pub fn try_preflight_current_schema(
+    conn: &Connection,
+    domain: &SchemaDomain,
+) -> Result<(), SqliteStoreError> {
+    domain.validate()?;
+    let supported = domain.supported_version();
+    match domain_version(conn, domain.name)? {
+        Some(found) if found > supported => {
+            return Err(SqliteStoreError::SchemaFromTheFuture {
+                domain: domain.name.to_string(),
+                found,
+                supported,
+            });
+        }
+        Some(found) if found == supported => {}
+        _ => {
+            return Err(SqliteStoreError::OpenRefused {
+                path: std::path::PathBuf::from(conn.path().unwrap_or(":memory:")),
+                profile: "online-existing-writer",
+                detail: "administration requires the installed current schema".to_string(),
+            });
+        }
+    }
+    let unavailable = || {
+        SqliteStoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "current schema catalog is not ready without waiting",
+        ))
+    };
+    let cache = EXPECTED_CURRENT_CATALOGS.get().ok_or_else(unavailable)?;
+    let expected = cache
+        .try_lock()
+        .map_err(|_| unavailable())?
+        .get(&current_catalog_cache_key(domain))
+        .cloned()
+        .ok_or_else(unavailable)?
+        .map_err(|detail| SqliteStoreError::SchemaFingerprintMismatch {
+            domain: domain.name.to_string(),
+            version: supported,
+            detail,
+        })?;
+    let actual = compact_catalog_fingerprint(conn, domain, domain.owned_objects);
+    if actual.as_ref().is_ok_and(|actual| actual == &expected) {
+        return Ok(());
+    }
+    let detail = actual.map_or_else(
+        |error| error,
+        |actual| format!("current owned catalog differs: expected {expected}, found {actual}"),
+    );
+    // Preserve the canonical typed mismatch and its object-level diagnostics.
+    // As in ordinary open, the private in-memory oracle runs only on refusal.
+    Err(match current_catalog_diff(conn, domain) {
+        Ok(diff) if !diff.is_empty() => SqliteStoreError::CurrentSchemaMismatch {
+            domain: domain.name.to_string(),
+            version: supported,
+            missing_objects: diff.missing,
+            unexpected_objects: diff.unexpected,
+            changed_objects: diff.changed,
+        },
+        _ => SqliteStoreError::SchemaFingerprintMismatch {
+            domain: domain.name.to_string(),
+            version: supported,
+            detail,
+        },
+    })
+}
+
 /// Bring `domain` up to date in the file behind `conn`, per the pinned
 /// protocol. Returns the version movement.
 ///

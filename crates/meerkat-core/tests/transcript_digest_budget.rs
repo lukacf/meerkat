@@ -185,6 +185,7 @@ fn synthetic_notice_refresh_branch_digest_budget_is_constant() {
                 phase: None,
                 persisted: false,
                 detail: None,
+                confinement_refusal: None,
                 pending_sources: Vec::new(),
             },
         ))

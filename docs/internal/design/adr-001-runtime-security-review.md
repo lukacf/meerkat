@@ -80,8 +80,8 @@ coherence and further project review. No mandatory text repairs remained.
 
 ## Project-owner review via agent bus
 
-Requested reviewers: GCP Meerkat/MobKit lead (`claude-gcp-lead`), Homecore
-developer (`homecore`), OB3 developer (`ob3`), and Meerkat Toolkit developer
+Requested reviewers: GCP Meerkat/MobKit lead (`claude-gcp-lead`), downstream-app
+developer (`downstream-app`), operator-deployment developer (`ops`), and Meerkat Toolkit developer
 (`toolkit-codex-local`). Each reviewer received the complete frozen r2 candidate via the GCS-backed
 agent bus on 2026-09-30, from `codex-security-adr-mac`. All four sends succeeded.
 The requests specified the exact hash, asked for counterexamples and minimum
@@ -90,8 +90,8 @@ repairs, and did not disclose the subagent verdicts.
 | Reviewer | Role | Status |
 | --- | --- | --- |
 | `claude-gcp-lead` | GCP Meerkat/MobKit lead | [RED on r2](reviews/adr-001/gcp-lead-r2.md); F1-F9 resolved in the dispositions below. |
-| `homecore` | Homecore developer | [RED on r2](reviews/adr-001/homecore-r2.md); F1-F10 dispositioned below. F5 closed as an accepted limitation: anonymous, physical and dynamic profiles remain unavailable. |
-| `ob3` | OB3 developer | [RED on r2](reviews/adr-001/ob3-r2.md); F1-F7 resolved in the dispositions below. |
+| `downstream-app` | Downstream-app developer | [RED on r2](reviews/adr-001/downstream-app-r2.md); F1-F10 dispositioned below. F5 closed as an accepted limitation: anonymous, physical and dynamic profiles remain unavailable. |
+| `ops` | Operator-deployment developer | [RED on r2](reviews/adr-001/ops-r2.md); F1-F7 resolved in the dispositions below. |
 | `toolkit-codex-local` | Meerkat Toolkit developer | [GREEN on r2](reviews/adr-001/toolkit-r2.md), with implementation acceptance requirements. |
 
 Responses, findings and revisions are recorded here rather than inferred from
@@ -116,7 +116,7 @@ pre-release custody and that admission-time store health does not prevent a
 post-effect append failure. Its follow-up retained the request for a named
 evidence-pending state in the existing generated owner. The later exact-candidate verdicts below record acceptance of these repairs.
 
-### OB3 findings and draft r3 dispositions
+### Operator-deployment findings and draft r3 dispositions
 
 | Finding | Disposition |
 | --- | --- |
@@ -133,12 +133,12 @@ incarnation fencing, receipt group commit, performance budgets and the existing
 generator/WASM compatibility requirements. Independent Elephant fixes remain
 identified follow-up work; this documentation task does not apply them.
 
-### Homecore findings and draft r3 dispositions
+### Downstream-app findings and draft r3 dispositions
 
 | Finding | Disposition |
 | --- | --- |
 | F1: private input contaminates shared contexts | Accept audience-bound admission before hydration/transcript inclusion and pre-inference partitioning. Reject the inference that splitting one mixed model response creates disjoint dependencies. Logical agents may keep stable identity across context generations. |
-| F2: historical household data cannot migrate | Add explicit, revocable adoption of an immutable legacy bundle by an authority entitled to authorize its use/release. The grant explicitly covers unknown internal dependencies without inventing identities, dropping known restrictions or claiming recovered historical audit. |
+| F2: historical deployment data cannot migrate | Add explicit, revocable adoption of an immutable legacy bundle by an authority entitled to authorize its use/release. The grant explicitly covers unknown internal dependencies without inventing identities, dropping known restrictions or claiming recovered historical audit. |
 | F3: snapshots restore revoked authority | Accept. Activation must consult surviving rollback-resistant authority; copied epochs/credentials are insufficient. Clones are quarantined until new incarnation and processing authority are established. |
 | F4: model-assisted classification is not expressible | Add a bounded classifier-service mandate. Any outcome broader than restrictive ingestion is an explicit preauthorized release/trust assumption; an allowed label alone does not prove correct classification or injection resistance. |
 | F5: anonymous speakers and physical/external audiences | Add assurance and audience vocabulary, separating authenticated device from unidentified human. These profiles remain unsupported initially; device identity cannot invent human identity. |
@@ -166,13 +166,13 @@ check both closure and regressions; no r2 verdict is treated as approval of r3.
 | Reviewer | r3 result |
 | --- | --- |
 | GCP Meerkat/MobKit lead | [GREEN on r3](reviews/adr-001/gcp-lead-r3.md); four requested clarifications to apply before acceptance. |
-| Homecore | [GREEN on r3](reviews/adr-001/homecore-r3.md); four nonblocking profile clarifications under reconciliation. |
-| OB3 | [GREEN on r3](reviews/adr-001/ob3-r3.md); two nonblocking precision edits incorporated into r4. |
+| The downstream app | [GREEN on r3](reviews/adr-001/downstream-app-r3.md); four nonblocking profile clarifications under reconciliation. |
+| The operator deployment | [GREEN on r3](reviews/adr-001/ops-r3.md); two nonblocking precision edits incorporated into r4. |
 | Meerkat Toolkit | [GREEN on r3](reviews/adr-001/toolkit-r3.md); no new findings. |
 
 ### Final profile clarifications after r3
 
-Homecore cleared the original blockers and raised four nonblocking precision
+The downstream app cleared the original blockers and raised four nonblocking precision
 items. The next revision addresses them without weakening runtime invariants:
 
 - Individually controlled external accounts have an explicit stable-principal
@@ -193,7 +193,7 @@ companion, required same-domain entry fences, made numeric budget declaration a
 pre-implementation gate, clarified classification-pending admission, and stated
 the initial no-live-voice consequence. Both [authority](reviews/adr-001/adr-001-authority-r4.md)
 and [information](reviews/adr-001/adr-001-information-r4.md) delta reviews were
-GREEN. The next exact-version review covers the Homecore clarifications above.
+GREEN. The next exact-version review covers the downstream app clarifications above.
 
 ### Exact r5 pair review
 
@@ -211,8 +211,8 @@ cleared the same substantive text before the mechanical scope-column addition.
 | Reviewer | r5 exact-pair verdict |
 | --- | --- |
 | GCP Meerkat/MobKit lead | [GREEN on both r5 hashes](reviews/adr-001/gcp-lead-r5.md). |
-| Homecore | [GREEN on both r5 hashes](reviews/adr-001/homecore-r5.md); domain definition and Core test specificity carried into the final delta. |
-| OB3 | [GREEN on both r5 hashes](reviews/adr-001/ob3-r5.md). |
+| The downstream app | [GREEN on both r5 hashes](reviews/adr-001/downstream-app-r5.md); domain definition and Core test specificity carried into the final delta. |
+| The operator deployment | [GREEN on both r5 hashes](reviews/adr-001/ops-r5.md). |
 | Meerkat Toolkit | Asked to combine the r5 review and final r6 delta into one final verdict. |
 
 ## Final r6 candidate and delta review
@@ -225,9 +225,9 @@ this [manifest](reviews/adr-001/candidate-r6-manifest.json). The complete
 four bus reviewers with the final hashes. No earlier verdict is silently
 carried forward to different bytes.
 
-The final delta resolves Homecore N5 and D1 from its [r4 review](reviews/adr-001/homecore-r4.md)
+The final delta resolves downstream-app N5 and D1 from its [r4 review](reviews/adr-001/downstream-app-r4.md)
 and subsequent clarification, the GCP lead's domain clarification,
-and OB3's profile-applicability precision. Domains are determined for each
+and the operator deployment's profile-applicability precision. Domains are determined for each
 canonical authority and its state. A handle exposing Meerkat-owned grant state
 must use its owner-side fence, while Elephant can retain independent resource
 policy and entry authority when it consumes that grant. Reachable governed
@@ -243,8 +243,8 @@ closure against the final bytes; both the finding and closure are preserved.
 | Reviewer | Final r6 verdict |
 | --- | --- |
 | GCP Meerkat/MobKit lead | [GREEN on both final hashes](reviews/adr-001/gcp-lead-r6.md); no remaining findings. |
-| Homecore | [GREEN on both final hashes](reviews/adr-001/homecore-r6.md); no remaining material findings. |
-| OB3 | [GREEN on both final hashes](reviews/adr-001/ob3-r6.md); no remaining material findings. |
+| The downstream app | [GREEN on both final hashes](reviews/adr-001/downstream-app-r6.md); no remaining material findings. |
+| The operator deployment | [GREEN on both final hashes](reviews/adr-001/ops-r6.md); no remaining material findings. |
 | Meerkat Toolkit | [GREEN_DESIGN_ONLY on both final hashes](reviews/adr-001/toolkit-r6.md); no remaining material architectural findings in its reviewed scope. |
 
 Toolkit also supplied an [independent review through r5](reviews/adr-001/toolkit-independent-r5.md).

@@ -7872,6 +7872,7 @@ impl MobBuilder {
                     supervisor_bridge.clone(),
                     notify_orchestrator_on_resume,
                     default_llm_client.clone(),
+                    tool_consequence_policy_registry.as_ref(),
                     &tool_bundles,
                     wiring.dsl_authority.as_mut(),
                     &seeded_topology_epoch,
@@ -8590,6 +8591,7 @@ impl MobBuilder {
         supervisor_bridge: Arc<MobSupervisorBridge>,
         notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
+        tool_consequence_policy_registry: Option<&Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         dsl_authority: &mut crate::machines::mob_machine::MobMachineAuthority,
         topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
@@ -9101,6 +9103,7 @@ impl MobBuilder {
                             agent_identity: &entry.agent_identity,
                             profile,
                             definition,
+                            realm_profile_store: realm_profile_store.as_ref(),
                             external_tools: compose_external_tools_for_profile(
                                 profile,
                                 tool_bundles,
@@ -9142,6 +9145,16 @@ impl MobBuilder {
                 if let Some(ref auth_binding) = restore_spec.auth_binding {
                     resumed_config.auth_binding = Some(auth_binding.clone());
                 }
+                // The restore spec's policy choice (the host customizer's, for
+                // an ordinary member) wins over the durable binding; no choice
+                // keeps it. The current registry realizes either: a durable
+                // Provider binding cannot carry the process-local registry.
+                build::apply_application_tool_policy_choice(
+                    &mut resumed_config,
+                    restore_spec.application_tool_policy.clone(),
+                );
+                resumed_config.tool_consequence_policy_registry =
+                    tool_consequence_policy_registry.cloned();
                 if let Some(reconcile_client) = default_llm_client.clone() {
                     resumed_config.llm_client_override = Some(reconcile_client);
                 }
@@ -9345,6 +9358,7 @@ impl MobBuilder {
                 agent_identity: &entry.agent_identity,
                 profile: &profile,
                 definition,
+                realm_profile_store: realm_profile_store.as_ref(),
                 external_tools: compose_external_tools_for_profile(
                     &profile,
                     tool_bundles,
@@ -9373,6 +9387,11 @@ impl MobBuilder {
             if let Some(ref auth_binding) = restore_spec.auth_binding {
                 config.auth_binding = Some(auth_binding.clone());
             }
+            build::apply_application_tool_policy_choice(
+                &mut config,
+                restore_spec.application_tool_policy.clone(),
+            );
+            config.tool_consequence_policy_registry = tool_consequence_policy_registry.cloned();
             // An explicitly supplied host client remains a mechanical test or
             // embedding override. Otherwise restoration re-enters the
             // canonical factory/provider path; it must never install a
@@ -10708,12 +10727,12 @@ mod tests {
 
     #[test]
     fn persisted_member_selector_ranks_current_role_before_declared_predecessor() {
-        let mob_id = MobId::from("homecore");
-        let current_role = ProfileName::from("home-automation");
+        let mob_id = MobId::from("example");
+        let current_role = ProfileName::from("automation");
         let predecessor_role = ProfileName::from("domain");
-        let member = AgentIdentity::from("mk--rt_cdomain_chome-automation_c0");
-        let current_comms = "homecore/home-automation/mk--rt_cdomain_chome-automation_c0";
-        let predecessor_comms = "homecore/domain/mk--rt_cdomain_chome-automation_c0";
+        let member = AgentIdentity::from("mk--rt_cdomain_cautomation_c0");
+        let current_comms = "example/automation/mk--rt_cdomain_cautomation_c0";
+        let predecessor_comms = "example/domain/mk--rt_cdomain_cautomation_c0";
         let current =
             member_session_metadata(mob_id.as_str(), current_role.as_str(), member.as_str());
         let predecessor =

@@ -1,9 +1,9 @@
 # Meerkat Toolkit: final r6 review
 
-Source: agent bus message `20260930T202520.951568-toolkit-codex-local-a25fd9.json`.
-From: `toolkit-codex-local` on `Lukas-BigMac` at `2026-09-30T20:25:20+00:00`.
+Source: agent bus message `20260930T202520.951568-connector-codex-local-a25fd9.json`.
+From: `connector-codex-local` on `operator-host` at `2026-09-30T20:25:20+00:00`.
 
-The message below is preserved verbatim.
+The message below is preserved verbatim, except that downstream names and private details are neutralised.
 
 Toolkit final ADR-001 r6 bundle review: GREEN on both exact hashes.
 
@@ -24,5 +24,5 @@ Previously reviewed Toolkit obligations remain intact: independent setup-waiter 
 
 This is an architecture review, not evidence of implementation, performance, destination conformance, profile enablement or release readiness. No source changes, builds or tests were performed for this review. It selects no caller-context API and authorizes no ABAC implementation. Luka retains the architecture decision, with Meerkat/MobKit upstream acceptance owned by the lead below Luka.
 
-Evidence: /Users/luka/src/meerkat-toolkit/docs/coordination/20260930-upstream-review/adr-001-r6-toolkit-review/root-review.md
-Independent review through r5: /Users/luka/src/meerkat-toolkit/docs/coordination/20260930-upstream-review/adr-001-r5-toolkit-review/independent-delta-review.md
+Evidence: (operator-retained path)
+Independent review through r5: (operator-retained path)

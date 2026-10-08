@@ -1733,7 +1733,7 @@ impl MobCommand {
     }
 
     /// Who is waiting on this command, for a Shutdown that keeps answering
-    /// while it joins actor-owned work (OB3). A caller request is refused
+    /// while it joins actor-owned work. A caller request is refused
     /// typed; an actor completion carries the result of work the actor owns
     /// and is retained for the actor to process, never refused. Exhaustive,
     /// so a new command has to be classified.

@@ -30,6 +30,7 @@ pub fn create_flow_step_input(
     Input::FlowStep(FlowStepInput {
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -78,6 +79,7 @@ pub fn create_tracked_flow_step_input(
     Ok(Input::FlowStep(FlowStepInput {
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::from_uuid(stable_uuid),
             timestamp: chrono::Utc::now(),

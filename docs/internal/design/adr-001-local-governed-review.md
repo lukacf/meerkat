@@ -26,17 +26,17 @@ Mechanical tool/source/account access, peering, qualified work identity, narrowi
 grants, current local checks, normal model feedback and full coverage remain.
 Optional gates use mandatory permission topology with honest model judgment.
 Audit describes observed access/actions and actual durability, not complete
-semantic provenance. HomeCore supplied a code-based account of its current
+semantic provenance. The downstream app supplied a code-based account of its current
 instruction-only gate and partial callback enforcement; it is not cited as an
 already mechanically enforced reference implementation.
 
-R7 received design acceptance from HomeCore, OB3 and Toolkit. GCP accepted with
+R7 received design acceptance from the downstream app, the operator deployment and Toolkit. GCP accepted with
 two conditions: declare the complete egress inventory for mandatory gates and
 close affected open subscriptions on owner invalidation. R8 adds both, explicit
 actor/requester/represented-subject/account/delegation separation, all delegation
 forms, exact-action expiring single-use human approval and scoped connector
 routing mandates. Two independent internal reviewers accepted the exact r8
-candidate and bounded additions. GCP, HomeCore, OB3 and Toolkit each accepted
+candidate and bounded additions. GCP, the downstream app, the operator deployment and Toolkit each accepted
 the exact frozen r8 candidate and patch. Implementation acceptance remains open. The user has
 no pending terminality or semantic-provenance question.
 
@@ -44,15 +44,15 @@ no pending terminality or semantic-provenance question.
 
 The [process confinement and human consent addendum](adr-001-confinement-and-consent.md)
 is a proposed implementation contract following the user-authorized side-chat
-handoff. GCP, HomeCore and OB3 accepted r2; GCP relayed Toolkit's design
+handoff. GCP, the downstream app and the operator deployment accepted r2; GCP relayed Toolkit's design
 acceptance with five implementation conditions. R3 incorporates those conditions
 and has two independent internal GREEN reviews. GCP accepted and froze r3;
-HomeCore accepted it and OB3 reported no objection. Toolkit's direct response to
+the downstream app accepted it and the operator deployment reported no objection. Toolkit's direct response to
 the final wording is pending. It does not change the accepted r8 semantic disclosure
 limit or make design acceptance apply to new implementation.
 R3 candidate: `ed2ae4e13b6bfae2a7b680d0f8b320cca5b09e3406710a5e08d17c83bac4fc50`.
 Frozen candidates, patches and reviews are under
-`/Users/luka/.codex/adr-001-evidence/confinement-consent-addendum-r{1,2,3}`.
+`(operator-retained path)`.
 Critical behavior now follows the user's explicit TDD direction: add failing
 regressions first, execute focused checks in a serialized build window, and
 reserve broader suites for coherent integration checkpoints.
@@ -61,15 +61,15 @@ reserve broader suites for coherent integration checkpoints.
 | --- | --- | --- |
 | r1 | `bbf338e21790cf4f300aabfe44954662ad32706ecb5f77fe43397d11ecd44527` | Internal adversarial findings repaired in r2. |
 | r2 | `589ede7935310f466492da380b2f666ba42ee4071fa5b9551999835047b26c9d` | Three internal reviewers GREEN. Four bus reviewers returned the findings below. |
-| r3 | `c765254055ed49bc83c0a4db6b9faf245d3b74fd89e684a72457fe5f55403b18` | Three internal reviewers GREEN. OB3 and Homecore closed their findings; GCP closed F2-F8 but required the premature scheduler choice to become pending and the planned filtering/lease clauses to appear in the text. |
+| r3 | `c765254055ed49bc83c0a4db6b9faf245d3b74fd89e684a72457fe5f55403b18` | Three internal reviewers GREEN. The operator deployment and the downstream app closed their findings; GCP closed F2-F8 but required the premature scheduler choice to become pending and the planned filtering/lease clauses to appear in the text. |
 | r4 | `ff5fc7bc7f87ee3ee715b72dde5efee0fbb5b1e43c4e9d8f3a2c5cc70f7fe31c` | Independent information/runtime delta reviews GREEN. All four bus reviewers accepted the common contract and closed their findings. The irreducible-request question was pending at that checkpoint and was resolved by Luka in r5. |
 | r5 | `c923089fe65c2eb1af90f04151b2aa83c47a08e036bcf9a2190a52625efa30e8` | Applies Luka's direct clarification: refused actions return normal model feedback. Review found an undefined last-controller-route case, resolved in r6; no terminal request or parked-run mechanism was selected. |
 | r6 | `5190b3dc8c4393ae38a83e94df7ef5f0836643ea7786e487cf75354705d737d6` | All four bus reviewers accepted the exact design. The later direct semantic-provenance correction supersedes its conflicting requirements. |
 | r7 | `c1a69f24c0cc7102953199db9f34b87cdc2af20b8179c125529ae4dc78075fdf` | Three bus reviewers accepted; GCP required closed egress inventory and open-subscription invalidation. Both are incorporated in r8. |
-| r8 | `5ba0c71ab4de8950bf2e596b4f3d6f87babbc31d2522b79a5da7a6810dd0bd8b` | Two internal reviewers GREEN. GCP, HomeCore, OB3 and Toolkit ACCEPT the exact bounded design delta; implementation and performance remain open. |
+| r8 | `5ba0c71ab4de8950bf2e596b4f3d6f87babbc31d2522b79a5da7a6810dd0bd8b` | Two internal reviewers GREEN. GCP, the downstream app, the operator deployment and Toolkit ACCEPT the exact bounded design delta; implementation and performance remain open. |
 
 Frozen candidates, exact patches, manifests and copied reviews live under
-`/Users/luka/.codex/adr-001-evidence/local-governed-default-r{1,2,3,4,5,6,7,8}`.
+`(operator-retained path)`.
 The r3 candidate manifest is
 `5d2c4e63470d179070afcc86dfeb58d0cfe80b9cc1c32249c4807d525e7a223a`;
 its internal-review manifest is
@@ -97,13 +97,13 @@ semantic-provenance machinery.
 | Reviewer | Verdict and concrete conditions | r3 disposition |
 | --- | --- | --- |
 | GCP Meerkat/MobKit lead | Accept with conditions: concrete refused-model outcome, persistent-memory envelopes, pre-inference compaction partitions, conservative MCP unit, authenticated subscribers, every model seam, audit cost/failure split and physical voice audience. | All specified in r3. The lead subsequently proposed permitted-context projection as the simpler normal path. Whether an entirely unprocessable request may end with a local refusal is pending Luka's direct clarification. |
-| Homecore | RED for adoption of existing unlabeled histories and sources; also visible refusal, scoped scheduled/connector service mandates, fresh live context and 10,000-dependency/write-lock measurements. | r3 carries explicit authorized legacy adoption and default envelopes, actual store ownership, service mandates, visible outcomes, retained input, fresh live context and the larger measurement cell. |
-| OB3 | Accept with one blocking audit condition: MobKit's lossy event-log ingress must not be the sole authoritative audit. Also preserve work associations across in-memory loss/reseed and define retained channel audiences/monitoring copies. | r3 requires native audit at the next existing commit, explicit exporter loss, retained associations or fresh authorized admission, and declared future-reader/retention policy. |
+| The downstream app | RED for adoption of existing unlabeled histories and sources; also visible refusal, scoped scheduled/connector service mandates, fresh live context and 10,000-dependency/write-lock measurements. | r3 carries explicit authorized legacy adoption and default envelopes, actual store ownership, service mandates, visible outcomes, retained input, fresh live context and the larger measurement cell. |
+| The operator deployment | Accept with one blocking audit condition: MobKit's lossy event-log ingress must not be the sole authoritative audit. Also preserve work associations across in-memory loss/reseed and define retained channel audiences/monitoring copies. | r3 requires native audit at the next existing commit, explicit exporter loss, retained associations or fresh authorized admission, and declared future-reader/retention policy. |
 | Meerkat Toolkit | Bounded design acceptance; clarify that ordinary trusted connectors may attest a local retained-copy contract but cannot invent vendor-issued ACL leases. | The exact source-issuer clarification landed in r4 and Toolkit closed the finding. Full native-path integration remains required for production use. |
 
 Exact bus envelopes are retained in the r2 `bus-reviews` evidence directory:
-`20261001T102006.831549-ob3-f743f1.json`,
-`20261001T102111.388675-homecore-051ec7.json`,
+`20261001T102006.831549-ops-f743f1.json`,
+`20261001T102111.388675-downstream-app-051ec7.json`,
 `20261001T102116.761922-claude-gcp-lead-0a70b6.json` and
 `20261001T102619.968986-toolkit-codex-local-ad98fd.json`.
 Their copied full-review manifest is
@@ -156,7 +156,7 @@ Its information/runtime review manifest is
 Root read both complete reports and verified exact candidate/patch hashes.
 
 All four bus reviewers then accepted the common r4 contract. GCP closed C1-C3;
-Homecore kept S1-S5 closed; OB3 closed the in-memory durability note and kept
+the downstream app kept S1-S5 closed; the operator deployment closed the in-memory durability note and kept
 B1/N1/N2 closed; Toolkit closed the retained-copy source-contract ambiguity.
 The exact copied bus envelopes and available full reports are bound by the r4
 `bus-reviews/manifest.json` SHA-256
@@ -206,7 +206,7 @@ preserved as `codex/native-governed-admission-m1` at
 Source work proceeds on the local pure contracts, minimal core extension seams,
 tool-local refusal handling. The retained-source slice and its storage-format
 changes were removed using its exact ownership-scoped inverse; the full archive
-remains at `/tmp/adr-001-retained-source-parked-r1`. The operation-feedback
+remains at `(operator-retained path)`. The operation-feedback
 path is now selected; neither earlier terminal/parking alternative is authorized.
 GCP has now opened the native association hook and four admission transitions
 after PR 1403 merged at `32edb5ebdb4aeb633ed5c47cef0a3d167f79d3e8`.
@@ -225,9 +225,9 @@ result is claimed by that library check.
 This is documentation validation only. There are no authorization performance
 measurements or full-path implementation acceptance claims for this candidate.
 
-OB3 extended root-owned compilation through 14:10 UTC on 2026-10-01, with
+The operator deployment extended root-owned compilation through 14:10 UTC on 2026-10-01, with
 two build jobs and four test workers in an isolated Rust lane. Benchmarks remain
-withheld until OB3 explicitly opens the quiet window. The former GRANT-03
+withheld until the operator deployment explicitly opens the quiet window. The former GRANT-03
 reservation is withdrawn; no child agent runs Cargo or generation.
 The next source composition must selectively reuse necessary canonical contracts
 and owner code, not import the parked witness stack wholesale. The complete

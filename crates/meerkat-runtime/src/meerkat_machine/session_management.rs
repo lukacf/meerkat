@@ -1643,6 +1643,18 @@ impl MeerkatMachine {
             };
         }
 
+        // #1813: no registration (and no durable write for one) without this
+        // runtime owner's hosting claim.
+        let hosting_claim = match self.grant_session_hosting(&session_id) {
+            Ok(claim) => claim,
+            Err(crate::session_hosting::HostingRefused::ServedElsewhere(_)) => {
+                return RuntimeSessionRegistrationOutcome::ServedElsewhere { session_id };
+            }
+            Err(crate::session_hosting::HostingRefused::Unavailable(_)) => {
+                return RuntimeSessionRegistrationOutcome::HostingUnavailable { session_id };
+            }
+        };
+
         match super::driver::runtime_authority_reconcile_decision_for_observation(
             &expected_lifecycle,
         ) {
@@ -1815,6 +1827,7 @@ impl MeerkatMachine {
                 ops_state,
                 None,
                 Some(Arc::clone(&write_fence)),
+                hosting_claim,
             )
             .await
         {
@@ -2161,6 +2174,7 @@ impl MeerkatMachine {
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
+            _hosting_claim: self.grant_registration_hosting(session_id)?,
             archive_recovered_registration: false,
             archive_recovered_from_quiescent: false,
             mutation_gate: Arc::new(Mutex::new(())),
@@ -2347,6 +2361,7 @@ impl MeerkatMachine {
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
+            _hosting_claim: self.grant_registration_hosting(&session_id)?,
             archive_recovered_registration: false,
             archive_recovered_from_quiescent: false,
             mutation_gate: Arc::new(Mutex::new(())),
@@ -2456,9 +2471,71 @@ impl MeerkatMachine {
         }
     }
 
+    /// This runtime owner's authority to grant session hosting claims
+    /// (#1813): its owner identity and its store's hosting capability. A
+    /// machine without a durable store is the only possible host of its
+    /// sessions.
+    pub fn hosting_authority(&self) -> crate::session_hosting::SessionHostingAuthority {
+        let capability = match self.store.as_ref() {
+            Some(store) => store.hosting_capability(),
+            None => crate::session_hosting::HostingCapability::ProcessLocal,
+        };
+        crate::session_hosting::SessionHostingAuthority::new(capability, self.hosting_owner.clone())
+    }
+
+    /// Take this runtime owner's hosting claim for `session_id` (#1813),
+    /// shared with every claim of this machine's lineage, or refuse at once
+    /// when another runtime owner (another process, or another machine of
+    /// this process) hosts the session, or when the store's cross-process
+    /// claim cannot be taken. Never waits.
+    pub fn grant_session_hosting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::session_hosting::HostingClaim, crate::session_hosting::HostingRefused>
+    {
+        self.hosting_authority().grant(session_id)
+    }
+
+    /// Where `session_id` is served for this runtime owner (#1813), read from
+    /// this process's claim registry only (it never touches the session's
+    /// lock): held by this machine's lineage, held by another machine of this
+    /// process, or not held in this process. A machine without a
+    /// cross-process store answers held here: there is no other host.
+    pub fn session_serving(
+        &self,
+        session_id: &SessionId,
+    ) -> crate::session_hosting::SessionServing {
+        self.hosting_authority().serving(session_id)
+    }
+
+    /// Take this owner's hosting claim for a registration (#1813), before any
+    /// durable recovery for it runs, to hand to the registration entry by
+    /// move. A session another runtime owner hosts, or whose claim is
+    /// unavailable, is refused typed, so this machine never registers (or
+    /// recovers) it.
+    fn grant_registration_hosting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::session_hosting::HostingClaim, RuntimeDriverError> {
+        self.grant_session_hosting(session_id)
+            .map_err(|refused| match refused {
+                crate::session_hosting::HostingRefused::ServedElsewhere(refused) => {
+                    RuntimeDriverError::ServedElsewhere {
+                        session_id: refused.session_id,
+                    }
+                }
+                crate::session_hosting::HostingRefused::Unavailable(unavailable) => {
+                    RuntimeDriverError::HostingUnavailable {
+                        session_id: unavailable.session_id,
+                    }
+                }
+            })
+    }
+
     /// Build the entry around an authority that is ALREADY registered under
     /// `ops_state`'s runtime epoch (see [`Self::ops_state_for_registration`]):
     /// the epoch cannot be minted here, because registration already needed it.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_registered_session_entry(
         &self,
         session_id: &SessionId,
@@ -2473,6 +2550,7 @@ impl MeerkatMachine {
             Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
         >,
         write_fence: Option<Arc<dyn crate::store::RuntimeStoreWriteFence>>,
+        hosting_claim: meerkat_core::session_hosting::HostingClaim,
     ) -> Result<(RuntimeSessionEntry, bool), RuntimeDriverError> {
         let recovered_unregister_progress = recovery.unregister_progress.take();
         let recovered_teardown_observations = Arc::new(
@@ -2568,6 +2646,7 @@ impl MeerkatMachine {
         let handle_teardown_gate = crate::handles::HandleTeardownGate::open();
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
+            _hosting_claim: hosting_claim,
             archive_recovered_registration: false,
             archive_recovered_from_quiescent: false,
             mutation_gate: Arc::new(Mutex::new(())),
@@ -2638,6 +2717,7 @@ impl MeerkatMachine {
         durable_lifecycle_was_quiescent: bool,
         operation_preservation: Option<meerkat_core::OperationRetentionRequest>,
     ) -> Result<super::PreparedArchiveSessionRegistration, RuntimeDriverError> {
+        let hosting_claim = self.grant_registration_hosting(&session_id)?;
         let runtime_id = Self::logical_runtime_id(&session_id);
         let ops_state = self
             .ops_state_for_registration(&session_id, &runtime_id)
@@ -2653,6 +2733,7 @@ impl MeerkatMachine {
                 ops_state,
                 None,
                 None,
+                hosting_claim,
             )
             .await?;
         if let Some(preservation) = operation_preservation {
@@ -2808,6 +2889,7 @@ impl MeerkatMachine {
             }
         }
 
+        let hosting_claim = self.grant_registration_hosting(&session_id)?;
         let runtime_id = Self::logical_runtime_id(&session_id);
         tracing::debug!(
             %session_id,
@@ -2846,6 +2928,7 @@ impl MeerkatMachine {
                             ops_state,
                             materialization_claim_state,
                             None,
+                            hosting_claim,
                         )
                         .await
                         .map(|(session_entry, draining)| (Box::new(session_entry), draining))
@@ -3699,8 +3782,15 @@ impl MeerkatMachine {
             // `UnregisterInProgress`, which callers must treat as unproven
             // cleanup. With B held, the claim's provisional post-stop cleanup
             // completed above under B, and its completion bit makes the
-            // saga's ordinary cleanup return before it takes its cleanup gate
-            // or B, so this join adds no wait on B.
+            // saga's ordinary cleanup skip the callback and B. That completed
+            // path still awaits the retained handle's
+            // `await_removed_actor_exit`, transitively under this caller's B.
+            // No current caller makes that wait depend on B: every persistent
+            // facade rollback passes `false` here, the boundary-held Mob and
+            // ephemeral rollbacks keep handles whose exit wait is the empty
+            // default, and committed Mob retirement drops B before joining. A
+            // handle that gains a real exit wait must not be paired with a
+            // boundary-held rollback on this path.
             self.join_or_start_unregister_teardown_with_admission(
                 session_id,
                 expected_epoch,
@@ -4288,6 +4378,9 @@ impl MeerkatMachine {
                     });
                 }
 
+                // #1813: no registration (and no durable recovery for one)
+                // without this runtime owner's hosting claim.
+                let hosting_claim = self.grant_registration_hosting(&session_id)?;
                 let runtime_id = Self::logical_runtime_id(&session_id);
                 // Recover ops state OUTSIDE the sessions lock, and BEFORE the
                 // authority: the entry's runtime epoch is a registration fact,
@@ -4395,6 +4488,7 @@ impl MeerkatMachine {
                     session_id.clone(),
                     RuntimeSessionEntry {
                         runtime_id,
+                        _hosting_claim: hosting_claim,
                         archive_recovered_registration: false,
                         archive_recovered_from_quiescent: false,
                         mutation_gate: Arc::clone(&mutation_gate),
@@ -5197,6 +5291,27 @@ impl MeerkatMachine {
             entry.epoch_id.clone(),
             Arc::downgrade(&entry.mutation_gate),
         ))
+    }
+
+    /// Every current registration of this machine, each as its exact
+    /// witness. A terminal owner shutdown tears these down so their hosting
+    /// claims (#1813) are released before a same-process successor hosts the
+    /// sessions; a registration replaced meanwhile is never torn down.
+    pub async fn current_session_registration_witnesses(
+        &self,
+    ) -> Vec<RuntimeSessionRegistrationWitness> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .iter()
+            .map(|(session_id, entry)| {
+                RuntimeSessionRegistrationWitness::new(
+                    Arc::downgrade(&self.shared),
+                    session_id.clone(),
+                    entry.epoch_id.clone(),
+                    Arc::downgrade(&entry.mutation_gate),
+                )
+            })
+            .collect()
     }
 
     /// Recover the exact current registration named by already issued
@@ -8373,11 +8488,18 @@ impl MeerkatMachine {
                 return Ok(());
             }
             if entry.post_stop_cleanup_complete {
+                let completed_handle = entry.post_stop_cleanup_handle.clone();
+                drop(sessions);
+                Self::join_actor_after_completed_post_stop_cleanup(
+                    completed_handle,
+                    turn_finalization_boundary_already_held,
+                )
+                .await;
                 return Ok(());
             }
             Arc::clone(&entry.post_stop_cleanup_gate)
         };
-        let _cleanup_guard = cleanup_gate.lock().await;
+        let cleanup_guard = cleanup_gate.lock().await;
 
         let cleanup_handle = {
             let sessions = self.sessions.read().await;
@@ -8388,6 +8510,14 @@ impl MeerkatMachine {
                 return Ok(());
             }
             if entry.post_stop_cleanup_complete {
+                let completed_handle = entry.post_stop_cleanup_handle.clone();
+                drop(sessions);
+                drop(cleanup_guard);
+                Self::join_actor_after_completed_post_stop_cleanup(
+                    completed_handle,
+                    turn_finalization_boundary_already_held,
+                )
+                .await;
                 return Ok(());
             }
             entry.post_stop_cleanup_handle.clone()
@@ -8418,7 +8548,43 @@ impl MeerkatMachine {
             return Ok(());
         }
         entry.post_stop_cleanup_complete = true;
+        drop(sessions);
+        drop(cleanup_guard);
         Ok(())
+    }
+
+    /// Direct access to the shared cleanup entry for deterministic unit tests.
+    /// Test callers read the attachment id minted by normal handle installation.
+    #[cfg(test)]
+    pub(super) async fn complete_post_stop_cleanup_for_test(
+        &self,
+        session_id: &SessionId,
+        attachment_id: RuntimeLoopAttachmentId,
+        turn_finalization_boundary_already_held: bool,
+    ) -> Result<(), RuntimeDriverError> {
+        self.complete_post_stop_cleanup_if_needed(
+            session_id,
+            attachment_id,
+            turn_finalization_boundary_already_held,
+        )
+        .await
+    }
+
+    /// A boundary-owned cleanup callback discards the actor without waiting
+    /// for it to exit (the actor may need that boundary to drain), so a
+    /// completed cleanup is not actor exit. A later caller that holds no
+    /// turn-finalization boundary still joins the exact removed actor, with no
+    /// machine lock held, before it reports cleanup done.
+    async fn join_actor_after_completed_post_stop_cleanup(
+        cleanup_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPostStopCleanupHandle>>,
+        turn_finalization_boundary_already_held: bool,
+    ) {
+        if turn_finalization_boundary_already_held {
+            return;
+        }
+        if let Some(cleanup_handle) = cleanup_handle {
+            cleanup_handle.await_removed_actor_exit().await;
+        }
     }
 
     /// Release the exact surface-owned actor/sidecar incarnation after a

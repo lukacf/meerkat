@@ -74,6 +74,33 @@ impl BuiltinTool for ShellJobCancelTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_with_entry(args, None).await
+    }
+
+    async fn call_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        let enter: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) =
+            &|| context.enter_reviewed_effect(call, None).map(drop);
+        self.call_with_entry(args, Some(enter)).await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
+    }
+}
+
+impl ShellJobCancelTool {
+    /// The entry runs inside the job manager, after the job lookup and the
+    /// terminal validation and before the cancellation request.
+    async fn call_with_entry(
+        &self,
+        args: Value,
+        entry: super::custody_spawn::EntryHook<'_>,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let input: JobCancelInput = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
 
@@ -81,7 +108,7 @@ impl BuiltinTool for ShellJobCancelTool {
 
         let disposition = self
             .job_manager
-            .cancel_job(&job_id)
+            .cancel_job_entering(&job_id, entry)
             .await
             .map_err(BuiltinToolError::from)?;
 

@@ -16,6 +16,7 @@ categories.workspace = true
 meerkat-capabilities = { workspace = true }
 meerkat-auth-core = { workspace = true, features = ["oauth"] }
 meerkat-core = { workspace = true }
+meerkat-sandbox = { workspace = true }
 meerkat-contracts = { workspace = true }
 rmcp = { workspace = true, features = [
     "client",
@@ -54,6 +55,7 @@ required-features = ["test-support"]
 nix = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "registry"] }
 mcp-test-server = { path = "../../tests/fixtures/mcp-test-server" } # test-only shared rmcp handler; never a published runtime dependency

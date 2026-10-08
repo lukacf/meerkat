@@ -68,7 +68,7 @@ fn source_restart_class_is_derived_from_real_dependency_durability() {
     );
     assert_eq!(
         PredicateSource::HostDependent {
-            adapter: "homecore-python".into()
+            adapter: "example-python".into()
         }
         .restart_class(),
         RestartClass::NonResumable
@@ -139,7 +139,7 @@ fn unavailable_host_source_is_typed_retryable_and_never_fabricates_notification(
         PredicateWatchId::new("host-watch").expect("watch id"),
         ScheduleIdRef::new("schedule-host").expect("schedule id"),
         PredicateSource::HostDependent {
-            adapter: "homecore-python".into(),
+            adapter: "example-python".into(),
         },
         PredicateComparison::Changed,
         policy(),

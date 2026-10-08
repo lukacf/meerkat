@@ -124,6 +124,16 @@ max_concurrent = 10
 shell = { secs = 120, nanos = 0 }
 ```
 
+<Note>
+These settings control tool availability. Realm selection chooses configuration
+and state, and provider credentials enable provider authentication; none installs
+native permission owners or selects OS confinement. Native governance requires
+explicit composition by a trusted embedding host, and shell confinement is a
+separate host setting. See [authorization integration](/guides/authorization-integration)
+for the current supported profiles and [native governed embedding](/rust/native-authorization)
+for Rust setup.
+</Note>
+
 `default_timeout` accepts humantime strings; per-tool timeout values use
 Serde's duration representation with `secs` and `nanos`.
 
@@ -341,14 +351,30 @@ When SQLite support is compiled in, new persistent realms default to `sqlite`.
 
 ## MCP configuration
 
-MCP servers are configured separately from realm runtime state:
+A session in a realm gets the MCP servers of three scopes:
 
-| Scope | Path |
-|-------|------|
+| Scope | Where |
+|-------|-------|
+| Realm | `[[tools.mcp_servers]]` in the realm's own config, inherited by its child realms |
 | User | `~/.rkat/mcp.toml` |
 | Project | `.rkat/mcp.toml` |
 
-Project servers override user servers with the same name.
+Project servers override user servers with the same name. A realm server and
+an `mcp.toml` server with the same name must be defined identically (they are
+then one server). A different definition is an error that names both
+scopes, so neither silently shadows the other.
+
+Realm servers are literal. `mcp.toml` expands `${VAR}` in a server's command,
+args, env values, URL and header values from the host environment; a realm
+server never does. A realm config is writable over the config APIs, so
+expanding it would let an API caller copy host environment variables into a
+request to a server of its choice. Writes refuse a realm server holding `${`,
+and a realm config that already holds one fails when its MCP servers are
+resolved. Put env-derived values in an `mcp.toml` server.
+
+`rkat run` (and `--resume`) starts the servers of all three scopes, and
+`rkat mcp login` resolves them. The RPC and REST servers do not start configured
+servers in their sessions; hosts attach servers with `mcp/add`.
 
 ## Exit codes
 

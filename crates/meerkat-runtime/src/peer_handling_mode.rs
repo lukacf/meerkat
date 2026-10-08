@@ -56,6 +56,7 @@ mod tests {
     fn make_header() -> InputHeader {
         InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -279,6 +280,7 @@ mod tests {
             injected_context: Vec::new(),
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),

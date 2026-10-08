@@ -38,6 +38,7 @@ fn make_progress_input(label: &str) -> Input {
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),

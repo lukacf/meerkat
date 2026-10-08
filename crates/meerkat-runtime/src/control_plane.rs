@@ -68,14 +68,18 @@ impl RunlessTerminalConvergenceError {
             | RuntimeDriverError::Destroyed
             | RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
             | RuntimeDriverError::LiveContextBarrierRevoked { .. }
+            | RuntimeDriverError::ServedElsewhere { .. }
+            | RuntimeDriverError::HostingUnavailable { .. }
             | RuntimeDriverError::StaleAuthority { .. }) => Self::StaleAuthority { context, error },
             // A receipt-less terminal is a legitimate read verdict, but a
             // runless terminal convergence expects the receipt it staged.
             error @ (RuntimeDriverError::ValidationFailed { .. }
             | RuntimeDriverError::InputRefused { .. }
+            | RuntimeDriverError::RetainedResumeRefused { .. }
             | RuntimeDriverError::InputIdempotencyConflict { .. }
             | RuntimeDriverError::RecoveryCorruption { .. }
             | RuntimeDriverError::InputTerminalWithoutReceipt { .. }
+            | RuntimeDriverError::HostingClaimInvariantViolated { .. }
             | RuntimeDriverError::RecoveryRepairBlocked { .. }) => Self::Corrupt { context, error },
             error @ (RuntimeDriverError::ControllerReadinessUnavailable { .. }
             | RuntimeDriverError::ControllerInUse

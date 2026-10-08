@@ -1,4 +1,4 @@
-//! OB3: a durably started member retirement is owned until it settles.
+//! A durably started member retirement is owned until it settles.
 //!
 //! Before this, a retirement whose stage outlived the caller's 30 s budget
 //! was dropped after its durable start: the member stayed `Retiring` with no
@@ -88,14 +88,14 @@ async fn stuck_retirement(
     );
 }
 
-/// The OB3 shape: a retire whose turn-boundary stage outlives the caller's
+/// The production shape: a retire whose turn-boundary stage outlives the caller's
 /// budget. The caller gets a typed in-progress answer naming the stage; the
 /// retirement stays owned and settles `Retired` once the boundary is free,
 /// with no second retire.
 #[tokio::test]
 async fn a_retire_that_outlives_its_caller_budget_stays_owned_and_settles() {
     let (handle, service) = turn_driven_mob().await;
-    let (identity, _) = spawn_member(&handle, "ob3-sweeper").await;
+    let (identity, _) = spawn_member(&handle, "ops-sweeper").await;
     let gate = service.install_non_reentrant_turn_finalization_gate();
     let held = gate.lock_owned().await;
 
@@ -231,7 +231,7 @@ async fn shutdown_interrupts_an_in_flight_retirement_and_reports_it() {
         other => panic!("expected the retirement reported as interrupted, got {other:?}"),
     }
     // An idle peer is never left pending behind another member's held
-    // boundary (the OB3 symptom).
+    // boundary (the production symptom).
     assert!(
         matches!(
             report.members.get(&other),
@@ -672,7 +672,7 @@ async fn a_completed_mob_shuts_down_holding_member_run_starts() {
 /// Shutdown starts. The actor keeps answering while it joins (a typed
 /// refusal), so the join completes and the Shutdown finishes. The inline
 /// Shutdown used to wait on the task while the task waited on the actor,
-/// until the process was killed (OB3).
+/// until the process was killed.
 #[tokio::test]
 async fn shutdown_completes_while_a_joined_task_awaits_the_actor() {
     let (handle, _service) = create_test_mob(sample_definition()).await;

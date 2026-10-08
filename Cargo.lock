@@ -2861,6 +2861,7 @@ dependencies = [
  "meerkat-openai",
  "meerkat-providers",
  "meerkat-runtime",
+ "meerkat-sandbox",
  "meerkat-schedule",
  "meerkat-session",
  "meerkat-skills",
@@ -3196,6 +3197,7 @@ dependencies = [
  "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-sandbox",
  "meerkat-skills",
  "nix 0.29.0",
  "reqwest 0.12.28",
@@ -3398,6 +3400,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-runtime",
+ "meerkat-sandbox",
  "meerkat-skills",
  "nix 0.29.0",
  "reqwest 0.12.28",
@@ -3405,6 +3408,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sse-stream",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -3496,7 +3500,6 @@ dependencies = [
  "meerkat-session",
  "meerkat-sqlite",
  "meerkat-store",
- "notify",
  "reqwest 0.12.28",
  "rusqlite",
  "schemars 1.2.2",
@@ -3534,6 +3537,7 @@ dependencies = [
  "indexmap",
  "jsonschema",
  "meerkat",
+ "meerkat-authorization-contracts",
  "meerkat-client",
  "meerkat-contracts",
  "meerkat-core",
@@ -3736,6 +3740,7 @@ dependencies = [
  "meerkat-runtime",
  "meerkat-sqlite",
  "meerkat-store",
+ "nix 0.29.0",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3836,9 +3841,11 @@ dependencies = [
 name = "meerkat-sqlite"
 version = "0.8.51"
 dependencies = [
+ "notify",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]

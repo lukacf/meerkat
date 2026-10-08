@@ -31,7 +31,7 @@
 
 1. `docs/quickstart.mdx` ends with a docs-site-broken local filesystem link, and the note attached to it is no longer accurate.
 
-   - `docs/quickstart.mdx:150-151` links to `/Users/luka/.codex/worktrees/fc6a/meerkat/meerkat/examples/simple.rs`. That is a machine-local path, not a portable docs URL, so it will not work for published docs readers.
+   - `docs/quickstart.mdx:150-151` links to `(operator-retained path)/meerkat/examples/simple.rs`. That is a machine-local path, not a portable docs URL, so it will not work for published docs readers.
    - The same note says the quickstart Rust snippet is "kept aligned" with the maintained starter example, but the current example uses `claude-sonnet-4-5` in both `factory.build_llm_adapter(...)` and `.model(...)` at `meerkat/examples/simple.rs:25` and `meerkat/examples/simple.rs:34`, while `docs/quickstart.mdx:59` and `docs/quickstart.mdx:66` use `claude-sonnet-4-6`.
    - Impact: the final trust-building note on the page currently does the opposite: it sends readers to a dead link and overstates snippet parity.
 

@@ -27,10 +27,10 @@ these boundaries separate from design acceptance and historical diagnostics.
 ## Historical foundation extraction and first native milestone, 2026-10-01
 
 The integrated donor is `codex/local-governed-default` in
-`/Users/luka/.codex/worktrees/security-adr/meerkat-native-governed-m1`. Its frozen
+`(operator-retained path)`. Its frozen
 audit checkpoint remains unchanged. Publication is being extracted separately
 in `codex/authorization-foundation`, at
-`/Users/luka/.codex/worktrees/security-adr/meerkat-authorization-publication`,
+`(operator-retained path)`,
 from main `9ebe09fac976c34a07d965d98e988677e00bfab4`. This keeps the foundational
 contracts and generated grant owner separate from runtime checks and audit;
 it does not import the integrated donor or the earlier high-assurance stack
@@ -41,7 +41,7 @@ refused tool call returned to the controller, permitted tool call and ordinary
 completion of that same run, with entry and outcome observations on the native
 input owner. That storeless fixture passed on 2026-10-01: one test, 5m57s build
 and 0.05s execution. Its frozen source/result checkpoint is
-`/Users/luka/.codex/adr-001-evidence/native-loop-green-20261001T1338Z`, manifest
+`(operator-retained path)`, manifest
 `76b34a8bced8ca1837ca7d6fc80bce4e98bbbb8ca42cb35fed66e31a473b5dc7`.
 Provider responses and application resource semantics are fixtures. This does
 not establish persistent recovery, real provider access or complete coverage.
@@ -67,7 +67,7 @@ implementation acceptance, a reviewable PR and green CI on its exact head.
 
 The frozen audit checkpoint is unchanged: 266 selected Rust tests, 414 Python
 SDK tests and 460 TypeScript SDK tests passed. The exact evidence remains under
-`/Users/luka/.codex/adr-001-evidence/audit-sdk-green-20261001`, manifest
+`(operator-retained path)`, manifest
 `e3e352ff860ef150aa1a6ee090a410870b9db84939ab2fe03ff3e1eaac52be33`.
 These results distinguish ordinary local policy feedback from audit
 infrastructure failure; they are not full-profile or persistent-recovery
@@ -88,7 +88,7 @@ claiming a self-contained checks-and-audit slice.
 
 The final review packet is
 `b17de27b1043db434d4ef9c1b6df40fd07291637a9e9b94f8ab032a00246ceaa`.
-Root reports GCP, HomeCore and OB3 acceptance on the bus at 16:14 UTC.
+Root reports GCP, the downstream app and the operator deployment acceptance on the bus at 16:14 UTC.
 Toolkit verified the final two-paragraph delta, with closure relayed by GCP;
 all four reviewers have closed the UX r5 and E2E r7 designs. Design acceptance
 does not establish implementation coverage. The separate provider diagnostics
@@ -128,7 +128,7 @@ tests passed, including the three native governed-loop tests, provider adapter
 and fallback classification, approval, callback/sibling settlement, and the final
 Mob observation-infrastructure case. All twelve original audit regression cases
 are now GREEN. Exact binary paths, commands, counts and logs are retained in
-`/tmp/adr-001-tdd-validation-20261001/audit-fix-results.json`; these are executed
+`(operator-retained path)`; these are executed
 results, not a full-suite or full-profile acceptance claim.
 
 Canonical schema emission and the reviewed SDK old-generator RED/new-generator
@@ -137,7 +137,7 @@ TypeScript compilation, schema freshness, event inventory and RPC/REST alignment
 The old generator failed the intended missing settlement-field assertion. The
 working generated files exactly match the isolated tested outputs. The frozen
 integrated checkpoint is
-`/Users/luka/.codex/adr-001-evidence/audit-sdk-green-20261001`, manifest
+`(operator-retained path)`, manifest
 `e3e352ff860ef150aa1a6ee090a410870b9db84939ab2fe03ff3e1eaac52be33`.
 It includes the larger working tree's dependencies and is not yet an independent
 audit-only PR. Publication now requires extracting a coherent dependency closure
@@ -157,7 +157,7 @@ slice; a different agent is implementing it. The
 independent-agent review: five stories, 32 named checkpoints, a complete
 feature/surface matrix, explicit missing integrations and bounded live-call costs.
 It is a design, not newly executed E2E coverage. Both proposals have been sent to
-the GCP lead, HomeCore, OB3 and Toolkit for focused bus review.
+the GCP lead, the downstream app, the operator deployment and Toolkit for focused bus review.
 
 Console rendering and existing MobKit access administration do not install the
 new native authority producers. The full editor follows real authenticated
@@ -183,7 +183,7 @@ a release-ready PR.
 5. Full sources, communications, delegation and surface wiring, including Calendar
    association validation and exact non-prompt replay (Mac and Toolkit VM lane).
 6. Consent with authenticated late delivery and a fresh explicit attempt (Mac,
-   with OB3 acceptance).
+   with the operator deployment acceptance).
 7. Common confinement launch contract and macOS Seatbelt, including all concrete
    process launch families (Mac, developed beside 3-6).
 8. Linux Landlock/seccomp and bubblewrap adapters (VM `turbo-det`, after the common
@@ -258,7 +258,7 @@ Root owns the integration lane and shared declaration schedule. Agents work in i
 
 Run focused changed-boundary checks first. Run the required broad publication gate once after the coherent candidate is reviewable. A failure is triaged against that exact head and assigned to its owner. Repeat only after a relevant repair, a diagnosed environmental correction or a concretely justified flake probe. A passing remote lane does not manufacture a local hook stamp.
 
-Observed publication cache correction: Elephant normal push inherited an Xcode SDKROOT that the earlier manual Clippy command did not have. Native build scripts therefore invalidated the same target cache and rebuilt. Future required manual prevalidation must match the inspected normal-hook environment. Keep the current push intact; no wrapper/tooling project is added to this critical path. Exact evidence is retained in `/tmp/adr-001-elephant-union-cache-note.md`.
+Observed publication cache correction: Elephant normal push inherited an Xcode SDKROOT that the earlier manual Clippy command did not have. Native build scripts therefore invalidated the same target cache and rebuilt. Future required manual prevalidation must match the inspected normal-hook environment. Keep the current push intact; no wrapper/tooling project is added to this critical path. Exact evidence is retained in `(operator-retained path)`.
 
 Actual GCP reservation: 2026-10-01 09:00-09:45 UTC. The lead has coordinated all GCP agents; heavy work must end by08:58. Existing benchmark binaries, controller, idle threshold and preflight budgets are unchanged. CoreNext's comparison jobs finished before this reservation; its final evidence analysis is separate.
 
@@ -282,6 +282,6 @@ The native declaration handoff remains pending: turbo-live-b merged at8302972d (
 
 INTEGRATION-02 drained at09:52:06.075989UTC. The lower native association composition is cleanly committed at2356d0eccb6b6a43172e5d73474a22745f1a53ee on parent8a6265fd6. Focused contracts34 tests+3compile-fail docs, combined host114 tests+3compile-fail docs, strict all-target lint, stable-tree strict Bazel/Cargo/example-lock checks and normal commit hooks passed. One test-only semicolon repaired the first lint failure; no reviewed production byte changed. Canonical metadata preserved all254 unrelated live-universe entries. The frozen26-file source/review/evidence archive is native-association-2356d0ecc-r1, manifest7ff999b1c975c369777efc52e5014378d815e328f0df0e42db4bfdde742d4d49. Full WASM/publication gates and real native admission remain open.
 
-This was a serialized ADR build lease, not a globally quiet benchmark window. An unrelated OB3 production-fix Rust test overlapped near09:48; its owner was notified and the process was left untouched. No root heavy command is now active. The next tentative lease is grant/control canonical generation and focused checks, after independent review and concrete fixes. Witness/time agents stay source-only until a separately assigned lease.
+This was a serialized ADR build lease, not a globally quiet benchmark window. An unrelated operator-deployment production-fix Rust test overlapped near09:48; its owner was notified and the process was left untouched. No root heavy command is now active. The next tentative lease is grant/control canonical generation and focused checks, after independent review and concrete fixes. Witness/time agents stay source-only until a separately assigned lease.
 
 Witness journal repair received bounded GREEN source reviewb9a3fe20228d3f776e46c33fcab706089320f0684eb2210b2c1ed4cdbd48cd51. The original RED review remains retained. Actual-file canaries remain unexecuted until the witness lease.

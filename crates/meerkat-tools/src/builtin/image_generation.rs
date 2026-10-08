@@ -1,6 +1,6 @@
 //! Builtin assistant image generation tool.
 
-use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
+use crate::builtin::{BuiltinTool, BuiltinToolError, LeafEntry, ToolOutput};
 use async_trait::async_trait;
 use base64::Engine;
 use meerkat_core::image_generation::{
@@ -386,6 +386,34 @@ impl BuiltinTool for GenerateImageTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::none()).await
+    }
+
+    async fn call_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::for_call(context, call)?)
+            .await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
+    }
+}
+
+impl GenerateImageTool {
+    /// The single native entry step runs after argument parsing and plan
+    /// resolution (a planner denial never spends), immediately before the
+    /// first effect: `begin_image_operation`, then the scoped override, then
+    /// the provider request. A refusal begins nothing and sends nothing.
+    async fn call_entering(
+        &self,
+        args: Value,
+        mut entry: LeafEntry,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let args: GenerateImageToolArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
         let operation_id = ImageOperationId::new(uuid::Uuid::new_v4());
@@ -434,6 +462,7 @@ impl BuiltinTool for GenerateImageTool {
         let requires_scoped_override = execution_plan_requires_scoped_override(&resolved_plan);
         let (approval, approval_reason) = approval_for_resolved_plan(&resolved_plan);
 
+        entry.enter()?;
         match self
             .runtime
             .machine
@@ -1919,5 +1948,101 @@ mod tests {
             }
         ));
         assert_eq!(machine.calls.lock().unwrap().as_slice(), ["deny"]);
+    }
+
+    #[derive(Default)]
+    struct CountingExecutor(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl ImageGenerationExecutor for CountingExecutor {
+        async fn execute_image_generation(
+            &self,
+            request: ProviderImageGenerationRequest,
+        ) -> Result<ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            FakeExecutor.execute_image_generation(request).await
+        }
+    }
+
+    /// The reviewed entry precedes the first effect: no `begin`, no scoped
+    /// override, no provider request and no blob write on refusal, for both
+    /// the hosted and the scoped-override plan. A planner denial never
+    /// reaches the entry. The open entry is the positive control.
+    #[tokio::test]
+    async fn refused_entry_precedes_begin_override_and_provider_request() {
+        let refusal = meerkat_core::ToolError::ReviewUnavailable {
+            kind: meerkat_core::ReviewUnavailableKind::DeadlineExpired,
+        };
+        for provider in ["openai", "gemini"] {
+            let machine = Arc::new(FakeMachine::default());
+            let executor = Arc::new(CountingExecutor::default());
+            let blob_store = Arc::new(FakeBlobStore {
+                writes: Mutex::new(Vec::new()),
+            });
+            let tool = GenerateImageTool::new(ImageGenerationToolRuntime {
+                session_id: SessionId::new(),
+                machine: machine.clone(),
+                planner: fake_planner(),
+                blob_store: blob_store.clone(),
+                executor: executor.clone(),
+            });
+            let targeted = || {
+                let mut image_request = request();
+                image_request.target = ImageGenerationTargetPreference::ProviderDefault {
+                    provider: ProviderId::new(provider),
+                };
+                json!({ "request": image_request })
+            };
+
+            match tool
+                .call_entering(targeted(), LeafEntry::refusing(refusal.clone()))
+                .await
+            {
+                Err(BuiltinToolError::EntryRefused(error)) => assert_eq!(*error, refusal),
+                other => panic!("{provider}: expected the typed entry refusal, got {other:?}"),
+            }
+            assert!(
+                machine.calls.lock().unwrap().is_empty(),
+                "{provider}: nothing begun or overridden"
+            );
+            assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(blob_store.writes.lock().unwrap().is_empty());
+
+            tool.call_entering(targeted(), LeafEntry::none())
+                .await
+                .expect("an open entry generates");
+            assert_eq!(machine.calls.lock().unwrap().first(), Some(&"begin"));
+            assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        let machine = Arc::new(FakeMachine::default());
+        let executor = Arc::new(CountingExecutor::default());
+        let tool = GenerateImageTool::new(ImageGenerationToolRuntime {
+            session_id: SessionId::new(),
+            machine: machine.clone(),
+            planner: fake_planner(),
+            blob_store: Arc::new(FakeBlobStore {
+                writes: Mutex::new(Vec::new()),
+            }),
+            executor: executor.clone(),
+        });
+        let mut too_many = request();
+        too_many.count = NonZeroU32::new(2).unwrap();
+        let output = tool
+            .call_entering(
+                json!({ "request": too_many }),
+                LeafEntry::refusing(refusal.clone()),
+            )
+            .await
+            .expect("a planner denial settles without entering")
+            .into_json()
+            .unwrap();
+        let result: ImageGenerationToolResult = serde_json::from_value(output).unwrap();
+        assert!(matches!(
+            result.terminal,
+            ImageOperationTerminalClass::Denied { .. }
+        ));
+        assert_eq!(machine.calls.lock().unwrap().as_slice(), ["deny"]);
+        assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

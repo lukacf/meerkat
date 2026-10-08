@@ -24,7 +24,7 @@ use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use meerkat_core::service::{SessionServiceControlExt as _, StageToolResultsRequest};
 use meerkat_core::{Message, SessionBuildOptions, ToolResult};
 use meerkat_runtime::completion::CompletionOutcome;
-use meerkat_runtime::{Input, MeerkatMachine, PromptInput};
+use meerkat_runtime::{ContinuationInput, Input, MeerkatMachine, PromptInput};
 use tokio::sync::watch;
 use tokio::time::Duration;
 
@@ -328,9 +328,9 @@ async fn a_delivery_held_by_a_pending_callback_batch_applies_once_after_its_resu
         "a refused delivery leaves the transcript untouched"
     );
 
-    // 3. The host stages the callback result and resumes with a content
-    //    turn, as the MCP server's resume does: the turn applies the staged
-    //    results before it runs.
+    // 3. The host stages the callback result and resumes with an ordinary
+    //    continuation: the resumed run applies the staged results before it
+    //    calls the model.
     service
         .stage_tool_results(
             &session_id,
@@ -347,10 +347,10 @@ async fn a_delivery_held_by_a_pending_callback_batch_applies_once_after_its_resu
     let (_outcome, completion) = adapter
         .accept_input_with_completion(
             &session_id,
-            Input::Prompt(PromptInput::new("continue", None)),
+            Input::Continuation(ContinuationInput::detached_background_op_completed()),
         )
         .await
-        .expect("accept the resume turn");
+        .expect("accept the resume continuation");
     let resumed = tokio::time::timeout(EVENT_GUARD, completion.expect("completion").wait())
         .await
         .expect("resumed run settles")
@@ -361,8 +361,14 @@ async fn a_delivery_held_by_a_pending_callback_batch_applies_once_after_its_resu
     );
 
     // 4. The run settlement retries the held row; it applies exactly once.
+    //    A pass after the held one that no longer reports the session blocked
+    //    drained its row. Not `applied > 0` on the observed pass: the passes
+    //    channel keeps only the latest pass, and the store-watch wake that
+    //    follows the delivery's own commit (#1813) can replace the applying
+    //    pass before this waiter reads it. The transcript and the backlog
+    //    below prove the single application.
     wait_for_pass(&mut passes, "the held delivery applied", |pass| {
-        !pass.blocked_sessions.contains(&session_id) && pass.applied > 0
+        pass.generation > held.generation && !pass.blocked_sessions.contains(&session_id)
     })
     .await;
     let transcript = authoritative_messages(&service, &session_id).await;

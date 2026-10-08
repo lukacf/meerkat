@@ -9,7 +9,9 @@ use meerkat_jobs::{
 };
 use meerkat_runtime::{
     LogicalRuntimeId, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
-    RuntimeDeliveryKind, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
+    RuntimeDeliveryKind, RuntimeDeliveryRecipient, RuntimeDeliveryRecipientGroupOutcome,
+    RuntimeDeliveryRecipientOutcome, RuntimeDeliveryRecipientState, RuntimeDeliveryRecord,
+    RuntimeDeliverySubmission,
 };
 use serde::{Deserialize, Serialize};
 
@@ -63,13 +65,42 @@ pub enum JobDeliveryApplication {
     },
 }
 
+/// Typed disposition of one recipient application. Refusal is distinct from
+/// unavailable authority and failed observation; a caller must not recover
+/// that distinction by parsing a diagnostic string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum JobDeliveryApplyError {
+    #[error(transparent)]
+    Authorization(#[from] meerkat_core::OperationAuthorizationError),
+    /// Required review settled locally before entry. Keep its exact reason
+    /// here; the runtime recipient outcome is the coarser `Refused`.
+    #[error(transparent)]
+    Review(#[from] meerkat_core::approval::review::OperationReviewRefusal),
+    /// Another runtime owner hosts the recipient's session (#1813): the
+    /// recipient is skipped, not settled, and stays pending for that owner.
+    #[error("session {session_id} is served by another runtime owner on this realm")]
+    ServedElsewhere { session_id: meerkat_core::SessionId },
+    /// The recipient's session cannot take its cross-process hosting claim
+    /// (#1813): nothing was applied without it. The recipient is skipped,
+    /// not settled, and stays pending until a claim can be taken.
+    #[error("hosting claim for session {session_id} is unavailable")]
+    HostingUnavailable { session_id: meerkat_core::SessionId },
+    #[error("{0}")]
+    Infrastructure(String),
+}
+
 #[async_trait::async_trait]
 pub trait JobDeliverySink: Send + Sync {
     /// Apply one stable subscription delivery idempotently.
     ///
     /// `Notification` is a turn-free user-visible append. Only `Event` may
     /// request ordinary runtime work/provider inference.
-    async fn apply(&self, application: JobDeliveryApplication) -> Result<(), String>;
+    /// An authorization refusal means the recipient effect did not enter.
+    /// It does not undo an already completed producer job or its wait binding.
+    /// Infrastructure and observation failures never imply permission denial
+    /// or prove that an effect did not happen.
+    async fn apply(&self, application: JobDeliveryApplication)
+    -> Result<(), JobDeliveryApplyError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +108,18 @@ pub struct AppliedRuntimeJobDelivery {
     pub delivery_id: RuntimeDeliveryId,
     pub runtime_sequence: u64,
     pub applications: usize,
+}
+
+/// A completed recipient group that was not wholly applied. These are exact
+/// runtime-owned dispositions, not a claim that the producer job failed or
+/// that a refused recipient's effect ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocallySettledRuntimeJobDelivery {
+    pub runtime_id: LogicalRuntimeId,
+    pub delivery_id: RuntimeDeliveryId,
+    pub runtime_sequence: u64,
+    pub outcome: RuntimeDeliveryRecipientGroupOutcome,
+    pub recipients: Vec<RuntimeDeliveryRecipientState>,
 }
 
 /// A pending delivery whose application failed during a drain pass.
@@ -88,7 +131,31 @@ pub struct AppliedRuntimeJobDelivery {
 pub struct BlockedRuntimeJobDelivery {
     pub delivery_id: RuntimeDeliveryId,
     pub runtime_sequence: u64,
+    pub reason: BlockedDeliveryReason,
     pub error: String,
+}
+
+/// Why a pending delivery is blocked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlockedDeliveryReason {
+    /// Its application failed; it is retried on the next wake for its
+    /// runtime.
+    ApplyFailed,
+    /// No handler for its delivery kind is armed on this owner. Visible, and
+    /// never treated as corruption.
+    UnsupportedKind,
+}
+
+/// A continuation delivery settled as refused this pass: a terminal policy
+/// outcome, never applied. The cursor passed it, so the rows after it
+/// proceeded. Job deliveries settle per recipient instead
+/// ([`LocallySettledRuntimeJobDelivery`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedRuntimeJobDelivery {
+    pub delivery_id: RuntimeDeliveryId,
+    pub runtime_sequence: u64,
+    pub reason: meerkat_runtime::RuntimeDeliveryRefusalReason,
 }
 
 /// Outcome of one ordered drain pass over a runtime's pending deliveries.
@@ -96,9 +163,70 @@ pub struct BlockedRuntimeJobDelivery {
 pub struct RuntimeJobDeliveryDrain {
     /// Deliveries applied and acknowledged this pass, in inbox order.
     pub applied: Vec<AppliedRuntimeJobDelivery>,
+    /// Groups fully settled with at least one local refusal or unavailable
+    /// authorization. Their cursor progress is distinct from applied effects.
+    pub locally_settled: Vec<LocallySettledRuntimeJobDelivery>,
     /// The first delivery whose application failed, if any. Progress made
-    /// before it is retained in `applied`.
+    /// before it is retained in `applied`, `locally_settled` and `refused`.
     pub blocked: Option<BlockedRuntimeJobDelivery>,
+    /// Continuation deliveries settled as refused this pass, in inbox order.
+    /// A refusal is progress: the drain continues past it.
+    pub refused: Vec<RefusedRuntimeJobDelivery>,
+    /// The first delivery with recipients another process must apply (or the
+    /// cold-delivery owner, for recipients no process hosts), if any. Not a
+    /// failure: this process applied and settled what it serves, and the row
+    /// stays pending, in order, for the others.
+    pub awaiting_other_hosts: Option<AwaitingRuntimeJobDelivery>,
+}
+
+/// The blocked report of `record`, whose application failed with `error`.
+fn blocked_delivery(
+    record: &RuntimeDeliveryRecord,
+    error: &JobOutboxProjectionError,
+) -> BlockedRuntimeJobDelivery {
+    let reason = match error {
+        JobOutboxProjectionError::UnsupportedKind(_) => BlockedDeliveryReason::UnsupportedKind,
+        _ => BlockedDeliveryReason::ApplyFailed,
+    };
+    BlockedRuntimeJobDelivery {
+        delivery_id: record.submission.delivery_id().clone(),
+        runtime_sequence: record.sequence,
+        reason,
+        error: error.to_string(),
+    }
+}
+
+/// A pending delivery waiting on recipients this process does not serve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitingRuntimeJobDelivery {
+    pub delivery_id: RuntimeDeliveryId,
+    pub runtime_sequence: u64,
+    /// The sessions of the recipients this pass skipped: the delivery owner
+    /// re-routes them on its store-watch ticks.
+    pub skipped_recipients: Vec<meerkat_core::SessionId>,
+    /// Whether this pass issued any delivery-authority input for the row. A
+    /// pass whose recipients were all served elsewhere issues none.
+    pub touched_authority: bool,
+}
+
+/// What applying one continuation row achieved (#1813).
+#[cfg(not(target_arch = "wasm32"))]
+enum ContinuationProgress {
+    Applied,
+    /// Left untouched for the host of this session.
+    AwaitingOtherHost(meerkat_core::SessionId),
+}
+
+/// What applying one record achieved.
+enum RecordProgress {
+    Completed(
+        RuntimeDeliveryRecipientGroupOutcome,
+        Vec<RuntimeDeliveryRecipientState>,
+    ),
+    AwaitingOtherHosts {
+        skipped_recipients: Vec<meerkat_core::SessionId>,
+        touched_authority: bool,
+    },
 }
 
 impl RuntimeJobDeliveryDrain {
@@ -107,10 +235,93 @@ impl RuntimeJobDeliveryDrain {
     }
 }
 
+/// Where one recipient's application goes, as decided by the host (#1813).
+///
+/// The host classifies from its runtime owner's claim registry only; it never
+/// takes a session's lock to probe it.
+#[derive(Clone)]
+pub enum DeliveryRoute {
+    /// The host's runtime owner hosts the recipient's session (its lineage
+    /// holds the session's hosting claim): apply through the sink, then
+    /// settle.
+    ServedHere(Arc<dyn JobDeliverySink>),
+    /// Another runtime owner of this process hosts the recipient's session:
+    /// the recipient is skipped, neither applied nor settled, with no
+    /// delivery-authority input, and stays pending for that owner.
+    ServedElsewhere,
+    /// No runtime owner of this process holds the recipient's claim (another
+    /// process may). A cold delivery: only the store's cold-delivery owner
+    /// applies it, after taking the session's claim through
+    /// [`JobDeliveryRouter::claim_cold`] before any delivery-authority input;
+    /// any other process skips it.
+    Unserved(Arc<dyn JobDeliverySink>),
+}
+
+/// Routes each recipient's application by the recipient's own session.
+#[async_trait::async_trait]
+pub trait JobDeliveryRouter: Send + Sync {
+    /// The route for `recipient`, or `None` once the host is gone.
+    async fn route(&self, recipient: &meerkat_core::SessionId) -> Option<DeliveryRoute>;
+
+    /// Take the hosting claim of an [`DeliveryRoute::Unserved`] recipient's
+    /// session for a cold delivery by this process: `Ok(claim)` to apply
+    /// under it, or [`meerkat_runtime::HostingRefused`] when another runtime
+    /// owner holds it or the claim is unavailable. `None` once the host is
+    /// gone.
+    async fn claim_cold(
+        &self,
+        recipient: &meerkat_core::SessionId,
+    ) -> Option<Result<meerkat_runtime::HostingClaim, meerkat_runtime::HostingRefused>>;
+}
+
+/// Every recipient is served here, through one sink: a single-process
+/// applier.
+struct SoleSinkRouter {
+    sink: Arc<dyn JobDeliverySink>,
+    owner: meerkat_runtime::HostingOwner,
+}
+
+#[async_trait::async_trait]
+impl JobDeliveryRouter for SoleSinkRouter {
+    async fn route(&self, _recipient: &meerkat_core::SessionId) -> Option<DeliveryRoute> {
+        Some(DeliveryRoute::ServedHere(Arc::clone(&self.sink)))
+    }
+
+    async fn claim_cold(
+        &self,
+        recipient: &meerkat_core::SessionId,
+    ) -> Option<Result<meerkat_runtime::HostingClaim, meerkat_runtime::HostingRefused>> {
+        // A single-process applier has no other host: the claim is
+        // process-local.
+        Some(meerkat_runtime::grant_session_hosting(
+            &meerkat_runtime::HostingCapability::ProcessLocal,
+            &self.owner,
+            recipient,
+        ))
+    }
+}
+
+/// A recipient this pass applies: its sink, and the cold delivery's hosting
+/// claim, held from before the recipients are bound until the row's
+/// application ends.
+struct ApplicableRecipient {
+    sink: Arc<dyn JobDeliverySink>,
+    _cold_claim: Option<meerkat_runtime::HostingClaim>,
+}
+
 #[derive(Clone)]
 pub struct JobRuntimeDeliveryApplier {
     runtime_inbox: RuntimeDeliveryInbox,
-    sink: Arc<dyn JobDeliverySink>,
+    router: Arc<dyn JobDeliveryRouter>,
+    /// Whether this process applies cold deliveries (recipients no process
+    /// hosts): it is the store's cold-delivery owner, or the only process.
+    applies_cold_deliveries: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    continuations: Option<(
+        Arc<dyn crate::ContinuationDeliverySink>,
+        meerkat_core::SessionId,
+        Option<Arc<dyn crate::RetainedJobSource>>,
+    )>,
 }
 
 impl std::fmt::Debug for JobRuntimeDeliveryApplier {
@@ -121,28 +332,70 @@ impl std::fmt::Debug for JobRuntimeDeliveryApplier {
 }
 
 impl JobRuntimeDeliveryApplier {
+    /// A single-process applier: every recipient is applied through `sink`.
     pub fn new(runtime_inbox: RuntimeDeliveryInbox, sink: Arc<dyn JobDeliverySink>) -> Self {
         Self {
             runtime_inbox,
-            sink,
+            router: Arc::new(SoleSinkRouter {
+                sink,
+                owner: meerkat_runtime::HostingOwner::mint(),
+            }),
+            applies_cold_deliveries: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            continuations: None,
         }
+    }
+
+    /// A multi-process applier (#1813): each recipient is routed by the
+    /// hosting of its own session. Recipients another runtime owner serves
+    /// are skipped without any delivery-authority input; cold recipients are
+    /// applied only when `applies_cold_deliveries`, under the session's
+    /// claim taken first.
+    pub fn routed(
+        runtime_inbox: RuntimeDeliveryInbox,
+        router: Arc<dyn JobDeliveryRouter>,
+        applies_cold_deliveries: bool,
+    ) -> Self {
+        Self {
+            runtime_inbox,
+            router,
+            applies_cold_deliveries,
+            #[cfg(not(target_arch = "wasm32"))]
+            continuations: None,
+        }
+    }
+
+    /// Also admit continuation rows, into `session` through `sink`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_continuations(
+        mut self,
+        sink: Arc<dyn crate::ContinuationDeliverySink>,
+        session: meerkat_core::SessionId,
+        job_source: Option<Arc<dyn crate::RetainedJobSource>>,
+    ) -> Self {
+        self.continuations = Some((sink, session, job_source));
+        self
     }
 
     /// Apply pending deliveries in inbox order, failing SAFE per runtime.
     ///
-    /// `Err` means the inbox itself could not be read. Every failure after
-    /// that — a corrupt payload, an unsupported kind, a sink rejection, a
-    /// failed acknowledgement — is reported as `blocked` in an `Ok` drain
-    /// instead of aborting the caller, so one poisoned runtime cannot
-    /// head-of-line block every other runtime's delivery drain forever.
+    /// `Err` means the inbox itself could not be read. Corrupt payloads,
+    /// unsupported kinds, infrastructure or observation failures, and failed
+    /// persistence are reported as `blocked` in an `Ok` drain. Typed local
+    /// authorization refusal or unavailability settles only that recipient;
+    /// successful siblings and later rows can continue.
     ///
-    /// Within one runtime the drain still stops at the blocked row: the
-    /// generated delivery authority enforces in-order acknowledgement, so
-    /// acknowledging past a failed row would silently discard a durable
-    /// delivery that may still be legitimately applied later. For a durable
-    /// delivery pipeline, a bounded per-runtime stall (observable, retried,
-    /// recoverable once the cause is fixed) is the lesser risk; silent loss
-    /// of a session-visible delivery is not recoverable at all.
+    /// Within one runtime the drain stops at an unresolved recipient. Every
+    /// completed recipient is durably settled before the next sink call, and
+    /// retry skips its immutable outcome. Sink effect and settlement are not
+    /// atomic: an unknown effect still requires sink idempotency or external
+    /// reconciliation before retry. The generated owner derives the completed
+    /// group and advances the cursor only after all recipients have settled.
+    ///
+    /// A continuation row ([`Self::with_continuations`]) has one owner and
+    /// settles whole: applied, or settled as refused for a terminal policy
+    /// reason (`refused`), which the cursor passes.
     pub async fn apply_pending(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -152,14 +405,17 @@ impl JobRuntimeDeliveryApplier {
         // Rows whose effect already reached the runtime out of band (the
         // shell's completion projection). Their sink must not run again; the
         // inbox consumes them when the cursor reaches them, which happens
-        // inside the preceding row's `mark_applied`.
+        // when the preceding row finishes.
         let acknowledged = self
             .runtime_inbox
             .acknowledged_pending_sequences(runtime_id)
             .await?;
         let mut drain = RuntimeJobDeliveryDrain {
             applied: Vec::with_capacity(pending.len()),
+            locally_settled: Vec::new(),
             blocked: None,
+            refused: Vec::new(),
+            awaiting_other_hosts: None,
         };
         for record in pending {
             if acknowledged.contains(&record.sequence) {
@@ -170,18 +426,107 @@ impl JobRuntimeDeliveryApplier {
                 });
                 continue;
             }
+            // A continuation row has one owner and settles whole: applied,
+            // or refused for a terminal policy reason.
+            #[cfg(not(target_arch = "wasm32"))]
+            if record.submission.kind() == RuntimeDeliveryKind::Continuation {
+                match self.apply_continuation(runtime_id, &record).await {
+                    Ok(ContinuationProgress::Applied) => {
+                        drain.applied.push(AppliedRuntimeJobDelivery {
+                            delivery_id: record.submission.delivery_id().clone(),
+                            runtime_sequence: record.sequence,
+                            applications: 1,
+                        });
+                    }
+                    // #1813: its session is another host's (or cold while
+                    // this process may not apply it): in order, untouched.
+                    Ok(ContinuationProgress::AwaitingOtherHost(session)) => {
+                        drain.awaiting_other_hosts = Some(AwaitingRuntimeJobDelivery {
+                            delivery_id: record.submission.delivery_id().clone(),
+                            runtime_sequence: record.sequence,
+                            skipped_recipients: vec![session],
+                            touched_authority: false,
+                        });
+                        break;
+                    }
+                    Err(JobOutboxProjectionError::DeliveryHostGone) => {
+                        return Err(JobOutboxProjectionError::DeliveryHostGone);
+                    }
+                    Err(JobOutboxProjectionError::Refused { reason, .. }) => {
+                        // A terminal policy outcome: settle it at the cursor
+                        // and continue, so it never holds the rows behind it.
+                        let settled = self
+                            .runtime_inbox
+                            .mark_refused(
+                                runtime_id,
+                                record.submission.delivery_id(),
+                                record.sequence,
+                                reason,
+                            )
+                            .await;
+                        if let Err(error) = settled {
+                            drain.blocked = Some(BlockedRuntimeJobDelivery {
+                                delivery_id: record.submission.delivery_id().clone(),
+                                runtime_sequence: record.sequence,
+                                reason: BlockedDeliveryReason::ApplyFailed,
+                                error: format!("refused delivery could not be settled: {error}"),
+                            });
+                            break;
+                        }
+                        drain.refused.push(RefusedRuntimeJobDelivery {
+                            delivery_id: record.submission.delivery_id().clone(),
+                            runtime_sequence: record.sequence,
+                            reason,
+                        });
+                    }
+                    Err(error) => {
+                        drain.blocked = Some(blocked_delivery(&record, &error));
+                        break;
+                    }
+                }
+                continue;
+            }
             match self.apply_record(runtime_id, &record).await {
-                Ok(applications) => drain.applied.push(AppliedRuntimeJobDelivery {
-                    delivery_id: record.submission.delivery_id().clone(),
-                    runtime_sequence: record.sequence,
-                    applications,
-                }),
-                Err(error) => {
-                    drain.blocked = Some(BlockedRuntimeJobDelivery {
+                Ok(RecordProgress::AwaitingOtherHosts {
+                    skipped_recipients,
+                    touched_authority,
+                }) => {
+                    // In order: no later row of this runtime may complete
+                    // before this one.
+                    drain.awaiting_other_hosts = Some(AwaitingRuntimeJobDelivery {
                         delivery_id: record.submission.delivery_id().clone(),
                         runtime_sequence: record.sequence,
-                        error: error.to_string(),
+                        skipped_recipients,
+                        touched_authority,
                     });
+                    break;
+                }
+                Ok(RecordProgress::Completed(
+                    RuntimeDeliveryRecipientGroupOutcome::AllApplied,
+                    recipients,
+                )) => {
+                    drain.applied.push(AppliedRuntimeJobDelivery {
+                        delivery_id: record.submission.delivery_id().clone(),
+                        runtime_sequence: record.sequence,
+                        applications: recipients.len(),
+                    });
+                }
+                Ok(RecordProgress::Completed(outcome, recipients)) => {
+                    drain
+                        .locally_settled
+                        .push(LocallySettledRuntimeJobDelivery {
+                            runtime_id: runtime_id.clone(),
+                            delivery_id: record.submission.delivery_id().clone(),
+                            runtime_sequence: record.sequence,
+                            outcome,
+                            recipients,
+                        });
+                }
+                Err(JobOutboxProjectionError::DeliveryHostGone) => {
+                    return Err(JobOutboxProjectionError::DeliveryHostGone);
+                }
+                Err(error) => {
+                    drain.blocked = Some(blocked_delivery(&record, &error));
                     break;
                 }
             }
@@ -189,11 +534,69 @@ impl JobRuntimeDeliveryApplier {
         Ok(drain)
     }
 
+    /// Admit one continuation row into the session serving its owner and
+    /// acknowledge it. A terminal policy refusal comes back as
+    /// [`JobOutboxProjectionError::Refused`] for the drain to settle.
+    ///
+    /// The row's one recipient is that session, routed by its hosting like a
+    /// job recipient (#1813) BEFORE any reservation or admission: served by
+    /// another runtime owner, or cold while this process is not the
+    /// cold-delivery owner (or its claim is refused), the row is left
+    /// untouched for its host. A cold admission holds the session's claim,
+    /// taken first, until it returns.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn apply_continuation(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        record: &RuntimeDeliveryRecord,
+    ) -> Result<ContinuationProgress, JobOutboxProjectionError> {
+        let Some((sink, session, job_source)) = self.continuations.as_ref() else {
+            return Err(JobOutboxProjectionError::UnsupportedKind(
+                record.submission.delivery_id().to_string(),
+            ));
+        };
+        let _cold_claim = match self
+            .router
+            .route(session)
+            .await
+            .ok_or(JobOutboxProjectionError::DeliveryHostGone)?
+        {
+            DeliveryRoute::ServedHere(_) => None,
+            DeliveryRoute::Unserved(_) if self.applies_cold_deliveries => {
+                match self
+                    .router
+                    .claim_cold(session)
+                    .await
+                    .ok_or(JobOutboxProjectionError::DeliveryHostGone)?
+                {
+                    Ok(claim) => Some(claim),
+                    Err(_) => return Ok(ContinuationProgress::AwaitingOtherHost(session.clone())),
+                }
+            }
+            DeliveryRoute::Unserved(_) | DeliveryRoute::ServedElsewhere => {
+                return Ok(ContinuationProgress::AwaitingOtherHost(session.clone()));
+            }
+        };
+        crate::continuation::admit_continuation_row(
+            &self.runtime_inbox,
+            runtime_id,
+            record,
+            &**sink,
+            session,
+            job_source.as_deref(),
+        )
+        .await?;
+        self.runtime_inbox
+            .mark_applied(runtime_id, record.submission.delivery_id(), record.sequence)
+            .await?;
+        Ok(ContinuationProgress::Applied)
+    }
+
     async fn apply_record(
         &self,
         runtime_id: &LogicalRuntimeId,
         record: &RuntimeDeliveryRecord,
-    ) -> Result<usize, JobOutboxProjectionError> {
+    ) -> Result<RecordProgress, JobOutboxProjectionError> {
         let applications = match record.submission.kind() {
             RuntimeDeliveryKind::JobNotification => {
                 let payload: JobNotificationDeliveryPayload =
@@ -203,16 +606,14 @@ impl JobRuntimeDeliveryApplier {
                             record.submission.delivery_id()
                         ))
                     })?;
-                apply_subscriptions(
-                    &*self.sink,
+                subscription_applications(
                     payload.job_id,
                     payload.delivery_sequence,
                     payload.origin_session_id,
                     payload.interaction_lineage_id,
                     payload.targets,
                     JobDeliveryContent::Notification(payload.notification),
-                )
-                .await?
+                )?
             }
             RuntimeDeliveryKind::JobTerminal => {
                 let payload: JobTerminalDeliveryPayload =
@@ -222,28 +623,152 @@ impl JobRuntimeDeliveryApplier {
                             record.submission.delivery_id()
                         ))
                     })?;
-                apply_subscriptions(
-                    &*self.sink,
+                subscription_applications(
                     payload.job_id,
                     payload.delivery_sequence,
                     payload.origin_session_id,
                     payload.interaction_lineage_id,
                     payload.targets,
                     JobDeliveryContent::Terminal(payload.terminal_result),
-                )
-                .await?
+                )?
             }
             _ => {
-                return Err(JobOutboxProjectionError::Corrupt(format!(
-                    "delivery {} has an unsupported runtime kind",
-                    record.submission.delivery_id()
-                )));
+                return Err(JobOutboxProjectionError::UnsupportedKind(
+                    record.submission.delivery_id().to_string(),
+                ));
             }
         };
-        self.runtime_inbox
-            .mark_applied(runtime_id, record.submission.delivery_id(), record.sequence)
+        // Bind the complete immutable manifest before any sink effect. Exact
+        // subscription bytes include the target, delivery kind and mode; an
+        // ID by itself cannot silently bind a different subscription on retry.
+        let recipients = applications
+            .iter()
+            .map(|application| {
+                let subscription = match application {
+                    JobDeliveryApplication::Record { subscription, .. }
+                    | JobDeliveryApplication::Notification { subscription, .. }
+                    | JobDeliveryApplication::Event { subscription, .. } => subscription,
+                };
+                Ok(RuntimeDeliveryRecipient::new(
+                    subscription.subscription_id().as_str(),
+                    serde_json::to_string(subscription)
+                        .map_err(|error| JobOutboxProjectionError::Encode(error.to_string()))?,
+                )?)
+            })
+            .collect::<Result<Vec<_>, JobOutboxProjectionError>>()?;
+        // #1813: route every recipient by ITS session's hosting, and take
+        // the claim of every cold recipient this process applies, before any
+        // delivery-authority input. A row with nothing this process may apply
+        // (every recipient served by another owner, or cold while another
+        // process is the cold-delivery owner or holds the session) is skipped
+        // without binding or settling.
+        let mut routes = Vec::with_capacity(applications.len());
+        for application in &applications {
+            let recipient = application_recipient(application);
+            let route = self
+                .router
+                .route(recipient)
+                .await
+                .ok_or(JobOutboxProjectionError::DeliveryHostGone)?;
+            let applicable = match route {
+                DeliveryRoute::ServedHere(sink) => Some(ApplicableRecipient {
+                    sink,
+                    _cold_claim: None,
+                }),
+                DeliveryRoute::Unserved(sink) if self.applies_cold_deliveries => {
+                    match self
+                        .router
+                        .claim_cold(recipient)
+                        .await
+                        .ok_or(JobOutboxProjectionError::DeliveryHostGone)?
+                    {
+                        Ok(claim) => Some(ApplicableRecipient {
+                            sink,
+                            _cold_claim: Some(claim),
+                        }),
+                        // Another process hosts it (the Unserved-to-hosted
+                        // race), or its claim is unavailable: settled at the
+                        // claim with zero input, never applied unclaimed.
+                        Err(
+                            meerkat_runtime::HostingRefused::ServedElsewhere(_)
+                            | meerkat_runtime::HostingRefused::Unavailable(_),
+                        ) => None,
+                    }
+                }
+                DeliveryRoute::Unserved(_) | DeliveryRoute::ServedElsewhere => None,
+            };
+            routes.push(applicable);
+        }
+        if routes.iter().all(Option::is_none) {
+            return Ok(RecordProgress::AwaitingOtherHosts {
+                skipped_recipients: applications
+                    .iter()
+                    .map(|application| application_recipient(application).clone())
+                    .collect(),
+                touched_authority: false,
+            });
+        }
+        let mut states = self
+            .runtime_inbox
+            .bind_recipients(runtime_id, record, &recipients)
             .await?;
-        Ok(applications)
+        let mut skipped_recipients = Vec::new();
+        for ((application, state), applicable) in
+            applications.into_iter().zip(&mut states).zip(&routes)
+        {
+            if state.outcome.is_some() {
+                continue;
+            }
+            let Some(applicable) = applicable else {
+                skipped_recipients.push(application_recipient(&application).clone());
+                continue;
+            };
+            let outcome = match applicable.sink.apply(application).await {
+                Ok(()) => RuntimeDeliveryRecipientOutcome::Applied,
+                Err(JobDeliveryApplyError::Authorization(
+                    meerkat_core::OperationAuthorizationError::Refused(_),
+                )) => RuntimeDeliveryRecipientOutcome::Refused,
+                Err(JobDeliveryApplyError::Review(_)) => RuntimeDeliveryRecipientOutcome::Refused,
+                Err(JobDeliveryApplyError::Authorization(
+                    meerkat_core::OperationAuthorizationError::Unavailable,
+                )) => RuntimeDeliveryRecipientOutcome::OperationAuthorizationUnavailable,
+                // Another runtime owner took the recipient's session after
+                // routing, or its claim is unavailable. Skip it: not settled,
+                // not blocked.
+                Err(
+                    JobDeliveryApplyError::ServedElsewhere { session_id }
+                    | JobDeliveryApplyError::HostingUnavailable { session_id },
+                ) => {
+                    skipped_recipients.push(session_id);
+                    continue;
+                }
+                Err(error) => return Err(JobOutboxProjectionError::Apply(error)),
+            };
+            *state = self
+                .runtime_inbox
+                .settle_recipient(runtime_id, record, &state.recipient, outcome)
+                .await?;
+        }
+        if !skipped_recipients.is_empty() {
+            return Ok(RecordProgress::AwaitingOtherHosts {
+                skipped_recipients,
+                touched_authority: true,
+            });
+        }
+        let outcome = self
+            .runtime_inbox
+            .finish_recipients(runtime_id, record)
+            .await?;
+        Ok(RecordProgress::Completed(outcome, states))
+    }
+}
+
+/// The session one application is delivered to.
+fn application_recipient(application: &JobDeliveryApplication) -> &meerkat_core::SessionId {
+    match application {
+        JobDeliveryApplication::Record { subscription, .. }
+        | JobDeliveryApplication::Notification { subscription, .. }
+        | JobDeliveryApplication::Event { subscription, .. } => subscription.session_id(),
     }
 }
 
@@ -339,6 +864,7 @@ pub fn job_delivery_event_input(
                 .map(meerkat_runtime::CorrelationId::from_uuid),
             authority_association: None,
             ingress_context: None,
+            retained_resume: None,
         },
         event_type: event_type.to_string(),
         payload,
@@ -348,15 +874,14 @@ pub fn job_delivery_event_input(
     })
 }
 
-async fn apply_subscriptions(
-    sink: &dyn JobDeliverySink,
+fn subscription_applications(
     job_id: JobId,
     delivery_sequence: u64,
     origin_session_id: meerkat_core::SessionId,
     interaction_lineage_id: InteractionLineageId,
     mut targets: Vec<JobSubscription>,
     content: JobDeliveryContent,
-) -> Result<usize, JobOutboxProjectionError> {
+) -> Result<Vec<JobDeliveryApplication>, JobOutboxProjectionError> {
     if targets.is_empty() {
         targets.push(JobSubscription::new(
             meerkat_jobs::JobSubscriptionId::new("origin")
@@ -365,7 +890,7 @@ async fn apply_subscriptions(
             JobDeliveryKind::Notification,
         ));
     }
-    let applications = targets.len();
+    let mut applications = Vec::with_capacity(targets.len());
     for subscription in targets {
         let delivery = subscription.delivery().clone();
         let application = match delivery {
@@ -390,9 +915,7 @@ async fn apply_subscriptions(
                 content: content.clone(),
             },
         };
-        sink.apply(application)
-            .await
-            .map_err(JobOutboxProjectionError::Apply)?;
+        applications.push(application);
     }
     Ok(applications)
 }
@@ -493,7 +1016,19 @@ pub enum JobOutboxProjectionError {
     #[error("failed to encode job delivery: {0}")]
     Encode(String),
     #[error("failed to apply job delivery: {0}")]
-    Apply(String),
+    Apply(#[source] JobDeliveryApplyError),
+    #[error("no handler for the kind of delivery {0} is armed")]
+    UnsupportedKind(String),
+    /// A terminal policy outcome for one continuation delivery, as opposed to
+    /// a failure: the drain settles it as refused and continues.
+    #[error("delivery {delivery_id} is refused: {reason:?}")]
+    Refused {
+        delivery_id: String,
+        reason: meerkat_runtime::RuntimeDeliveryRefusalReason,
+    },
+    /// The delivery host is gone: the owner stops.
+    #[error("the job delivery host is gone")]
+    DeliveryHostGone,
 }
 
 #[derive(Clone)]

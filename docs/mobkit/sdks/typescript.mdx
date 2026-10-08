@@ -4,7 +4,7 @@ description: "TypeScript SDK for MobKit with type-safe contracts, parity tests, 
 icon: "js"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 The TypeScript SDK (`@rkat/mobkit-sdk`) provides type-safe access to the MobKit JSON-RPC gateway from Node.js.
 
@@ -48,6 +48,55 @@ const results = await handle.memoryQuery({
 
 ```
 
+## Waiting for a turn
+
+The recommended completion barrier is a tracked delivery plus its ticket:
+`sendAndWait(identity, content)`, or `send(identity, content, { trackTurn:
+true })` followed by `waitForTurn(identity, result.turnTicket)`. It reads only
+the ticket ledger and returns that turn's own output.
+
+`sendAndWaitOutcome` and `dispatchAndWaitOutcome` resolve the typed
+`AwaitedTurn` (`text`, `attributed`, `admission`, `ticket`, `outputStatus`,
+`untrackedCode`); `sendAndWait` / `dispatchAndWait` resolve its `text`. When
+the delivery returns no ticket (any delivered `turnUnavailable.code`, such
+as `autonomous_host`, the default mode, or a gateway predating turn tickets),
+the call waits on the identity-wide completion cursor with a
+`TurnTrackingUnavailableWarning` naming the code: `attributed` is `false`
+because another delivery's turn may have produced the text, and
+`untrackedCode` carries the code. `requireAttribution: true` throws
+`TurnTrackingUnavailableError` (carrying `admission`) in every untracked case
+instead. `not_delivered` (nothing ran) throws `TurnNotDeliveredError`.
+
+The delivery is never repeated. A transport or RPC failure of the
+exact-ticket wait is retried for that ticket only until `timeoutMs`, then
+throws `PostAdmissionObservationError` with `admission`, `ticket` and the
+last failure as `cause`. Every error an `*AndWait` call throws after
+admission keeps its type and carries `admission` (and `ticket`, `null` when
+untracked): `TurnFailedError`, `TurnUnknownError`, `WaitEndedError`,
+`TurnWaitTimeoutError` (a turn still pending at the deadline), and on the
+identity-wide wait its deadline, missing-baseline and superseded-incarnation
+errors and a raw transport error. A tracked `WaitEndedError` carries the
+top-level `ticket` too. The one exception is a thrown value that cannot carry
+fields (a non-object, or a frozen object thrown by custom code), which still
+propagates unchanged.
+
+`waitForCompletion(identity, baseline)` and `waitUntilReady(identities)` are
+identity-wide: any completion on the identity satisfies them.
+
+Every wait is server-side and event-driven: `waitForTurn` is one
+`mobkit/wait_for_turn` request, and `waitForCompletion` / `waitUntilReady` are
+one `mobkit/wait_for_completion` request per identity. The gateway answers
+when the ticket settles or a completion is recorded, so nothing polls, and the
+member's output is read once, at completion. `timeoutMs` is only the deadline;
+`pollIntervalMs` applies only against a gateway that predates the server-side
+waits. `completionCursor(identity)` is a one-shot cursor read that never
+touches the member session. `inspectIdentity` does read the member session, so
+do not poll it.
+
+A wait that ends before a completion (a failed or cancelled run, a Broken,
+retiring or deleted identity, or gateway shutdown) rejects with the typed
+`WaitEndedError`, whose `outcome` names why.
+
 ## Durable detached tools
 
 Long-running host work must declare detached execution rather than keeping a
@@ -67,7 +116,7 @@ const runtime = await MobKit.builder()
         {
           description: "Run a durable security scan",
           execution: new DetachedJobExecution({
-            runner: "homecore.security_scan",
+            runner: "example.security_scan",
             version: "v1",
             restartClass: "checkpoint_resumable",
             idempotencyScope: "interaction_and_arguments",
@@ -249,7 +298,7 @@ The TypeScript SDK targets the JSON-RPC gateway. Rust also exposes lower-level n
 External identity providers are all-or-nothing: configure `continuityStore()`, `leaseProvider()`, and `scratchDir()` together. The SDK sends the corresponding init flags to Rust, and provider callbacks use Rust's wire shape (`result` tags and `ttl`). `LeaseProvider.renewLeases(...)` is atomic from the caller's perspective: a rejected promise means no input grant was changed, while every returned `renewed` or `lost` result is already committed for that identity. Providers must not commit a replacement grant and then reject.
 Continuity stores should treat `checkpoint_version` as monotonic per identity and continuity generation. A live session rebind changes `session_id` without resetting the version; only destructive reset advances `generation` and starts the version stream over.
 
-Raw gateway memory config accepts `{ backend: "local_json", health_check_endpoint: url }`, with `health_check_endpoint` optional. The TypeScript helper is `memory.localJson({ healthCheckEndpoint: url })`; it translates that option to the snake_case wire key. The legacy Elephant `{ backend, endpoint }` shape still works but is deprecated. Store, collection, and space selectors are retained on the helper object for app code but are not sent to the Rust gateway. Gateway auth config supports JWT validation; Google/OIDC helpers are model objects, not accepted by `mobkit/init` today.
+Raw gateway memory config accepts `{ backend: "local_json", health_check_endpoint: url }`, with `health_check_endpoint` optional. The TypeScript helper is `memory.localJson({ healthCheckEndpoint: url })`; it translates that option to the snake_case wire key. The legacy `elephant` `{ backend, endpoint }` shape still works but is deprecated. Store, collection, and space selectors are retained on the helper object for app code but are not sent to the Rust gateway. Gateway auth config supports JWT validation; Google/OIDC helpers are model objects, not accepted by `mobkit/init` today.
 
 The builder exposes no `roleMigrations(...)` setter and sends no `role_migrations` init param, so a TypeScript host cannot authorize a role-migrating resume: a durable member whose role changed keeps refusing to resume with `MobError::MemberRoleMigrationRequired`. Declaring the migration currently requires the Python builder's `.role_migrations([...])` or a hand-built `mobkit/init` payload; see the [configuration reference](/mobkit/reference/configuration#member-role-migrations).
 
@@ -295,6 +344,29 @@ declaration). Blob-store durability has no wire declaration today — it is
 declared by Rust embedders via `ephemeral_blobs(true)` /
 `binary_blob_store(...)` and reported read-only in the census.
 
+A composition provenance refusal surfaces as the typed
+`CompositionProvenanceError` (code `-32019`, `COMPOSITION_PROVENANCE_CODE`).
+The gateway raises it when the persistent mob storage's recorded composition
+cannot be proven to match this launch, for example a `mob.toml` edited since
+the persistent mob storage was created. Its `kind` names the refusal
+(`"divergent"`, `"created_by_rehearsal"`, the manifest kinds, and
+`"candidate_divergent"` from gateways launched as a candidate) and `fields`
+lists the diverged definition fields as dotted paths, so a host can show what
+changed without parsing the message:
+
+```typescript
+import { CompositionProvenanceError } from "@rkat/mobkit-sdk";
+
+try {
+  const runtime = await builder.build();
+} catch (err) {
+  if (err instanceof CompositionProvenanceError && err.kind === "divergent") {
+    console.error("mob.toml differs from the stored definition in", err.fields);
+  }
+  throw err;
+}
+```
+
 ## Gateway logging (stderr)
 
 The persistent gateway reports tracing lines, panic hooks, and storage
@@ -334,6 +406,41 @@ hook adds alerting, not logging. Use
 `isResolutionErrorEvent(event)` to tell a failure ending
 (`actor_loop_recovered`) from one starting before paging on it. The Python
 twin is `.on_error(callback)`.
+
+## Startup: no built-in total deadline
+
+`connect()` runs `mobkit/init` as accepted-then-settled. The gateway accepts
+the init at once, reports each startup phase, and then settles it `ready` or
+`failed`. The SDK has **no built-in total deadline** for that wait. Startup
+legitimately includes provider callbacks (each bounded at 130 s by the
+gateway) and native persisted-authority prewarm, which is deliberately
+unbounded and can run for minutes on a large roster. Any fixed SDK timer
+would sooner or later abort a healthy restore. `gatewayTimeoutMs` still
+bounds the wait for the `accepted` answer, and for an older gateway's single
+init response.
+
+The wait ends only when one of these happens:
+
+- the init settles `ready` (connected);
+- the init settles `failed`. You get the typed error, for example
+  `StorageResolutionError`, with `err.data.durable_effects`: `"none"` when
+  nothing durable was touched, otherwise `"possible"`;
+- the gateway exits, or the transport reader fails. You get
+  `InitOutcomeUnknownError`;
+- your own deadline runs out. Set it with
+  `MobKit.builder().initDeadline(ms)`, and running out also throws
+  `InitOutcomeUnknownError`.
+
+`InitOutcomeUnknownError` carries `initId`, `lastPhase` (the last
+`mobkit/init_progress` phase seen, such as `"prewarm"` or `"restore"`) and
+`reason`. That makes a stuck or interrupted init diagnosable. The gateway may
+already have changed native state, so the SDK never retries it automatically
+and asks the gateway to shut down.
+
+Provider callbacks that run during startup must not call ordinary runtime
+RPCs on the same runtime. Ordinary dispatch starts only after init settles,
+and the gateway refuses an earlier request at once with `InitInProgressError`
+(`-32018`, exported as `INIT_IN_PROGRESS_CODE`).
 
 ## HTTP transport timeout
 

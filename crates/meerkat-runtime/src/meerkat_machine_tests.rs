@@ -1121,6 +1121,7 @@ async fn assert_fenced_registration_target_and_authority_contract(
         injected_context: Vec::new(),
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: input_id.clone(),
             timestamp: Utc::now(),
@@ -2787,6 +2788,7 @@ fn make_prompt(text: &str) -> Input {
         injected_context: Vec::new(),
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -2808,6 +2810,7 @@ fn make_queued_external_event(label: &str) -> Input {
         objective_id: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -5587,6 +5590,7 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
         sender_taint: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -5881,6 +5885,7 @@ fn make_progress_input(label: &str) -> Input {
         sender_taint: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -21991,6 +21996,7 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
         sender_taint: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -22260,6 +22266,7 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
         sender_taint: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -22718,6 +22725,7 @@ fn interrupt_yielding_peer_input(
         sender_taint: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -22753,6 +22761,7 @@ fn directed_interrupt_yielding_peer_input(body: &str) -> (Input, InputId) {
         sender_taint: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: input_id.clone(),
             timestamp: Utc::now(),
@@ -34555,10 +34564,13 @@ async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes()
         .await
         .expect("prepare runtime bindings");
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    bindings.post_commit_hooks().configure(
-        Some(Arc::new(RecordingPostCommitHookEngine { sender })),
-        meerkat_core::HookRunOverrides::default(),
-    );
+    bindings
+        .post_commit_hooks()
+        .configure(
+            Some(Arc::new(RecordingPostCommitHookEngine { sender })),
+            meerkat_core::HookRunOverrides::default(),
+        )
+        .expect("install post-commit hook engine");
 
     let mut first = crate::input::PromptInput::new("first", None);
     first.header.idempotency_key = Some(crate::IdempotencyKey::new("same-input"));
@@ -34583,6 +34595,7 @@ async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes()
     let valid_peer = Input::Peer(crate::input::PeerInput {
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -34619,6 +34632,7 @@ async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes()
     let invalid_peer = Input::Peer(crate::input::PeerInput {
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -34683,10 +34697,13 @@ async fn direct_ingest_retired_rejection_emits_typed_not_ready_hook() {
         .await
         .expect("prepare runtime bindings");
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    bindings.post_commit_hooks().configure(
-        Some(Arc::new(RecordingPostCommitHookEngine { sender })),
-        meerkat_core::HookRunOverrides::default(),
-    );
+    bindings
+        .post_commit_hooks()
+        .configure(
+            Some(Arc::new(RecordingPostCommitHookEngine { sender })),
+            meerkat_core::HookRunOverrides::default(),
+        )
+        .expect("install post-commit hook engine");
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
         .await
@@ -35689,6 +35706,75 @@ fn domain_live_identity(model: &str) -> meerkat_core::SessionLlmIdentity {
     }
 }
 
+/// #1823: the member-turn reasoning preference lives exactly as long as the
+/// admitted channel that sealed it. A rejected open records none; abandoning
+/// or closing the channel removes it.
+#[test]
+fn live_open_member_turn_reasoning_lives_exactly_as_long_as_its_channel() {
+    let reasoning = |authority: &mm_dsl::MeerkatMachineAuthority| {
+        authority
+            .state()
+            .live_member_turn_reasoning_by_channel
+            .clone()
+    };
+    let open = |authority: &mut mm_dsl::MeerkatMachineAuthority, channel: &str, level| {
+        mm_dsl::MeerkatMachineMutator::apply(
+            authority,
+            mm_dsl::MeerkatMachineInput::ResolveLiveOpenAdmission {
+                session_id: "session-live-r".to_string(),
+                channel_id: channel.to_string(),
+                llm_identity: dsl_live_identity("gpt-realtime-2"),
+                member_turn_reasoning: Some(level),
+            },
+        )
+        .expect("live open classified")
+    };
+    let mut authority = registered_dsl_authority_for_session("session-live-r");
+    open(
+        &mut authority,
+        "channel-a",
+        mm_dsl::LiveMemberTurnReasoning::Low,
+    );
+    assert_eq!(
+        reasoning(&authority).get("channel-a"),
+        Some(&mm_dsl::LiveMemberTurnReasoning::Low)
+    );
+    // A second open while one is bound is rejected and records nothing.
+    open(
+        &mut authority,
+        "channel-b",
+        mm_dsl::LiveMemberTurnReasoning::High,
+    );
+    assert!(!reasoning(&authority).contains_key("channel-b"));
+    // Abandoning the admitted open removes its preference.
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: "session-live-r".to_string(),
+            channel_id: "channel-a".to_string(),
+        },
+    )
+    .expect("abandon");
+    assert!(reasoning(&authority).is_empty());
+    // A committed close removes it too.
+    open(
+        &mut authority,
+        "channel-c",
+        mm_dsl::LiveMemberTurnReasoning::Medium,
+    );
+    assert_eq!(reasoning(&authority).len(), 1);
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+            session_id: "session-live-r".to_string(),
+            channel_id: "channel-c".to_string(),
+            close_observation_sequence: 1,
+        },
+    )
+    .expect("close");
+    assert!(reasoning(&authority).is_empty());
+}
+
 #[test]
 fn live_open_admission_is_machine_owned() {
     let mut authority = registered_dsl_authority_for_session("session-live-1");
@@ -35700,6 +35786,7 @@ fn live_open_admission_is_machine_owned() {
             session_id: "session-live-1".to_string(),
             channel_id: "live-channel-1".to_string(),
             llm_identity: identity.clone(),
+            member_turn_reasoning: None,
         },
     )
     .expect("machine authority should admit first live channel open");
@@ -35740,6 +35827,7 @@ fn live_open_admission_is_machine_owned() {
             session_id: "session-live-1".to_string(),
             channel_id: "live-channel-2".to_string(),
             llm_identity: dsl_live_identity("gpt-realtime-2"),
+            member_turn_reasoning: None,
         },
     )
     .expect("machine authority should classify duplicate live open");
@@ -35796,6 +35884,7 @@ fn live_open_admission_rejects_without_reviving_terminal_lifecycle() {
                 session_id: "terminal-live-session".to_string(),
                 channel_id: "terminal-live-channel".to_string(),
                 llm_identity: dsl_live_identity("gpt-realtime-2"),
+                member_turn_reasoning: None,
             },
         )
         .expect("terminal live/open should resolve as an explicit rejection");
@@ -35838,6 +35927,7 @@ fn live_open_admission_rejects_during_unregister_drain() {
             session_id: "draining-live-session".to_string(),
             channel_id: "draining-live-channel".to_string(),
             llm_identity: dsl_live_identity("gpt-realtime-2"),
+            member_turn_reasoning: None,
         },
     )
     .expect("draining live/open should resolve as an explicit rejection");
@@ -35879,6 +35969,7 @@ fn live_open_admission_rejects_after_final_unregister_marker() {
             session_id: "removed-live-session".to_string(),
             channel_id: "removed-live-channel".to_string(),
             llm_identity: dsl_live_identity("gpt-realtime-2"),
+            member_turn_reasoning: None,
         },
     )
     .expect("post-unregister live/open should resolve as an explicit rejection");
@@ -35915,6 +36006,7 @@ fn live_open_admission_rejects_while_runtime_stop_is_deferred() {
             session_id: "stopping-live-session".to_string(),
             channel_id: "stopping-live-channel".to_string(),
             llm_identity: dsl_live_identity("gpt-realtime-2"),
+            member_turn_reasoning: None,
         },
     )
     .expect("deferred-stop live/open should resolve as an explicit rejection");
@@ -36341,6 +36433,7 @@ fn live_webrtc_answer_admission_and_result_are_machine_owned() {
             session_id: "session-live-1".to_string(),
             channel_id: "live-channel-1".to_string(),
             llm_identity: dsl_live_identity("gpt-realtime-2"),
+            member_turn_reasoning: None,
         },
     )
     .expect("machine authority should own live channel binding before WebRTC token issue");
@@ -36577,6 +36670,7 @@ fn live_websocket_token_admission_is_machine_owned() {
             session_id: "session-live-1".to_string(),
             channel_id: "live-channel-1".to_string(),
             llm_identity: dsl_live_identity("gpt-realtime-2"),
+            member_turn_reasoning: None,
         },
     )
     .expect("machine authority should own live channel binding before WS token issue");
@@ -44187,6 +44281,7 @@ fn runtime_parity_peer_message(text: &str) -> Input {
         sender_taint: None,
         header: crate::input::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -44477,6 +44572,7 @@ async fn wake_runtime_if_active_inputs_drains_existing_attached_queue() {
                 sender_taint: None,
                 header: crate::input::InputHeader {
                     ingress_context: None,
+                    retained_resume: None,
                     authority_association: None,
                     id: InputId::new(),
                     timestamp: Utc::now(),
@@ -45951,10 +46047,25 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::InputIdempotencyConflict { existing_id } => {
             format!("input_idempotency_conflict:{existing_id}")
         }
+        RuntimeDriverError::RetainedResumeRefused { reason } => {
+            format!("retained_resume_refused:{reason:?}")
+        }
         RuntimeDriverError::NotFound { runtime_id } => {
             format!("not_found:{runtime_id}")
         }
         RuntimeDriverError::Destroyed => "destroyed".to_string(),
+        RuntimeDriverError::ServedElsewhere { session_id } => {
+            format!("served_elsewhere:{session_id}")
+        }
+        RuntimeDriverError::HostingUnavailable { session_id } => {
+            format!("hosting_unavailable:{session_id}")
+        }
+        RuntimeDriverError::HostingClaimInvariantViolated {
+            runtime_id,
+            input_id,
+            constraint,
+            ..
+        } => format!("hosting_claim_invariant_violated:{runtime_id}:{input_id}:{constraint}"),
         RuntimeDriverError::LiveContextBarrierRevoked {
             session_id,
             channel_id,
@@ -48409,9 +48520,15 @@ mod prepared_materialization_transactions {
         }
     }
 
+    struct ControlledCleanupExit {
+        waits: AtomicUsize,
+        release: tokio::sync::Semaphore,
+    }
+
     struct CountingCleanupHandle {
         normal: Arc<AtomicUsize>,
         under_boundary: Arc<AtomicUsize>,
+        exit: Option<Arc<ControlledCleanupExit>>,
     }
 
     #[async_trait::async_trait]
@@ -48428,6 +48545,13 @@ mod prepared_materialization_transactions {
         ) -> Result<(), CoreExecutorError> {
             self.under_boundary.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+
+        async fn await_removed_actor_exit(&self) {
+            if let Some(exit) = self.exit.as_ref() {
+                exit.waits.fetch_add(1, Ordering::SeqCst);
+                let _permit = exit.release.acquire().await;
+            }
         }
     }
 
@@ -49036,6 +49160,138 @@ mod prepared_materialization_transactions {
     }
 
     #[tokio::test]
+    async fn completed_boundary_cleanup_waits_for_exit_without_repeating_callback() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let normal = Arc::new(AtomicUsize::new(0));
+        let under_boundary = Arc::new(AtomicUsize::new(0));
+        let exit = Arc::new(ControlledCleanupExit {
+            waits: AtomicUsize::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let mut prepared = machine
+            .prepare_session_materialization(session_id.clone())
+            .await
+            .expect("prepare exact cleanup ownership");
+        machine
+            .install_prepared_session_executor_handles(
+                prepared.bindings(),
+                Arc::new(CountingInterruptHandle),
+                Arc::new(CountingCleanupHandle {
+                    normal: Arc::clone(&normal),
+                    under_boundary: Arc::clone(&under_boundary),
+                    exit: Some(Arc::clone(&exit)),
+                }),
+            )
+            .await
+            .expect("install owner-minted provisional cleanup attachment");
+        let (attachment_id, cleanup_gate) = {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions.get(&session_id).expect("prepared registration");
+            (
+                entry
+                    .post_stop_cleanup_attachment_id
+                    .expect("machine minted the cleanup attachment identity"),
+                Arc::clone(&entry.post_stop_cleanup_gate),
+            )
+        };
+
+        // This is the shared runtime contract, with a controlled exit wait.
+        // The physical actor and hosting-claim behavior is covered separately
+        // by actor_exit_control in the facade. Do not set the completion bit.
+        let initial_boundary = {
+            let mut future = Box::pin(machine.complete_post_stop_cleanup_for_test(
+                &session_id,
+                attachment_id,
+                true,
+            ));
+            futures::poll!(tokio::task::unconstrained(future.as_mut()))
+        };
+        let waits_after_boundary = exit.waits.load(Ordering::SeqCst);
+        let mut cancelled = Box::pin(machine.complete_post_stop_cleanup_for_test(
+            &session_id,
+            attachment_id,
+            false,
+        ));
+        let first_ordinary = futures::poll!(tokio::task::unconstrained(cancelled.as_mut()));
+        let waits_after_first_ordinary = exit.waits.load(Ordering::SeqCst);
+        drop(cancelled);
+
+        let mut retry = Box::pin(machine.complete_post_stop_cleanup_for_test(
+            &session_id,
+            attachment_id,
+            false,
+        ));
+        let retry_poll = futures::poll!(tokio::task::unconstrained(retry.as_mut()));
+        let retry_was_pending = retry_poll.is_pending();
+        let retry_result = match retry_poll {
+            std::task::Poll::Ready(result) => Some(result),
+            std::task::Poll::Pending => None,
+        };
+        let boundary_retry = {
+            let mut future = Box::pin(machine.complete_post_stop_cleanup_for_test(
+                &session_id,
+                attachment_id,
+                true,
+            ));
+            futures::poll!(tokio::task::unconstrained(future.as_mut()))
+        };
+        let waits_before_release = exit.waits.load(Ordering::SeqCst);
+        let ordinary_callbacks_before_release = normal.load(Ordering::SeqCst);
+        let boundary_callbacks_before_release = under_boundary.load(Ordering::SeqCst);
+        let registry_unlocked = machine.sessions.try_write().is_ok();
+        let cleanup_gate_unlocked = cleanup_gate.try_lock().is_ok();
+
+        // Closing this semaphore makes the test exit observation permanently
+        // ready, including for any later idempotent waiter during rollback.
+        // Release before assertions so an expected RED cannot strand cleanup.
+        exit.release.close();
+        let retry_result = match retry_result {
+            Some(result) => result,
+            None => tokio::time::timeout(Duration::from_secs(2), retry.as_mut())
+                .await
+                .expect("ordinary retry completes after exit is released"),
+        };
+        drop(retry);
+        let rolled_back = tokio::time::timeout(Duration::from_secs(2), prepared.rollback_now())
+            .await
+            .expect("clean the prepared registration after releasing exit")
+            .expect("exact cleanup rollback succeeds");
+
+        assert!(matches!(initial_boundary, std::task::Poll::Ready(Ok(()))));
+        assert_eq!(
+            waits_after_boundary, 0,
+            "boundary-owned cleanup must not join"
+        );
+        assert!(
+            first_ordinary.is_pending(),
+            "a completed nonjoining callback is not a completed actor exit"
+        );
+        assert_eq!(waits_after_first_ordinary, 1);
+        assert!(
+            retry_was_pending,
+            "cancelling one observer cannot erase the exit wait"
+        );
+        assert!(matches!(boundary_retry, std::task::Poll::Ready(Ok(()))));
+        assert_eq!(waits_before_release, 2, "only the ordinary observers join");
+        assert_eq!(ordinary_callbacks_before_release, 0);
+        assert_eq!(boundary_callbacks_before_release, 1);
+        assert!(
+            registry_unlocked,
+            "exit wait must release the registry guard"
+        );
+        assert!(
+            cleanup_gate_unlocked,
+            "exit wait must release the cleanup gate"
+        );
+        retry_result.expect("ordinary cleanup finishes after exit");
+        assert_eq!(normal.load(Ordering::SeqCst), 0);
+        assert_eq!(under_boundary.load(Ordering::SeqCst), 1);
+        assert!(rolled_back);
+        assert!(!machine.contains_session(&session_id).await);
+    }
+
+    #[tokio::test]
     async fn unregister_cleans_committed_provisional_actor_before_loop_attachment() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
@@ -49052,6 +49308,7 @@ mod prepared_materialization_transactions {
                 Arc::new(CountingCleanupHandle {
                     normal: Arc::clone(&normal),
                     under_boundary: Arc::clone(&under_boundary),
+                    exit: None,
                 }),
             )
             .await
@@ -49289,6 +49546,7 @@ mod prepared_materialization_transactions {
                 Arc::new(CountingCleanupHandle {
                     normal: Arc::clone(&normal),
                     under_boundary: Arc::clone(&under_boundary),
+                    exit: None,
                 }),
             )
             .await
@@ -49319,6 +49577,7 @@ mod prepared_materialization_transactions {
                 Arc::new(CountingCleanupHandle {
                     normal: Arc::clone(&normal),
                     under_boundary: Arc::clone(&under_boundary),
+                    exit: None,
                 }),
             )
             .await
@@ -51080,6 +51339,7 @@ fn unregister_completes_after_normal_close_of_a_staged_live_channel() {
             session_id: s.clone(),
             channel_id: c.clone(),
             llm_identity: dsl_live_identity("gpt-realtime-2"),
+            member_turn_reasoning: None,
         },
         "live open",
     );
@@ -51386,4 +51646,173 @@ async fn attachment_commit_generation_advances_when_an_executor_attachment_serve
         .expect("register with executor");
     assert!(attachments.has_changed().expect("signal open"));
     assert_eq!(*attachments.borrow_and_update(), 2);
+}
+
+/// ADR's #1813 B correction, machine level: the store selected cross-process
+/// claims at open, and the session's lock becomes unavailable afterwards (a
+/// regular file where the lock directory belongs). Registration is refused
+/// typed `HostingUnavailable`: no registration, nothing served here, no
+/// unclaimed host. Paired: once the lock directory is usable the same
+/// machine registers the session under a cross-process claim.
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn a_session_lock_unavailable_after_startup_is_refused_not_hosted_unclaimed() {
+    use crate::session_hosting::{HostingPaths, HostingRefused, SessionServing};
+
+    let dir = tempfile::tempdir().unwrap();
+    let hosting_lock_dir = dir.path().join("hosting");
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        crate::store::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite3"))
+            .unwrap()
+            .with_hosting_paths(HostingPaths {
+                hosting_lock_dir: hosting_lock_dir.clone(),
+                cold_delivery_lock: dir.path().join("delivery").join("cold-delivery.lock"),
+                database: None,
+            }),
+    );
+    assert!(store.hosting_capability().is_cross_process());
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store()).unwrap();
+    let session_id = SessionId::new();
+    std::fs::write(&hosting_lock_dir, b"not a directory").unwrap();
+
+    assert!(
+        matches!(
+            machine.grant_session_hosting(&session_id),
+            Err(HostingRefused::Unavailable(_))
+        ),
+        "an unavailable claim is refused, never granted unclaimed"
+    );
+    let refused = machine
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::RegisterSession {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .expect_err("registration without the claim is refused");
+    assert!(
+        matches!(
+            &refused,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::HostingUnavailable {
+                session_id: refused_id,
+            }) if refused_id == &session_id
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        !machine.contains_session(&session_id).await,
+        "no registration was published"
+    );
+    assert_eq!(
+        machine.session_serving(&session_id),
+        SessionServing::NotHeldInThisProcess
+    );
+
+    std::fs::remove_file(&hosting_lock_dir).unwrap();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("registers once the claim can be taken");
+    assert_eq!(
+        machine.session_serving(&session_id),
+        SessionServing::HeldHere
+    );
+    assert!(
+        machine
+            .grant_session_hosting(&session_id)
+            .expect("the lineage shares its claim")
+            .is_cross_process()
+    );
+}
+
+/// #1813 (ADR's R6 objection): hosting claims are owner-scoped. Two
+/// MeerkatMachines may share one store for distinct runtimes, and each is a
+/// distinct runtime owner. A session one hosts is refused to the other
+/// exactly as to another process (grant, serving and registration, before
+/// any recovery or admission, so the two can never race the session's input
+/// idempotency index), while the first machine's own lineage shares the
+/// claim. Once the first owner unregisters and every clone of its lineage is
+/// gone, the other may host the session.
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn a_second_local_machine_over_one_store_is_refused_the_session() {
+    use crate::session_hosting::{HostingPaths, HostingRefused, ServedElsewhere, SessionServing};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        crate::store::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite3"))
+            .unwrap()
+            .with_hosting_paths(HostingPaths {
+                hosting_lock_dir: dir.path().join("hosting"),
+                cold_delivery_lock: dir.path().join("delivery").join("cold-delivery.lock"),
+                database: None,
+            }),
+    );
+    assert!(store.hosting_capability().is_cross_process());
+    let host = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store()).unwrap();
+    let other = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("separate machines may share one store");
+    assert!(!host.is_same_runtime_owner(&other));
+    let session_id = SessionId::new();
+
+    host.register_session(session_id.clone())
+        .await
+        .expect("the first owner registers");
+    assert_eq!(host.session_serving(&session_id), SessionServing::HeldHere);
+    assert_eq!(
+        other.session_serving(&session_id),
+        SessionServing::HeldByAnotherLocalOwner
+    );
+    let lineage = host
+        .grant_session_hosting(&session_id)
+        .expect("the host's own lineage shares its claim");
+
+    assert_eq!(
+        other
+            .grant_session_hosting(&session_id)
+            .expect_err("another runtime owner is refused"),
+        HostingRefused::ServedElsewhere(ServedElsewhere {
+            session_id: session_id.clone()
+        })
+    );
+    let refused = other
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::RegisterSession {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .expect_err("another runtime owner's registration is refused");
+    assert!(
+        matches!(
+            &refused,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::ServedElsewhere {
+                session_id: refused_id,
+            }) if refused_id == &session_id
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        !other.contains_session(&session_id).await,
+        "the refused owner published no registration"
+    );
+
+    drop(lineage);
+    assert!(
+        host.unregister_current_session_registration_until_terminal(&session_id)
+            .await
+            .expect("the first owner unregisters"),
+        "the first owner's registration is torn down"
+    );
+    assert_eq!(
+        other.session_serving(&session_id),
+        SessionServing::NotHeldInThisProcess
+    );
+    other
+        .register_session(session_id.clone())
+        .await
+        .expect("free once the first owner's lineage is gone");
+    assert_eq!(other.session_serving(&session_id), SessionServing::HeldHere);
 }

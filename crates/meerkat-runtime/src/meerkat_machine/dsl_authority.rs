@@ -50,6 +50,7 @@ pub(crate) fn refusal(
             "dsl_no_matching_transition"
         }
         mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => "dsl_guard_rejected",
+        mm_dsl::MeerkatMachineTransitionError::AbsentMapKey { .. } => "dsl_absent_map_key",
         mm_dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected { .. } => {
             "dsl_recovered_state_invariant_rejected"
         }
@@ -71,6 +72,15 @@ pub(crate) fn map_error(err: mm_dsl::MeerkatMachineTransitionError, context: &st
         mm_dsl::MeerkatMachineTransitionError::GuardRejected { phase, trigger } => {
             format!(
                 "DSL authority ({context}): guard rejected transition from {phase:?} for {trigger}"
+            )
+        }
+        mm_dsl::MeerkatMachineTransitionError::AbsentMapKey {
+            phase,
+            trigger,
+            field,
+        } => {
+            format!(
+                "DSL authority ({context}): guard read absent key of {field} from {phase:?} for {trigger}"
             )
         }
         mm_dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected {

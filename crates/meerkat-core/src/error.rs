@@ -222,6 +222,20 @@ pub enum ToolError {
     #[error("operation authorization unavailable")]
     OperationAuthorizationUnavailable,
 
+    /// Owner review policy is not satisfied for this otherwise permitted
+    /// operation. An ordinary tool result, never a run or session disposition.
+    #[error("{kind}")]
+    ReviewUnsatisfied {
+        kind: crate::approval::review::ReviewUnsatisfiedKind,
+    },
+
+    /// Required review could not be completed. Distinct from a refusal; the
+    /// operation did not enter.
+    #[error("{kind}")]
+    ReviewUnavailable {
+        kind: crate::approval::review::ReviewUnavailableKind,
+    },
+
     /// Application consequence policy denied an otherwise statically admitted call.
     #[error("Tool call denied by application policy: {denial:?}")]
     PolicyDenied {
@@ -266,6 +280,15 @@ pub enum ToolError {
     HookDenied {
         /// Keep the full denial without enlarging unrelated result values.
         denial: Box<crate::hooks::HookDenial>,
+    },
+    /// A required post-tool hook could not enter, so its result publication
+    /// remains withheld. This does not reclassify any entered tool execution
+    /// as a pre-entry refusal or authorize replay of its effects.
+    #[error("Tool result publication was withheld because a required hook could not enter")]
+    HookLaunchRefused {
+        hook_id: crate::hooks::HookId,
+        point: crate::hooks::HookPoint,
+        refusal: crate::confinement::ConfinementRefusal,
     },
 }
 
@@ -359,8 +382,11 @@ impl ToolError {
             Self::AuthorizationRefused { .. } => "operation_refused",
             Self::ConfinementRefused { .. } => "confinement_refused",
             Self::HookDenied { .. } => "hook_denied",
+            Self::HookLaunchRefused { .. } => "hook_launch_refused",
             Self::OperationObservationUnavailable => "operation_observation_unavailable",
             Self::OperationAuthorizationUnavailable => "operation_authorization_unavailable",
+            Self::ReviewUnsatisfied { .. } => "review_unsatisfied",
+            Self::ReviewUnavailable { .. } => "review_unavailable",
             Self::PolicyDenied { .. } => "policy_denied",
             Self::PolicyIndeterminate { .. } => "policy_indeterminate",
             Self::Other(_) => "tool_error",
@@ -440,8 +466,19 @@ impl ToolError {
                 }
                 Some(data)
             }
+            Self::HookLaunchRefused {
+                hook_id,
+                point,
+                refusal,
+            } => Some(serde_json::json!({
+                "hook_id": hook_id,
+                "point": point,
+                "refusal": refusal,
+            })),
             Self::PolicyDenied { denial } => serde_json::to_value(denial).ok(),
             Self::PolicyIndeterminate { failure } => serde_json::to_value(failure).ok(),
+            Self::ReviewUnsatisfied { kind } => Some(serde_json::json!({ "kind": kind })),
+            Self::ReviewUnavailable { kind } => Some(serde_json::json!({ "kind": kind })),
             _ => None,
         }
     }
@@ -758,6 +795,28 @@ impl AgentError {
             )),
             "operation authorization unavailable",
         )
+    }
+
+    /// Typed review settlement of a model operation that required review the
+    /// request could not carry. It travels in the authority-unavailable
+    /// class (`details.review`); it is never a permission decision. With a
+    /// retained, usable controller the loop returns a review notice to it
+    /// once; with no usable controller, or on a second refusal, the run fails
+    /// like any other local model-operation refusal.
+    pub fn operation_review_refusal(
+        &self,
+    ) -> Option<crate::approval::review::OperationReviewRefusal> {
+        match self {
+            Self::Llm {
+                reason: LlmFailureReason::ProviderError(error),
+                ..
+            } if error.kind == LlmProviderErrorKind::OperationAuthorizationUnavailable => error
+                .details
+                .get("review")
+                .cloned()
+                .and_then(|review| serde_json::from_value(review).ok()),
+            _ => None,
+        }
     }
 
     /// Typed local authority failure, never inferred from a provider message.

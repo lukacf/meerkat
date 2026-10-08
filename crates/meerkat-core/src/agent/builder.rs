@@ -92,10 +92,12 @@ pub struct AgentBuilder {
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
+    pub(super) operation_review: Option<Arc<crate::approval::review::BoundOperationReview>>,
     pub(super) tools_config: ToolsConfig,
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     pub(super) tool_visibility_owner: Option<GeneratedToolVisibilityOwner>,
     pub(super) capability_base_filter_override: Option<ToolFilter>,
+    pub(super) policy_base_filter: ToolFilter,
     pub(super) initial_visibility_authority: Option<InheritedToolVisibilityAuthority>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     pub(super) model_routing_handle: Option<Arc<dyn crate::handles::ModelRoutingHandle>>,
@@ -118,6 +120,8 @@ pub struct AgentBuilder {
 pub enum AgentBuildPolicyError {
     #[error("factory policy build requires an explicit session")]
     MissingSession,
+    #[error("failed to install hook configuration: {message}")]
+    HookConfiguration { message: String },
     #[error("factory policy build requires session metadata")]
     MissingSessionMetadata,
     #[error("factory policy build requires session build state metadata")]
@@ -260,10 +264,12 @@ impl AgentBuilder {
             default_event_tx: None,
             model_defaults_resolver: None,
             call_timeout_override: CallTimeoutOverride::default(),
+            operation_review: None,
             tools_config: ToolsConfig::default(),
             epoch_cursor_state: None,
             tool_visibility_owner: None,
             capability_base_filter_override: None,
+            policy_base_filter: ToolFilter::All,
             initial_visibility_authority: None,
             turn_state_handle: None,
             model_routing_handle: None,
@@ -532,6 +538,7 @@ impl AgentBuilder {
         let runtime_tool_visibility_owner_required =
             self.requires_explicit_runtime_tool_visibility_owner();
         let capability_base_filter_override = self.capability_base_filter_override.clone();
+        let policy_base_filter = self.policy_base_filter.clone();
         let initial_visibility_authority = self.initial_visibility_authority.clone();
         let tool_visibility_owner = self.tool_visibility_owner.clone();
         if runtime_tool_visibility_owner_required && tool_visibility_owner.is_none() {
@@ -569,6 +576,23 @@ impl AgentBuilder {
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
         let catalog_mode = select_tool_catalog_mode(tools.as_ref());
         let catalog_capabilities = tools.tool_catalog_capabilities();
+        // What this agent mounts, to fit a handed-off ceiling to it (below).
+        let mounted_tool_names: Option<std::collections::HashSet<String>> =
+            initial_visibility_authority.as_ref().map(|_| {
+                if catalog_capabilities.exact_catalog {
+                    tools
+                        .tool_catalog()
+                        .iter()
+                        .map(|entry| entry.tool.name.to_string())
+                        .collect()
+                } else {
+                    tools
+                        .tools()
+                        .iter()
+                        .map(|tool| tool.name.to_string())
+                        .collect()
+                }
+            });
         let (control_tool_names, deferred_tool_names) = if catalog_capabilities.exact_catalog {
             let catalog = tools.tool_catalog();
             let control_names = catalog
@@ -737,6 +761,8 @@ impl AgentBuilder {
             event_tap: self
                 .event_tap
                 .unwrap_or_else(crate::event_tap::new_event_tap),
+            #[cfg(any(test, feature = "test-support"))]
+            model_preparation_observer: None,
             transient_turn_context_state,
             default_event_tx: self.default_event_tx,
             applied_cursor,
@@ -751,6 +777,7 @@ impl AgentBuilder {
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),
+            active_turn_request_reasoning: None,
             turn_state_handle: self.turn_state_handle,
             model_routing_handle: self.model_routing_handle,
             sticky_model_fallback_commit_coordinator: self.sticky_model_fallback_commit_coordinator,
@@ -770,6 +797,7 @@ impl AgentBuilder {
             last_hidden_deferred_catalog_names: Default::default(),
             last_pending_catalog_sources: Default::default(),
             tool_dispatch_context: Default::default(),
+            operation_review: self.operation_review,
             live_bridge_dispatch_admission: None,
             live_bridge_tool_defs: None,
             noncommitting_live_bridge_run: false,
@@ -848,13 +876,90 @@ impl AgentBuilder {
             }
         }
 
+        // The retained ceiling must prove its own identities before any
+        // handoff is composed with it: an incoming witness proves the new
+        // parent's tool, never the lost identity of a same-named retained one.
+        if runtime_tool_visibility_owner_required
+            && let Err(err) = validate_inherited_filter_witnesses(
+                &visibility_state.inherited_base_filter,
+                &visibility_state.filter_witnesses,
+            )
+        {
+            tracing::error!(
+                error = %err,
+                "runtime-backed agent build rejected a retained inherited tool ceiling without witnesses"
+            );
+            return Err(AgentBuildPolicyError::MissingInheritedToolVisibilityWitnesses);
+        }
+
         let has_initial_visibility_state = initial_visibility_authority.is_some();
         if let Some(incoming) = initial_visibility_authority {
-            let incoming = incoming.into_initial_visibility_state();
-            visibility_state.inherited_base_filter = incoming.inherited_base_filter;
-            visibility_state
+            let mut incoming = incoming.into_initial_visibility_state();
+            // An allow-ceiling bounds only what this agent mounts: a name it
+            // never mounts can be neither listed nor called, and keeping it
+            // would leave a ceiling name the owner's authority catalog cannot
+            // witness. Dropping such names never widens the ceiling; tools
+            // that appear later outside it stay hidden.
+            if let (ToolFilter::Allow(names), Some(mounted)) =
+                (&incoming.inherited_base_filter, mounted_tool_names.as_ref())
+            {
+                let kept: crate::types::ToolNameSet = names
+                    .iter()
+                    .filter(|name| mounted.contains(name.as_str()))
+                    .cloned()
+                    .collect();
+                incoming
+                    .filter_witnesses
+                    .retain(|name, _| kept.contains(name.as_str()));
+                incoming.inherited_base_filter = ToolFilter::Allow(kept);
+            }
+            // A retained identity witness is never reinterpreted: a handoff
+            // naming a tool the durable state already witnesses under a
+            // different identity admits nothing for that name, and a handoff
+            // that is not an allow-ceiling cannot be fitted that way, so it
+            // is refused rather than merged.
+            let conflicting: Vec<crate::types::ToolName> = incoming
                 .filter_witnesses
-                .extend(incoming.filter_witnesses);
+                .iter()
+                .filter(|(name, witness)| {
+                    visibility_state
+                        .filter_witnesses
+                        .get(*name)
+                        .is_some_and(|retained| retained != *witness)
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            if !conflicting.is_empty() {
+                let ToolFilter::Allow(names) = &incoming.inherited_base_filter else {
+                    return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+                        message: format!(
+                            "inherited tool visibility handoff conflicts with the retained \
+                             identity of {conflicting:?}"
+                        ),
+                    });
+                };
+                let admitted: crate::types::ToolNameSet = names
+                    .iter()
+                    .filter(|name| !conflicting.contains(*name))
+                    .cloned()
+                    .collect();
+                incoming.inherited_base_filter = ToolFilter::Allow(admitted);
+                for name in &conflicting {
+                    incoming.filter_witnesses.remove(name);
+                }
+            }
+            // A handed-off ceiling only narrows: on a resumed session it is
+            // composed with the durable inherited ceiling, so a broader new
+            // parent snapshot never replaces the original one.
+            visibility_state.inherited_base_filter = visibility_state
+                .inherited_base_filter
+                .narrowed_by(&incoming.inherited_base_filter);
+            for (name, witness) in incoming.filter_witnesses {
+                visibility_state
+                    .filter_witnesses
+                    .entry(name)
+                    .or_insert(witness);
+            }
         }
 
         if runtime_tool_visibility_owner_required
@@ -879,11 +984,17 @@ impl AgentBuilder {
                 false
             };
 
+        // The policy filter is this build's, never a restored one: a resumed
+        // session recomputes it from the policy it is rebuilt with.
+        let policy_base_filter_changed = visibility_state.policy_base_filter != policy_base_filter;
+        visibility_state.policy_base_filter = policy_base_filter;
+
         let visibility_state_requires_restore = visibility_state
             != SessionToolVisibilityState::default()
             || has_canonical_visibility_state
             || has_initial_visibility_state
-            || capability_base_filter_changed;
+            || capability_base_filter_changed
+            || policy_base_filter_changed;
         if visibility_state_requires_restore
             && let Err(err) = agent.tool_scope.set_visibility_state(visibility_state)
         {
@@ -921,7 +1032,10 @@ impl AgentBuilder {
 
         agent
             .post_commit_hooks
-            .configure(agent.hook_engine.clone(), agent.hook_run_overrides.clone());
+            .configure(agent.hook_engine.clone(), agent.hook_run_overrides.clone())
+            .map_err(|error| AgentBuildPolicyError::HookConfiguration {
+                message: error.to_string(),
+            })?;
         Ok(agent)
     }
 
@@ -1045,6 +1159,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Hide the tools this build's execution policy makes unreachable by name
+    /// (see [`crate::ToolExecutionPolicy::static_visibility_filter`]). Applied
+    /// on every build, a resume included; the execution gate still refuses
+    /// every denied call.
+    pub fn with_policy_base_filter(mut self, filter: ToolFilter) -> Self {
+        self.policy_base_filter = filter;
+        self
+    }
+
     /// Carry initial inherited visibility into the generated visibility owner.
     ///
     /// The value is validated and merged during build after the tool catalogs
@@ -1164,6 +1287,18 @@ impl AgentBuilder {
     /// - `Value(d)`: explicitly set call timeout to `d`
     pub fn with_call_timeout_override(mut self, override_value: CallTimeoutOverride) -> Self {
         self.call_timeout_override = override_value;
+        self
+    }
+
+    /// Attach trusted host operation review composition. It enables review
+    /// only; the required tier is resolved by native authorization, and an
+    /// agent without review settles required R2 review as local unavailable.
+    #[must_use]
+    pub fn with_operation_review(
+        mut self,
+        review: Arc<crate::approval::review::BoundOperationReview>,
+    ) -> Self {
+        self.operation_review = Some(review);
         self
     }
 
@@ -2115,6 +2250,152 @@ mod tests {
             inherited_filter,
             "canonical inherited metadata should restore through the visibility owner"
         );
+    }
+
+    /// A ceiling handed to a resumed session narrows its durable inherited
+    /// ceiling: a broader new parent snapshot never replaces it.
+    #[tokio::test]
+    async fn resumed_builder_narrows_the_durable_inherited_ceiling_with_a_handoff() {
+        let client = Arc::new(MockClient);
+        let kept = test_tool_with_provenance("kept", "kept");
+        let extra = test_tool_with_provenance("extra", "extra");
+        let tools = Arc::new(StaticTools::new(
+            vec![Arc::clone(&kept), Arc::clone(&extra)].into(),
+        ));
+        let store = Arc::new(MockStore);
+        let witness = |tool: &Arc<ToolDef>| {
+            (
+                tool.name.clone(),
+                crate::ToolVisibilityWitness {
+                    last_seen_provenance: tool.provenance.clone(),
+                },
+            )
+        };
+        let durable = ToolFilter::Allow(["kept".to_string()].into_iter().collect());
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    SessionToolVisibilityState {
+                        inherited_base_filter: durable.clone(),
+                        filter_witnesses: [witness(&kept)].into_iter().collect(),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .expect("visibility state should serialize");
+        let broader = InheritedToolVisibilityAuthority::from_generated_composition_authority(
+            ToolFilter::Allow(
+                ["kept".to_string(), "extra".to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
+            [witness(&kept), witness(&extra)].into_iter().collect(),
+        );
+        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_initial_tool_visibility_state(broader)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            owner.visibility_state().unwrap().inherited_base_filter,
+            durable,
+            "the durable ceiling holds against a broader handoff"
+        );
+    }
+
+    /// A conflicting handoff cannot reinterpret a retained identity or
+    /// discard unrelated inherited tools that are still permitted.
+    #[tokio::test]
+    async fn resumed_builder_keeps_a_retained_witness_against_a_conflicting_handoff() {
+        for include_sibling in [false, true] {
+            let client = Arc::new(MockClient);
+            let retained = test_tool_with_provenance("kept", "original-source");
+            let sibling = test_tool_with_provenance("sibling", "sibling-source");
+            let witness = |tool: &Arc<ToolDef>| crate::ToolVisibilityWitness {
+                last_seen_provenance: tool.provenance.clone(),
+            };
+            let retained_witness = witness(&retained);
+            let mut mounted = vec![Arc::clone(&retained)];
+            let mut names: crate::types::ToolNameSet = ["kept".to_string()].into_iter().collect();
+            let mut retained_witnesses = std::collections::BTreeMap::from([(
+                retained.name.clone(),
+                retained_witness.clone(),
+            )]);
+            if include_sibling {
+                mounted.push(Arc::clone(&sibling));
+                names.insert("sibling".to_string());
+                retained_witnesses.insert(sibling.name.clone(), witness(&sibling));
+            }
+            let tools = Arc::new(StaticTools::new(mounted.into()));
+            let store = Arc::new(MockStore);
+            let mut incoming_witnesses = retained_witnesses.clone();
+            let mut session = Session::new();
+            session
+                .set_tool_visibility_state(
+                    AuthorizedSessionToolVisibilityState::from_generated_authority(
+                        SessionToolVisibilityState {
+                            inherited_base_filter: ToolFilter::Allow(names.clone()),
+                            filter_witnesses: retained_witnesses,
+                            ..Default::default()
+                        },
+                    ),
+                )
+                .expect("visibility state should serialize");
+            let other_identity = test_tool_with_provenance("kept", "another-source");
+            incoming_witnesses.insert(other_identity.name.clone(), witness(&other_identity));
+            let conflicting =
+                InheritedToolVisibilityAuthority::from_generated_composition_authority(
+                    ToolFilter::Allow(names),
+                    incoming_witnesses,
+                );
+            let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+            let result = AgentBuilder::new()
+                .resume_session(session)
+                .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+                .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
+                .with_initial_tool_visibility_state(conflicting)
+                .build_inner(client, tools, store)
+                .await;
+
+            let agent = match result {
+                Ok(agent) => agent,
+                Err(error) => {
+                    panic!("the resume builds (include_sibling={include_sibling}): {error:?}");
+                }
+            };
+            let state = owner.visibility_state().unwrap();
+            assert_eq!(
+                state.filter_witnesses.get("kept"),
+                Some(&retained_witness),
+                "the retained identity is never overwritten"
+            );
+            let expected_names: crate::types::ToolNameSet = if include_sibling {
+                ["sibling".to_string()].into_iter().collect()
+            } else {
+                crate::types::ToolNameSet::new()
+            };
+            assert_eq!(
+                state.inherited_base_filter,
+                ToolFilter::Allow(expected_names.clone()),
+                "only the conflicting name is removed from the inherited ceiling"
+            );
+            let visible = agent
+                .tool_scope
+                .visible_tools_result()
+                .expect("restored visibility should be readable");
+            let visible_names: crate::types::ToolNameSet =
+                visible.iter().map(|tool| tool.name.clone()).collect();
+            assert_eq!(
+                visible_names, expected_names,
+                "a conflicting handoff leaves a permitted sibling visible"
+            );
+        }
     }
 
     #[tokio::test]

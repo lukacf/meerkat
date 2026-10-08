@@ -456,6 +456,8 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
             runtime_delivery_crash_retry_reuse_witness(),
             runtime_delivery_out_of_order_acknowledgement_witness(),
             runtime_delivery_apply_after_ahead_acknowledgement_witness(),
+            runtime_delivery_status_classification_witness(),
+            runtime_delivery_refused_then_applied_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -3438,6 +3440,150 @@ fn runtime_delivery_apply_after_ahead_acknowledgement_witness() -> CompositionWi
             "ApplyNextDelivery",
         )],
         state_limits: runtime_delivery_ack_witness_limits(),
+    }
+}
+
+fn runtime_delivery_classify(delivery_id: &str) -> CompositionWitnessInput {
+    runtime_delivery_input(
+        "ClassifyDeliveryStatus",
+        vec![witness_field(
+            "delivery_id",
+            Expr::String(delivery_id.into()),
+        )],
+    )
+}
+
+fn runtime_delivery_status_witness_limits() -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 40,
+        pending_input_limit: 12,
+        pending_route_limit: 4,
+        delivered_route_limit: 6,
+        emitted_effect_limit: 24,
+        seq_limit: 0,
+        set_limit: 2,
+        map_limit: 2,
+    }
+}
+
+/// Every `ClassifyDeliveryStatus` verdict, and the source-sequence conflict,
+/// on the two-commit script. Classification is total, so each read is queued
+/// behind an input that only completes in the state it reads: the ahead
+/// acknowledgement of the terminal waits for both commits, and applying the
+/// notification waits for its commit. An id that is never committed is
+/// `NotCommitted` wherever it runs. A guard that lets one read take a second
+/// arm fails the witness. A conflict that creates a row cannot happen
+/// (`CommitNew` refuses a committed id); a conflict that rewrites the stored
+/// source sequence is invisible here, because witness expectations cannot name
+/// a map value, and is refused by the read-only pin in
+/// `tests/delivery_status_classification_totality.rs`.
+fn runtime_delivery_status_classification_witness() -> CompositionWitness {
+    let mut preload_inputs = runtime_delivery_two_commit_inputs();
+    preload_inputs.extend([
+        runtime_delivery_classify("never_committed"),
+        runtime_delivery_ack("AcknowledgeDelivery", "terminal", 2),
+        runtime_delivery_classify(RUNTIME_DELIVERY_NOTIFICATION_KEY),
+        runtime_delivery_classify("terminal"),
+        runtime_delivery_input(
+            "CommitDelivery",
+            vec![
+                witness_field("delivery_id", Expr::String("terminal".into())),
+                witness_field("source_sequence", Expr::U64(7)),
+            ],
+        ),
+        runtime_delivery_ack("MarkDeliveryApplied", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+        runtime_delivery_classify(RUNTIME_DELIVERY_NOTIFICATION_KEY),
+        runtime_delivery_input("AdvanceAcknowledgedPrefix", vec![]),
+        runtime_delivery_classify("terminal"),
+    ]);
+    let mut expected_transitions = runtime_delivery_two_commit_transitions();
+    expected_transitions.extend([
+        witness_transition("runtime_delivery", "ClassifyNotCommitted"),
+        witness_transition("runtime_delivery", "AcknowledgeAheadOfCursor"),
+        witness_transition("runtime_delivery", "ClassifyPending"),
+        witness_transition("runtime_delivery", "ClassifyAcknowledgedAhead"),
+        witness_transition("runtime_delivery", "RejectSourceSequenceConflict"),
+        witness_transition("runtime_delivery", "ApplyNextDelivery"),
+        witness_transition("runtime_delivery", "ClassifyApplied"),
+        witness_transition("runtime_delivery", "AdvanceOverAcknowledgedDelivery"),
+    ]);
+    CompositionWitness {
+        name: witness_id("runtime_delivery_status_classification"),
+        preload_inputs,
+        expected_routes: vec![
+            route_id("job_notification_enters_runtime_inbox"),
+            route_id("job_terminal_enters_runtime_inbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![runtime_delivery_cursor_at(2)],
+        expected_transitions,
+        expected_transition_order: vec![
+            runtime_delivery_order("AcknowledgeAheadOfCursor", "ClassifyPending"),
+            runtime_delivery_order("ClassifyPending", "ClassifyAcknowledgedAhead"),
+            runtime_delivery_order("ClassifyAcknowledgedAhead", "RejectSourceSequenceConflict"),
+            runtime_delivery_order("RejectSourceSequenceConflict", "ApplyNextDelivery"),
+            runtime_delivery_order("ApplyNextDelivery", "ClassifyApplied"),
+            runtime_delivery_order("ApplyNextDelivery", "AdvanceOverAcknowledgedDelivery"),
+        ],
+        state_limits: runtime_delivery_status_witness_limits(),
+    }
+}
+
+fn runtime_delivery_refuse(delivery_id: &str, delivery_sequence: u64) -> CompositionWitnessInput {
+    runtime_delivery_input(
+        "SettleRefusedDelivery",
+        vec![
+            witness_field("delivery_id", Expr::String(delivery_id.into())),
+            witness_field("delivery_sequence", Expr::U64(delivery_sequence)),
+            witness_field(
+                "reason",
+                named_variant("DeliveryRefusalReason", "NoAdmissibleWorkBinding"),
+            ),
+        ],
+    )
+}
+
+/// A refused row never wedges the ordered inbox: the first delivery is
+/// settled as refused at the cursor, the next one then applies in order, a
+/// repeated refusal observes the settlement without changing anything, and
+/// classification reads the first as `Refused` and the second as `Applied`.
+/// Refusal waits for the first commit and the application waits for the
+/// cursor to pass the refused row, so a refusal that left the cursor behind
+/// (or an application that skipped it) deadlocks the witness.
+fn runtime_delivery_refused_then_applied_witness() -> CompositionWitness {
+    let mut preload_inputs = runtime_delivery_two_commit_inputs();
+    preload_inputs.extend([
+        runtime_delivery_refuse(RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+        runtime_delivery_ack("MarkDeliveryApplied", "terminal", 2),
+        runtime_delivery_refuse(RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+        runtime_delivery_classify(RUNTIME_DELIVERY_NOTIFICATION_KEY),
+        runtime_delivery_classify("terminal"),
+    ]);
+    let mut expected_transitions = runtime_delivery_two_commit_transitions();
+    expected_transitions.extend([
+        witness_transition("runtime_delivery", "SettleRefusedDeliveryAtCursor"),
+        witness_transition("runtime_delivery", "ApplyNextDelivery"),
+        witness_transition("runtime_delivery", "ObserveAlreadyRefusedDelivery"),
+        witness_transition("runtime_delivery", "ClassifyRefused"),
+        witness_transition("runtime_delivery", "ClassifyApplied"),
+    ]);
+    CompositionWitness {
+        name: witness_id("runtime_delivery_refused_then_applied"),
+        preload_inputs,
+        expected_routes: vec![
+            route_id("job_notification_enters_runtime_inbox"),
+            route_id("job_terminal_enters_runtime_inbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![runtime_delivery_cursor_at(2)],
+        expected_transitions,
+        expected_transition_order: vec![
+            runtime_delivery_order("SettleRefusedDeliveryAtCursor", "ApplyNextDelivery"),
+            runtime_delivery_order("ApplyNextDelivery", "ObserveAlreadyRefusedDelivery"),
+            runtime_delivery_order("ObserveAlreadyRefusedDelivery", "ClassifyRefused"),
+            runtime_delivery_order("ClassifyRefused", "ClassifyApplied"),
+        ],
+        state_limits: runtime_delivery_status_witness_limits(),
     }
 }
 

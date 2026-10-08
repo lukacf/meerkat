@@ -433,6 +433,89 @@ async fn cold_owner_bearer_rehydrates_without_refresh_or_credential_change() {
 }
 
 #[tokio::test]
+async fn cold_owner_expiring_bearer_refreshes_once_and_preserves_account_and_scope() {
+    let fx = fixture().await;
+    let work = slot("tenant-a", "drive-cold-refresh");
+    login_expiring(&fx, &work).await;
+    let before = fx.stored(&work).await.unwrap();
+    let original = ConnectorCredentialMetadata::from_tokens(&before).unwrap();
+    assert_eq!(
+        fx.state
+            .refresh_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    *fx.state.refresh.lock() = Some(("access-a2".into(), None, None));
+    fx.subjects
+        .lock()
+        .insert("access-a2".into(), "subject-a".into());
+
+    // The committed expiring credential is the only lifecycle evidence the
+    // fresh owner has; do not warm it with status before the first bearer call.
+    let lifecycle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let lease_key =
+        LeaseKey::from_credential_identity(&AuthCredentialIdentity::Account(work.clone()));
+    assert!(!lifecycle.snapshot(&lease_key).credential_present);
+    let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
+        std::time::Duration::from_secs(300),
+        lifecycle.clone(),
+    ));
+    let cold = ConnectorOAuthAuthority::with_http(
+        fx.persistence.clone(),
+        flows,
+        ConnectorStrategies::default().with(fx.strategy.clone()),
+        reqwest::Client::new(),
+    )
+    .unwrap();
+
+    let status = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        assert_eq!(
+            cold.bearer_token(&work).await.unwrap().as_deref(),
+            Some("access-a2")
+        );
+        assert_eq!(
+            cold.bearer_token(&work).await.unwrap().as_deref(),
+            Some("access-a2"),
+            "the refreshed credential must be reusable without another refresh"
+        );
+        cold.status(&work).await.unwrap()
+    })
+    .await
+    .expect("cold rehydration and refresh must not reacquire an already-held lifecycle guard");
+    assert!(lifecycle.snapshot(&lease_key).credential_present);
+    assert_eq!(
+        fx.state
+            .refresh_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "cold rehydration, repeated bearer and status must refresh exactly once"
+    );
+
+    let stored = fx.stored(&work).await.unwrap();
+    assert_eq!(stored.primary_secret.as_deref(), Some("access-a2"));
+    assert_eq!(stored.auth_mode, PersistedAuthMode::ConnectorOauth);
+    assert_eq!(stored.account_id, before.account_id);
+    assert_eq!(stored.refresh_token, before.refresh_token);
+    assert_eq!(stored.scopes, vec!["files.read"]);
+    let retained = ScopeEvidence::RetainedOnRefresh {
+        from: ScopeEvidenceRef {
+            granted_at_epoch_secs: original.granted_at_epoch_secs,
+        },
+    };
+    let metadata = ConnectorCredentialMetadata::from_tokens(&stored).unwrap();
+    assert_eq!(metadata.stable_context, original.stable_context);
+    assert_eq!(metadata.scope_evidence, retained);
+    assert_eq!(status.phase, ConnectorAuthPhase::Authorized);
+    assert_eq!(status.slot, work);
+    let verified = status.verified_account.unwrap();
+    assert_eq!(verified.subject, "subject-a");
+    assert_eq!(verified.issuer, fx.issuer);
+    assert_eq!(verified.strategy_id, STRATEGY);
+    assert_eq!(status.scopes, vec!["files.read"]);
+    assert_eq!(status.scope_evidence, Some(retained));
+}
+
+#[tokio::test]
 async fn two_slots_for_one_connector_keep_distinct_accounts() {
     let fx = fixture().await;
     let personal = slot("tenant-a", "drive-personal");

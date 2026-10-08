@@ -7,7 +7,7 @@ use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::MobToolAuthorityContext;
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // NameFilteredDispatcher
@@ -189,6 +189,237 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         } else {
             BindOutcome::Skipped(wrapper)
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BundleProvenanceDispatcher
+// ---------------------------------------------------------------------------
+
+/// A registered Rust tool bundle as one member mounts it: every tool the
+/// bundle exposes without a source identity carries one, so the member's
+/// visible tools can be handed on as a witnessed ceiling. A tool that already
+/// names its source keeps it; a tool whose catalog entry names its deferred
+/// owner carries that owner; only a genuinely unattributed tool carries the
+/// bundle's own identity. The catalog is read live on every call, so tools
+/// the bundle adds later are attributed the same way. Everything else,
+/// including how a tool executes, is the bundle's own.
+pub(crate) struct BundleProvenanceDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+    provenance: ToolProvenance,
+}
+
+impl BundleProvenanceDispatcher {
+    pub(crate) fn mount(inner: Arc<dyn AgentToolDispatcher>, bundle: &str) -> Self {
+        Self {
+            inner,
+            provenance: ToolProvenance {
+                kind: ToolSourceKind::RustBundle,
+                source_id: meerkat_core::types::ToolSourceId::new(bundle),
+            },
+        }
+    }
+
+    fn deferred_owner(entry: &meerkat_core::ToolCatalogEntry) -> Option<&ToolProvenance> {
+        match &entry.deferred_eligibility {
+            meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { provenance } => {
+                Some(provenance)
+            }
+            meerkat_core::ToolCatalogDeferredEligibility::InlineOnly => None,
+        }
+    }
+
+    fn attributed(&self, tool: &Arc<ToolDef>, owner: Option<&ToolProvenance>) -> Arc<ToolDef> {
+        if tool.provenance.is_some() {
+            return Arc::clone(tool);
+        }
+        let mut tool = tool.as_ref().clone();
+        tool.provenance = Some(owner.unwrap_or(&self.provenance).clone());
+        Arc::new(tool)
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl AgentToolDispatcher for BundleProvenanceDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        let tools = self.inner.tools();
+        if tools.iter().all(|tool| tool.provenance.is_some()) {
+            return tools;
+        }
+        let catalog = self.inner.tool_catalog();
+        let owners: HashMap<&str, &ToolProvenance> = catalog
+            .iter()
+            .filter_map(|entry| {
+                Self::deferred_owner(entry).map(|owner| (entry.tool.name.as_str(), owner))
+            })
+            .collect();
+        tools
+            .iter()
+            .map(|tool| self.attributed(tool, owners.get(tool.name.as_str()).copied()))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.inner
+            .tool_catalog()
+            .iter()
+            .map(|entry| {
+                let mut entry = entry.clone();
+                entry.tool = self.attributed(&entry.tool, Self::deferred_owner(&entry));
+                entry
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn tool_mutation_class(&self, tool_name: &str) -> meerkat_core::ToolMutationClass {
+        self.inner.tool_mutation_class(tool_name)
+    }
+
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        self.inner.live_bridge_effect_kind(tool_name)
+    }
+
+    fn review_entry_support(
+        &self,
+        tool_name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        self.inner.review_entry_support(tool_name)
+    }
+
+    fn execution_binding_epoch(&self, tool_name: &str) -> u64 {
+        self.inner.execution_binding_epoch(tool_name)
+    }
+
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == tool_name)
+            .ok_or_else(|| meerkat_core::ToolExecutionResolutionError::NotFound {
+                tool_name: tool_name.to_string(),
+            })?;
+        Ok(
+            meerkat_core::ephemeral_tool_catalog_binding_fingerprint(entry)
+                .with_live_authority(0, 0)
+                .with_dependency(&self.inner.execution_binding_fingerprint(tool_name)?),
+        )
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        self.inner
+            .resolve_execution_plan(call, dispatch_context, resolution_context)
+    }
+
+    fn validate_resolved_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<(), meerkat_core::ToolExecutionResolutionError> {
+        self.inner
+            .validate_resolved_execution_plan(call, resolution_context, plan)
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.inner.pending_catalog_sources()
+    }
+
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.inner.dispatch(call).await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.inner.dispatch_with_context(call, context).await
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.inner
+            .dispatch_resolved_with_context(call, context, plan)
+            .await
+    }
+
+    async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
+        self.inner.poll_external_updates().await
+    }
+
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        self.inner.external_tool_surface_snapshot()
+    }
+
+    fn capabilities(&self) -> DispatcherCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_bridge_session_id: SessionId,
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        let outcome = owned
+            .inner
+            .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
+        let bound = outcome.was_bound();
+        let wrapper = Arc::new(BundleProvenanceDispatcher {
+            inner: outcome.into_dispatcher(),
+            provenance: owned.provenance,
+        });
+        Ok(if bound {
+            BindOutcome::Bound(wrapper)
+        } else {
+            BindOutcome::Skipped(wrapper)
+        })
+    }
+
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::completion_feed::CompletionEnrichmentProvider>> {
+        self.inner.completion_enrichment()
+    }
+
+    fn bind_mcp_server_lifecycle_handle(
+        &self,
+        handle: Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>,
+    ) {
+        self.inner.bind_mcp_server_lifecycle_handle(handle);
+    }
+
+    fn bind_external_tool_surface_handle(
+        &self,
+        handle: Arc<dyn meerkat_core::handles::ExternalToolSurfaceHandle>,
+    ) {
+        self.inner.bind_external_tool_surface_handle(handle);
     }
 }
 
@@ -497,7 +728,9 @@ pub(super) fn compose_external_tools_for_profile(
                 .ok_or_else(|| MobError::ToolBundleUnavailable {
                     bundle: name.clone(),
                 })?;
-        dispatchers.push(dispatcher);
+        dispatchers.push(Arc::new(BundleProvenanceDispatcher::mount(
+            dispatcher, name,
+        )));
     }
 
     // Compose per-spawn and default external tools with deterministic

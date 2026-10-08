@@ -1062,18 +1062,18 @@ impl MobDefinition {
 mod tests {
     use super::*;
 
-    /// Shaped like HomeCore's production mob.toml: a host-private
+    /// Shaped like a downstream app's production mob.toml: a host-private
     /// `role_summary` under every profile table (plus one more private key on
     /// `domain`). The host parses those keys itself; meerkat must warn about
     /// them and keep parsing, never refuse.
-    const HOMECORE_SHAPED_TOML: &str = r#"
+    const DOWNSTREAM_SHAPED_TOML: &str = r#"
 [mob]
-id = "homecore-shaped"
+id = "downstream-shaped"
 
 [profiles.identity]
 model = "gpt-5.5"
 provider = "openai"
-role_summary = "You are a personal household identity agent."
+role_summary = "You are a personal team identity agent."
 skills = ["identity"]
 
 [profiles.identity.tools]
@@ -1081,7 +1081,7 @@ comms = true
 
 [profiles.domain]
 model = "claude-sonnet-4-5"
-role_summary = "You are a household domain specialist."
+role_summary = "You are a team domain specialist."
 gating_tier = 2
 
 [profiles.domain.tools]
@@ -1180,7 +1180,7 @@ comms = true
 
     #[test]
     fn parse_toml_warns_on_host_private_profile_keys_and_keeps_parsing() {
-        let parsed = MobDefinition::parse_toml(HOMECORE_SHAPED_TOML)
+        let parsed = MobDefinition::parse_toml(DOWNSTREAM_SHAPED_TOML)
             .expect("host-private keys do not refuse the parse");
         assert_eq!(
             parsed.unknown_profile_keys,
@@ -1234,7 +1234,7 @@ comms = true
         assert_eq!(domain_profile.model, "claude-sonnet-4-5");
 
         // The convenience path parses the same text; the keys only log there.
-        let definition = MobDefinition::from_toml(HOMECORE_SHAPED_TOML)
+        let definition = MobDefinition::from_toml(DOWNSTREAM_SHAPED_TOML)
             .expect("from_toml keeps parsing past host-private keys");
         assert_eq!(definition, parsed.definition);
     }
@@ -1270,7 +1270,7 @@ comms = true
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        MobDefinition::from_toml(HOMECORE_SHAPED_TOML).expect("parses");
+        MobDefinition::from_toml(DOWNSTREAM_SHAPED_TOML).expect("parses");
 
         let logs = String::from_utf8(buf.lock().expect("log buffer lock").clone())
             .expect("captured logs should be utf8");

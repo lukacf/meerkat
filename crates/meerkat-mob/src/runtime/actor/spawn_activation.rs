@@ -2773,6 +2773,7 @@ impl MobActor {
             injected_context: Vec::new(),
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

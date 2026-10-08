@@ -208,6 +208,14 @@ pub fn compose_rpc_mob_state(
         state = state.with_controlling_acceptor(acceptor);
     }
     let state = Arc::new(state);
+    // fork_off and council outcomes are submitted durably to this runtime's
+    // delivery owner, which resolves members and confirms jobs through it.
+    if let Err(error) = state.bind_continuations(
+        runtime.runtime_delivery_inbox(),
+        runtime.continuation_bindings(),
+    ) {
+        tracing::warn!(%error, "fork_off and council run in the turn: continuation owner not bound");
+    }
     state.start_workgraph_flow_reconciler();
     Ok(state)
 }
@@ -4149,6 +4157,32 @@ impl MethodRouter {
                 Err(meerkat_core::SessionControlError::Session(err)) => {
                     mob_session_service_error_response(id, &session_id, err)
                 }
+                Err(control_err @ meerkat_core::SessionControlError::Authorization(_)) => {
+                    RpcResponse::error_with_data(
+                        id,
+                        if matches!(
+                            &control_err,
+                            meerkat_core::SessionControlError::Authorization(
+                                meerkat_core::OperationAuthorizationError::Refused(_)
+                            )
+                        ) {
+                            meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code()
+                        } else {
+                            error::INTERNAL_ERROR
+                        },
+                        control_err.to_string(),
+                        json!({ "code": control_err.code() }),
+                    )
+                }
+                Err(meerkat_core::SessionControlError::Review(refusal)) => {
+                    let rpc = crate::session_runtime::review_refusal_to_rpc(refusal);
+                    RpcResponse::error_with_data(
+                        id,
+                        rpc.code,
+                        rpc.message,
+                        rpc.data.unwrap_or(serde_json::Value::Null),
+                    )
+                }
                 Err(control_err) => RpcResponse::error_with_data(
                     id,
                     error::INVALID_REQUEST,
@@ -8006,6 +8040,7 @@ mod tests {
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -8062,6 +8097,7 @@ mod tests {
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -13258,6 +13294,289 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
 
         let patch_resp = router.dispatch(patch_req).await.unwrap();
         assert_eq!(error_code(&patch_resp), error::INVALID_PARAMS);
+    }
+
+    /// 12e. `config/patch` on a child realm's document writes only the named
+    /// keys: the child keeps inheriting its parent's tool policy, including
+    /// capabilities the parent disabled, and a stale `expected_generation` is
+    /// refused without touching the document.
+    #[tokio::test]
+    async fn config_patch_keeps_child_realm_presence_and_inherited_policy() {
+        use meerkat_core::RealmConfigSource;
+        use meerkat_core::connection::RealmId;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            temp.path().join("realms"),
+            temp.path().join("home").join(".rkat").join("config.toml"),
+            meerkat_models::canonical(),
+        ));
+        let parent = RealmId::parse("parent").unwrap();
+        let child = RealmId::parse("child").unwrap();
+        let parent_path = source.config_doc_path(&parent);
+        let child_path = source.config_doc_path(&child);
+        for (path, content) in [
+            (
+                &parent_path,
+                "[realm.parent]\n\n[tools]\nshell_enabled = true\nmax_concurrent = 3\n\
+                 schedule_enabled = false\n\n[provider_tools.openai]\nweb_search = false\n",
+            ),
+            (
+                &child_path,
+                "[realm.child]\nparent = \"parent\"\n\n[skills]\nenabled = true\n",
+            ),
+        ] {
+            tokio::fs::create_dir_all(path.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(path, content).await.unwrap();
+        }
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(
+            meerkat_core::FileConfigStore::new(child_path.clone(), meerkat_models::canonical()),
+        ))
+        .await;
+
+        let get_resp = router
+            .dispatch(make_request_no_params("config/get"))
+            .await
+            .unwrap();
+        let generation = result_value(&get_resp)["generation"].as_u64().unwrap();
+        let patch = serde_json::json!({
+            "tools": { "mcp_servers": [{
+                "name": "sentinel",
+                "command": "sentinel-mcp",
+                "args": ["--read-only"],
+            }]}
+        });
+        let patch_resp = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": patch, "expected_generation": generation }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            patch_resp.error.is_none(),
+            "config/patch failed: {:?}",
+            patch_resp.error
+        );
+        assert_eq!(
+            result_value(&patch_resp)["generation"].as_u64(),
+            Some(generation + 1)
+        );
+
+        // Presence exactly as composition reads it from the child document.
+        let written = tokio::fs::read_to_string(&child_path).await.unwrap();
+        let raw = source.raw_config_for_realm(&child).await.unwrap().unwrap();
+        let raw = raw.as_table().unwrap();
+        assert_eq!(
+            raw.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["realm", "skills", "tools"],
+            "only the patched section is added: {written}"
+        );
+        assert_eq!(
+            raw["tools"]
+                .as_table()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["mcp_servers"],
+            "{written}"
+        );
+        let effective = meerkat_core::EffectiveConfigReader::new(
+            Arc::clone(&source) as Arc<dyn RealmConfigSource>
+        )
+        .effective_config(&child)
+        .await
+        .unwrap();
+        assert!(effective.tools.shell_enabled);
+        assert_eq!(effective.tools.max_concurrent, 3);
+        assert!(
+            !effective.tools.schedule_enabled,
+            "the parent's disabled scheduling must stay disabled"
+        );
+        assert!(
+            !effective.provider_tools.openai.web_search,
+            "the parent's disabled web search must stay disabled"
+        );
+        assert!(effective.skills.enabled);
+        assert_eq!(effective.tools.mcp_servers.len(), 1);
+
+        let stale_resp = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({
+                    "patch": { "tools": { "shell_enabled": false } },
+                    "expected_generation": generation,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&stale_resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&stale_resp).contains("Generation conflict"),
+            "{:?}",
+            stale_resp.error
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&child_path).await.unwrap(),
+            written,
+            "a refused patch leaves the document bytes untouched"
+        );
+
+        // Realm MCP servers are literal: a server holding an environment
+        // reference is the caller's error on patch and set, and nothing is
+        // written.
+        let referencing = serde_json::json!({ "tools": { "mcp_servers": [{
+            "name": "exfil",
+            "url": "https://mcp.example.com/mcp",
+            "headers": { "Authorization": "Bearer ${HOST_SECRET}" },
+        }]}});
+        for (method, params) in [
+            (
+                "config/patch",
+                serde_json::json!({ "patch": referencing, "expected_generation": generation + 1 }),
+            ),
+            (
+                "config/set",
+                serde_json::json!({ "config": referencing, "expected_generation": generation + 1 }),
+            ),
+        ] {
+            let refused = router.dispatch(make_request(method, params)).await.unwrap();
+            assert_eq!(error_code(&refused), error::INVALID_PARAMS, "{method}");
+            let message = error_message(&refused);
+            assert!(
+                message.contains("never expanded from the environment")
+                    && !message.contains("HOST_SECRET"),
+                "{method}: {message}"
+            );
+            assert_eq!(
+                tokio::fs::read_to_string(&child_path).await.unwrap(),
+                written,
+                "{method}: a refused write leaves the document bytes untouched"
+            );
+        }
+    }
+
+    /// Realm MCP servers are literal, judged entry by entry against the
+    /// persisted document: with a legacy referencing entry in place, an
+    /// unrelated patch succeeds, while a new or changed referencing entry is
+    /// the caller's error (INVALID_PARAMS) and writes nothing.
+    #[tokio::test]
+    async fn config_writes_refuse_only_new_or_changed_env_referencing_mcp_servers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        tokio::fs::write(
+            &path,
+            "[[tools.mcp_servers]]\nname = \"legacy\"\ncommand = \"tool\"\n\
+             env = { TOKEN = \"${HOST_SECRET}\" }\n",
+        )
+        .await
+        .unwrap();
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(
+            meerkat_core::FileConfigStore::new(path.clone(), meerkat_models::canonical()),
+        ))
+        .await;
+
+        let unrelated = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 200 } }),
+            ))
+            .await
+            .unwrap();
+        assert!(unrelated.error.is_none(), "{:?}", unrelated.error);
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains("legacy"), "{written}");
+
+        let legacy = serde_json::json!({
+            "name": "legacy", "command": "tool", "env": { "TOKEN": "${HOST_SECRET}" },
+        });
+        let mut changed = legacy.clone();
+        changed["connect_timeout_secs"] = serde_json::json!(30);
+        let added = serde_json::json!({
+            "name": "exfil", "url": "https://mcp.example.com/mcp",
+            "headers": { "Authorization": "Bearer ${HOST_SECRET}" },
+        });
+        for (servers, server) in [
+            (serde_json::json!([changed]), "'legacy'"),
+            (serde_json::json!([legacy, added]), "'exfil'"),
+        ] {
+            let refused = router
+                .dispatch(make_request(
+                    "config/patch",
+                    serde_json::json!({ "patch": { "tools": { "mcp_servers": servers } } }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(error_code(&refused), error::INVALID_PARAMS, "{server}");
+            let message = error_message(&refused);
+            assert!(
+                message.contains(server)
+                    && message.contains("never expanded from the environment")
+                    && !message.contains("HOST_SECRET"),
+                "{message}"
+            );
+            assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), written);
+        }
+    }
+
+    /// A stored-document validation failure is a server fault, even when
+    /// the same validation rule would reject a caller's new candidate.
+    #[tokio::test]
+    async fn config_read_fault_is_not_a_caller_validation_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let valid = "[skills]\nenabled = true\n";
+        tokio::fs::write(&path, valid).await.unwrap();
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(
+            meerkat_core::FileConfigStore::new(path.clone(), meerkat_models::canonical()),
+        ))
+        .await;
+        let before = router
+            .dispatch(make_request_no_params("config/get"))
+            .await
+            .unwrap();
+        let generation = result_value(&before)["generation"].as_u64().unwrap();
+
+        // The caller supplies a valid unrelated patch. It is the stored
+        // document, changed externally, that contains the unwired setting.
+        let broken = r#"[agent]
+provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
+"#;
+        tokio::fs::write(&path, broken).await.unwrap();
+        for request in [
+            make_request_no_params("config/get"),
+            make_request(
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 200 } }),
+            ),
+        ] {
+            let response = router.dispatch(request).await.unwrap();
+            assert_eq!(error_code(&response), error::INTERNAL_ERROR);
+            assert!(error_message(&response).contains("[agent] provider_params"));
+            assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), broken);
+        }
+
+        tokio::fs::write(&path, valid).await.unwrap();
+        let invalid_candidate = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 0 } }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&invalid_candidate), error::INVALID_PARAMS);
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), valid);
+        let after = router
+            .dispatch(make_request_no_params("config/get"))
+            .await
+            .unwrap();
+        assert_eq!(
+            result_value(&after)["generation"].as_u64(),
+            Some(generation)
+        );
     }
 
     /// 13. A notification (request with no id) returns None (no response).

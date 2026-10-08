@@ -1,6 +1,6 @@
 //! Cold-resume content-digest cost gate.
 //!
-//! The production defect this pins (HomeCore, 18-member mob, 2026-09): after a
+//! The production defect this pins (a production mob, 2026-09): after a
 //! cold restart the mob spent tens of minutes single-threaded in canonical
 //! JSON plus SHA-256 over whole transcripts (8.8k-12k messages per member)
 //! before it could serve anything, and the first turn of a large member took

@@ -4,7 +4,7 @@ description: "Runtime-owned R0-R3 policy evaluation, pending approvals, safe-dra
 icon: "shield-check"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 Gating is a policy service owned by the MobKit runtime. A caller submits an action, actor, and risk tier. The runtime evaluates that request, records the result, and may create a pending approval entry.
 
@@ -75,6 +75,8 @@ Approval timeouts default to 60 seconds and are clamped to the runtime limits. E
   }
 }
 ```
+
+Gating IDs (`gate-action-...`, `gate-pending-...` and `gate-audit-...`) are opaque strings. Each runtime mints them under its own random 128-bit epoch, so a restart or another runtime does not reissue an earlier ID (barring a random epoch collision). Do not parse or order them.
 
 ## Decisions
 

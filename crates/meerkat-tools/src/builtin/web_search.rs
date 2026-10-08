@@ -80,6 +80,37 @@ impl BuiltinTool for WebSearchTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
+        self.search(args, None).await
+    }
+
+    /// A governed turn carries its admitted work authorization into the
+    /// helper's own model request. The outer `ReadOnly` admission and the tool
+    /// name check do not authorize the helper's model, account, endpoint or
+    /// hosted search; the executor prepares those facts for the actual target.
+    async fn call_with_context(
+        &self,
+        _call: meerkat_core::ToolCallView<'_>,
+        args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        let authorization = context.work_authorization().map(|work| {
+            meerkat_core::LlmRequestAuthorization::new(
+                work.clone(),
+                meerkat_core::OperationId::new(),
+                meerkat_core::authorization::ModelAuthorizationUse::Inference,
+            )
+            .with_coordinates(context.run_id().cloned(), None)
+        });
+        self.search(args, authorization).await
+    }
+}
+
+impl WebSearchTool {
+    async fn search(
+        &self,
+        args: Value,
+        authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let args: WebSearchToolArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
         let query = args.query.trim().to_string();
@@ -93,19 +124,28 @@ impl BuiltinTool for WebSearchTool {
             .transpose()?;
         let result = self
             .executor
-            .execute_web_search(WebSearchRequest {
-                query,
-                provider,
-                provider_params: None,
-                context: args.context.filter(|value| !value.trim().is_empty()),
-            })
+            .execute_web_search_authorized(
+                WebSearchRequest {
+                    query,
+                    provider,
+                    provider_params: None,
+                    context: args.context.filter(|value| !value.trim().is_empty()),
+                },
+                authorization,
+            )
             .await
             .map_err(|err| match err {
+                meerkat_llm_core::LlmError::OperationRefused { refusal } => {
+                    BuiltinToolError::OperationRefused { refusal }
+                }
                 meerkat_llm_core::LlmError::OperationObservationUnavailable => {
                     BuiltinToolError::OperationObservationUnavailable
                 }
                 meerkat_llm_core::LlmError::OperationAuthorizationUnavailable => {
                     BuiltinToolError::OperationAuthorizationUnavailable
+                }
+                meerkat_llm_core::LlmError::OperationReviewRefused { refusal } => {
+                    BuiltinToolError::EntryRefused(Box::new(refusal.into()))
                 }
                 other => BuiltinToolError::execution_failed(other.to_string()),
             })?;
@@ -151,6 +191,16 @@ impl WebSearchExecutor for EmptyWebSearchExecutor {
             error: Some("no configured provider supports Meerkat web_search fallback".to_string()),
             checked_at: chrono::Utc::now(),
         })
+    }
+
+    /// Reports unavailability without any model request, so there is no
+    /// helper operation for the companion to govern.
+    async fn execute_web_search_authorized(
+        &self,
+        request: WebSearchRequest,
+        _authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Result<WebSearchResult, meerkat_llm_core::LlmError> {
+        self.execute_web_search(request).await
     }
 }
 
@@ -233,5 +283,116 @@ mod tests {
             .await
             .expect_err("self-hosted cannot own fallback search");
         assert!(err.to_string().contains("does not support"));
+    }
+
+    struct UnusedPolicy;
+    impl meerkat_core::authorization::WorkAuthorization for UnusedPolicy {
+        fn prepare(
+            &self,
+            _: &meerkat_core::authorization::PreparedAuthorizationBinding,
+        ) -> Result<
+            Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
+            meerkat_core::OperationAuthorizationError,
+        > {
+            Err(meerkat_core::authorization::OperationRefused::new(
+                meerkat_core::authorization::OperationRefusalKind::Denied,
+            )
+            .into())
+        }
+    }
+
+    fn governed_context() -> meerkat_core::ToolDispatchContext {
+        meerkat_core::ToolDispatchContext::default().with_work_authorization(Some(
+            meerkat_core::WorkAuthorizationContext::new(
+                Arc::new(UnusedPolicy),
+                meerkat_core::exact_operation::OperationExecutionScope::Domain,
+            ),
+        ))
+    }
+
+    async fn call_in(
+        tool: &WebSearchTool,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        let args = serde_json::json!({"query": "fixed query"});
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        tool.call_with_context(
+            meerkat_core::ToolCallView {
+                id: "search-call",
+                name: WEB_SEARCH_TOOL_NAME,
+                args: &raw,
+            },
+            args,
+            context,
+        )
+        .await
+    }
+
+    /// Stands in for a helper whose own model operation is refused.
+    #[derive(Default)]
+    struct RefusedHelper {
+        authorized: Mutex<Vec<bool>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl WebSearchExecutor for RefusedHelper {
+        async fn execute_web_search(
+            &self,
+            _request: WebSearchRequest,
+        ) -> Result<WebSearchResult, meerkat_llm_core::LlmError> {
+            Err(meerkat_llm_core::LlmError::InvalidRequest {
+                message: "the tool always uses the authorized seam".to_string(),
+            })
+        }
+
+        async fn execute_web_search_authorized(
+            &self,
+            _request: WebSearchRequest,
+            authorization: Option<meerkat_core::LlmRequestAuthorization>,
+        ) -> Result<WebSearchResult, meerkat_llm_core::LlmError> {
+            self.authorized.lock().await.push(authorization.is_some());
+            Err(meerkat_llm_core::LlmError::operation_refused(
+                meerkat_core::authorization::OperationRefusalKind::Denied,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn governed_turn_forwards_work_authorization_and_keeps_refusal_typed() {
+        let executor = Arc::new(RefusedHelper::default());
+        let tool = WebSearchTool::new(executor.clone());
+        let error = call_in(&tool, &governed_context())
+            .await
+            .expect_err("a refused helper is not a search result");
+        assert!(
+            matches!(
+                &error,
+                BuiltinToolError::OperationRefused { refusal }
+                    if refusal.kind() == meerkat_core::authorization::OperationRefusalKind::Denied
+            ),
+            "refusal must not flatten into ExecutionFailed: {error:?}"
+        );
+        assert_eq!(*executor.authorized.lock().await, vec![true]);
+    }
+
+    #[tokio::test]
+    async fn executor_without_an_authorized_seam_refuses_governed_work_without_searching() {
+        let executor = Arc::new(RecordingExecutor::default());
+        let tool = WebSearchTool::new(executor.clone());
+        let error = call_in(&tool, &governed_context())
+            .await
+            .expect_err("an executor that cannot bind the helper must refuse");
+        assert!(
+            matches!(error, BuiltinToolError::OperationRefused { .. }),
+            "{error:?}"
+        );
+        assert!(executor.seen.lock().await.is_empty(), "zero searches");
+
+        // Without admitted work the legacy contract is unchanged.
+        call_in(&tool, &meerkat_core::ToolDispatchContext::default())
+            .await
+            .expect("ungoverned search keeps its existing behavior");
+        assert_eq!(executor.seen.lock().await.len(), 1);
     }
 }

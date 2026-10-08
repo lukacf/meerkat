@@ -1279,80 +1279,369 @@ async fn detached_council_completion_revives_a_convener_whose_executor_was_torn_
     fixture.teardown().await;
 }
 
-/// The live custodian's delivery waits out a deferred owner revival: the
-/// owner is not live and its mob is stopped when the job ends, so revival is
-/// deferred; once the mob runs again the completion is delivered, exactly
-/// once, without a restart (lifecycle review: the single live attempt used to
-/// drop it until the next restart).
+/// The live custodian's completion outlives an owner that cannot be served
+/// when the job ends: the convener is not live and its mob is stopped, so it
+/// cannot be revived. The outcome is committed and submitted durably, nothing
+/// is recorded while the mob is stopped, and once the mob runs again the
+/// completion is applied exactly once, with no restart (P3-B B1 and B2: the
+/// live path waited on a bounded revival loop and then dropped the outcome
+/// until the next restart).
 #[tokio::test(flavor = "multi_thread")]
-async fn live_delivery_waits_for_a_stopped_owner_mob_and_delivers_once() {
-    let fixture =
-        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
-    fixture.seed_source_mob(&["forker"]).await;
+async fn a_live_completion_for_an_unservable_owner_is_applied_once_it_can_be_served() {
+    let log = RequestLog::default();
+    let gate = TurnGate::new();
+    let _release_on_exit = OpenOnDrop(gate.clone());
+    let inner = routed_script(log.clone(), Vec::new());
+    let gate_for_script = gate.clone();
+    let fixture = CouncilFixture::new_runtime_backed(move |request: &LlmRequest| {
+        if !support::user_text(request).contains("bounded plain-text summary")
+            && let Some(role) = support::role_in_request(request)
+        {
+            return ScriptedTurn::Gated(gate_for_script.clone(), format!("position from {role}"));
+        }
+        inner(request)
+    });
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let convener = bind_surface(
+        &fixture.state,
+        member_session(&fixture, "convener").await,
+        convener_authority(&mob_id),
+    );
+    let started = call(&convener.surface, "council", council_args(&fixture, None))
+        .await
+        .expect("council starts");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+    gate.wait_entered(1).await;
+
+    // The convener's mob stops and its executor is retired while the council
+    // runs: when the council ends, the convener cannot be revived.
     let handle = source_handle(&fixture).await;
-    let owner = member_session(&fixture, "forker").await;
+    handle.stop().await.expect("stop the convener's mob");
     let runtime = fixture
         .runtime_adapter
         .clone()
         .expect("runtime-backed fixture");
-    handle.stop().await.expect("stop the mob");
     runtime
-        .unregister_session(&owner)
+        .unregister_session(&convener.session)
         .await
-        .expect("the owner is not live");
+        .expect("the convener is not live");
+    gate.open();
 
-    let job_id = "job-live-deferred".to_string();
-    let delivery = tokio::spawn({
-        let runtime = Arc::clone(&runtime);
-        let handle = handle.clone();
-        let owner = owner.clone();
-        let job_id = job_id.clone();
-        async move {
-            meerkat_mob_mcp::deliver_detached_completion_to_member_when_revivable(
-                &runtime,
-                &handle,
-                &AgentIdentity::from("forker"),
-                &owner,
-                "fork_off",
-                &job_id,
-                BackgroundJobTerminalStatus::Completed,
-                json!({"text": CHILD_REPLY}),
-            )
+    // The council's terminal is committed on its custody record.
+    let council_store = fixture.state.temporary_council_store_for_tests();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let committed = council_store
+            .list_all()
             .await
+            .expect("council records")
+            .into_iter()
+            .any(|record| {
+                record
+                    .detached_job
+                    .is_some_and(|job| job.job_id == job_id && job.terminal.is_some())
+            });
+        if committed {
+            break;
         }
-    });
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the council's outcome was never committed"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
-        !delivery.is_finished(),
-        "delivery waits while the mob is stopped"
-    );
-    assert!(
         completion_records(
-            &persisted_messages(fixture.service.as_ref(), &owner).await,
+            &persisted_messages(fixture.service.as_ref(), &convener.session).await,
             &job_id
         )
-        .is_empty()
+        .is_empty(),
+        "nothing is recorded while the convener cannot be served"
     );
 
     handle.resume().await.expect("the mob runs again");
-    let delivered = tokio::time::timeout(Duration::from_secs(60), delivery)
-        .await
-        .expect("delivery ends once the mob runs")
-        .expect("delivery task");
-    assert_eq!(
-        delivered,
-        Ok(meerkat_mob_mcp::DetachedCompletionDelivered::Delivered)
-    );
-    wait_for_completion(&fixture, &owner, &job_id).await;
+    // Stopping the mob also ends the council's participants, so the council
+    // itself may fail; what is delivered is whatever outcome it committed.
+    wait_for_completion(&fixture, &convener.session, &job_id).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         completion_records(
-            &persisted_messages(fixture.service.as_ref(), &owner).await,
+            &persisted_messages(fixture.service.as_ref(), &convener.session).await,
             &job_id
         )
         .len(),
         1,
-        "delivered exactly once"
+        "applied exactly once"
+    );
+    fixture.teardown().await;
+}
+
+/// P3-B B.4 at the producer: a completion the job's owner session already
+/// took under `{tool}:{job_id}` (delivered live before an upgrade, or before
+/// the member was repointed to another session) is not submitted again,
+/// wherever the owner serves now: no continuation is committed and nothing
+/// reaches the owner's current session. A completion not yet taken is
+/// submitted, and once applied a repeat submission is skipped too.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sink_skips_a_completion_the_owner_session_already_took_even_after_a_repoint() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    fixture.seed_source_mob(&["forker", "successor"]).await;
+    let handle = source_handle(&fixture).await;
+    let taken = member_session(&fixture, "forker").await;
+    let current = member_session(&fixture, "successor").await;
+    let runtime = fixture
+        .runtime_adapter
+        .clone()
+        .expect("runtime-backed fixture");
+    let outcome = json!({"status": "completed", "text": CHILD_REPLY});
+    support::admit_pre_upgrade_completion(
+        &runtime,
+        &handle,
+        &AgentIdentity::from("forker"),
+        &taken,
+        "fork_off",
+        "job-b4",
+        BackgroundJobTerminalStatus::Completed,
+        outcome.clone(),
+    )
+    .await
+    .expect("the job's session takes the completion");
+    wait_for_completion(&fixture, &taken, "job-b4").await;
+
+    // The owner now serves on another session (as after a repoint).
+    let skipped = fixture
+        .state
+        .submit_detached_completion_for_tests(
+            Some((handle.clone(), AgentIdentity::from("successor"))),
+            &taken,
+            "fork_off",
+            "job-b4",
+            BackgroundJobTerminalStatus::Completed,
+            outcome.clone(),
+        )
+        .await
+        .expect("submit");
+    assert_eq!(
+        skipped,
+        meerkat_mob_mcp::DetachedCompletionDelivered::AlreadyDelivered
+    );
+    let continuations = fixture.continuations.as_ref().expect("continuations");
+    let status_reader = meerkat::ContinuationOwnerService::new(
+        continuations.inbox.clone(),
+        continuations.bindings.resolver().expect("bound resolver"),
+        Arc::clone(&runtime),
+    );
+    assert_eq!(
+        status_reader
+            .continuation_status(
+                &meerkat::ContinuationOwner::Member {
+                    mob_id: fixture.source_mob_id().to_string(),
+                    identity: "successor".to_string(),
+                },
+                &meerkat::ContinuationKey::new("fork_off:job-b4").expect("key"),
+            )
+            .await
+            .expect("status"),
+        meerkat::ContinuationStatus::NotCommitted,
+        "nothing is committed for a completion already taken"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        completion_records(
+            &persisted_messages(fixture.service.as_ref(), &current).await,
+            "job-b4"
+        )
+        .is_empty(),
+        "the owner's current session never sees it"
+    );
+
+    // A completion not yet taken is submitted, applied once, and a repeat
+    // submission after it was applied is skipped.
+    let submit = || {
+        fixture.state.submit_detached_completion_for_tests(
+            Some((handle.clone(), AgentIdentity::from("successor"))),
+            &current,
+            "fork_off",
+            "job-b4-new",
+            BackgroundJobTerminalStatus::Completed,
+            outcome.clone(),
+        )
+    };
+    assert_eq!(
+        submit().await.expect("submit"),
+        meerkat_mob_mcp::DetachedCompletionDelivered::Delivered
+    );
+    wait_for_completion(&fixture, &current, "job-b4-new").await;
+    assert_eq!(
+        submit().await.expect("submit again"),
+        meerkat_mob_mcp::DetachedCompletionDelivered::AlreadyDelivered
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        completion_records(
+            &persisted_messages(fixture.service.as_ref(), &current).await,
+            "job-b4-new"
+        )
+        .len(),
+        1
+    );
+    fixture.teardown().await;
+}
+
+/// The job owner confirms a fork_off outcome only from the mob that ran the
+/// job, and a restarted host binds its continuations before it restores its
+/// mobs. Until the restore is done a job it cannot find waits (a governed
+/// completion stays pending instead of being refused for a mob that comes
+/// back); once the mob set is complete the job is found, and a job no mob
+/// holds is absent for good.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_job_owner_waits_for_the_restore_before_calling_a_fork_job_absent() {
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker"]).await;
+    let forker = member_surface(&fixture, "forker").await;
+    let job_id = start_detached_fork(
+        &forker,
+        "restore-child",
+        fork_args("restore-child", CHILD_TASK),
+    )
+    .await;
+    wait_for_completion(&fixture, &forker.session, &job_id).await;
+
+    let bindings = Arc::clone(
+        &fixture
+            .continuations
+            .as_ref()
+            .expect("continuations")
+            .bindings,
+    );
+    let lookup = |job_id: &str| {
+        let (bindings, job_id) = (Arc::clone(&bindings), job_id.to_string());
+        async move {
+            bindings
+                .job_source()
+                .expect("a bound job owner")
+                .retained_job(&meerkat::ContinuationProducer::ForkOff, &job_id)
+                .await
+        }
+    };
+    assert!(matches!(
+        lookup(&job_id).await,
+        meerkat::RetainedJobLookup::Found(_)
+    ));
+
+    // The process dies; the restarted host binds before anything restores.
+    fixture.shut_down_predecessor().await;
+    let restarted = fixture.restart_state();
+    assert!(
+        matches!(
+            lookup(&job_id).await,
+            meerkat::RetainedJobLookup::Unavailable(_)
+        ),
+        "a job in a mob not restored yet waits"
+    );
+    assert!(matches!(
+        lookup("never-forked").await,
+        meerkat::RetainedJobLookup::Unavailable(_)
+    ));
+
+    // Any mob verb restores the mobs, and the set is complete.
+    restarted
+        .mob_handles_snapshot()
+        .await
+        .expect("restore the mobs");
+    match lookup(&job_id).await {
+        meerkat::RetainedJobLookup::Found(facts) => {
+            assert_eq!(facts.owner_session_id, forker.session);
+        }
+        _ => panic!("the restored mob confirms its job"),
+    }
+    assert!(
+        matches!(
+            lookup("never-forked").await,
+            meerkat::RetainedJobLookup::Absent
+        ),
+        "a job no mob holds once the set is complete is absent"
+    );
+    fixture.teardown().await;
+}
+
+/// A continuation owed to a member of a mob this host does not manage waits
+/// (the host may insert the mob's handle later), but only while the mob can
+/// still come back. A mob this state destroyed, or one missing once the mob
+/// set is known complete (persistent restore finished, or the host declared
+/// its own restore done), is retired, so its rows strand instead of waiting
+/// for good.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_address_of_a_mob_gone_for_good_is_retired() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    fixture.seed_source_mob(&["worker"]).await;
+    let handle = source_handle(&fixture).await;
+    let generation = handle
+        .roster()
+        .await
+        .get_by_identity(&AgentIdentity::from("worker"))
+        .expect("worker")
+        .generation
+        .get();
+    let mob_id = fixture.source_mob_id();
+    let address =
+        meerkat::member_delivery_address(mob_id.as_str(), "worker", generation).expect("address");
+    let bindings = Arc::clone(
+        &fixture
+            .continuations
+            .as_ref()
+            .expect("continuations")
+            .bindings,
+    );
+    assert!(matches!(
+        bindings.resolve_address(&address).await,
+        meerkat::AddressResolution::Session(_)
+    ));
+
+    fixture
+        .state
+        .mob_destroy(&mob_id)
+        .await
+        .expect("destroy the mob");
+    assert_eq!(
+        bindings.resolve_address(&address).await,
+        meerkat::AddressResolution::Retired,
+        "a mob this state destroyed never serves again"
+    );
+    let never = meerkat::member_delivery_address("never-existed", "worker", 1).expect("address");
+    assert_eq!(
+        bindings.resolve_address(&never).await,
+        meerkat::AddressResolution::Retired,
+        "a mob missing after the persistent restore is gone for good"
+    );
+
+    // A host that inserts restored handles itself (no persistent root): an
+    // unknown mob waits until the host declares its restore done.
+    let inserting = MobMcpState::new_with_runtime_adapter(
+        fixture.service.clone(),
+        fixture.runtime_adapter.clone(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    )
+    .expect("construct runtime authority")
+    .into_shared();
+    fixture.bind_continuations(&inserting);
+    let late = meerkat::member_delivery_address("late-mob", "worker", 1).expect("address");
+    assert_eq!(
+        bindings.resolve_address(&late).await,
+        meerkat::AddressResolution::NotServed,
+        "its handle may still be inserted"
+    );
+    inserting.declare_mob_set_restored();
+    assert_eq!(
+        bindings.resolve_address(&late).await,
+        meerkat::AddressResolution::Retired
     );
     fixture.teardown().await;
 }
@@ -1938,7 +2227,7 @@ async fn forker_observes_a_running_child_without_waiting_for_its_turn() {
 /// Marker of a forker turn held open at its model call.
 const FORKER_HOLD: &str = "FORKER-HOLD-3K keep this turn open";
 
-/// The HomeCore incident: an operator harness polled the forker's status
+/// The field incident: an operator harness polled the forker's status
 /// while the forker was mid-turn, each read of the busy forker held the mob's
 /// single status permit, and the forker's own `mob_check_member` on its idle
 /// fork child was refused (`observation_lane_saturated`). The check must

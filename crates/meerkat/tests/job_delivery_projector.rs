@@ -1,14 +1,19 @@
 #![allow(clippy::expect_used)]
 
+#[path = "job_delivery_projector/local_settlement.rs"]
+mod local_settlement;
+#[path = "job_delivery_projector/recipient_routing.rs"]
+mod recipient_routing;
+
 use std::sync::Arc;
 
 use meerkat::{
     AttemptClaim, CanonicalArgumentsHash, DetachedJobService, DetachedJobStore,
-    InteractionLineageId, JobDeliveryApplication, JobDeliveryKind, JobDeliverySink, JobId,
-    JobNotification, JobNotificationDeliveryPayload, JobOutboxProjector, JobResultRef,
-    JobRuntimeDeliveryApplier, JobSpec, JobSubmissionKey, JobSubscription, JobSubscriptionId,
-    JobTerminalDeliveryPayload, JobTerminalResult, MemoryDetachedJobStore, RestartClass,
-    RunnerHandleRef, RunnerIdentity, SessionId, ToolIdentity, WorkerId,
+    InteractionLineageId, JobDeliveryApplication, JobDeliveryApplyError, JobDeliveryKind,
+    JobDeliverySink, JobId, JobNotification, JobNotificationDeliveryPayload, JobOutboxProjector,
+    JobResultRef, JobRuntimeDeliveryApplier, JobSpec, JobSubmissionKey, JobSubscription,
+    JobSubscriptionId, JobTerminalDeliveryPayload, JobTerminalResult, MemoryDetachedJobStore,
+    RestartClass, RunnerHandleRef, RunnerIdentity, SessionId, ToolIdentity, WorkerId,
 };
 use meerkat_core::HandlingMode;
 use meerkat_runtime::{
@@ -25,7 +30,10 @@ struct RecordingDeliverySink {
 
 #[async_trait::async_trait]
 impl JobDeliverySink for RecordingDeliverySink {
-    async fn apply(&self, application: JobDeliveryApplication) -> Result<(), String> {
+    async fn apply(
+        &self,
+        application: JobDeliveryApplication,
+    ) -> Result<(), JobDeliveryApplyError> {
         self.applications.lock().await.push(application);
         Ok(())
     }
@@ -51,14 +59,19 @@ impl SelectivePoisonSink {
 
 #[async_trait::async_trait]
 impl JobDeliverySink for SelectivePoisonSink {
-    async fn apply(&self, application: JobDeliveryApplication) -> Result<(), String> {
+    async fn apply(
+        &self,
+        application: JobDeliveryApplication,
+    ) -> Result<(), JobDeliveryApplyError> {
         let job_id = match &application {
             JobDeliveryApplication::Record { job_id, .. }
             | JobDeliveryApplication::Notification { job_id, .. }
             | JobDeliveryApplication::Event { job_id, .. } => job_id.clone(),
         };
         if self.poisoned.lock().expect("poison lock").as_ref() == Some(&job_id) {
-            return Err(format!("sink rejects deliveries for job {job_id}"));
+            return Err(JobDeliveryApplyError::Infrastructure(format!(
+                "sink rejects deliveries for job {job_id}"
+            )));
         }
         self.applications.lock().await.push(job_id);
         Ok(())

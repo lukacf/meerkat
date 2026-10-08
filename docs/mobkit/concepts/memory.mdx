@@ -4,7 +4,7 @@ description: "Operational memory assertions plus optional identity-first agent m
 icon: "brain"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 MobKit has two memory-adjacent surfaces, and they serve different latency
 classes:
@@ -31,11 +31,11 @@ import-only: selecting `store: "markdown"` is refused at gateway init, while
 the SQLite provider imports a realm's files when that realm is first accessed
 and renames each source to `.md.imported`.
 
-Elephant is not integrated today. A real Elephant integration — a deep-memory
+No external memory hub is integrated today. A real hub integration - a deep-memory
 hub with a knowledge graph, document/vector retrieval, truth maintenance,
-provenance, and ABAC/redaction — is the wire-boundary provider described in the
+provenance, and ABAC/redaction - is the wire-boundary provider described in the
 memory hub roadmap (`docs/design/memory-hub-roadmap.md` in the repository).
-Nothing in the current runtime sends data to Elephant.
+Nothing in the current runtime sends data to an external memory hub.
 
 Meerkat's session semantic memory is a separate layer again: it indexes
 compacted session content and exposes semantic recall through Meerkat's
@@ -62,7 +62,7 @@ LocalJsonMemoryBackendConfig {
 
 The legacy `ElephantMemoryBackendConfig` shape (`kind = "elephant"` with an
 `endpoint`) is still accepted for config compatibility and logs a deprecation
-warning: despite its name it never sent data to Elephant — the `endpoint` was
+warning: despite its name it never sent data to an external memory hub - the `endpoint` was
 only ever health-checked and the ledger persisted locally. It maps to the
 local-JSON backend with `endpoint` as the health-check endpoint.
 
@@ -165,7 +165,7 @@ MobKit.builder()
 
 By default, the bundled provider stores one SQLite database per realm under `<persistent_state>/agent-memory`. Records are injected as a quoted observation block for the matching durable identity. Contextual recall receives the raw turn or RPC `query_text`, ignores common stopwords, scores matching records, and size-caps injected records. Existing markdown files under a realm's legacy subdirectory are parsed only when that realm is first accessed, imported through the SQLite validator, and renamed rather than deleted; malformed records are skipped instead of being promoted into runtime context. Automatic build/turn injection is time-bounded by `recall_timeout_ms` (default `500`) and defaults to `recall_failure_policy: "skip"`, so provider slowness or outage does not block normal delivery. Set `recall_failure_policy: "fail"` for fail-closed deployments. Explicit `mobkit/agent_memory/recall` calls still return provider errors to the caller.
 
-Apps write identity-scoped agent memory explicitly through `mobkit/agent_memory/remember`, TypeScript `handle.rememberAgentMemory(...)`, or Python `handle.remember_agent_memory(...)`; read it through `mobkit/agent_memory/recall`, `handle.recallAgentMemory(...)`, or `handle.recall_agent_memory(...)`; and delete individual records through `mobkit/agent_memory/forget`, `handle.forgetAgentMemory(...)`, or `handle.forget_agent_memory(...)`. A successful `remember` means the configured hot identity-memory provider durably accepted the record and it is available to the next identity-first send for that identity, plus build context on materialization/resume/respawn/reset. It does not imply Elephant entity extraction, truth maintenance, or document/vector indexing has completed. Custom providers receive both raw `query_text` and normalized `query_terms` so they can implement stronger retrieval without changing MobKit runtime authority.
+Apps write identity-scoped agent memory explicitly through `mobkit/agent_memory/remember`, TypeScript `handle.rememberAgentMemory(...)`, or Python `handle.remember_agent_memory(...)`; read it through `mobkit/agent_memory/recall`, `handle.recallAgentMemory(...)`, or `handle.recall_agent_memory(...)`; and delete individual records through `mobkit/agent_memory/forget`, `handle.forgetAgentMemory(...)`, or `handle.forget_agent_memory(...)`. A successful `remember` means the configured hot identity-memory provider durably accepted the record and it is available to the next identity-first send for that identity, plus build context on materialization/resume/respawn/reset. It does not imply external memory hub entity extraction, truth maintenance, or document/vector indexing has completed. Custom providers receive both raw `query_text` and normalized `query_terms` so they can implement stronger retrieval without changing MobKit runtime authority.
 
 Agent memory is identity-scoped rather than session-scoped. A session respawn or identity reset does not delete stored memory; apps that need privacy reset semantics can call `mobkit/agent_memory/forget` for specific records or use a provider that clears memory as part of the app's identity lifecycle. `forget` removes records from future recall and injection, but it cannot remove text already delivered into an active model context; reset or respawn the identity after deletion when immediate context revocation matters.
 
@@ -206,7 +206,7 @@ pass-through; custom or classic-provider compositions need equivalent tracker,
 decorator, and write-gate wiring. The stricter `"quarantined"` posture is not a
 workaround for an unshipped stock dispatch-order fix.
 
-Application/operator writes (the `mobkit/agent_memory/*` RPCs) are non-LLM principals and are never quarantined by this machinery. `llm_writes` and `content_trust` require `store: "sqlite"`. Selecting `store: "markdown"` is refused before a runtime can start; combining it with these SQLite-only knobs is rejected earlier during config validation.
+Application/operator writes (the `mobkit/agent_memory/*` RPCs) are non-LLM principals and are never quarantined by this machinery. Quarantined records leave quarantine only through review: the memory steward's dream, the gating flow for steward-staged promotions, or an operator decision (see [Reviewing quarantined records](#reviewing-quarantined-records)). `llm_writes` and `content_trust` require `store: "sqlite"`. Selecting `store: "markdown"` is refused before a runtime can start; combining it with these SQLite-only knobs is rejected earlier during config validation.
 
 ```typescript
 MobKit.builder().agentMemory({
@@ -257,15 +257,51 @@ MemoryStoreInfo {
 
 `record_count` counts stored assertions plus active conflict signals for the store. This is available through the RPC API for monitoring and diagnostics.
 
+## Reviewing quarantined records
+
+A quarantined record waits for review. Without a memory steward (or alongside one), an operator decides it from the console with `mobkit/memory/quarantine/decide`:
+
+```json
+{
+  "realm": "default",
+  "identity": "lead:main",
+  "memory_id": "mem-...",
+  "verdict": "release",
+  "expected_content_hash": "<record.content_hash from mobkit/memory/panel/record>",
+  "rationale": "confirmed with the reader"
+}
+```
+
+- **release** makes the content active memory of the same identity. The store creates the successor `<memory_id>-released` at `agent_observed` with `derived_from` the original and tombstones the original. Nothing is deleted: the original keeps its body, provenance and timestamps. A quarantined update (one that `supersedes` an active record) is released as a supersede of that record, so only one version stays active.
+- **tombstone** discards the record; it is never recalled.
+
+The decision is one store transaction through the same validator as every other write:
+
+- The successor stays capped at `agent_observed` forever: it carries the durable `ever_quarantined` marker, and any later retier or update above `agent_observed` is rejected.
+- Content matching a secret pattern is never released (`secret_detected`); tombstone is its only exit.
+- `expected_content_hash` binds the decision to the content the reviewer read; a different hash is refused (`content_mismatch`).
+- Repeating a decision returns `already_released` or `already_tombstoned` with the original decision and writes nothing. A replay is recognized only from the review's own audit evidence; a row that merely holds the successor id is refused (`successor_conflict`), and a record tombstoned by a plain forget is not reported as reviewed. The receipts show the records as they stand now, so a successor forgotten later stays forgotten.
+- A record a gated promotion is waiting on cannot be released (`gate_pending`, with `expires_at_ms`) until the gating flow decides that promotion or it expires. Gated promotions expire after seven days, the same rule the steward's dream applies; a review after that expires the promotion itself (discarding its staged batch), so a promotion orphaned by a restart never blocks review for good, steward or not.
+- An operator can still tombstone it. The tombstone invalidates the record's pending promotions in the same transaction (their mappings expire and their staged batches are discarded; the decision lists them as `invalidated_promotions`), so a later approval publishes nothing, and a late denial or escalation leaves the invalidated promotion as it is. If the promotion was approved first, it stands and the tombstone is refused (`not_quarantined`). Only an operator's tombstone has this exception.
+- Releasing an update whose earlier version is gone (missing, forgotten or replaced) is refused (`stale_update`); tombstone it instead.
+
+Refusals are JSON-RPC error `-32043` with `data.kind = "memory_quarantine_review_refused"` and `data.reason`. A result carries `outcome`, receipts for `origin` and `successor` (status, trust, `ever_quarantined`, `content_hash`, lineage) and the committed `decision`: its audit token and time, and the review itself (verdict, reviewer, origin, successor, bound hash, the original's quarantine reason, expired promotions, invalidated promotions, rationale). Each applied op writes one audit row whose `detail.review` holds that review. The reviewer is the authenticated console principal, never a caller-supplied name; on a host running without app authentication it records that no principal was known.
+
+Deciding needs `memory.quarantine.review` plus `agent.view` and `agent.memory.read` on the identity, and `agent.memory.write` to release or `agent.memory.delete` to tombstone (see [Access control](/mobkit/concepts/access-control)). With access control on, an anonymous caller is held to the same grants. Read-only consoles refuse it. The identity's session taint is unchanged: later writes from a still-tainted session quarantine again and are reviewed the same way. Mob-, operator- and realm-scoped quarantine stays with the steward and the gating flow.
+
+Quarantined content stays reviewer-only after it is decided: a released or tombstoned original, and a quarantined write removed by `forget`, still need `memory.quarantine.review` to read, while a released successor is ordinary memory. A review emits its `memory.quarantine.verdict` timeline event only once the decision has committed; the event names the record, the verdict and any successor, never the reviewer or the rationale. The steward's open-loop nudge (verdict `open_loop_escalated`) uses the same event and names only the record, without the dream's rationale.
+
+The store operation behind it is `StewardStore::review_quarantined`, which the bundled SQLite store implements. The memory steward's dream runs the same operation for its `release` and `tombstone` verdicts, recorded with reviewer `{"kind": "steward", "run_id": ...}`: whichever reviewer commits first decides the record, and the other gets the replay or a refusal. A steward `hold` changes nothing and emits no verdict event; a `promote_pending_gate` verdict reports through its gate (`memory.promotion.pending_gate`).
+
 ## Console Memory panel
 
-When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel — trust through inspectability. It is strictly read-only and served by ten `mobkit/memory/panel/*` RPC methods, subject to provider capability and the caller's access grants:
+When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel: trust through inspectability. Its reads are served by ten `mobkit/memory/panel/*` RPC methods, subject to provider capability and the caller's access grants. Its one mutation is the quarantine decision above, offered as Release and Tombstone on a quarantined record's detail view:
 
 | Method | Returns |
 |--------|---------|
 | `mobkit/memory/panel/records` | Records filtered by realm/scope/status, newest-updated first, keyset cursor (`{realm?, scope?, identity?, scope_key?, status?, limit?, cursor?}`). List rows are body-free (`body_bytes` stands in) |
-| `mobkit/memory/panel/record` | One record with body, its supersede chain (ancestors, committed successors, trailing uncommitted claimants), and its injection-ledger usage |
-| `mobkit/memory/panel/quarantine` | The quarantine queue plus pending gated promotions. The queue is read-only — verdicts belong to the memory steward's dream and the gating flow |
+| `mobkit/memory/panel/record` | One record with body and `content_hash`, its supersede chain (ancestors, committed successors, trailing uncommitted claimants), and its injection-ledger usage |
+| `mobkit/memory/panel/quarantine` | The quarantine queue plus pending gated promotions. Gated promotions are decided through the gating flow; quarantined records through `mobkit/memory/quarantine/decide` or the steward's dream |
 | `mobkit/memory/panel/dreams` | Steward dream-run summaries reconstructed from the audit rows (op counts and kinds, quarantined ops, sampled record ids and rationales) |
 | `mobkit/memory/panel/dream_runs` | Durable dream-run detail, including partition, timestamps, committed-op count, and saved detail |
 | `mobkit/memory/panel/audit_verdicts` | Open usage-audit verdicts awaiting operator action, with record/run ids and rationales |
@@ -280,7 +316,7 @@ identity, session-key, or surface filters proposed in the design notes.
 
 Memory lifecycle events (`memory.dream.*`, `memory.record.promoted`, `memory.quarantine.verdict`, `memory.write.quarantined`, `memory.taint.transition`, `memory.hygiene.*`, ...) flow onto the console timeline as standard envelopes and render in the timeline and Signals surfaces.
 
-Visibility is governed by the [access-control](/mobkit/concepts/access-control) memory actions: identity-scoped records need `agent.memory.read` + `agent.view` on the identity, mob-scoped records need `mob.memory.read`, operator-scoped records need `operator.memory.read`, realm-scoped records and dream history need an unscoped `agent.memory.read` grant, and quarantined content needs `memory.quarantine.review`. The panel's nav entry appears when the experience projection reports `memory.can_read`.
+Visibility is governed by the [access-control](/mobkit/concepts/access-control) memory actions: identity-scoped records need `agent.memory.read` + `agent.view` on the identity, mob-scoped records need `mob.memory.read`, operator-scoped records need `operator.memory.read`, realm-scoped records and dream history need an unscoped `agent.memory.read` grant, and quarantined content (including a tombstoned record that was ever quarantined) needs `memory.quarantine.review`. The panel's nav entry appears when the experience projection reports `memory.can_read`.
 
 Embedders wire the panel by handing the runtime any panel-capable store handle (`Arc<dyn MemoryPanelStore>` — the bundled SQLite store advertises it via `provider.as_memory_panel_store()`): `runtime.set_memory_panel_store(panel)` before building the console router. Providers that do not advertise `MemoryPanelStore` leave the panel methods unadvertised.
 
@@ -288,5 +324,5 @@ Embedders wire the panel by handing the runtime any panel-capable store handle (
 
 - [Gating](/mobkit/concepts/gating) -- conflict-aware approval gates
 - [Access control](/mobkit/concepts/access-control) -- the memory read actions governing panel visibility
-- `docs/design/memory-hub-roadmap.md` (in the repository) -- the roadmap for a real Elephant-backed memory hub
+- `docs/design/memory-hub-roadmap.md` (in the repository) -- the roadmap for a real external memory hub
 - [RPC API](/mobkit/api/rpc) -- `memory.*` methods

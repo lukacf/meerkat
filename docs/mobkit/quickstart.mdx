@@ -4,7 +4,7 @@ description: "Bootstrap a MobKit runtime with modules and a Meerkat mob. Single 
 icon: "rocket"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 ## Install
 
@@ -12,7 +12,7 @@ icon: "rocket"
   <Tab title="Rust crate">
     ```toml Cargo.toml
     [dependencies]
-    meerkat-mobkit = "0.8.41"
+    meerkat-mobkit = "0.8.49"
     tokio = { version = "1", features = ["full"] }
     ```
   </Tab>
@@ -149,25 +149,25 @@ shut it down when finished, and a console host should retain that cleanup on exi
 
 The console shows the agent sidebar, conversation workspace, signals rail, topology, logs, and health overview. The bundled app seeds from REST, sends through JSON-RPC, and tails replayable timeline frames over SSE.
 
-## Identity-first (household apps)
+## Identity-first (durable identity apps)
 
-For apps with durable agent identities (like HomeCore), use the identity-first API:
+For apps with durable agent identities, use the identity-first API:
 
 ```python
 from meerkat_mobkit import MobKit
 from meerkat_mobkit.identity_first_models import DurableAgentSpec, ManagedPeerEdge
 
-# Define your household roster
+# Define your roster
 class MyRoster:
     async def roster(self, context):
         return [
-            DurableAgentSpec(identity="identity:luka", profile="personal", addressability="addressable"),
+            DurableAgentSpec(identity="identity:alice", profile="personal", addressability="addressable"),
             DurableAgentSpec(identity="triage:main", profile="triage", addressability="internal_only"),
         ]
 
 class MyTopology:
     async def compute_edges(self, target_identities, context):
-        return [ManagedPeerEdge(a="identity:luka", b="triage:main")]
+        return [ManagedPeerEdge(a="identity:alice", b="triage:main")]
 
 # Boot the runtime
 rt = await (
@@ -182,16 +182,21 @@ rt = await (
 
 # Use identity-scoped handles
 triage = rt.agent("triage:main")
-luka = rt.agent("identity:luka")
+alice = rt.agent("identity:alice")
 
-# send_and_wait / dispatch_and_wait wait on the turn's completion cursor.
-# Never wait by comparing output text: an agent may answer the same thing
-# twice, and a text comparison then reports "nothing happened" until timeout.
+# On turn_driven members (runtime_mode = "turn_driven"), send_and_wait /
+# dispatch_and_wait wait for the turn they started, by its turn ticket, and
+# return that turn's own output. On autonomous_host members (the default
+# mode) the delivery still happens once, but the turn cannot be tracked: the
+# call waits identity-wide with a TurnTrackingUnavailableWarning, and
+# dispatch_text_and_wait_outcome(...).attributed is False because another
+# delivery can satisfy that wait. Never wait by comparing output text: an
+# agent may answer the same thing twice.
 output = await triage.dispatch_text_and_wait(
     "New event from connector", origin="connector", timeout=60,
 )
 
-await luka.send_and_wait("What's happening today?", timeout=60)
+await alice.send_and_wait("What's happening today?", timeout=60)
 ```
 
 <Note>

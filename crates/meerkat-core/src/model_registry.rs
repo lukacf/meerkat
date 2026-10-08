@@ -52,6 +52,9 @@ pub struct ModelProfileWitness {
     context_window: Option<u32>,
     max_input_tokens: Option<u32>,
     max_output_tokens: Option<u32>,
+    /// The catalog row behind this profile; `None` for custom and
+    /// self-hosted models, which have no catalog-owned capability facts.
+    catalog_capabilities: Option<&'static crate::model_profile::capabilities::ModelCapabilities>,
 }
 
 impl fmt::Debug for ModelProfileWitness {
@@ -99,6 +102,14 @@ impl ModelProfileWitness {
         self.max_output_tokens
     }
 
+    /// The catalog-owned capability row of this model, when it has one
+    /// (custom and self-hosted models do not).
+    pub fn catalog_capabilities(
+        &self,
+    ) -> Option<&'static crate::model_profile::capabilities::ModelCapabilities> {
+        self.catalog_capabilities
+    }
+
     /// Whether this witness was minted for the supplied session identity.
     pub fn matches_identity(&self, identity: &crate::SessionLlmIdentity) -> bool {
         self.provider == identity.provider && self.model == identity.model
@@ -133,6 +144,11 @@ pub struct ModelRegistry {
     entries: BTreeMap<String, ModelRegistryEntry>,
     profiles: BTreeMap<(Provider, String), ModelProfile>,
     defaults: BTreeMap<Provider, String>,
+    /// Catalog capability rows of the catalog-owned entries.
+    catalog_capabilities: BTreeMap<
+        (Provider, String),
+        &'static crate::model_profile::capabilities::ModelCapabilities,
+    >,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +258,7 @@ impl ModelRegistry {
         let mut entries = BTreeMap::new();
         let mut profiles = BTreeMap::new();
         let mut defaults = BTreeMap::new();
+        let mut catalog_capabilities = BTreeMap::new();
 
         for &provider in catalog.providers {
             let default_model = catalog.default_model(provider).ok_or_else(|| {
@@ -257,6 +274,9 @@ impl ModelRegistry {
                 .iter()
                 .filter(|entry| entry.provider == provider.as_str())
             {
+                if let Some(capabilities) = catalog.capabilities_for(provider, entry.id) {
+                    catalog_capabilities.insert((provider, entry.id.to_string()), capabilities);
+                }
                 let profile = catalog.profile_for(provider, entry.id).ok_or_else(|| {
                     ConfigError::InternalError(format!(
                         "missing catalog profile for {}:{}",
@@ -297,6 +317,7 @@ impl ModelRegistry {
             entries,
             profiles,
             defaults,
+            catalog_capabilities,
         })
     }
 
@@ -369,6 +390,10 @@ impl ModelRegistry {
             context_window: entry.context_window,
             max_input_tokens: entry.max_input_tokens,
             max_output_tokens: entry.max_output_tokens,
+            catalog_capabilities: self
+                .catalog_capabilities
+                .get(&(provider, model_id.to_string()))
+                .copied(),
         })
     }
 

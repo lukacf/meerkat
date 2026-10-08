@@ -280,7 +280,21 @@ impl CoreExecutorPostStopCleanupHandle for SessionRuntimePostStopCleanupHandle {
                 SessionError::NotFound { .. } => Ok(()),
                 err => Err(err),
             })
-            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))?;
+        // The session actor owns its hosting claim until it exits, so cleanup
+        // completes only once the removed actor has exited.
+        self.runtime
+            .persistent_service()
+            .await_removed_actor_exit(&self.session_id)
+            .await;
+        Ok(())
+    }
+
+    async fn await_removed_actor_exit(&self) {
+        self.runtime
+            .persistent_service()
+            .await_removed_actor_exit(&self.session_id)
+            .await;
     }
 
     async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(

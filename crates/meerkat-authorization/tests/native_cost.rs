@@ -12,18 +12,59 @@
 //! ```
 //! Measure only in an explicitly allocated, externally monitored quiet window.
 //! Set NATIVE_COST_RUN=approved-quiet-window and a fresh NATIVE_COST_OUTPUT
-//! path for each matrix. Both matrices require --ignored --nocapture
+//! path for each matrix. The matrices require --ignored --nocapture
 //! --test-threads=1 and separate raw outputs. For --exact native_cost_matrix,
 //! set NATIVE_COST_WARMUP_PAIRS=100 and NATIVE_COST_PAIRS=2000.
 //! For --exact representative::native_representative_matrix, the default is
 //! fixed_mean_32 with 20 warmup and 32 measured pairs; explicit profile/count
 //! overrides must match those values. The representative tail profile is
 //! withdrawn. Run this minutes-scale profile with no interim decisions.
-//! Its internal 1,200-second deadline does not preempt synchronous work. Use
-//! GNU timeout --signal=KILL 1190s before the binary and reserve at most ten
-//! seconds for bounded postwork within the hard 1,200-second end-to-end cap.
+//! Its internal deadline does not preempt synchronous work. Use GNU timeout
+//! with the positive remaining budget from the original allocation and reserve
+//! time for bounded postwork within the hard 1,200-second end-to-end cap.
 //! A timeout, nonzero exit or output failure is UNCERTAIN, never acceptance.
 //! This profile reports conditional mean inference, not empirical p99.
+//! A separate tool-only tail mode reuses two held native runs per depth rather
+//! than repeating representative setup for each dispatch. Its fixed W100/N2000
+//! calls retain growing audit history; their signed paired differences estimate
+//! added authorization cost across the full resolve/validate/fenced read span.
+//! These are correlated empirical observations, not independent tail confidence,
+//! Agent scheduling, model preparation or full-profile acceptance. Model call
+//! and inactivity timers are disabled only in the artificially held tail fixtures;
+//! per-tool and outer deadlines remain. After the
+//! optimized binary is built and a quiet window is allocated, use a fresh path.
+//! The representative mean, tool tail and model tail share one 1,200-second
+//! allocation, in that order: representative mean first, tool tail second,
+//! model tail last, including setup, checks, cleanup and output. The owner sets REMAINING_SECONDS
+//! from that allocation's original deadline, reserving time for postwork:
+//! ```text
+//! NATIVE_COST_RUN=approved-quiet-window NATIVE_COST_MEASUREMENT_PROFILE=tool_dispatch_tail \
+//! NATIVE_COST_WARMUP_PAIRS=100 NATIVE_COST_PAIRS=2000 NATIVE_COST_OUTPUT="$RAW_OUTPUT" \
+//! timeout --signal=KILL "${REMAINING_SECONDS:?remaining shared allocation}s" "$BINARY" \
+//!   --exact representative::native_tool_dispatch_tail \
+//!   --ignored --nocapture --test-threads=1
+//! ```
+//! Select the model-only tail through the existing matrix entrypoint. This
+//! uses only Boundaries samples at depths 1 and 3, fixed W100/N2000, with two
+//! correlated request spans per fixture. It does not repeat the TurnOnly mean
+//! cells. Use a separate fresh output and recompute REMAINING_SECONDS from the
+//! SAME original allocation after the preceding work and postwork reservation:
+//! ```text
+//! NATIVE_COST_RUN=approved-quiet-window NATIVE_COST_MEASUREMENT_PROFILE=model_dispatch_tail \
+//! NATIVE_COST_WARMUP_PAIRS=100 NATIVE_COST_PAIRS=2000 NATIVE_COST_OUTPUT="$MODEL_RAW_OUTPUT" \
+//! timeout --signal=KILL "${REMAINING_SECONDS:?remaining shared allocation}s" "$BINARY" \
+//!   --exact native_cost_matrix --ignored --nocapture --test-threads=1
+//! ```
+//! REMAINING_SECONDS must be a positive integer; timeout 0 disables its bound.
+//! Do not start if the remaining allocation is expired or insufficient for
+//! the complete fixed-count study plus reserved postwork.
+//! Do not reset the shared deadline or reduce the fixed sample counts to fit.
+//! A failed or incomplete tail run is not a performance result. Combined mean
+//! and tail duration remains unmeasured until the actual qualified execution.
+//! A model-tail sample timeout writes only the completed samples with
+//! measurement_status=budget_exhausted and timeouts=1, then fails. Such partial
+//! data retains counts only, never quantiles or acceptance. SIGKILL can prevent
+//! even that output; absent output means sample counts are unavailable.
 //! Preserve the raw sample JSON beside the existing command/stdout/stderr logs.
 //! Analyze each raw output independently with the repository-owned script:
 //! ```text
@@ -34,6 +75,12 @@
 //! quiet-window qualification and the producer's typed audit assertions remain
 //! separate requirements. Do not pair samples across distinct measurement runs.
 //! These diagnostics do not establish full/default overhead acceptance.
+//! `native_model_preparation_ns` starts at the Agent's CallingLlm boundary,
+//! before notice refresh, and ends after the actual native Entry/currentness
+//! checks immediately before scripted transport. It excludes admission/run
+//! setup before CallingLlm, real provider-specific serialization/header refresh,
+//! network I/O and Outcome auditing. The older `model_authorization_ns` remains
+//! a provider-only diagnostic. Neither field alone is full-profile acceptance.
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -45,7 +92,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
+use meerkat::{
+    AgentFactory, EphemeralSessionService, FactoryAgent, FactoryAgentBuilder, SessionAgentBuilder,
+};
 use meerkat_authorization::grant_policy::{
     AdmittedWorkPolicyOwner, OperationPolicyOwner, WorkOwnerAllowance,
 };
@@ -80,9 +129,10 @@ use meerkat_core::connection::{AuthCredentialIdentity, RealmId};
 use meerkat_core::exact_operation::OperationExecutionScope;
 use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy};
 use meerkat_core::{
-    AgentError, AgentSessionStore, AgentToolDispatcher, Config, ControllerModelSelection, Message,
-    PrincipalKind, PrincipalRef, Provider, Session, SessionId, SessionLlmIdentity, StopReason,
-    ToolCallView, ToolDef, ToolDispatchOutcome, ToolError, ToolResult, TrustDomainId,
+    AgentError, AgentEvent, AgentSessionStore, AgentToolDispatcher, Config,
+    ControllerModelSelection, Message, PrincipalKind, PrincipalRef, Provider, Session,
+    SessionError, SessionId, SessionLlmIdentity, StopReason, ToolCallView, ToolDef,
+    ToolDispatchOutcome, ToolError, ToolResult, TrustDomainId,
 };
 use meerkat_llm_core::{
     LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmStream, PreparedLlmRequest,
@@ -96,7 +146,7 @@ use meerkat_runtime::meerkat_machine::{
 };
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 const MODEL: &str = "claude-sonnet-4-5";
 const ENDPOINT: &str = "https://native-loop.invalid/messages";
@@ -320,6 +370,7 @@ impl OperationPolicyOwner for RecordOwner {
             }],
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: now_ms + 60_000,
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
 }
@@ -481,8 +532,115 @@ impl AgentToolDispatcher for FileTools {
 #[derive(Default)]
 struct BoundarySamples {
     model_authorization_ns: Vec<u64>,
+    native_model_preparation_start: Option<Instant>,
+    native_model_preparation_starts: usize,
+    native_model_preparation_ns: Vec<u64>,
     tool_batch_start: Option<Instant>,
     tool_batch_ns: Option<u64>,
+}
+
+impl BoundarySamples {
+    fn begin_native_model_preparation(&mut self) {
+        assert!(
+            self.native_model_preparation_start.is_none(),
+            "model preparation cannot overwrite an unfinished span"
+        );
+        assert_eq!(
+            self.native_model_preparation_starts,
+            self.native_model_preparation_ns.len(),
+            "every earlier preparation must have reached its provider entry"
+        );
+        self.native_model_preparation_starts += 1;
+        // The caller holds the recorder lock before this timestamp. The
+        // fixed slot assignment/drop is matched in both modes, not subtracted.
+        self.native_model_preparation_start = Some(Instant::now());
+    }
+
+    fn finish_native_model_preparation(&mut self, end: Instant, request_index: usize) {
+        assert_eq!(
+            request_index,
+            self.native_model_preparation_ns.len(),
+            "model preparation spans must follow provider request order"
+        );
+        let start = self
+            .native_model_preparation_start
+            .take()
+            .expect("provider entry requires its own model preparation start");
+        self.native_model_preparation_ns.push(ns(end
+            .checked_duration_since(start)
+            .expect("provider entry follows model preparation")));
+    }
+}
+
+// Preserve the real factory and SessionAgent. This wrapper installs only the
+// per-instance test observer; it does not wrap execution or supply permission.
+struct ObservedFactoryAgentBuilder {
+    inner: FactoryAgentBuilder,
+    model_preparation_observer: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for ObservedFactoryAgentBuilder {
+    type Agent = FactoryAgent;
+
+    async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
+        self.inner.model_supports_inline_video(identity).await
+    }
+
+    async fn build_agent(
+        &self,
+        request: &CreateSessionRequest,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        let mut agent = self.inner.build_agent(request, event_tx).await?;
+        agent
+            .agent_mut()
+            .__test_set_model_preparation_observer(self.model_preparation_observer.clone());
+        Ok(agent)
+    }
+
+    async fn abort_absent_session_compaction_stages(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .abort_absent_session_compaction_stages(session_id)
+            .await
+    }
+}
+
+#[test]
+fn native_model_preparation_pairs_each_start_with_one_provider_entry() {
+    let mut samples = BoundarySamples::default();
+    for index in 0..2 {
+        samples.begin_native_model_preparation();
+        samples.finish_native_model_preparation(Instant::now(), index);
+    }
+    assert_eq!(samples.native_model_preparation_starts, 2);
+    assert_eq!(samples.native_model_preparation_ns.len(), 2);
+    assert!(samples.native_model_preparation_start.is_none());
+}
+
+#[test]
+#[should_panic(expected = "provider entry requires its own model preparation start")]
+fn native_model_preparation_rejects_provider_entry_without_start() {
+    BoundarySamples::default().finish_native_model_preparation(Instant::now(), 0);
+}
+
+#[test]
+#[should_panic(expected = "model preparation cannot overwrite an unfinished span")]
+fn native_model_preparation_rejects_overlapping_boundaries() {
+    let mut samples = BoundarySamples::default();
+    samples.begin_native_model_preparation();
+    samples.begin_native_model_preparation();
+}
+
+#[test]
+#[should_panic(expected = "model preparation spans must follow provider request order")]
+fn native_model_preparation_rejects_wrong_provider_ordinal() {
+    let mut samples = BoundarySamples::default();
+    samples.begin_native_model_preparation();
+    samples.finish_native_model_preparation(Instant::now(), 1);
 }
 struct ProviderFixture {
     mode: HostMode,
@@ -562,11 +720,14 @@ impl LlmClient for ProviderFixture {
             boundaries.tool_batch_ns = Some(ns(end.duration_since(start)));
         }
         let start = (self.instrumentation == Instrumentation::Boundaries).then(Instant::now);
-        match self.mode {
-            HostMode::TrustedHost => assert!(
-                request.authorization().is_none(),
-                "baseline has no substitute authorization policy"
-            ),
+        let native_model_preparation_end = match self.mode {
+            HostMode::TrustedHost => {
+                assert!(
+                    request.authorization().is_none(),
+                    "baseline has no substitute authorization policy"
+                );
+                (self.instrumentation == Instrumentation::Boundaries).then(Instant::now)
+            }
             HostMode::LocalGoverned => {
                 let prepared = request
                     .authorization()
@@ -578,13 +739,16 @@ impl LlmClient for ProviderFixture {
                 let current = current
                     .current()
                     .expect("current after Entry before scripted transport");
+                let entry =
+                    (self.instrumentation == Instrumentation::Boundaries).then(Instant::now);
                 // A single scripted response replaces only external transport.
                 // It retains the actual Prepared/Entry/Outcome and both checks.
                 current
                     .observe_outcome(OperationObservedOutcome::HttpResponse { status: 200 })
                     .expect("actual native Outcome append");
+                entry
             }
-        }
+        };
         if let Some(start) = start {
             let elapsed = ns(start.elapsed());
             self.boundaries
@@ -592,6 +756,14 @@ impl LlmClient for ProviderFixture {
                 .expect("boundary recorder")
                 .model_authorization_ns
                 .push(elapsed);
+        }
+        if let Some(end) = native_model_preparation_end {
+            // The endpoint was captured before transport/Outcome. Append the
+            // sample only after the existing provider-only diagnostic ends.
+            self.boundaries
+                .lock()
+                .expect("boundary recorder")
+                .finish_native_model_preparation(end, index);
         }
         if index == 0 {
             let mut events = Vec::with_capacity(6);
@@ -708,7 +880,7 @@ fn issue_lineage(
 struct Fixture {
     mode: HostMode,
     machine: Arc<MeerkatMachine>,
-    service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
+    service: Arc<EphemeralSessionService<ObservedFactoryAgentBuilder>>,
     provider: Arc<ProviderFixture>,
     tools: Arc<FileTools>,
     session_id: SessionId,
@@ -785,6 +957,7 @@ impl Fixture {
             requests: AtomicUsize::new(0),
             boundaries: Mutex::new(BoundarySamples {
                 model_authorization_ns: Vec::with_capacity(2),
+                native_model_preparation_ns: Vec::with_capacity(2),
                 ..Default::default()
             }),
             pause_for_inspection: inspect,
@@ -804,6 +977,22 @@ impl Fixture {
         builder.default_llm_client = Some(provider.clone());
         builder.default_tool_dispatcher = Some(tools.clone());
         builder.default_session_store = Some(Arc::new(SessionStore::default()));
+        let model_preparation_observer = if instrumentation == Instrumentation::Boundaries {
+            let provider = Arc::clone(&provider);
+            Some(Arc::new(move || {
+                provider
+                    .boundaries
+                    .lock()
+                    .expect("boundary recorder")
+                    .begin_native_model_preparation();
+            }) as Arc<dyn Fn() + Send + Sync>)
+        } else {
+            None
+        };
+        let builder = ObservedFactoryAgentBuilder {
+            inner: builder,
+            model_preparation_observer,
+        };
         let service = Arc::new(EphemeralSessionService::new(builder, 2));
         let created = meerkat::surface::materialize_ephemeral_runtime_session(
             &service,
@@ -1055,6 +1244,7 @@ struct Sample {
     instrumentation: Instrumentation,
     turn_ns: u64,
     model_authorization_ns: Vec<u64>,
+    native_model_preparation_ns: Vec<u64>,
     tool_batch_ns: Option<u64>,
     model_requests: usize,
     read_effects: usize,
@@ -1104,7 +1294,7 @@ async fn sample(
     );
     let audit = fixture.audit().await;
     assert_audit(&fixture, &audit, Script::Allowed);
-    let (models, batch) = {
+    let (models, native_models, batch) = {
         let record = fixture
             .provider
             .boundaries
@@ -1112,12 +1302,21 @@ async fn sample(
             .expect("boundary recorder");
         if instrumentation == Instrumentation::TurnOnly {
             assert!(record.model_authorization_ns.is_empty());
+            assert!(record.native_model_preparation_ns.is_empty());
+            assert_eq!(record.native_model_preparation_starts, 0);
             assert!(record.tool_batch_ns.is_none());
         } else {
             assert_eq!(record.model_authorization_ns.len(), 2);
+            assert_eq!(record.native_model_preparation_ns.len(), 2);
+            assert_eq!(record.native_model_preparation_starts, 2);
             assert!(record.tool_batch_ns.is_some());
         }
-        (record.model_authorization_ns.clone(), record.tool_batch_ns)
+        assert!(record.native_model_preparation_start.is_none());
+        (
+            record.model_authorization_ns.clone(),
+            record.native_model_preparation_ns.clone(),
+            record.tool_batch_ns,
+        )
     };
     fixture.close().await;
     Sample {
@@ -1128,6 +1327,7 @@ async fn sample(
         instrumentation,
         turn_ns: elapsed,
         model_authorization_ns: models,
+        native_model_preparation_ns: native_models,
         tool_batch_ns: batch,
         model_requests: 2,
         read_effects: 4,
@@ -1236,6 +1436,99 @@ async fn native_cost_correctness() {
     std::fs::remove_file(path).expect("remove fixture only");
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct NativeCostMeasurementSettings {
+    profile: Option<&'static str>,
+    warmup: usize,
+    pairs: usize,
+}
+
+impl NativeCostMeasurementSettings {
+    fn instrumentations(&self) -> &'static [Instrumentation] {
+        if self.profile == Some("model_dispatch_tail") {
+            &[Instrumentation::Boundaries]
+        } else {
+            &[Instrumentation::TurnOnly, Instrumentation::Boundaries]
+        }
+    }
+}
+
+fn native_cost_measurement_settings(
+    profile: Option<&str>,
+    warmup: Option<usize>,
+    pairs: Option<usize>,
+) -> Result<NativeCostMeasurementSettings, &'static str> {
+    let profile = match profile {
+        None => None,
+        Some("model_dispatch_tail") => Some("model_dispatch_tail"),
+        Some(_) => return Err("unknown native cost measurement profile"),
+    };
+    let warmup = warmup.unwrap_or(100);
+    let pairs = pairs.unwrap_or(2000);
+    if profile.is_some() && (warmup != 100 || pairs != 2000) {
+        return Err("model_dispatch_tail requires exactly W100/N2000");
+    }
+    if !(20..=500).contains(&warmup) || !(2000..=10000).contains(&pairs) {
+        return Err("native cost matrix requires W20-500 and N2000-10000");
+    }
+    Ok(NativeCostMeasurementSettings {
+        profile,
+        warmup,
+        pairs,
+    })
+}
+
+#[test]
+fn native_cost_model_tail_uses_fixed_counts_and_only_boundary_samples() {
+    let settings = native_cost_measurement_settings(Some("model_dispatch_tail"), None, None)
+        .expect("explicit model-tail profile");
+    assert_eq!(settings.profile, Some("model_dispatch_tail"));
+    assert_eq!((settings.warmup, settings.pairs), (100, 2000));
+    assert_eq!(settings.instrumentations(), &[Instrumentation::Boundaries]);
+    assert_eq!(
+        native_cost_measurement_settings(Some("model_dispatch_tail"), Some(100), Some(2000)),
+        Ok(settings)
+    );
+}
+
+#[test]
+fn native_cost_model_tail_rejects_mismatched_fixed_counts() {
+    for warmup in [20, 99, 101, 500] {
+        assert!(
+            native_cost_measurement_settings(Some("model_dispatch_tail"), Some(warmup), None)
+                .is_err()
+        );
+    }
+    for pairs in [1999, 2001, 10000] {
+        assert!(
+            native_cost_measurement_settings(Some("model_dispatch_tail"), None, Some(pairs))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn native_cost_matrix_rejects_unknown_measurement_profile() {
+    for profile in ["", "unknown", "tool_dispatch_tail", "fixed_mean_32"] {
+        assert!(native_cost_measurement_settings(Some(profile), None, None).is_err());
+    }
+}
+
+#[test]
+fn native_cost_default_matrix_preserves_both_instrumentation_modes() {
+    let settings = native_cost_measurement_settings(None, None, None).expect("legacy matrix");
+    assert_eq!(settings.profile, None);
+    assert_eq!((settings.warmup, settings.pairs), (100, 2000));
+    assert_eq!(
+        settings.instrumentations(),
+        &[Instrumentation::TurnOnly, Instrumentation::Boundaries]
+    );
+    assert!(native_cost_measurement_settings(None, Some(20), Some(2000)).is_ok());
+    assert!(native_cost_measurement_settings(None, Some(500), Some(10000)).is_ok());
+    assert!(native_cost_measurement_settings(None, Some(19), Some(2000)).is_err());
+    assert!(native_cost_measurement_settings(None, Some(100), Some(1999)).is_err());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit quiet-host performance lease required; never run during normal tests"]
 async fn native_cost_matrix() {
@@ -1248,23 +1541,29 @@ async fn native_cost_matrix() {
         !std::hint::black_box(cfg!(debug_assertions)),
         "optimized binary required: generated debug invariants have different costs"
     );
-    let count = |name: &str, default: usize| {
-        std::env::var(name)
-            .ok()
-            .map(|v| v.parse::<usize>().expect("integer sample count"))
-            .unwrap_or(default)
+    let count = |name: &str| match std::env::var(name) {
+        Ok(value) => Some(value.parse::<usize>().expect("integer sample count")),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("invalid sample count {name}: {error}"),
     };
-    let warmup = count("NATIVE_COST_WARMUP_PAIRS", 100);
-    let pairs = count("NATIVE_COST_PAIRS", 2000);
-    assert!((20..=500).contains(&warmup));
-    assert!(
-        (2000..=10000).contains(&pairs),
-        "do not report a p99 tail from a smoke sample"
-    );
+    let profile = match std::env::var("NATIVE_COST_MEASUREMENT_PROFILE") {
+        Ok(profile) => Some(profile),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("invalid native cost measurement profile: {error}"),
+    };
+    let settings = native_cost_measurement_settings(
+        profile.as_deref(),
+        count("NATIVE_COST_WARMUP_PAIRS"),
+        count("NATIVE_COST_PAIRS"),
+    )
+    .expect("valid native cost measurement settings");
+    let warmup = settings.warmup;
+    let pairs = settings.pairs;
     let path = fixture_file();
-    let mut samples = Vec::with_capacity(2 * 2 * 2 * pairs);
-    for depth in [1, 3] {
-        for instrumentation in [Instrumentation::TurnOnly, Instrumentation::Boundaries] {
+    let mut samples = Vec::with_capacity(2 * settings.instrumentations().len() * 2 * pairs);
+    let mut timeouts = 0;
+    'measurement: for depth in [1, 3] {
+        for &instrumentation in settings.instrumentations() {
             for iteration in 0..warmup + pairs {
                 let order = if iteration % 2 == 0 {
                     [HostMode::TrustedHost, HostMode::LocalGoverned]
@@ -1272,7 +1571,7 @@ async fn native_cost_matrix() {
                     [HostMode::LocalGoverned, HostMode::TrustedHost]
                 };
                 for (position, mode) in order.into_iter().enumerate() {
-                    let value = tokio::time::timeout(
+                    let result = tokio::time::timeout(
                         Duration::from_secs(30),
                         sample(
                             mode,
@@ -1283,8 +1582,17 @@ async fn native_cost_matrix() {
                             position == 0,
                         ),
                     )
-                    .await
-                    .expect("timed-out cells fail; never discard them as outliers");
+                    .await;
+                    let value = match result {
+                        Ok(value) => value,
+                        Err(_) if settings.profile == Some("model_dispatch_tail") => {
+                            timeouts = 1;
+                            break 'measurement;
+                        }
+                        Err(error) => {
+                            panic!("timed-out cells fail; never discard them as outliers: {error}");
+                        }
+                    };
                     if iteration >= warmup {
                         samples.push(value);
                     }
@@ -1292,18 +1600,21 @@ async fn native_cost_matrix() {
             }
         }
     }
-    std::fs::remove_file(path).expect("remove fixture only");
     let output = std::env::var_os("NATIVE_COST_OUTPUT").expect("raw measurement output path");
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "schema": 1, "samples": samples, "warmup_pairs": warmup, "pairs_per_cell": pairs,
-        "status": "measured_subset_only", "failures": 0, "timeouts": 0,
+        "status": "measured_subset_only", "failures": 0, "timeouts": timeouts,
+        "measurement_status": if timeouts == 0 { "complete" } else { "budget_exhausted" },
         "unsupported": [
             {"cell":"representative", "contributors":4, "old_rows":252, "prefix_reads":333, "prefix_audit_records":1002,
              "reason":"measured separately by representative::native_representative_matrix"},
-            {"boundary":"individual_tool_prepare_checks_audit", "reason":"no nanosecond full-dispatch observation seam; batch is not four individual samples"}
+            {"boundary":"individual_tool_prepare_checks_audit", "reason":"measured separately by representative::native_tool_dispatch_tail; this batch is not four individual samples"}
         ],
         "acceptance": "not_evaluated: full matrix and individual-operation measurement remain required"
     });
+    if let Some(profile) = settings.profile {
+        payload["measurement_profile"] = serde_json::json!(profile);
+    }
     use std::io::Write;
     let mut raw_output = std::fs::OpenOptions::new()
         .write(true)
@@ -1313,6 +1624,11 @@ async fn native_cost_matrix() {
     raw_output
         .write_all(&serde_json::to_vec_pretty(&payload).expect("output JSON"))
         .expect("write outside every timed interval");
+    std::fs::remove_file(path).expect("remove fixture only");
+    assert_eq!(
+        timeouts, 0,
+        "incomplete model tail retained as counts only; never a performance result"
+    );
 }
 
 #[path = "native_cost/representative.rs"]

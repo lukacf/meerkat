@@ -96,9 +96,14 @@ sources. An empty child section does not delete a parent entry.
 
 `config get`, `config set`, and `config patch` operate on the raw head
 document. Runtime agent construction reads the composed effective config. This
-read/write split prevents a read-modify-write from flattening inherited entries
-into the child. RFC 7396 `config patch` updates the raw document; it is distinct
-from these realm-composition rules.
+read/write split keeps inherited entries out of the child's document, but a
+`config get` then `config set` round trip still flattens the child: `config
+get` returns the head document as a typed config with every default filled in,
+and `config set` is a full replace that writes each of those defaults as the
+child's own override. The child then stops inheriting them, including
+capabilities the parent disabled. RFC 7396 `config patch` updates only the keys
+it names in the raw document (`null` removes a key so it inherits again); it
+is distinct from these realm-composition rules. Use it for partial edits.
 
 ## Credentials Read Down, Write To The Owner
 

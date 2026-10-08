@@ -6,7 +6,7 @@
 > Use `docs/reference/architecture`, `docs/guides/realtime`, and generated
 > schemas for current contracts.
 
-**Scope:** read-only audit of `dogma/wave-a-demolition` branch against the 70-violation dogma catalog at `/Users/luka/.codex/dogma-violations.md` and the wave (a) agent completion set (tasks #1–#8).
+**Scope:** read-only audit of `dogma/wave-a-demolition` branch against the 70-violation dogma catalog at `(operator-retained path)` and the wave (a) agent completion set (tasks #1–#8).
 
 **Agents:** `core-loop`, `runtime`, `mob`, `foundations`, `session-surface`, `factory-creds`, `rpc-servers`, `rest-mcp-cli-docs`.
 

@@ -775,6 +775,29 @@ pub struct TemporaryCouncilJobBinding {
     /// process delivered it and no restart has looked since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<DateTime<Utc>>,
+    /// Identity of the convener's staged run, retained at dispatch when its
+    /// native owner recorded one. The outcome resumes exactly this work;
+    /// identity only, never a permission. `None` on a host without a native
+    /// work authorization host and in records written before this field
+    /// existed; such a record cannot resume work on a governed runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+    /// The council's outcome as delivered to the convener, recorded once
+    /// when it is known and never changed. Records written before this field
+    /// existed have none: a governed runtime cannot confirm their outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TemporaryCouncilJobTerminal>,
+}
+
+/// A detached council's committed outcome, exactly as it is delivered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemporaryCouncilJobTerminal {
+    pub status: meerkat_core::event::BackgroundJobTerminalStatus,
+    /// The outcome as delivered.
+    pub outcome: serde_json::Value,
+    /// [`crate::detached_outcome_digest`] of `outcome`, computed once.
+    pub result_digest: String,
 }
 
 impl TemporaryCouncilJobBinding {
@@ -785,7 +808,19 @@ impl TemporaryCouncilJobBinding {
             job_id: job_id.into(),
             owner_session_id,
             settled_at: None,
+            retained_work: None,
+            terminal: None,
         }
+    }
+
+    /// Retain the convener's staged-run identity with the binding.
+    #[must_use]
+    pub fn with_retained_work(
+        mut self,
+        retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+    ) -> Self {
+        self.retained_work = retained_work;
+        self
     }
 }
 

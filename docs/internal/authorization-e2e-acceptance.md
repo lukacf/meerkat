@@ -101,10 +101,18 @@ wait error, and cancellation paths. The accepted-kill custody retention
 regression passes in the current shell checkpoint. Broader governed-path and
 restart acceptance remain separate requirements.
 
-Keep actual confinement cases in the macOS companion suite. Other platforms
-must return the typed unsupported refusal rather than skip or launch directly.
-Command-hook integration remains pending. These shell tests do not establish
-all source, communication, permission, or surface coverage.
+Keep confinement cases in explicit native platform lanes. The combined source
+includes a limited Linux strict-Paths backend, MCP launch/reload fixtures, and
+command-hook PreTool fixtures. These authored additions still need qualification
+on the supported platforms. Successful Required Linux foreground/background
+shell and monitor-recovery adapter cases remain open, as do factory-owned
+nonwaiting MCP startup/reload feedback and full hook-lifecycle locality.
+
+Unsupported platforms and requirement combinations must return typed local
+refusal before entry. Required descendant termination remains unsupported;
+correct refusal does not establish that guarantee. Keep source preparation and
+executed evidence separate in the implementation checkpoint. These shell tests
+do not establish all source, communication, permission, or surface coverage.
 
 Harness anchors: `crates/meerkat-tools/src/builtin/shell/confinement_tests.rs`,
 `crates/meerkat-tools/src/builtin/shell/tool.rs` (the
@@ -113,11 +121,49 @@ Harness anchors: `crates/meerkat-tools/src/builtin/shell/confinement_tests.rs`,
 `crates/meerkat-sandbox/tests/process_confinement.rs`, and
 `crates/meerkat-sandbox/tests/compiled_confinement.rs`.
 
+## Next-slice source inventory
+
+The acceptance source branch starts at consent checkpoint
+`0dcddd279728ef5316981d58b8f89893c82822f6`. The rows below identify source
+coverage and remaining acceptance work. They are not executed RED/PASS results;
+this acceptance lane has run no Rust tests, builds, lint, code generation or
+benchmarks. Keep actual commands, source identities and results in the existing
+[implementation checkpoint](design/adr-001-implementation/implementation-progress.md).
+Earlier native-loop or optimized-binary results do not qualify this source.
+
+| Boundary | Existing source and required oracle | Status for this slice |
+| --- | --- | --- |
+| R2 reviewer Deny or Escalate in an actual Agent | `factory_review_denial_and_escalation_preserve_goal_sibling_and_model_continuation` in `src/work/tests/tool_dispatch/operation_review.rs`: typed review feedback, zero reviewed body entries, one permitted R1 sibling, unchanged user goal/session, next model request and one completion | New test source only; no observed RED or PASS. The prior direct-dispatch test does not cover this Agent boundary. |
+| Changed authority, stale review, missing reviewer and tool timeout | The same existing suite includes actual factory controls, a narrow tool revocation, post-Allow entry mutation, worker custody and queued-observer lock controls | Existing source only for this checkpoint; qualification must use the completed integrated head. Test work owners and in-process model clients do not establish production ingress or provider HTTP coverage. |
+| Required review on model/context operations | Shared HTTP and context append reject unsupported required review; the Agent has one retained-controller feedback path | Full operation-review support remains open. HTTP error conversion is not an actual Agent continuity test; feedback requires a usable retained controller and does not prove continuity after a second refusal. |
+| Human consent and reviewer context | Exact original work, requester/executor, account/mandates and action-bound human consumption must come from their existing native owners | Still open; existing MobKit pending-approval projection and memory-only review do not establish these semantics or cold consumption. |
+| Restart and shipping effect leaves | Retain the separate native admission/restart and real leaf controls, including no pre-entry effect and permitted sibling continuation | Do not inherit full restart, confinement or surface coverage from the review-capable test dispatcher. Unsupported leaf feedback is safe refusal, not completed leaf support. |
+
+The new Agent regression is written before any acceptance-lane implementation.
+Its first execution must retain the actual outcome: a compile/setup failure is
+not a behavioral RED, and an immediate PASS means the missing coverage was
+added without proving a current production defect. Keep the existing unchanged
+review and genuine cancellation controls beside it.
+
+When the GCP lead schedules this completed slice, its focused existing-target
+command is:
+
+```bash
+./scripts/repo-cargo test --locked -p meerkat-authorization --lib \
+  work::tests::tool_dispatch::operation_review::factory_review_denial_and_escalation_preserve_goal_sibling_and_model_continuation \
+  -- --exact --nocapture --test-threads=1
+```
+
+The neighboring controls remain in the same `operation_review` module; select
+that module through the same `--lib` target for its complete critical suite.
+Neither command replaces integrated native-loop, provider, restart, surface or
+normal CI qualification.
+
 ## Registration and evidence rules
 
 Register Turbo S cases in the authoritative catalog in
-`tests/integration/src/e2e_lanes.rs`. Keep platform-specific coverage in an
-explicit macOS lane. Missing setup is a failure, not a skip. Report source and
+`tests/integration/src/e2e_lanes.rs`. Keep platform-specific coverage in explicit
+native platform lanes. Missing setup is a failure, not a skip. Report source and
 publication coverage as incomplete until their production adapters exist, and
 keep interrupted recovery and persistent controller administration open.
 The completed-turn SQLite case above does not accept either of those paths.
@@ -145,7 +191,7 @@ necessary for integrated delivery. The completed-turn SQLite result does not
 establish interrupted recovery, full E2E registration, or CI acceptance.
 
 The existing `native_cost` integration target includes two workload correctness
-tests, profile/deadline controls, and two ignored timing matrices. Run the
+tests, profile/deadline controls, and three ignored timing selectors. Run the
 correctness tests with:
 
 ```bash
@@ -155,11 +201,111 @@ correctness tests with:
 The fixtures compare actual native trusted and governed admission, model
 boundaries, grants, file effects and audit. They include fresh admission,
 continuing work and individual fenced tool calls. Deterministic model transport
-and application resource mapping remain fixtures. The timing matrices require
-an optimized prebuilt binary and a reserved quiet window; their source comments
-document the existing commands, sample counts and raw output requirements.
+and application resource mapping remain fixtures.
 
-These matrices cover a measured subset. They do not establish all warm/cold,
+Before the quiet allocation, build the optimized target in each exact source
+checkout selected by the execution owner. Use Cargo's emitted executable path
+for `MEAN_BINARY` and `TAIL_BINARY`, respectively; they may have different source
+and binary identities. Preserve each identity with its own raw output and
+ordinary command logs. A build or correctness result for one identity does not
+qualify measurements from another.
+
+```bash
+./scripts/repo-cargo test --locked --release -p meerkat-authorization \
+  --test native_cost --no-run --message-format=json
+```
+
+The representative mean, tool tail and model tail share one original
+1,200-second allocation, in that order, including setup, warmup, samples,
+correctness oracles, cleanup and analyzer output. Immediately before each invocation, the execution
+owner sets its `*_REMAINING_SECONDS` to a positive integer from that original
+deadline, reserving time for the remaining work and postwork. If no positive
+budget remains after that reservation, do not start the selector: zero disables
+GNU `timeout`. Record the incomplete allocation as UNCERTAIN. Do not reset the
+deadline, reduce sample counts, or substitute the withdrawn representative `tail`
+profile. The internal deadline does not preempt synchronous work; use the existing
+GNU `timeout` command and externally monitored process cleanup.
+
+Use separate fresh `MEAN_RAW`, `TAIL_RAW` and `MODEL_RAW` paths. The unchanged
+six-cell mean profile uses fixed W20/N32; the tool-only selector uses fixed
+W100/N2000 at grant lineage depths 1 and 3. Run the analysis commands from the
+integrated checkout, whose repository analyzer supports all three schemas:
+
+```bash
+NATIVE_COST_RUN=approved-quiet-window NATIVE_COST_MEASUREMENT_PROFILE=fixed_mean_32 \
+NATIVE_COST_WARMUP_PAIRS=20 NATIVE_COST_PAIRS=32 NATIVE_COST_OUTPUT="$MEAN_RAW" \
+timeout --signal=KILL "${MEAN_REMAINING_SECONDS:?remaining shared allocation}s" "$MEAN_BINARY" \
+  --exact representative::native_representative_matrix \
+  --ignored --nocapture --test-threads=1
+
+NATIVE_COST_RUN=approved-quiet-window NATIVE_COST_MEASUREMENT_PROFILE=tool_dispatch_tail \
+NATIVE_COST_WARMUP_PAIRS=100 NATIVE_COST_PAIRS=2000 NATIVE_COST_OUTPUT="$TAIL_RAW" \
+timeout --signal=KILL "${TAIL_REMAINING_SECONDS:?remaining shared allocation}s" "$TAIL_BINARY" \
+  --exact representative::native_tool_dispatch_tail \
+  --ignored --nocapture --test-threads=1
+
+python3 scripts/analyze-native-cost.py "$MEAN_RAW" > "$MEAN_SUMMARY"
+python3 scripts/analyze-native-cost.py "$TAIL_RAW" > "$TAIL_SUMMARY"
+```
+
+The existing matrix also has a `model_dispatch_tail` profile. Run it last with
+a positive remaining budget from the same original deadline, using the emitted
+optimized `MODEL_BINARY` for its exact integrated source:
+
+```bash
+NATIVE_COST_RUN=approved-quiet-window NATIVE_COST_MEASUREMENT_PROFILE=model_dispatch_tail \
+NATIVE_COST_WARMUP_PAIRS=100 NATIVE_COST_PAIRS=2000 NATIVE_COST_OUTPUT="$MODEL_RAW" \
+timeout --signal=KILL "${MODEL_REMAINING_SECONDS:?remaining shared allocation}s" "$MODEL_BINARY" \
+  --exact native_cost_matrix --ignored --nocapture --test-threads=1
+
+python3 scripts/analyze-native-cost.py "$MODEL_RAW" > "$MODEL_SUMMARY"
+```
+
+This profile uses only Boundaries cells at depths 1 and 3. Its schema 1 native
+preparation spans include the instrumented Agent preparation through the
+scripted provider's post-Entry currentness check, ending before transport and
+Outcome. The older provider-only timer does not cover that preparation interval;
+neither interval is real HTTP or time to a provider event.
+The two request spans in each fixture are correlated. Partial output after a
+graceful timeout preserves completed counts only, without quantiles or
+acceptance. A hard kill may leave no output and therefore no known sample count.
+
+The repository analyzer accepts model schema 1, representative schema 2 and
+tool-tail schema 3 independently; never combine samples across outputs. The mean inference rules
+remain in the [acceptance plan](design/adr-001-implementation/acceptance-plan.md).
+Do not also run the unfiltered minimal matrix as part of this allocation.
+
+The tail retains two runs per depth and measures full resolve/validate/fenced
+tool dispatch, including the actual file read and audit. Its p99 is computed from
+matched signed per-call differences, not by subtracting separate percentile
+summaries. Calls within each retained run are correlated and accumulate audit
+history. These are empirical estimates without independent tail confidence;
+they exclude Agent scheduling and model preparation. Only the artificial held
+model call and inactivity timers are disabled in the tail fixture; per-tool and
+outer deadlines remain.
+
+Require release-build and correctness evidence for each selected source before
+measurement. The GCP lead owns the quiet exact-head allocation; machine-wide
+competing build/test/benchmark load must be absent, not merely an idle named lane. The unchanged
+targets are native added per-operation p99 strictly below 1 ms and
+representative overhead at most 10 percent, under the acceptance plan's mean
+inference rules. W20/N32 cannot establish p99. Keep each mode's raw costs:
+governed-minus-trusted differences can cancel a regression common to both modes.
+
+Before claiming reviewed-leaf performance, close the source coverage gap in
+`FileTools::dispatch_resolved_with_context`: it currently bypasses
+`reviewed_entry_ticket` and `enter_reviewed_effect`, and short Text prompts do
+not exercise populated `CurrentTurnContent` Blocks. A bounded control using the
+real leaf entry and populated content belongs in the existing fixture; it must
+retain content through the leaf without adding a new measurement runner or
+changing the fixed counts. Until then, those costs remain unmeasured.
+
+Do not assume the combined mean-plus-tail work fits the allocation;
+its actual complete execution must establish that. A timeout,
+nonzero exit, incomplete raw data or output failure is UNCERTAIN, not acceptance;
+an analyzer's empirical below-1-ms result alone is not full-profile acceptance.
+
+These fixtures cover only a subset. They do not establish all warm/cold,
 invalidation, concurrency, resource cardinality, streaming/audio or CPU,
 allocation, lock and IO acceptance cells. Keep raw measurements and source
 identity, and report missing measurements as open. Compilation time and

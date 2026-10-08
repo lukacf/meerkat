@@ -144,7 +144,7 @@ mod tests {
     }
 
     /// The harness canary: a store whose windowed read adopts orphan
-    /// (uncommitted) sibling rows as current — the ob3 zombie incident —
+    /// (uncommitted) sibling rows as current - the zombie-member incident -
     /// must FAIL the append-only chapter, at the orphan step.
     #[tokio::test]
     async fn naive_orphan_visible_store_fails_append_only() {

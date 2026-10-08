@@ -93,10 +93,17 @@ struct NoHost;
 
 #[async_trait::async_trait]
 impl meerkat::RuntimeDeliveryHost for NoHost {
-    async fn delivery_sink(
+    async fn delivery_route(
         &self,
         _session_id: &meerkat::SessionId,
-    ) -> Option<Arc<dyn JobDeliverySink>> {
+    ) -> Option<meerkat::DeliveryRoute> {
+        None
+    }
+
+    async fn claim_cold_delivery(
+        &self,
+        _session_id: &meerkat::SessionId,
+    ) -> Option<Result<meerkat_runtime::HostingClaim, meerkat_runtime::HostingRefused>> {
         None
     }
 }
@@ -159,4 +166,130 @@ async fn an_event_delivery_wakes_an_idle_facade_session() {
         matches!(wait, Some(InputTerminalReceiptWait::Resolved(_))),
         "the event input reached its terminal receipt: {wait:?}"
     );
+}
+
+// This service injects an already-decided typed control result. The test below
+// exercises the actual Notification sink, not native review adjudication or
+// authenticated context-control admission.
+struct ReviewControlService {
+    refusal: Option<meerkat_core::approval::review::OperationReviewRefusal>,
+    calls: std::sync::Mutex<Vec<(meerkat::SessionId, meerkat_core::AppendSystemContextRequest)>>,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::SessionService for ReviewControlService {
+    async fn create_session(
+        &self,
+        _req: CreateSessionRequest,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::SessionError> {
+        panic!("Notification must not create a session")
+    }
+
+    async fn start_turn(
+        &self,
+        _id: &meerkat::SessionId,
+        _req: meerkat_core::StartTurnRequest,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::SessionError> {
+        panic!("Notification must not start a turn")
+    }
+
+    async fn interrupt(&self, _id: &meerkat::SessionId) -> Result<(), meerkat_core::SessionError> {
+        panic!("Notification must not interrupt a turn")
+    }
+
+    async fn read(
+        &self,
+        _id: &meerkat::SessionId,
+    ) -> Result<meerkat_core::SessionView, meerkat_core::SessionError> {
+        panic!("Notification must use the control owner")
+    }
+
+    async fn list(
+        &self,
+        _query: meerkat_core::SessionQuery,
+    ) -> Result<Vec<meerkat_core::SessionSummary>, meerkat_core::SessionError> {
+        panic!("Notification must not search for another recipient")
+    }
+
+    async fn archive(&self, _id: &meerkat::SessionId) -> Result<(), meerkat_core::SessionError> {
+        panic!("Notification must not archive a recipient")
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::SessionServiceControlExt for ReviewControlService {
+    async fn append_system_context(
+        &self,
+        id: &meerkat::SessionId,
+        request: meerkat_core::AppendSystemContextRequest,
+    ) -> Result<meerkat_core::AppendSystemContextResult, meerkat_core::SessionControlError> {
+        self.calls
+            .lock()
+            .expect("control calls")
+            .push((id.clone(), request));
+        if let Some(refusal) = self.refusal {
+            return Err(meerkat_core::SessionControlError::Review(refusal));
+        }
+        Ok(meerkat_core::AppendSystemContextResult {
+            status: meerkat_core::AppendSystemContextStatus::Applied,
+        })
+    }
+}
+
+#[tokio::test]
+async fn notification_sink_preserves_exact_review_refusal_and_permitted_control() {
+    use meerkat_core::approval::review::{
+        OperationReviewRefusal, ReviewUnavailableKind, ReviewUnsatisfiedKind,
+    };
+
+    let runtime = Arc::new(MeerkatMachine::ephemeral());
+    for refusal in [
+        None,
+        Some(OperationReviewRefusal::Unavailable {
+            kind: ReviewUnavailableKind::UnsupportedEntry,
+        }),
+        Some(OperationReviewRefusal::Unsatisfied {
+            kind: ReviewUnsatisfiedKind::HumanConsentRequired,
+        }),
+    ] {
+        let service = Arc::new(ReviewControlService {
+            refusal,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let sink = SessionServiceDeliverySink::new(service.clone(), runtime.clone());
+        let session_id = meerkat::SessionId::new();
+        let job_id = meerkat::JobId::new("job-review-notification").expect("job id");
+        let subscription = meerkat::JobSubscription::new(
+            meerkat::JobSubscriptionId::new("watcher").expect("subscription id"),
+            session_id.clone(),
+            meerkat::JobDeliveryKind::Notification,
+        );
+        let content = JobDeliveryContent::Terminal(meerkat::JobTerminalResult::Succeeded {
+            result_ref: None,
+        });
+        let expected_request =
+            meerkat::job_delivery_notification_request(&job_id, 1, &subscription, &content);
+        let result = sink
+            .apply(JobDeliveryApplication::Notification {
+                job_id,
+                delivery_sequence: 1,
+                subscription,
+                content,
+            })
+            .await;
+        assert_eq!(
+            result,
+            refusal.map_or(Ok(()), |error| {
+                Err(meerkat::JobDeliveryApplyError::Review(error))
+            })
+        );
+        let calls = service.calls.lock().expect("control calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, session_id);
+        assert_eq!(
+            serde_json::to_value(&calls[0].1).expect("actual request"),
+            serde_json::to_value(&expected_request).expect("expected request"),
+            "the exact recipient and Notification request reach the control owner"
+        );
+    }
 }

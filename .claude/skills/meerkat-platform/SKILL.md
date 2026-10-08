@@ -196,21 +196,24 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 
 ## MCP server config (CLI)
 
-Use `rkat mcp ...` to manage local MCP server configuration. This writes config; new `rkat run` and `rkat run --resume` sessions load configured MCP servers and expose their tools to the agent.
+Use `rkat mcp ...` to manage MCP server configuration. This writes config; new `rkat run` and `rkat run --resume` sessions load configured MCP servers and expose their tools to the agent.
 
 Config locations:
 
 - Project scope (default): `.rkat/mcp.toml`
 - User scope: `~/.rkat/mcp.toml`
+- Realm scope: `[[tools.mcp_servers]]` in the selected realm's own config, inherited by its child realms; `--expected-generation <N>` makes the write conditional
+
+A realm server and an `mcp.toml` server with the same name must be defined identically, or sessions fail with a conflict naming both. Realm servers are literal: `${VAR}` expands only in `mcp.toml`, and realm writes refuse it.
 
 Command forms:
 
 ```bash
-rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
-rkat mcp login <NAME> [--scope project|user|local]
-rkat mcp remove <NAME> [--scope project|user|local]
-rkat mcp list [--scope project|user|local] [--json]
-rkat mcp get <NAME> [--scope project|user|local] [--json]
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local|realm] [--expected-generation <N>] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
+rkat mcp login <NAME> [--scope project|user|local|realm]
+rkat mcp remove <NAME> [--scope project|user|local|realm] [--expected-generation <N>]
+rkat mcp list [--scope project|user|local|realm] [--json]
+rkat mcp get <NAME> [--scope project|user|local|realm] [--json]
 ```
 
 Examples:

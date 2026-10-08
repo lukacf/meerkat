@@ -2586,6 +2586,28 @@ pub enum FencedPreparedRuntimeSessionCommitOutcome {
     FenceBackoff { reason: String },
 }
 
+/// Which constraint of the durable input idempotency index refused a write
+/// (#1813). Both include the runtime id: another runtime reusing a key, or an
+/// input id, never conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputIdempotencyIndexConstraint {
+    /// `PRIMARY KEY (runtime_id, idempotency_key)`: another input of this
+    /// runtime already holds the (qualified) key.
+    RuntimeKey,
+    /// `UNIQUE (runtime_id, input_id)`: this input id already maps another
+    /// key in this runtime.
+    RuntimeInputId,
+}
+
+impl std::fmt::Display for InputIdempotencyIndexConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RuntimeKey => "primary key (runtime_id, idempotency_key)",
+            Self::RuntimeInputId => "unique (runtime_id, input_id)",
+        })
+    }
+}
+
 /// Errors from RuntimeStore operations.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -2700,6 +2722,23 @@ pub enum RuntimeStoreError {
     /// The requested exact input-state batch CAS has an invalid row/key shape.
     #[error("Invalid input-state batch compare-and-swap: {reason}")]
     InvalidInputStateBatchCas { reason: String },
+    /// A write of input state met an existing mapping in the durable input
+    /// idempotency index (#1813): SQLite refused the statement on one of the
+    /// index's two constraints, named precisely in `constraint`. Nothing of
+    /// the write was committed. This names the constraint only; whether it
+    /// proves a competing writer is the caller's call (only an admission's
+    /// post-transition commit treats it as a broken hosting invariant).
+    #[error(
+        "input {input_id} of runtime '{runtime_id}' conflicts on the input idempotency index \
+         ({constraint})"
+    )]
+    InputIdempotencyIndexConflict {
+        runtime_id: String,
+        input_id: String,
+        /// The qualified key the index stores, when the input carries one.
+        idempotency_key: Option<String>,
+        constraint: InputIdempotencyIndexConstraint,
+    },
     /// The maintained idempotency-key index cannot prove a unique answer while
     /// a source input row's key identity is unindexable.
     ///
@@ -5425,6 +5464,178 @@ pub enum RuntimeDeliveryAuthorityCasOutcome {
     Conflict(Option<RuntimeDeliveryAuthorityRecord>),
 }
 
+/// The first binding of one continuation key: which delivery a
+/// `(stable owner, key)` pair committed first, and where.
+///
+/// Stores keep at most one binding per `(owner, key)` and write it in the
+/// same atomic boundary as the inbox row it names, so every later submit and
+/// status read for the pair resolves to the original delivery even after the
+/// owner's incarnation changed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContinuationKeyBinding {
+    /// Canonical stable-owner key (for example a mob member's mob and
+    /// identity, or a session id). Opaque to the store.
+    pub owner: String,
+    /// The host-owned continuation key.
+    pub key: String,
+    /// The runtime delivery address the first commit used.
+    pub address: LogicalRuntimeId,
+    /// The delivery id of the first commit.
+    pub delivery_id: String,
+    /// Digest of the whole first submission.
+    pub submission_digest: String,
+    pub committed_at_ms: u64,
+}
+
+/// Admission index state of one continuation delivery, keyed by
+/// `(delivery address, delivery id)`.
+///
+/// Reserve-first: the index names the session and input id before the input
+/// is admitted (`Reserved`), and becomes `Applied` once that session's input
+/// ledger holds the admission. Every change goes through
+/// [`ContinuationAdmissionTransition::next`], the one legality rule every
+/// store applies inside its own write transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationAdmission {
+    /// The input may or may not have reached the session; recovery asks the
+    /// session's input ledger for the admission key.
+    Reserved {
+        session_id: meerkat_core::types::SessionId,
+        input_id: InputId,
+    },
+    /// The session's input ledger holds the admission.
+    Applied {
+        session_id: meerkat_core::types::SessionId,
+        input_id: InputId,
+    },
+}
+
+impl ContinuationAdmission {
+    pub fn session_id(&self) -> &meerkat_core::types::SessionId {
+        match self {
+            Self::Reserved { session_id, .. } | Self::Applied { session_id, .. } => session_id,
+        }
+    }
+
+    pub fn input_id(&self) -> &InputId {
+        match self {
+            Self::Reserved { input_id, .. } | Self::Applied { input_id, .. } => input_id,
+        }
+    }
+}
+
+/// A requested change of one continuation admission index entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationAdmissionTransition {
+    /// No entry yet: reserve `session_id` under `input_id`.
+    Reserve {
+        session_id: meerkat_core::types::SessionId,
+        input_id: InputId,
+    },
+    /// The reservation in `from` never reached that session's input ledger:
+    /// move it to `session_id`. Only a `Reserved` entry in `from` moves, so
+    /// the superseded session can no longer be recorded as the admission.
+    Repoint {
+        from: meerkat_core::types::SessionId,
+        session_id: meerkat_core::types::SessionId,
+        input_id: InputId,
+    },
+    /// The reserved session's input ledger holds the admission as `input_id`
+    /// (a deduplicated admission names the earlier input).
+    Apply {
+        session_id: meerkat_core::types::SessionId,
+        input_id: InputId,
+    },
+}
+
+impl ContinuationAdmissionTransition {
+    /// The entry after this transition, or `None` when it is rejected from
+    /// `current`. Re-applying the transition that produced `current` is a
+    /// no-op that answers `current`.
+    pub fn next(&self, current: Option<&ContinuationAdmission>) -> Option<ContinuationAdmission> {
+        match (self, current) {
+            (
+                Self::Reserve {
+                    session_id,
+                    input_id,
+                },
+                None,
+            ) => Some(ContinuationAdmission::Reserved {
+                session_id: session_id.clone(),
+                input_id: input_id.clone(),
+            }),
+            (
+                Self::Reserve {
+                    session_id,
+                    input_id,
+                },
+                Some(reserved @ ContinuationAdmission::Reserved { .. }),
+            ) if reserved.session_id() == session_id && reserved.input_id() == input_id => {
+                Some(reserved.clone())
+            }
+            (
+                Self::Repoint {
+                    from,
+                    session_id,
+                    input_id,
+                },
+                Some(ContinuationAdmission::Reserved {
+                    session_id: reserved,
+                    ..
+                }),
+            ) if reserved == from => Some(ContinuationAdmission::Reserved {
+                session_id: session_id.clone(),
+                input_id: input_id.clone(),
+            }),
+            (
+                Self::Apply {
+                    session_id,
+                    input_id,
+                },
+                Some(ContinuationAdmission::Reserved {
+                    session_id: reserved,
+                    ..
+                }),
+            ) if reserved == session_id => Some(ContinuationAdmission::Applied {
+                session_id: session_id.clone(),
+                input_id: input_id.clone(),
+            }),
+            (
+                Self::Apply {
+                    session_id,
+                    input_id,
+                },
+                Some(applied @ ContinuationAdmission::Applied { .. }),
+            ) if applied.session_id() == session_id && applied.input_id() == input_id => {
+                Some(applied.clone())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Outcome of a [`ContinuationAdmissionTransition`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationAdmissionOutcome {
+    /// The entry now holds this state.
+    Transitioned(ContinuationAdmission),
+    /// The transition is not legal from `current`; nothing was written.
+    Rejected {
+        current: Option<ContinuationAdmission>,
+    },
+}
+
+/// Outcome of a delivery commit that also binds a continuation key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyedRuntimeDeliveryCasOutcome {
+    /// Authority, row and binding committed together.
+    Applied(RuntimeDeliveryAuthorityRecord),
+    /// The authority revision moved; nothing was written.
+    Conflict(Option<RuntimeDeliveryAuthorityRecord>),
+    /// The `(owner, key)` pair is already bound; nothing was written.
+    KeyAlreadyBound(ContinuationKeyBinding),
+}
+
 fn validated_compaction_projection_intents(
     session: &meerkat_core::Session,
 ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
@@ -8000,6 +8211,70 @@ pub async fn load_input_states_for_recovery(
     Ok(states)
 }
 
+/// Exact durable owner rows observed while the backend retains its writer.
+/// These facts are not reconstructed permission or a reusable absence proof.
+#[doc(hidden)]
+pub struct RuntimeStoreControllerRuntime {
+    pub(crate) runtime_id: LogicalRuntimeId,
+    pub(crate) lifecycle: MachineLifecycleObservation,
+    pub(crate) input_states: Vec<StoredInputState>,
+}
+
+impl RuntimeStoreControllerRuntime {
+    /// Package facts read by the actual backend under its retained reservation.
+    ///
+    /// Include every nonterminal input and every original of the current run,
+    /// even when that original's input is terminal. Include orphan input owners
+    /// with a `Missing` lifecycle rather than hiding them. Decode or physical
+    /// binding failures must fail the visit; they are not evidence of absence.
+    /// Constructing these facts grants no permission, authenticated client, or
+    /// custody. Only the backend guard held through the callback retains custody.
+    pub fn new(
+        runtime_id: LogicalRuntimeId,
+        lifecycle: MachineLifecycleObservation,
+        input_states: Vec<StoredInputState>,
+    ) -> Self {
+        Self {
+            runtime_id,
+            lifecycle,
+            input_states,
+        }
+    }
+
+    pub fn runtime_id(&self) -> &LogicalRuntimeId {
+        &self.runtime_id
+    }
+
+    pub fn lifecycle(&self) -> &MachineLifecycleObservation {
+        &self.lifecycle
+    }
+
+    pub fn input_states(&self) -> &[StoredInputState] {
+        &self.input_states
+    }
+}
+
+/// The actual backend reservation, borrowed only by synchronous administration.
+///
+/// Implementors retain their actual writer lock or transaction and operation
+/// fence until this value is dropped. The caller retains native custody for
+/// the same period and must not await, re-enter a driver, or perform I/O in its
+/// mutation callback.
+/// An observation copied out of this carrier does not retain custody.
+#[doc(hidden)]
+pub trait RuntimeStoreControllerCustody: Send {
+    /// Visit canonical owner facts under the same retained transaction. A true
+    /// result stops the scan. Completed historical input bodies are not kept.
+    /// Administration is linear in canonical lifecycle/input records and their
+    /// decoded bytes, not accumulated event/receipt history. It has no lifetime
+    /// record cap. A malformed or misbound record refuses that entire mutation;
+    /// normal acquire/refresh does not invoke this administrative inventory.
+    fn visit_runtimes(
+        &self,
+        visit: &mut dyn FnMut(&RuntimeStoreControllerRuntime) -> bool,
+    ) -> Result<bool, RuntimeStoreError>;
+}
+
 /// Atomic persistence interface for runtime state.
 ///
 /// Implementations:
@@ -8020,9 +8295,9 @@ pub async fn load_input_states_for_recovery(
 ///
 /// This object-safe carrier is implemented only by real persistence backends.
 /// Its methods have the same contracts as the corresponding forwarding
-/// methods on [`RuntimeStore`]. Every method is required: profile-specific
-/// capability refusals are explicit backend behavior, never inherited
-/// defaults.
+/// methods on [`RuntimeStore`]. Durable operations are required; optional
+/// custody capabilities explicitly default to absence or refusal. Forwarding
+/// a custody capability preserves the actual backend's retained owner.
 ///
 /// This is an implementor seam. Operational callers use [`RuntimeStore`] so a
 /// decorator's intentional per-operation overrides remain observable.
@@ -8035,6 +8310,19 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
     /// execution. Ordinary operation on unsupported backends is unchanged.
     fn execution_custody(&self) -> Option<&RuntimeStoreExecutionCustody> {
         None
+    }
+
+    /// Try one actual backend writer reservation without async work or retries.
+    /// Only the backend's retained governed execution claim can acquire it.
+    /// Unsupported carriers refuse; decorators forward the actual backend.
+    fn try_controller_mutation_custody<'a>(
+        &'a self,
+        claim: &'a RuntimeStoreExecutionClaim,
+    ) -> Result<Box<dyn RuntimeStoreControllerCustody + 'a>, RuntimeStoreError> {
+        let _ = claim;
+        Err(RuntimeStoreError::Unsupported(
+            "runtime store controller administration custody is unavailable".to_string(),
+        ))
     }
 
     fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile;
@@ -8281,6 +8569,16 @@ pub trait RuntimeStore: Send + Sync {
     /// Actual backend execution owner, never the wrapper's pointer identity.
     fn execution_custody(&self) -> Option<&RuntimeStoreExecutionCustody> {
         self.session_authority_ops().execution_custody()
+    }
+
+    /// Retain the actual backend reservation through synchronous administration.
+    #[doc(hidden)]
+    fn try_controller_mutation_custody<'a>(
+        &'a self,
+        claim: &'a RuntimeStoreExecutionClaim,
+    ) -> Result<Box<dyn RuntimeStoreControllerCustody + 'a>, RuntimeStoreError> {
+        self.session_authority_ops()
+            .try_controller_mutation_custody(claim)
     }
 
     /// Durable session representation owned by this store.
@@ -8617,6 +8915,15 @@ pub trait RuntimeStore: Send + Sync {
         None
     }
 
+    /// How sessions on this store are hosted across processes (#1813).
+    ///
+    /// The default makes no multi-process claim: a store that offers no
+    /// hosting claims keeps single-process behavior. Decorators must forward
+    /// their inner store's capability.
+    fn hosting_capability(&self) -> crate::session_hosting::HostingCapability {
+        crate::session_hosting::HostingCapability::None
+    }
+
     /// Load the exact generated runtime-delivery authority record.
     async fn load_runtime_delivery_authority(
         &self,
@@ -8664,6 +8971,73 @@ pub trait RuntimeStore: Send + Sync {
         ))
     }
 
+    /// Load the first binding of one continuation key, if any.
+    async fn load_continuation_key_binding(
+        &self,
+        owner: &str,
+        key: &str,
+    ) -> Result<Option<ContinuationKeyBinding>, RuntimeStoreError> {
+        let _ = (owner, key);
+        Err(RuntimeStoreError::Unsupported(
+            "load_continuation_key_binding".into(),
+        ))
+    }
+
+    /// [`Self::compare_and_swap_runtime_delivery_authority`] that also writes
+    /// the first binding of a continuation key, all or nothing.
+    ///
+    /// When the `(owner, key)` pair is already bound the store writes nothing
+    /// and returns the existing binding; the caller decides replay or
+    /// conflict from it.
+    async fn compare_and_swap_runtime_delivery_authority_with_key_binding(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: Option<u64>,
+        replacement: RuntimeDeliveryAuthorityRecord,
+        inserted_delivery: RuntimeDeliveryStoreRecord,
+        binding: ContinuationKeyBinding,
+    ) -> Result<KeyedRuntimeDeliveryCasOutcome, RuntimeStoreError> {
+        let _ = (
+            runtime_id,
+            expected_revision,
+            replacement,
+            inserted_delivery,
+            binding,
+        );
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_swap_runtime_delivery_authority_with_key_binding".into(),
+        ))
+    }
+
+    /// The admission recorded for one continuation delivery, if any.
+    async fn load_continuation_admission(
+        &self,
+        address: &LogicalRuntimeId,
+        delivery_id: &str,
+    ) -> Result<Option<ContinuationAdmission>, RuntimeStoreError> {
+        let _ = (address, delivery_id);
+        Err(RuntimeStoreError::Unsupported(
+            "load_continuation_admission".into(),
+        ))
+    }
+
+    /// Change the admission index entry of one continuation delivery by
+    /// [`ContinuationAdmissionTransition::next`], reading and writing it in
+    /// one store transaction. A reservation is written before the input is
+    /// admitted, so recovery can find an admission that reached the session
+    /// but not the inbox acknowledgement.
+    async fn transition_continuation_admission(
+        &self,
+        address: &LogicalRuntimeId,
+        delivery_id: &str,
+        transition: ContinuationAdmissionTransition,
+    ) -> Result<ContinuationAdmissionOutcome, RuntimeStoreError> {
+        let _ = (address, delivery_id, transition);
+        Err(RuntimeStoreError::Unsupported(
+            "transition_continuation_admission".into(),
+        ))
+    }
+
     /// List every generated delivery-authority record in this store, keyed by
     /// the runtime that owns it.
     ///
@@ -8685,6 +9059,15 @@ pub trait RuntimeStore: Send + Sync {
         Err(RuntimeStoreError::Unsupported(
             "list_runtime_delivery_authorities".into(),
         ))
+    }
+
+    /// The store's durable delivery generation (#1813): incremented in the
+    /// same transaction as every delivery-authority commit, so another
+    /// process that sees the store change learns, from one read, whether a
+    /// delivery was committed. A store that never committed a delivery reads
+    /// zero. Stores without cross-process hosting need not count.
+    async fn load_delivery_generation(&self) -> Result<u64, RuntimeStoreError> {
+        Ok(0)
     }
 
     /// List durable inbox rows in generated sequence order.

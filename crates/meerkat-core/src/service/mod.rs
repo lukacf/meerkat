@@ -3,7 +3,12 @@
 //! All surfaces (CLI, REST, MCP Server, JSON-RPC) route through `SessionService`.
 //! Implementations may be ephemeral (in-memory only) or persistent (backed by a store).
 
+pub mod context_append;
 pub mod transport;
+pub use context_append::{
+    ContextControlFacts, PreparedSystemContextAppend, SystemContextAppendControl,
+    SystemContextControlRequest,
+};
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
@@ -71,6 +76,24 @@ pub enum SessionError {
     /// A turn is already in progress on this session.
     #[error("session is busy: {id}")]
     Busy { id: SessionId },
+
+    /// Another runtime owner hosts this session: another process on the same
+    /// realm, or another runtime of this process (it holds the session's
+    /// hosting claim, #1813). This owner therefore neither attaches the
+    /// session nor writes its durable state. Typed so callers route the work
+    /// to the hosting owner instead of treating it as a fault. Never retried
+    /// here: the claim frees only when the hosting owner stops serving the
+    /// session.
+    #[error("session {id} is served by another runtime owner on this realm")]
+    ServedElsewhere { id: SessionId },
+
+    /// The realm's store selected cross-process hosting claims, but this
+    /// session's claim cannot be taken for a reason other than another
+    /// holder (the lock file cannot be created or locked, #1813). Nothing was
+    /// attached or written without the claim; the refusal clears once the
+    /// claim can be taken. The local cause is logged, never carried here.
+    #[error("session {id} cannot be hosted: its hosting claim is unavailable on this realm")]
+    HostingUnavailable { id: SessionId },
 
     /// The operation requires persistence but the `session-store` feature is disabled.
     #[error("session persistence is disabled")]
@@ -397,12 +420,22 @@ impl SessionError {
         )
     }
 
+    /// Structured-data `kind` of a [`Self::ServedElsewhere`] refusal on the
+    /// wire, where it travels under the session-busy code.
+    pub const SERVED_ELSEWHERE_KIND: &'static str = "session_served_elsewhere";
+
+    /// Structured-data `kind` of a [`Self::HostingUnavailable`] refusal on the
+    /// wire, where it travels under the runtime-unavailable code.
+    pub const HOSTING_UNAVAILABLE_KIND: &'static str = "session_hosting_unavailable";
+
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
             Self::RuntimeUnavailable { .. } => "SESSION_RUNTIME_UNAVAILABLE",
             Self::NotFound { .. } => "SESSION_NOT_FOUND",
             Self::Busy { .. } => "SESSION_BUSY",
+            Self::ServedElsewhere { .. } => "SESSION_SERVED_ELSEWHERE",
+            Self::HostingUnavailable { .. } => "SESSION_HOSTING_UNAVAILABLE",
             Self::PersistenceDisabled => "SESSION_PERSISTENCE_DISABLED",
             Self::CompactionDisabled => "SESSION_COMPACTION_DISABLED",
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
@@ -426,6 +459,14 @@ impl SessionError {
         match self {
             Self::FailedWithData { data, .. } => Some(data.clone()),
             Self::CapabilityUnavailable(refusal) => serde_json::to_value(refusal.data).ok(),
+            Self::ServedElsewhere { id } => Some(serde_json::json!({
+                "kind": Self::SERVED_ELSEWHERE_KIND,
+                "session_id": id.to_string(),
+            })),
+            Self::HostingUnavailable { id } => Some(serde_json::json!({
+                "kind": Self::HOSTING_UNAVAILABLE_KIND,
+                "session_id": id.to_string(),
+            })),
             Self::DurableTailHeldForRecovery { id } => {
                 Some(self.durable_resume_hold_data(DurableResumeHold::TailHeldForRecovery, id))
             }
@@ -487,6 +528,10 @@ impl SessionError {
 /// Errors returned by session control-plane mutation methods.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionControlError {
+    /// Current native context admission or its protected observation failed.
+    #[error(transparent)]
+    Authorization(#[from] crate::OperationAuthorizationError),
+
     /// A lifecycle/session-store error occurred while handling the control request.
     #[error(transparent)]
     Session(#[from] SessionError),
@@ -494,6 +539,11 @@ pub enum SessionControlError {
     /// The control request was malformed.
     #[error("invalid system-context request: {message}")]
     InvalidRequest { message: String },
+
+    /// The current, permitted control required review it cannot carry; it
+    /// settled locally with no message appended.
+    #[error(transparent)]
+    Review(crate::approval::review::OperationReviewRefusal),
 
     /// The idempotency key was replayed with different request content.
     #[error(
@@ -507,6 +557,16 @@ impl SessionControlError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Session(err) => err.code(),
+            Self::Authorization(crate::OperationAuthorizationError::Refused(_)) => {
+                "OPERATION_REFUSED"
+            }
+            Self::Authorization(crate::OperationAuthorizationError::Unavailable) => {
+                "OPERATION_AUTHORIZATION_UNAVAILABLE"
+            }
+            Self::Authorization(crate::OperationAuthorizationError::ObservationUnavailable(_)) => {
+                "OPERATION_OBSERVATION_UNAVAILABLE"
+            }
+            Self::Review(refusal) => refusal.code(),
             Self::InvalidRequest { .. } => "INVALID_PARAMS",
             Self::Conflict { .. } => "SESSION_SYSTEM_CONTEXT_CONFLICT",
         }
@@ -792,6 +852,10 @@ pub struct SessionBuildOptions {
     /// the JSON bag is retired; surfaces parse fail-closed at their ingress).
     pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// How the created session gets its cross-process hosting claim (#1813).
+    /// The claim moves into the session's task. Defaults to a process-local
+    /// grant, correct for a service without a shared runtime store.
+    pub hosting: crate::session_hosting::SessionHostingIntent,
     /// Declarative MCP server configs for this build. The factory
     /// materializes them into a session-owned MCP router composed with
     /// `external_tools` and builtins, constructed against the build mode's
@@ -932,6 +996,14 @@ pub struct SessionBuildOptions {
     /// build options so it survives deferred-session materialization, where the
     /// `AgentBuildConfig` is reconstructed from these options.
     pub initial_tool_filter: Option<crate::tool_scope::ToolFilter>,
+    /// Inherited tool-visibility ceiling a spawner hands its child (the
+    /// parent's visible tools, with provenance witnesses), installed as the
+    /// child session's inherited base filter at agent build.
+    ///
+    /// Rides the build options for the same reason as `initial_tool_filter`:
+    /// a mob member's `AgentBuildConfig` is reconstructed from these options,
+    /// and an authority dropped there would leave the child uncapped.
+    pub initial_tool_visibility_state: Option<crate::InheritedToolVisibilityAuthority>,
     /// Per-launch call-level tool access policy (existing
     /// [`crate::ops::ToolAccessPolicy`] vocabulary). Flows into
     /// `AgentBuildConfig.tool_access_policy`, where the factory resolves it
@@ -1715,6 +1787,7 @@ impl Default for SessionBuildOptions {
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            hosting: crate::session_hosting::SessionHostingIntent::default(),
             mcp_servers: Vec::new(),
             recoverable_tool_defs: None,
             blob_store_override: None,
@@ -1750,6 +1823,7 @@ impl Default for SessionBuildOptions {
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
+            initial_tool_visibility_state: None,
             tool_access_policy: None,
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
@@ -1791,6 +1865,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("budget_limits", &self.budget_limits)
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
+            .field("hosting", &self.hosting)
             .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
@@ -1830,6 +1905,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
+            .field(
+                "initial_tool_visibility_state",
+                &self.initial_tool_visibility_state.is_some(),
+            )
             .field("tool_access_policy", &self.tool_access_policy)
             .field(
                 "tool_dispatch_admission",
@@ -3201,6 +3280,28 @@ pub trait SessionServiceControlExt: SessionService {
         id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError>;
+
+    /// Full native-owner control admission, including persisted observations
+    /// for preparation refusal. A process receipt never bypasses the installed
+    /// mandate, source or destination policy owner.
+    async fn append_authenticated_system_context(
+        &self,
+        control: Arc<SystemContextControlRequest>,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let _ = control;
+        Err(crate::OperationAuthorizationError::Unavailable.into())
+    }
+
+    /// Append the exact process-only request prepared by this service's
+    /// canonical native owner. Unsupported compositions cannot downgrade it
+    /// to an unauthenticated append.
+    async fn append_authorized_system_context(
+        &self,
+        prepared: PreparedSystemContextAppend,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let _ = prepared;
+        Err(crate::OperationAuthorizationError::Unavailable.into())
+    }
 
     /// Stage callback tool results for application on the next turn seam.
     ///

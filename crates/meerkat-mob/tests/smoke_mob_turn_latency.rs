@@ -548,7 +548,7 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
     // rewrite-commit tests.
     config.compaction.auto_compact_threshold = 50_000_000;
     let mut builder = FactoryAgentBuilder::new(factory, config);
-    // Production HomeCore shape: session rows and runtime authority share one
+    // Production shape: session rows and runtime authority share one
     // SQLite transaction domain, and the runtime profile is explicitly
     // HeadCanonical. Separate files would make an atomic O(delta) boundary
     // impossible and silently exercise the WholeBlob compatibility path.

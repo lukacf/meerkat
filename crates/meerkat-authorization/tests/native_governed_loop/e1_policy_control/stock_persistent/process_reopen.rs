@@ -291,6 +291,107 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
         "writer process auth registry cannot survive here"
     );
     assert_eq!(cold.generation, 0);
+
+    let claims = association(&runtime, controller, operation, selected.clone());
+    assert_ne!(
+        &claims,
+        original.state.authority_contributors[0].association()
+    );
+    let mut prompt = PromptInput::new(COLD_PROMPT, None);
+    prompt.header.authority_association = Some(claims.clone());
+    let input = Input::Prompt(prompt);
+    let input_id = input.id().clone();
+    assert_ne!(input_id, original_input_id);
+    let current = NativeIngressContext::from_trusted_ingress(
+        &input,
+        principal("requester"),
+        principal("ingress"),
+        RealmId::parse("native-loop").unwrap(),
+        super::super::super::evidence("stock-cold-current-authentication"),
+    )
+    .unwrap()
+    .with_controller_client(&input, pin.clone())
+    .unwrap();
+    let input = input.with_ingress_context(current).unwrap();
+
+    // Current grants and durable token bytes do not replace the cold native
+    // credential owner. Keep this exact input for retry after its restoration.
+    let unavailable = machine
+        .accept_input_with_completion(&session_id, input.clone())
+        .await;
+    assert!(
+        matches!(
+            &unavailable,
+            Err(
+                meerkat_runtime::traits::RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason:
+                        meerkat_runtime::traits::ControllerReadinessFailure::CredentialUnusable {
+                            disposition:
+                                meerkat_core::handles::CredentialUseDisposition::LeaseAbsent,
+                        },
+                }
+            )
+        ),
+        "a cold credential owner must return typed readiness, not permission denial: {unavailable:?}",
+    );
+    assert!(server.receiver.bodies.lock().unwrap().is_empty());
+    assert_eq!(
+        server.receiver.authorized_requests.load(Ordering::SeqCst),
+        0
+    );
+    assert!(tools.0.lock().unwrap().is_empty());
+    assert!(
+        machine
+            .input_state(&session_id, &input_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .load_input_state(&runtime, &input_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let rows_before_restore = store.load_input_states_strict(&runtime).await.unwrap();
+    assert_eq!(rows_before_restore.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&rows_before_restore[0]).unwrap(),
+        frozen_original,
+        "cold admission cannot change the original durable input or protected audit",
+    );
+    assert_eq!(
+        serde_json::to_value(
+            machine
+                .input_state(&session_id, &original_input_id)
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        frozen_original,
+        "cold admission cannot change the original live input or protected audit",
+    );
+    let document_before_restore = store
+        .load_committed_whole_blob_snapshot(&runtime)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        document_before_restore.bytes(),
+        reconstructed_document.bytes(),
+        "cold admission cannot rewrite the committed session or transcript",
+    );
+    assert_eq!(
+        document_before_restore.authority(),
+        reconstructed_document.authority(),
+    );
+    assert_eq!(
+        token_store.load(&token_key).await.unwrap(),
+        Some(stored_tokens.clone()),
+    );
+
     let publication = meerkat_core::auth::tokens_lifecycle_publication(&stored_tokens)
         .expect("writer persisted an actual credential lifecycle publication");
     let restored = meerkat_core::auth::rehydrate_marked_tokens_for_status_for_identity(
@@ -407,31 +508,11 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
         "a refused old-grant input cannot enter the committed transcript",
     );
 
-    let claims = association(&runtime, controller, operation, selected);
-    assert_ne!(
-        &claims,
-        original.state.authority_contributors[0].association()
-    );
-    let mut prompt = PromptInput::new(COLD_PROMPT, None);
-    prompt.header.authority_association = Some(claims.clone());
-    let input = Input::Prompt(prompt);
-    let input_id = input.id().clone();
-    assert_ne!(input_id, original_input_id);
     assert_ne!(input_id, stale_input_id);
-    let current = NativeIngressContext::from_trusted_ingress(
-        &input,
-        principal("requester"),
-        principal("ingress"),
-        RealmId::parse("native-loop").unwrap(),
-        super::super::super::evidence("stock-cold-current-authentication"),
-    )
-    .unwrap()
-    .with_controller_client(&input, pin)
-    .unwrap();
     let (accepted, completion) = machine
-        .accept_input_with_completion(&session_id, input.with_ingress_context(current).unwrap())
+        .accept_input_with_completion(&session_id, input)
         .await
-        .expect("fresh authenticated native admission after writer process exit");
+        .expect("the same cold input is admissible after canonical credential restoration");
     assert!(
         matches!(accepted, AcceptOutcome::Accepted { input_id: ref accepted_id, .. }
         if accepted_id == &input_id)

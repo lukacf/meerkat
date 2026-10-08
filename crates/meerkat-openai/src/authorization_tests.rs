@@ -149,6 +149,10 @@ impl Drop for Check {
     }
 }
 impl PreparedOperationAuthorization for Check {
+    fn review_tier(&self) -> meerkat_core::authorization::OperationReviewTier {
+        meerkat_core::authorization::OperationReviewTier::R1
+    }
+
     fn observe(
         &self,
         binding: &PreparedAuthorizationBinding,
@@ -160,6 +164,7 @@ impl PreparedOperationAuthorization for Check {
         let fail = match &observation {
             OperationObservation::Entry => self.fail_entry.load(Ordering::SeqCst),
             OperationObservation::Outcome(_) => self.fail_outcome.load(Ordering::SeqCst),
+            OperationObservation::ReviewAttemptStarted { .. } => false,
             OperationObservation::AuthorizationUnavailable => false,
             OperationObservation::Refused(_) => false,
         };
@@ -396,7 +401,14 @@ fn binding() -> AuthBindingRef {
     }
 }
 fn client(route: Route, url: &str, authorizer: Arc<Authorizer>) -> Arc<dyn LlmClient> {
-    let binding = binding();
+    client_for_binding(route, url, authorizer, binding())
+}
+fn client_for_binding(
+    route: Route,
+    url: &str,
+    authorizer: Arc<Authorizer>,
+    binding: AuthBindingRef,
+) -> Arc<dyn LlmClient> {
     let identity = SessionLlmIdentity {
         model: MODEL.to_owned(),
         provider: Provider::OpenAI,
@@ -979,4 +991,196 @@ async fn plain_controller_facts_match_actual_openai_and_compatible_routes_withou
         assert_eq!(plain.wire_model(), observed[0].wire_model.as_ref());
         assert!(plain.selection().matches_model_facts(&observed[0]));
     }
+}
+
+// Governed fallback search: the helper is its own model operation. The tool's
+// outer admission authorizes none of the helper's model, account, endpoint or
+// hosted search; the executor prepares them on the helper's selected target.
+
+fn helper_binding() -> AuthBindingRef {
+    AuthBindingRef {
+        realm: RealmId::parse("test-realm").unwrap(),
+        binding: BindingId::parse("helper-binding").unwrap(),
+        profile: None,
+        origin: BindingOrigin::Configured,
+    }
+}
+
+/// Denies only model operations attributed to one binding, so one work
+/// context can allow the controller route while refusing the helper route.
+struct DenyBinding {
+    inner: Arc<Policy>,
+    denied: AuthBindingRef,
+}
+impl WorkAuthorization for DenyBinding {
+    fn prepare(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<Arc<dyn PreparedOperationAuthorization>, meerkat_core::OperationAuthorizationError>
+    {
+        if let AuthorizationOperation::Model(facts) = &binding.facts().operation
+            && facts.identity.auth_binding.as_ref() == Some(&self.denied)
+        {
+            self.inner.bindings.lock().unwrap().push(binding.clone());
+            return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
+        }
+        self.inner.prepare(binding)
+    }
+}
+
+fn helper_executor(
+    url: &str,
+    authorizer: Arc<Authorizer>,
+) -> crate::web_search::OpenAiWebSearchExecutor {
+    let adapted: Arc<dyn meerkat_core::AgentLlmClient> = Arc::new(
+        meerkat_llm_core::LlmClientAdapter::try_for_provider_identity(
+            client_for_binding(Route::Public, url, authorizer, helper_binding()),
+            MODEL.to_owned(),
+            Provider::OpenAI,
+        )
+        .unwrap(),
+    );
+    crate::web_search::OpenAiWebSearchExecutor::new(MODEL.to_owned(), adapted)
+}
+
+fn search_request() -> meerkat_core::web_search::WebSearchRequest {
+    meerkat_core::web_search::WebSearchRequest {
+        query: "fixture query".to_owned(),
+        provider: None,
+        provider_params: None,
+        context: None,
+    }
+}
+
+fn helper_authorization(work: &WorkAuthorizationContext) -> Option<LlmRequestAuthorization> {
+    Some(LlmRequestAuthorization::new(
+        work.clone(),
+        OperationId::new(),
+        ModelAuthorizationUse::Inference,
+    ))
+}
+
+fn assert_helper_attribution(facts: &ModelAuthorizationFacts) {
+    assert_eq!(facts.identity.auth_binding, Some(helper_binding()));
+    assert_eq!(
+        facts.credential,
+        Some(AuthCredentialIdentity::Binding(helper_binding()))
+    );
+    assert_ne!(facts.identity.auth_binding, Some(binding()));
+    assert_eq!(
+        facts.hosted_capabilities.as_ref(),
+        &[ServerToolKind::WebSearch]
+    );
+    assert!(matches!(facts.usage, ModelAuthorizationUse::Inference));
+}
+
+#[tokio::test]
+async fn helper_deny_sends_zero_bodies_while_the_controller_route_continues() {
+    use meerkat_llm_core::WebSearchExecutor;
+
+    let server = serve(StatusCode::OK, None, false, None).await;
+    let recorded = Policy::new();
+    let work = WorkAuthorizationContext::new(
+        Arc::new(DenyBinding {
+            inner: Arc::clone(&recorded),
+            denied: helper_binding(),
+        }),
+        meerkat_core::exact_operation::OperationExecutionScope::Domain,
+    );
+    let helper_authorizer = Authorizer::new(false, None);
+    let executor = helper_executor(&server.url, Arc::clone(&helper_authorizer));
+
+    let error = executor
+        .execute_web_search_authorized(search_request(), helper_authorization(&work))
+        .await
+        .expect_err("a denied helper route must not search");
+    assert!(
+        matches!(&error, LlmError::OperationRefused { refusal } if refusal.kind() == OperationRefusalKind::Denied),
+        "{error:?}"
+    );
+    assert!(
+        server.bodies.lock().unwrap().is_empty(),
+        "zero helper sends"
+    );
+    assert_eq!(helper_authorizer.calls.load(Ordering::SeqCst), 0);
+    let facts = recorded.facts();
+    assert_eq!(facts.len(), 1);
+    assert_helper_attribution(&facts[0]);
+
+    // The controller route under the same work context is not poisoned.
+    let controller = client(Route::Public, &server.url, Authorizer::new(false, None));
+    let projection = controller
+        .project_replay_request(&simple_request().messages)
+        .unwrap();
+    let request = PreparedLlmRequest::from_projection(simple_request(), projection)
+        .with_authorization(helper_authorization(&work));
+    assert!(succeeded(&collect(controller.as_ref(), &request).await));
+    assert_eq!(server.bodies.lock().unwrap().len(), 1);
+    let facts = recorded.facts();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[1].identity.auth_binding, Some(binding()));
+}
+
+#[tokio::test]
+async fn allowed_helper_search_is_attributed_to_its_own_route() {
+    use meerkat_llm_core::WebSearchExecutor;
+
+    let server = serve(StatusCode::OK, None, false, None).await;
+    let policy = Policy::new();
+    let work = WorkAuthorizationContext::new(
+        Arc::clone(&policy) as Arc<dyn WorkAuthorization>,
+        meerkat_core::exact_operation::OperationExecutionScope::Domain,
+    );
+    let executor = helper_executor(&server.url, Authorizer::new(false, None));
+    executor
+        .execute_web_search_authorized(search_request(), helper_authorization(&work))
+        .await
+        .expect("an allowed helper route searches");
+    let bodies = server.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0].1["model"], MODEL);
+    assert!(
+        bodies[0].1["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["type"] == "web_search"))
+    );
+    let facts = policy.facts();
+    assert_eq!(facts.len(), 1);
+    assert_helper_attribution(&facts[0]);
+    assert_eq!(facts[0].identity.model, MODEL);
+}
+
+#[tokio::test]
+async fn helper_revocation_while_credentials_are_awaited_sends_nothing() {
+    use meerkat_llm_core::WebSearchExecutor;
+
+    let server = serve(StatusCode::OK, None, false, None).await;
+    let policy = Policy::new();
+    let work = WorkAuthorizationContext::new(
+        Arc::clone(&policy) as Arc<dyn WorkAuthorization>,
+        meerkat_core::exact_operation::OperationExecutionScope::Domain,
+    );
+    let authorizer = Authorizer::new(true, None);
+    let executor = helper_executor(&server.url, Arc::clone(&authorizer));
+    let authorization = helper_authorization(&work);
+    let task = tokio::spawn(async move {
+        executor
+            .execute_web_search_authorized(search_request(), authorization)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), authorizer.entered.notified())
+        .await
+        .unwrap();
+    policy.allowed.store(false, Ordering::SeqCst);
+    authorizer.resume.notify_one();
+    let error = task
+        .await
+        .unwrap()
+        .expect_err("currentness is rechecked after the credential wait");
+    assert!(
+        matches!(error, LlmError::OperationRefused { .. }),
+        "{error:?}"
+    );
+    assert!(server.bodies.lock().unwrap().is_empty());
+    assert_eq!(policy.facts().len(), 1);
 }

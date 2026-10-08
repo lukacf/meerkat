@@ -14,7 +14,6 @@ use std::time::Duration;
 use meerkat_mob::{
     AgentIdentity, ForkChildRunOutcome, ForkJobBinding, ProfileName, SpawnMemberSpec,
 };
-use meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral;
 use meerkat_mob_mcp::fork_relink::ForkRelinkAction;
 use support::{CouncilFixture, MobBackedOwnerHost, ScriptedTurn, SeenRequests, TurnGate};
 
@@ -92,10 +91,7 @@ fn relink_runtime(fixture: &CouncilFixture) -> Option<Arc<meerkat_runtime::Meerk
 /// The re-link delivery for the fixture's runtime: no owner hook, and only
 /// the child's own mob to find the owner in.
 fn relink_delivery(fixture: &CouncilFixture) -> meerkat_mob_mcp::fork_relink::RelinkDelivery {
-    meerkat_mob_mcp::fork_relink::RelinkDelivery {
-        runtime: relink_runtime(fixture),
-        ..Default::default()
-    }
+    meerkat_mob_mcp::fork_relink::RelinkDelivery::from_state(&fixture.state).without_managed_mobs()
 }
 
 /// Wait until job `job_id`'s completion record is in `session`: delivery
@@ -163,6 +159,7 @@ async fn relink_delivers_a_finished_childs_result_exactly_once() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -186,6 +183,7 @@ async fn relink_delivers_a_finished_childs_result_exactly_once() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -287,6 +285,7 @@ async fn relink_delivers_the_reply_of_a_child_whose_turn_compacted() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -348,6 +347,7 @@ async fn relink_delivers_the_reply_of_a_child_whose_turn_compacted() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(mob_id.clone(), handle.clone())
         .await;
@@ -430,6 +430,7 @@ async fn relink_of_a_record_without_a_turn_delivery_reads_the_transcript() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -541,6 +542,7 @@ async fn relink_rearms_max_run_from_the_original_start() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -657,6 +659,7 @@ async fn relink_past_max_run_delivers_a_child_that_finished_within_its_limit() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -759,6 +762,7 @@ async fn relink_past_max_run_retires_a_child_still_running() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -829,6 +833,7 @@ async fn relink_after_a_live_limit_passed_delivers_the_completed_childs_reply() 
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -908,6 +913,7 @@ async fn relink_leaves_a_child_whose_job_already_ended_alone() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -1002,6 +1008,7 @@ async fn a_respawned_fork_child_carries_no_fork_job() {
             Some(ForkJobBinding {
                 job_id: "job-before-respawn".to_string(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -1075,6 +1082,7 @@ async fn relink_of_several_running_children_delivers_each_real_reply() {
                 Some(ForkJobBinding {
                     job_id: job_id.clone(),
                     owner_session_id: owner.clone(),
+                    retained_work: None,
                 }),
             )
             .await
@@ -1092,6 +1100,7 @@ async fn relink_of_several_running_children_delivers_each_real_reply() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -1163,6 +1172,7 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -1197,6 +1207,7 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -1279,6 +1290,7 @@ async fn relink_settles_a_running_child_whose_turn_fails() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -1293,6 +1305,7 @@ async fn relink_settles_a_running_child_whose_turn_fails() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -1507,6 +1520,7 @@ async fn runtime_backed_relink_waits_for_a_finished_child_turn_to_commit() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -1529,6 +1543,7 @@ async fn runtime_backed_relink_waits_for_a_finished_child_turn_to_commit() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -1598,6 +1613,7 @@ async fn relink_stops_waiting_on_unanswered_commit_reads_without_naming_a_cause(
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -1687,6 +1703,7 @@ async fn a_failed_boundary_commit_makes_the_run_input_read_an_error() {
             Some(ForkJobBinding {
                 job_id: "job-failed-commit".to_string(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -2464,7 +2481,7 @@ async fn a_failed_turn_deduplicated_against_restart_interrupted_keeps_its_child_
     status_entered
         .await
         .expect("the re-link reads the child's status");
-    meerkat_mob_mcp::detached_delivery::deliver_detached_completion_to_member(
+    support::admit_pre_upgrade_completion(
         &runtime,
         &handle,
         &AgentIdentity::from("forker"),
@@ -2536,6 +2553,7 @@ async fn a_retiring_outcome_admitted_but_not_yet_committed_retires_its_child() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -2546,7 +2564,7 @@ async fn a_retiring_outcome_admitted_but_not_yet_committed_retires_its_child() {
     ));
     let (commit_entered, release_commit) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(owner.clone());
-    meerkat_mob_mcp::detached_delivery::deliver_detached_completion_to_member(
+    support::admit_pre_upgrade_completion(
         &runtime,
         &handle,
         &AgentIdentity::from("forker"),
@@ -2622,6 +2640,7 @@ async fn relink_after_a_delivered_record(
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -2630,7 +2649,7 @@ async fn relink_after_a_delivered_record(
         run.outcome().await,
         Some(ForkChildRunOutcome::Completed(_))
     ));
-    meerkat_mob_mcp::detached_delivery::deliver_detached_completion_to_member(
+    support::admit_pre_upgrade_completion(
         &runtime,
         handle,
         &AgentIdentity::from("forker"),
@@ -2687,6 +2706,7 @@ async fn fork_held_child(
             Some(ForkJobBinding {
                 job_id: job_id.to_string(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -3049,6 +3069,7 @@ async fn the_fence_cancels_a_queued_job_input_before_restart_interrupted() {
             Some(ForkJobBinding {
                 job_id: format!("job-{name}-first"),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -3093,7 +3114,9 @@ async fn the_fence_cancels_a_queued_job_input_before_restart_interrupted() {
         .get_by_identity(&child)
         .and_then(|entry| entry.fork_job.clone())
         .expect("durable fork job record");
-    job.job_id = job_id.clone();
+    // The queued turn is the job's own (its job id stays the spawned one, as
+    // a committed terminal must name a job the mob spawned).
+    let job_id = job.job_id.clone();
     job.turn_delivery = Some(turn_delivery.clone());
 
     let action = meerkat_mob_mcp::fork_relink::relink_child_within(
@@ -3145,8 +3168,9 @@ async fn the_fence_cancels_a_queued_job_input_before_restart_interrupted() {
 /// A host that restores a stopped mob inserts its handle before activating
 /// it (MobKit's identity-first gateway after a clean shutdown). The forker is
 /// not live and cannot be revived while its mob is stopped: the re-link
-/// reports that typed, then delivers the outcome once the mob runs, exactly
-/// once (lifecycle review: the single attempt failed and was never retried).
+/// submits the outcome durably at once, and the host's delivery owner
+/// applies it once the mob runs, exactly once, with no re-link pass of its
+/// own (P3-B B1: the outcome used to wait on a bounded revival loop).
 #[tokio::test(flavor = "multi_thread")]
 async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
     let fixture =
@@ -3173,6 +3197,7 @@ async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -3197,6 +3222,7 @@ async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -3206,19 +3232,11 @@ async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
         .iter()
         .find(|report| report.job_id == job_id)
         .expect("the child is visited");
-    assert_eq!(
-        report.action,
-        ForkRelinkAction::AwaitingOwner {
-            mob_id: fixture.source_mob_id(),
-            reason: OwnerRevivalDeferral::MobNotRunning {
-                phase: meerkat_mob::MobState::Stopped
-            },
-        }
-    );
+    assert_eq!(report.action, ForkRelinkAction::Delivered);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
 
-    // The host activates the mob: the automatic pass delivers now.
+    // The host activates the mob: the delivery owner applies the outcome.
     handle.resume().await.expect("activate the mob");
     await_completion_record(&fixture, &owner, &job_id).await;
     assert!(
@@ -3328,6 +3346,7 @@ impl PlainOwnerJob {
                 Some(ForkJobBinding {
                     job_id: job_id.clone(),
                     owner_session_id: owner.clone(),
+                    retained_work: None,
                 }),
             )
             .await
@@ -3354,14 +3373,16 @@ impl PlainOwnerJob {
     }
 
     fn restarted_state(&self) -> Arc<meerkat_mob_mcp::MobMcpState> {
-        Arc::new(
+        let state = Arc::new(
             meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                 self.fixture.service.clone(),
                 Some(Arc::clone(&self.runtime)),
                 meerkat_mob::MobControlPrincipal::Owner,
             )
             .expect("construct runtime authority"),
-        )
+        );
+        self.fixture.bind_continuations(&state);
+        state
     }
 
     fn marker(&self) -> String {
@@ -3417,47 +3438,40 @@ async fn relink_revives_a_plain_session_owner_through_the_host_hook() {
     job.fixture.teardown().await;
 }
 
-/// The same owner on a host without an owner hook: the re-link cannot make
-/// the session live, so nothing is recorded and the owner is not woken. The
-/// job stays owed: a re-link on a host that can make the owner live
-/// delivers it, once.
+/// The same owner on a host without an owner hook: the re-link submits the
+/// outcome durably, but nothing can make the session live, so nothing is
+/// recorded and the owner is not woken. The outcome stays owed and is
+/// applied, once, when the session is attached again, with no re-link pass
+/// of its own (P3-B B2: a completion its live path could not deliver used to
+/// wait for the next restart).
 #[tokio::test(flavor = "multi_thread")]
-async fn without_a_host_hook_a_plain_session_owner_stays_owed() {
+async fn without_a_host_hook_a_plain_session_owner_is_delivered_on_attach() {
     let job = PlainOwnerJob::after_restart("unhooked").await;
     let restarted = job.restarted_state();
     restarted
         .mob_insert_handle(job.fixture.source_mob_id(), job.handle.clone())
         .await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let reports = restarted.relink_restored_fork_children().await;
-    let action = reports
-        .iter()
-        .find(|report| report.job_id == job.job_id)
-        .map(|report| report.action.clone())
-        .expect("the child is visited");
-    assert!(
-        matches!(action, ForkRelinkAction::Failed(_)),
-        "the runtime's refusal is reported: {action:?}"
-    );
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(job.records().await, 0, "nothing is recorded");
-    assert_eq!(job.seen.turns_that_saw(&job.marker()), 0, "no wake");
-
-    // Still owed: a host that can make the owner live delivers it.
-    let host = MobBackedOwnerHost::new(job.owner_handle.clone(), "owner");
-    restarted.set_detached_owner_host(Some(host.clone()));
     let reports = restarted.relink_restored_fork_children().await;
     assert_eq!(
         reports
             .iter()
             .find(|report| report.job_id == job.job_id)
             .map(|report| report.action.clone()),
-        Some(ForkRelinkAction::Delivered)
+        Some(ForkRelinkAction::Delivered),
+        "the outcome is submitted durably"
     );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(job.records().await, 0, "nothing is recorded");
+    assert_eq!(job.seen.turns_that_saw(&job.marker()), 0, "no wake");
+
+    // The session is attached again: the owed outcome is applied, once.
+    job.owner_handle
+        .ensure_member_live(&AgentIdentity::from("owner"))
+        .await
+        .expect("attach the owner's session");
     await_completion_record(&job.fixture, &job.owner, &job.job_id).await;
     job.await_one_wake().await;
     assert_eq!(job.records().await, 1, "recorded exactly once");
-    assert_eq!(host.calls(), 1);
     job.fixture.teardown().await;
 }
 
@@ -3505,6 +3519,7 @@ async fn relink_past_max_run_revives_a_member_forker_that_is_not_live() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -3534,10 +3549,7 @@ async fn relink_past_max_run_revives_a_member_forker_that_is_not_live() {
 
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
-        &meerkat_mob_mcp::fork_relink::RelinkDelivery {
-            runtime: Some(Arc::clone(&runtime)),
-            ..Default::default()
-        },
+        &relink_delivery(&fixture),
         &fixture.source_mob_id(),
         &handle,
         &child,
@@ -3568,13 +3580,13 @@ async fn relink_past_max_run_revives_a_member_forker_that_is_not_live() {
     fixture.teardown().await;
 }
 
-/// When the limit won but its outcome cannot be delivered yet (here a plain
-/// session owner on a host without an owner hook), the child is cancelled
-/// but not retired: it keeps its job record, so a later pass that can reach
-/// the owner delivers max_run_elapsed once and retires it then. A retired
-/// child with an undelivered outcome would be lost.
+/// When the limit won while the owner cannot be served yet (here a plain
+/// session owner on a host without an owner hook), max_run_elapsed is
+/// committed and submitted durably, so the child is retired at once: the
+/// outcome no longer depends on the child's job record. It is applied, once,
+/// when the owner's session is attached again.
 #[tokio::test(flavor = "multi_thread")]
-async fn relink_past_max_run_keeps_the_job_while_its_outcome_cannot_be_delivered() {
+async fn relink_past_max_run_retires_the_child_once_its_outcome_is_durable() {
     let seen = SeenRequests::default();
     let gate = TurnGate::new();
     let fixture = CouncilFixture::new_runtime_backed({
@@ -3609,6 +3621,7 @@ async fn relink_past_max_run_keeps_the_job_while_its_outcome_cannot_be_delivered
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -3629,44 +3642,9 @@ async fn relink_past_max_run_keeps_the_job_while_its_outcome_cannot_be_delivered
         .expect("the owner session is not live after the restart");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let hookless = meerkat_mob_mcp::fork_relink::RelinkDelivery {
-        runtime: Some(Arc::clone(&runtime)),
-        ..Default::default()
-    };
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
-        &hookless,
-        &fixture.source_mob_id(),
-        &handle,
-        &child,
-        &job,
-    )
-    .await;
-    assert!(
-        matches!(action, ForkRelinkAction::Failed(_)),
-        "the outcome cannot reach the owner: {action:?}"
-    );
-    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
-    assert!(
-        handle
-            .get_member(&child)
-            .await
-            .unwrap()
-            .and_then(|entry| entry.fork_job)
-            .is_some_and(|recorded| recorded.job_id == job_id),
-        "the child keeps its job record while the outcome is owed"
-    );
-
-    // A pass that can reach the owner delivers it once and retires the
-    // child.
-    let host = MobBackedOwnerHost::new(owner_handle, "owner");
-    let hooked = meerkat_mob_mcp::fork_relink::RelinkDelivery {
-        owner_host: Some(host.clone()),
-        ..hookless
-    };
-    let action = meerkat_mob_mcp::fork_relink::relink_child(
-        fixture.state.session_service(),
-        &hooked,
+        &relink_delivery(&fixture),
         &fixture.source_mob_id(),
         &handle,
         &child,
@@ -3674,17 +3652,24 @@ async fn relink_past_max_run_keeps_the_job_while_its_outcome_cannot_be_delivered
     )
     .await;
     gate.open();
-    assert_eq!(action, ForkRelinkAction::Delivered);
+    assert_eq!(action, ForkRelinkAction::Delivered, "submitted durably");
+    assert!(
+        handle.get_member(&child).await.unwrap().is_none(),
+        "the child is retired once its outcome is durable"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
+
+    // The owner's session is attached again: applied once.
+    owner_handle
+        .ensure_member_live(&AgentIdentity::from("owner"))
+        .await
+        .expect("attach the owner's session");
     await_completion_record(&fixture, &owner, &job_id).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
     let record = completion_record_text(&fixture, &owner, &job_id).await;
     assert!(record.contains("max_run_elapsed"), "{record}");
-    assert!(
-        handle.get_member(&child).await.unwrap().is_none(),
-        "the child is retired once its outcome is delivered"
-    );
-    assert_eq!(host.calls(), 1);
     fixture.teardown().await;
 }
 
@@ -3724,6 +3709,7 @@ async fn overdue_job(
             Some(ForkJobBinding {
                 job_id: job_id.to_string(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -3739,13 +3725,13 @@ async fn overdue_job(
     job
 }
 
-/// A child kept (cancelled, its job owed) by a pass whose delivery could not
-/// reach the owner gets max_run_elapsed on the next pass, every time: its
-/// limit has passed, so the pass does not race a status read of the now idle
-/// child against a zero-length timer (lifecycle review: the idle child
-/// usually answered first and was delivered restart_interrupted).
+/// Overdue children whose owner cannot be served yet each get max_run_elapsed,
+/// every time: the limit has passed, so the pass does not race a status read
+/// against a zero-length timer (lifecycle review: an idle child usually
+/// answered first and was delivered restart_interrupted). The outcomes are
+/// durable at once and applied when the owner is attached again.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_kept_overdue_child_gets_max_run_elapsed_on_every_later_pass() {
+async fn overdue_children_each_get_max_run_elapsed() {
     const CHILDREN: usize = 6;
     let seen = SeenRequests::default();
     let gate = TurnGate::new();
@@ -3776,34 +3762,11 @@ async fn a_kept_overdue_child_gets_max_run_elapsed_on_every_later_pass() {
         .unregister_session(&owner)
         .await
         .expect("the owner session is not live after the restart");
-    let hookless = meerkat_mob_mcp::fork_relink::RelinkDelivery {
-        runtime: Some(Arc::clone(&runtime)),
-        ..Default::default()
-    };
+    let delivery = relink_delivery(&fixture);
     for (child, job) in &jobs {
         let action = meerkat_mob_mcp::fork_relink::relink_child(
             fixture.state.session_service(),
-            &hookless,
-            &fixture.source_mob_id(),
-            &handle,
-            child,
-            job,
-        )
-        .await;
-        assert!(matches!(action, ForkRelinkAction::Failed(_)), "{action:?}");
-    }
-    // The kept children are idle now; a status read answers at once.
-    gate.open();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let hooked = meerkat_mob_mcp::fork_relink::RelinkDelivery {
-        owner_host: Some(MobBackedOwnerHost::new(owner_handle, "owner")),
-        ..hookless
-    };
-    for (child, job) in &jobs {
-        let action = meerkat_mob_mcp::fork_relink::relink_child(
-            fixture.state.session_service(),
-            &hooked,
+            &delivery,
             &fixture.source_mob_id(),
             &handle,
             child,
@@ -3811,13 +3774,20 @@ async fn a_kept_overdue_child_gets_max_run_elapsed_on_every_later_pass() {
         )
         .await;
         assert_eq!(action, ForkRelinkAction::Delivered, "{child}");
+        assert!(handle.get_member(child).await.unwrap().is_none(), "{child}");
+    }
+    gate.open();
+    owner_handle
+        .ensure_member_live(&AgentIdentity::from("owner"))
+        .await
+        .expect("attach the owner's session");
+    for (child, job) in &jobs {
         await_completion_record(&fixture, &owner, &job.job_id).await;
         let record = completion_record_text(&fixture, &owner, &job.job_id).await;
         assert!(
             record.contains("max_run_elapsed"),
             "{child} is delivered its limit, not a settled outcome: {record}"
         );
-        assert!(handle.get_member(child).await.unwrap().is_none(), "{child}");
     }
     fixture.teardown().await;
 }
@@ -3850,6 +3820,7 @@ async fn relink_retires_a_child_left_seated_after_its_limit_was_delivered() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -3863,7 +3834,7 @@ async fn relink_retires_a_child_left_seated_after_its_limit_was_delivered() {
         .expect("durable fork job record");
     // max_run_elapsed was delivered; the retire after it never happened.
     let runtime = relink_runtime(&fixture).expect("runtime");
-    let delivered = meerkat_mob_mcp::deliver_detached_completion(
+    let delivered = support::admit_pre_upgrade_session_completion(
         &runtime,
         &owner,
         "fork_off",
@@ -4024,6 +3995,7 @@ async fn a_job_owner_in_a_mob_inserted_later_is_revived_through_it() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -4045,6 +4017,7 @@ async fn a_job_owner_in_a_mob_inserted_later_is_revived_through_it() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -4079,13 +4052,12 @@ async fn a_job_owner_in_a_mob_inserted_later_is_revived_through_it() {
 }
 
 /// A job in mob A (running) whose owner is a member of mob B, stopped with
-/// the owner not live. Delivery defers on B, and the re-link waits on B, not
-/// on the child's mob: while A runs, no attempts are spent, and when only B
-/// resumes the outcome is delivered, once (lifecycle review: the wait was on
-/// the child's running mob, so all attempts were spent at once and nothing
-/// was left waiting when B resumed).
+/// the owner not live. The outcome is submitted durably to the owner's
+/// incarnation, and applied when only B resumes, once, whatever A does
+/// (lifecycle review: a wait on the child's running mob spent every attempt
+/// at once and left nothing waiting when B resumed).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
+async fn an_owner_in_another_stopped_mob_receives_its_outcome_when_that_mob_runs() {
     let seen = SeenRequests::default();
     let fixture = CouncilFixture::new_runtime_backed({
         let seen = seen.clone();
@@ -4114,6 +4086,7 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
             Some(ForkJobBinding {
                 job_id: job_id.clone(),
                 owner_session_id: owner.clone(),
+                retained_work: None,
             }),
         )
         .await
@@ -4139,6 +4112,7 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(owner_handle.mob_id().clone(), owner_handle.clone())
         .await;
@@ -4146,30 +4120,17 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
 
-    // Long enough for a wait on the running mob A to spend every attempt.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
-    // The deferral is observed: it waits on B, the owner's mob.
     let reports = restarted.relink_restored_fork_children().await;
     assert_eq!(
         reports
             .iter()
             .find(|report| report.job_id == job_id)
             .map(|report| report.action.clone()),
-        Some(ForkRelinkAction::AwaitingOwner {
-            mob_id: owner_handle.mob_id().clone(),
-            reason: OwnerRevivalDeferral::MobNotRunning {
-                phase: meerkat_mob::MobState::Stopped,
-            },
-        })
+        Some(ForkRelinkAction::Delivered),
+        "submitted durably to the owner's incarnation"
     );
-
-    // The automatic re-link's waiter is armed, on B.
-    assert_eq!(
-        restarted.fork_relink_waiting_owners(),
-        1,
-        "one deferred outcome is waiting on its owner's mob"
-    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
 
     // Only the owner's mob resumes.
     owner_handle.resume().await.expect("resume the owner's mob");
@@ -4190,7 +4151,6 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
         "delivered exactly once"
     );
     assert_eq!(seen.turns_that_saw(&marker), 1, "the owner is woken once");
-    assert_eq!(restarted.fork_relink_waiting_owners(), 0);
     assert!(
         completion_record_text(&fixture, &owner, &job_id)
             .await
@@ -4201,11 +4161,11 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
 
 /// Two children of one mob whose jobs share an id (bindings are the host's;
 /// nothing makes a job id unique across children), bound to owners in two
-/// different mobs, both stopped with their owners not live. Each deferred
-/// outcome is retried as exactly its child's job: when only C resumes, Y is
-/// delivered once and X keeps waiting on B; when B resumes, X is delivered
-/// once (lifecycle review: a retry selected every child with the job id and
-/// adopted the first report, so a child could take the other's report).
+/// different mobs, both stopped with their owners not live. Each outcome is
+/// committed and submitted as exactly its child's job: when only C resumes,
+/// Y is delivered once and X keeps waiting on B; when B resumes, X is
+/// delivered once (lifecycle review: a retry selected every child with the
+/// job id and adopted the first report, so a child could take the other's).
 #[tokio::test(flavor = "multi_thread")]
 async fn children_sharing_a_job_id_are_each_retried_as_their_own_job() {
     let fixture =
@@ -4234,6 +4194,7 @@ async fn children_sharing_a_job_id_are_each_retried_as_their_own_job() {
                 Some(ForkJobBinding {
                     job_id: job_id.clone(),
                     owner_session_id: owner.clone(),
+                    retained_work: None,
                 }),
             )
             .await
@@ -4261,6 +4222,7 @@ async fn children_sharing_a_job_id_are_each_retried_as_their_own_job() {
         )
         .expect("construct runtime authority"),
     );
+    fixture.bind_continuations(&restarted);
     for owner_mob in [&b_handle, &c_handle] {
         restarted
             .mob_insert_handle(owner_mob.mob_id().clone(), owner_mob.clone())
@@ -4269,14 +4231,17 @@ async fn children_sharing_a_job_id_are_each_retried_as_their_own_job() {
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while restarted.fork_relink_waiting_owners() < 2 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "both outcomes should wait on their owners' mobs"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    let reports = restarted.relink_restored_fork_children().await;
+    let shared: Vec<_> = reports
+        .iter()
+        .filter(|report| report.job_id == job_id)
+        .map(|report| report.action.clone())
+        .collect();
+    assert_eq!(
+        shared,
+        vec![ForkRelinkAction::Delivered; 2],
+        "both outcomes are submitted durably"
+    );
 
     // Only C resumes: Y is delivered, X keeps waiting on B.
     c_handle.resume().await.expect("resume C");
@@ -4289,11 +4254,10 @@ async fn children_sharing_a_job_id_are_each_retried_as_their_own_job() {
             .contains("zzz-shared-y"),
         "C's owner is delivered Y's outcome"
     );
-    assert_eq!(completion_records(&fixture, &b_owner, &job_id).await, 0);
     assert_eq!(
-        restarted.fork_relink_waiting_owners(),
-        1,
-        "only X still waits, on B"
+        completion_records(&fixture, &b_owner, &job_id).await,
+        0,
+        "X still waits, on B"
     );
 
     // B resumes: X is delivered, once.
@@ -4308,6 +4272,5 @@ async fn children_sharing_a_job_id_are_each_retried_as_their_own_job() {
         "B's owner is delivered X's outcome"
     );
     assert_eq!(completion_records(&fixture, &c_owner, &job_id).await, 1);
-    assert_eq!(restarted.fork_relink_waiting_owners(), 0);
     fixture.teardown().await;
 }

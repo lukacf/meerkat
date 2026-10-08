@@ -2729,10 +2729,12 @@ mod tests {
         let hooks = Arc::new(meerkat_core::PostCommitHookDispatcher::new(
             meerkat_core::SessionId::new(),
         ));
-        hooks.configure(
-            Some(Arc::new(RecordingPostCommitHook { sender: hook_tx })),
-            meerkat_core::HookRunOverrides::default(),
-        );
+        hooks
+            .configure(
+                Some(Arc::new(RecordingPostCommitHook { sender: hook_tx })),
+                meerkat_core::HookRunOverrides::default(),
+            )
+            .expect("configure test post-commit hooks");
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime).with_post_commit_hooks(hooks));
 
         let result = handle_tools_call(

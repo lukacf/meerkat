@@ -1064,6 +1064,65 @@ async fn custody_bound_shell_call_records_then_settles() {
     .expect("observed group exit must release custody");
 }
 
+/// The gated foreground entry runs after custody recorded the spawned leader
+/// and before the gate release. A refusal there (here: authority revoked by
+/// the time the entry runs) keeps the gate closed, so the command never runs
+/// and the prologue is terminated and reaped; a permitted sibling call still
+/// runs under the same custody.
+#[tokio::test]
+async fn refused_entry_after_custody_record_never_releases_the_gate() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let scope = scope();
+    let dir = root.path().join(scope.as_str());
+    let (custody, _) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+    let tool = ShellTool::new(sh_config(project.path()));
+    tool.job_manager.bind_process_custody(custody).unwrap();
+    let marker = project.path().join("entered");
+    let command = json!({"command": format!("touch '{}'", marker.display())});
+
+    let revoked = AtomicBool::new(true);
+    let entries = AtomicUsize::new(0);
+    let records_at_entry = AtomicUsize::new(0);
+    let entry: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) = &|| {
+        entries.fetch_add(1, Ordering::SeqCst);
+        records_at_entry.store(record_files(&dir).len(), Ordering::SeqCst);
+        if revoked.load(Ordering::SeqCst) {
+            Err(meerkat_core::ToolError::AuthorizationRefused {
+                refusal: meerkat_core::authorization::OperationRefused::new(
+                    meerkat_core::authorization::OperationRefusalKind::Denied,
+                ),
+            })
+        } else {
+            Ok(())
+        }
+    };
+    let refused = tool
+        .call_with_entry(command.clone(), Some("call-refused"), None, Some(entry))
+        .await;
+    assert!(
+        matches!(&refused, Err(crate::builtin::BuiltinToolError::EntryRefused(error))
+            if matches!(**error, meerkat_core::ToolError::AuthorizationRefused { .. })),
+        "typed refusal survives: {refused:?}"
+    );
+    assert_eq!(entries.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        records_at_entry.load(Ordering::SeqCst),
+        1,
+        "the entry ran after custody recorded the spawned leader"
+    );
+    assert!(!marker.exists(), "the gate never released the command");
+
+    revoked.store(false, Ordering::SeqCst);
+    tool.call_with_entry(command, Some("call-sibling"), None, Some(entry))
+        .await
+        .expect("permitted call runs under the same custody");
+    assert!(marker.exists());
+}
+
 /// Child "gateway" role for
 /// [`gateway_sigkill_mid_tool_is_recovered_before_new_work`]. Inert unless the
 /// parent test launches this binary with the role environment.

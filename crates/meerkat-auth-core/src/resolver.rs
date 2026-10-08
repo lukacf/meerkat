@@ -297,10 +297,10 @@ async fn resolve_command_credential_via_lease(
             "AuthMachine command-credential {context} failed: {error}"
         ))
     }
-    // The handle is shared across bindings; reset this key's prior state, then
-    // record the cached credential's synthetic expiry so the freshness verdict
-    // reflects THIS cache entry.
-    let _ = auth_lease.release_lease(&lease_key);
+    // Acquire projects this cache entry's expiry onto the existing key and
+    // retains the existing one-generation publication. Reading cached bytes
+    // is not logout: do not release custody, drain OAuth flows, clear prior
+    // refresh history, or emit a Released event before the freshness decision.
     auth_lease
         .acquire_lease(&lease_key, synthetic_expiry)
         .map_err(|e| lifecycle_err("acquire", e))?;
@@ -2899,6 +2899,38 @@ mod tests {
         // comparison. With a primed cache and a fresh valid lease, the lease
         // authorizes the cached credential and the subprocess is NOT re-run.
         use crate::auth_store::{CommandCredentialRunner, CommandCredentialSpec};
+        use tracing::instrument::WithSubscriber;
+
+        // Observe the real generated handle's audit, not a mock lease verdict.
+        #[derive(Clone)]
+        struct LeaseAudit(Arc<std::sync::Mutex<Vec<String>>>);
+        impl tracing::Subscriber for LeaseAudit {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.target() == "meerkat::auth::audit"
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Action<'a>(&'a mut Vec<String>);
+                impl tracing::field::Visit for Action<'_> {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "action" {
+                            self.0.push(format!("{value:?}"));
+                        }
+                    }
+                }
+                event.record(&mut Action(&mut self.0.lock().unwrap()));
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
 
         let run_log = std::env::temp_dir().join(format!("rkat-cmd-{}", uuid::Uuid::new_v4()));
         // Each subprocess run appends a line and prints the running count as the
@@ -2934,11 +2966,17 @@ mod tests {
             },
             "api_key",
         );
+        let owner = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let lease_key = LeaseKey::from_credential_identity(binding.credential_identity());
+        owner.acquire_lease(&lease_key, u64::MAX).unwrap();
+        let before = owner.snapshot(&lease_key);
         let env = ResolverEnvironment::testing()
-            .with_auth_lease_handle(StaticAuthLeaseHandle::valid().generated());
+            .with_auth_lease_handle(generated_auth_lease_handle_for_test(owner.clone()));
+        let audit = LeaseAudit(Arc::default());
 
         // Fresh valid lease authorizes the cached credential: reuse, no re-run.
         let reused = resolve_command_credential_via_lease(&env, &binding, &runner)
+            .with_subscriber(audit.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -2950,6 +2988,35 @@ mod tests {
         assert_eq!(
             line_count, 1,
             "command must not be re-run when the lease authorizes the cached credential"
+        );
+        let projected = owner.snapshot(&lease_key);
+        assert_eq!(projected.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(projected.generation, before.generation + 1);
+        assert!(
+            projected
+                .expires_at
+                .is_some_and(|expiry| expiry > epoch_secs((env.now)()))
+        );
+        assert_eq!(
+            *audit.0.lock().unwrap(),
+            vec!["acquire_lease"],
+            "cached resolution must not release credentials, drain OAuth, or enter administrative custody"
+        );
+        resolve_command_credential_via_lease(&env, &binding, &runner)
+            .with_subscriber(audit.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            owner.snapshot(&lease_key).generation,
+            projected.generation + 1
+        );
+        assert_eq!(
+            *audit.0.lock().unwrap(),
+            vec!["acquire_lease", "acquire_lease"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&run_log).unwrap().lines().count(),
+            1
         );
 
         // With NO lease handle, caching has no owning authority, so the command

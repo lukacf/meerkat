@@ -6,6 +6,8 @@
 //! sessions with exclusive backend execution custody. Restart and unloaded
 //! administrative controller scope are not established by this adapter.
 
+mod review_context;
+
 use std::sync::{Arc, Weak};
 
 use meerkat_authorization::grant_policy::{
@@ -122,6 +124,27 @@ struct NativeGrantWorkAuthorizationHost {
 }
 
 impl NativeWorkAuthorizationHost for NativeGrantWorkAuthorizationHost {
+    fn context_control_authorization(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<WorkAuthorizationContext, meerkat_core::OperationAuthorizationError> {
+        let owner = self
+            .machine
+            .upgrade()
+            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
+        owner
+            .require_governed_execution_custody()
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        let context = self.policy.context_control_authorization(control);
+        Ok(WorkAuthorizationContext::new(
+            Arc::new(NativeControlAuthorization {
+                inner: Arc::clone(context.authorization()),
+                machine: self.machine.clone(),
+            }),
+            OperationExecutionScope::Domain,
+        ))
+    }
+
     fn authenticate_association(
         &self,
         runtime: &LogicalRuntimeId,
@@ -171,16 +194,16 @@ impl NativeWorkAuthorizationHost for NativeGrantWorkAuthorizationHost {
             .collect::<Vec<_>>()
             .into();
         let run = NativeRunCustody::for_batch(batch, self.machine.clone())?;
-        let native_owner = NativeAcceptedWorkOwner {
+        let native_owner = Arc::new(NativeAcceptedWorkOwner {
             run: run.clone(),
             runtime_id: batch.runtime_id().to_string(),
             selected_input_bindings: batch.selected_input_bindings.clone(),
             associations: Arc::clone(&associations),
             invocation_owner: Arc::clone(&self.invocation_owner),
-        };
+        });
         let policy = Arc::new(GrantBackedWorkPolicy::new(
             Arc::clone(&self.grants),
-            Arc::new(native_owner),
+            native_owner.clone(),
             Arc::clone(&self.operation_owner),
         ));
         let context = policy
@@ -196,6 +219,8 @@ impl NativeWorkAuthorizationHost for NativeGrantWorkAuthorizationHost {
         let authorization = Arc::new(NativeRunAuthorization {
             inner: Arc::clone(context.authorization()),
             run,
+            owner: native_owner,
+            originals: batch.contributors().to_vec().into(),
         });
         WorkAuthorizationContext::new(authorization, batch.execution_scope().clone())
             .with_controller_client(controller)
@@ -211,14 +236,11 @@ struct NativeAcceptedWorkOwner {
     invocation_owner: Arc<dyn AdmittedWorkPolicyOwner>,
 }
 
-impl AdmittedWorkPolicyOwner for NativeAcceptedWorkOwner {
-    fn authorize_admitted_work(
+impl NativeAcceptedWorkOwner {
+    fn check_current_membership(
         &self,
-        association: &InputAuthorityAssociation,
         binding: &PreparedAuthorizationBinding,
-        purpose: LocalPolicyPurpose,
-        now_ms: u64,
-    ) -> Result<WorkOwnerAllowance, meerkat_core::OperationAuthorizationError> {
+    ) -> Result<(), meerkat_core::OperationAuthorizationError> {
         self.run.check_binding(binding)?;
         self.run.check_durability()?;
         let machine = self
@@ -229,11 +251,6 @@ impl AdmittedWorkPolicyOwner for NativeAcceptedWorkOwner {
         machine
             .require_governed_execution_custody()
             .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
-        if association.candidate().target.logical_runtime.as_str() != self.runtime_id.as_str()
-            || !self.associations.contains(association)
-        {
-            return Err(malformed().into());
-        }
         {
             // Actual owner only: no sessions, mutation or driver coordination
             // gate is needed to read this already accepted batch. This short
@@ -272,6 +289,24 @@ impl AdmittedWorkPolicyOwner for NativeAcceptedWorkOwner {
             }) {
                 return Err(malformed().into());
             }
+        }
+        Ok(())
+    }
+}
+
+impl AdmittedWorkPolicyOwner for NativeAcceptedWorkOwner {
+    fn authorize_admitted_work(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        purpose: LocalPolicyPurpose,
+        now_ms: u64,
+    ) -> Result<WorkOwnerAllowance, meerkat_core::OperationAuthorizationError> {
+        self.check_current_membership(binding)?;
+        if association.candidate().target.logical_runtime.as_str() != self.runtime_id.as_str()
+            || !self.associations.contains(association)
+        {
+            return Err(malformed().into());
         }
         // Retained originals include every pre-stage coalesced contribution.
         // They are immutable input data, not current account/route permission.
@@ -379,9 +414,21 @@ impl NativeRunCustody {
 struct NativeRunAuthorization {
     inner: Arc<dyn WorkAuthorization>,
     run: NativeRunCustody,
+    owner: Arc<NativeAcceptedWorkOwner>,
+    // Compact original attribution only, once per admitted batch. Payloads are
+    // not copied or retained by R1 authorization; R2 reads their existing rows.
+    originals: Arc<[crate::input_authority::RetainedInputAuthority]>,
 }
 
 impl WorkAuthorization for NativeRunAuthorization {
+    fn read_review_context<'a>(
+        &'a self,
+        binding: &'a PreparedAuthorizationBinding,
+        attribution: Option<&'a meerkat_core::approval::review::ReviewOperationAttribution>,
+    ) -> meerkat_core::approval::review::ReviewContextFuture<'a> {
+        Box::pin(self.read_native_review_context(binding, attribution))
+    }
+
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         self.inner.controller_model_selection()
     }
@@ -423,6 +470,16 @@ struct NativePreparedAuthorization {
 }
 
 impl PreparedOperationAuthorization for NativePreparedAuthorization {
+    fn policy_observation(
+        &self,
+    ) -> Option<meerkat_core::authorization::PolicyPublicationObservation> {
+        self.prepared.policy_observation()
+    }
+
+    fn review_tier(&self) -> meerkat_core::authorization::OperationReviewTier {
+        self.prepared.review_tier()
+    }
+
     fn check_current(
         &self,
         binding: &PreparedAuthorizationBinding,
@@ -558,17 +615,37 @@ mod tests {
             let AuthorizationOperation::Source(facts) = &binding.facts().operation else {
                 return Err(denied().into());
             };
-            let SourceAuthorizationTarget::External(target) = &facts.target else {
-                return Err(denied().into());
-            };
             if purpose != LocalPolicyPurpose::Operation
                 || facts.usage != SourceAuthorizationUse::Read
-                || target.authority != self.domain.authority
-                || target.namespace.as_ref() != self.domain.namespace
-                || target.id.as_ref() != "record"
             {
                 return Err(denied().into());
             }
+            // This explicit fixture owner understands native input reads;
+            // production owners must supply their own resource policy mapping.
+            let review_tier = match &facts.target {
+                SourceAuthorizationTarget::RuntimeInput {
+                    owner_session_id,
+                    runtime_epoch_id,
+                    ..
+                } if matches!(&binding.facts().execution_scope,
+                        OperationExecutionScope::RuntimeInput { owner_session_id: session, runtime_epoch_id: epoch, .. }
+                        if owner_session_id == session && runtime_epoch_id == epoch) =>
+                {
+                    meerkat_core::authorization::OperationReviewTier::R1
+                }
+                SourceAuthorizationTarget::External(target)
+                    if target.authority == self.domain.authority
+                        && target.namespace.as_ref() == self.domain.namespace
+                        && matches!(target.id.as_ref(), "record" | "reviewed-record") =>
+                {
+                    if target.id.as_ref() == "reviewed-record" {
+                        meerkat_core::authorization::OperationReviewTier::R2
+                    } else {
+                        meerkat_core::authorization::OperationReviewTier::R1
+                    }
+                }
+                _ => return Err(denied().into()),
+            };
             Ok(LocalPolicyAllowance {
                 operation_values: vec![LocalOperationValues {
                     action: ActionRef {
@@ -585,6 +662,7 @@ mod tests {
                 }],
                 restrictions: ExecutionRestrictions::unrestricted(),
                 expires_at_ms: 10_000,
+                review_tier,
             })
         }
     }
@@ -844,6 +922,15 @@ mod tests {
         run: &meerkat_core::RunId,
         domain: &ResourceDomain,
     ) -> PreparedAuthorizationBinding {
+        binding_for(context, run, domain, "record")
+    }
+
+    fn binding_for(
+        context: &WorkAuthorizationContext,
+        run: &meerkat_core::RunId,
+        domain: &ResourceDomain,
+        record: &str,
+    ) -> PreparedAuthorizationBinding {
         PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
             operation_id: meerkat_core::OperationId::new(),
             execution_scope: context.execution_scope().clone(),
@@ -853,11 +940,38 @@ mod tests {
                 target: SourceAuthorizationTarget::External(OwnerQualifiedTarget {
                     authority: domain.authority.clone(),
                     namespace: domain.namespace.clone().into(),
-                    id: "record".into(),
+                    id: record.into(),
                 }),
                 usage: SourceAuthorizationUse::Read,
             }),
         })
+    }
+
+    #[tokio::test]
+    async fn native_run_authorization_delegates_the_owner_review_tier() {
+        use meerkat_core::authorization::{OperationReviewTier, PreparedOperationCheck};
+        let (_machine, _session, _id, run, context, domain) = accepted().await;
+        // Through the actual native chain: NativeRunAuthorization ->
+        // NativePreparedAuthorization -> audited grant-backed compiled decision.
+        let plain = PreparedOperationCheck::prepare(
+            context.clone(),
+            binding_for(&context, &run, &domain, "record"),
+        )
+        .expect("current native owners");
+        assert_eq!(plain.review_tier(), OperationReviewTier::R1);
+        let reviewed = PreparedOperationCheck::prepare(
+            context.clone(),
+            binding_for(&context, &run, &domain, "reviewed-record"),
+        )
+        .expect("current native owners");
+        assert_eq!(
+            reviewed.review_tier(),
+            OperationReviewTier::R2,
+            "the native wrapper must not default the owner tier away"
+        );
+        let current = reviewed.current().expect("unchanged owners");
+        assert!(current.same_check(&reviewed));
+        assert_eq!(current.review_tier(), OperationReviewTier::R2);
     }
 
     #[tokio::test]
@@ -1128,6 +1242,7 @@ mod tests {
                 }],
                 restrictions: ExecutionRestrictions::unrestricted(),
                 expires_at_ms: 10_000,
+                review_tier: meerkat_core::authorization::OperationReviewTier::R1,
             })
         }
     }
@@ -2405,4 +2520,74 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     mod memory_persistence;
+}
+
+/// Recheck physical native custody at the final control entry, after service
+/// queues/locks. A prepared local policy cannot outlive its runtime owner.
+struct NativeControlAuthorization {
+    inner: Arc<dyn WorkAuthorization>,
+    machine: Weak<MeerkatMachineShared>,
+}
+
+impl WorkAuthorization for NativeControlAuthorization {
+    fn prepare(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<Arc<dyn PreparedOperationAuthorization>, meerkat_core::OperationAuthorizationError>
+    {
+        self.prepare_observed(binding).result
+    }
+
+    fn prepare_observed(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> meerkat_core::authorization::ObservedAuthorizationResult<
+        Arc<dyn PreparedOperationAuthorization>,
+    > {
+        self.inner.prepare_observed(binding).map(|inner| {
+            Arc::new(NativeControlDecision {
+                inner,
+                machine: self.machine.clone(),
+            }) as Arc<dyn PreparedOperationAuthorization>
+        })
+    }
+}
+
+struct NativeControlDecision {
+    inner: Arc<dyn PreparedOperationAuthorization>,
+    machine: Weak<MeerkatMachineShared>,
+}
+
+impl PreparedOperationAuthorization for NativeControlDecision {
+    fn policy_observation(
+        &self,
+    ) -> Option<meerkat_core::authorization::PolicyPublicationObservation> {
+        self.inner.policy_observation()
+    }
+
+    fn review_tier(&self) -> meerkat_core::authorization::OperationReviewTier {
+        self.inner.review_tier()
+    }
+
+    fn check_current(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        let owner = self
+            .machine
+            .upgrade()
+            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
+        owner
+            .require_governed_execution_custody()
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        self.inner.check_current(binding)
+    }
+
+    fn observe(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+        observation: OperationObservation,
+    ) -> Result<(), OperationObservationError> {
+        self.inner.observe(binding, observation)
+    }
 }

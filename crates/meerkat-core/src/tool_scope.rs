@@ -32,6 +32,35 @@ impl ToolFilter {
             Self::Allow(names) | Self::Deny(names) => Some(names),
         }
     }
+
+    /// The filter admitting exactly the tools both `self` and `other` admit.
+    /// Never wider than either side; an empty allow-set stays deny-all.
+    #[must_use]
+    pub fn narrowed_by(&self, other: &ToolFilter) -> ToolFilter {
+        match (self, other) {
+            (Self::All, filter) | (filter, Self::All) => filter.clone(),
+            (Self::Allow(left), Self::Allow(right)) => Self::Allow(
+                left.iter()
+                    .filter(|name| right.contains(name.as_str()))
+                    .cloned()
+                    .collect(),
+            ),
+            (Self::Allow(allow), Self::Deny(deny)) | (Self::Deny(deny), Self::Allow(allow)) => {
+                Self::Allow(
+                    allow
+                        .iter()
+                        .filter(|name| !deny.contains(name.as_str()))
+                        .cloned()
+                        .collect(),
+                )
+            }
+            (Self::Deny(left), Self::Deny(right)) => {
+                let mut union = left.clone();
+                union.extend(right.iter().cloned());
+                Self::Deny(union)
+            }
+        }
+    }
 }
 
 /// Session metadata key storing the persisted external tool filter.
@@ -56,6 +85,9 @@ pub struct ToolScopeSnapshot {
     pub visible_names: Vec<ToolName>,
     pub capability_base_filter: ToolFilter,
     pub base_filter: ToolFilter,
+    /// Names the session's execution policy makes unreachable, hidden from
+    /// the visible scope (see `SessionToolVisibilityState::policy_base_filter`).
+    pub policy_base_filter: ToolFilter,
     pub active_external_filter: ToolFilter,
     pub active_turn_allow: Option<Vec<ToolName>>,
     pub active_turn_deny: Vec<ToolName>,
@@ -1032,6 +1064,10 @@ mod generated_visibility_test_owner {
                 state,
                 "inherited_base_filter",
             )?)?,
+            policy_base_filter: tool_filter_from_value(required_state_field(
+                state,
+                "policy_base_filter",
+            )?)?,
             active_filter: tool_filter_from_value(required_state_field(state, "active_filter")?)?,
             staged_filter: tool_filter_from_value(required_state_field(state, "staged_filter")?)?,
             active_requested_deferred_names: state_string_set(state, "active_deferred_names")?,
@@ -1074,6 +1110,10 @@ mod generated_visibility_test_owner {
                         (
                             "inherited_base_filter",
                             tool_filter_value(&visibility_state.inherited_base_filter),
+                        ),
+                        (
+                            "policy_base_filter",
+                            tool_filter_value(&visibility_state.policy_base_filter),
                         ),
                         (
                             "active_filter",
@@ -1548,6 +1588,7 @@ impl ToolScope {
             ),
             capability_base_filter: visibility_state.capability_base_filter.clone(),
             base_filter: visibility_state.inherited_base_filter.clone(),
+            policy_base_filter: visibility_state.policy_base_filter.clone(),
             active_external_filter: visibility_state.active_filter.clone(),
             active_turn_allow: state.active_turn_allow.as_ref().map(sorted_names),
             active_turn_deny: sorted_names(&state.active_turn_deny),
@@ -1779,6 +1820,14 @@ impl ToolScope {
                 state,
                 visibility_state,
                 &visibility_state.inherited_base_filter,
+            ),
+            // Policy names need no witnesses: a deny may name a tool this
+            // build never mounted.
+            Self::effective_filter_for_current_projection(
+                state,
+                visibility_state,
+                &visibility_state.policy_base_filter,
+                false,
             ),
             Self::effective_filter_for_current_projection(
                 state,
@@ -2063,6 +2112,12 @@ impl ToolScope {
             Self::effective_filter_for_current_projection(
                 &state,
                 &visibility_state,
+                &visibility_state.policy_base_filter,
+                false,
+            ),
+            Self::effective_filter_for_current_projection(
+                &state,
+                &visibility_state,
                 &visibility_state.staged_filter,
                 require_filter_witnesses,
             ),
@@ -2118,6 +2173,7 @@ impl ToolScope {
             && Self::compose(&[
                 previous_state.capability_base_filter.clone(),
                 previous_state.inherited_base_filter.clone(),
+                previous_state.policy_base_filter.clone(),
                 previous_state.active_filter.clone(),
             ])
             .allows(crate::VIEW_IMAGE_TOOL_NAME);
@@ -2130,6 +2186,7 @@ impl ToolScope {
             && Self::compose(&[
                 next_state.capability_base_filter.clone(),
                 next_state.inherited_base_filter.clone(),
+                next_state.policy_base_filter.clone(),
                 next_state.active_filter.clone(),
             ])
             .allows(crate::VIEW_IMAGE_TOOL_NAME);
@@ -2818,6 +2875,40 @@ mod tests {
     use crate::types::{ToolDef, ToolName, ToolNameSet, ToolProvenance, ToolSourceKind};
     use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::sync::Arc;
+
+    fn name_set(list: &[&str]) -> ToolNameSet {
+        list.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn narrowed_by_admits_only_what_both_filters_admit() {
+        let all = ToolFilter::All;
+        let allow = ToolFilter::Allow(name_set(&["a", "b"]));
+        let deny = ToolFilter::Deny(name_set(&["b", "c"]));
+        assert_eq!(all.narrowed_by(&allow), allow);
+        assert_eq!(allow.narrowed_by(&all), allow);
+        assert_eq!(
+            allow.narrowed_by(&ToolFilter::Allow(name_set(&["b", "c"]))),
+            ToolFilter::Allow(name_set(&["b"]))
+        );
+        assert_eq!(
+            allow.narrowed_by(&deny),
+            ToolFilter::Allow(name_set(&["a"]))
+        );
+        assert_eq!(
+            deny.narrowed_by(&allow),
+            ToolFilter::Allow(name_set(&["a"]))
+        );
+        assert_eq!(
+            deny.narrowed_by(&ToolFilter::Deny(name_set(&["d"]))),
+            ToolFilter::Deny(name_set(&["b", "c", "d"]))
+        );
+        // An empty allow-set is a deny-all ceiling, never "no restriction".
+        let deny_all = ToolFilter::Allow(name_set(&[]));
+        assert_eq!(deny_all.narrowed_by(&all), deny_all);
+        assert_eq!(all.narrowed_by(&deny_all), deny_all);
+        assert_eq!(deny_all.narrowed_by(&deny), deny_all);
+    }
 
     fn set(names: &[&str]) -> ToolNameSet {
         names.iter().map(|name| (*name).to_string()).collect()
@@ -3950,6 +4041,41 @@ mod tests {
             },
             "the refusal must name exactly the unknown allow tools"
         );
+    }
+
+    /// #1807: the policy filter hides the tools the execution policy makes
+    /// unreachable, needs no witnesses (it may name a tool this build never
+    /// mounted), shows in the snapshot, and composes with the other filters.
+    #[test]
+    fn policy_base_filter_hides_unreachable_tools_without_witnesses() {
+        let scope = scope_with_generated_visibility(tools(&["a", "b", "c"]));
+        let mut state = scope.visibility_state().unwrap();
+        state.policy_base_filter = ToolFilter::Deny(set(&["b", "never_mounted"]));
+        scope.set_visibility_state(state).unwrap();
+        let visible = || {
+            scope
+                .visible_tools()
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(visible(), vec!["a".to_string(), "c".to_string()]);
+        let snapshot = scope.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.policy_base_filter,
+            ToolFilter::Deny(set(&["b", "never_mounted"]))
+        );
+        assert!(
+            !snapshot
+                .visible_names
+                .iter()
+                .any(|name| name.as_str() == "b")
+        );
+
+        scope
+            .set_base_filter(ToolFilter::Allow(set(&["a", "b"])))
+            .unwrap();
+        assert_eq!(visible(), vec!["a".to_string()], "filters compose");
     }
 
     #[test]

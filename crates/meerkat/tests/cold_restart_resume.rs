@@ -8,9 +8,11 @@
 //! from the persisted session-store transcript.
 //!
 //! SAME-PROCESS CAVEAT: most "host lifetimes" below are reconstructed inside
-//! one OS process, and "cold stop" means dropping the service/adapter handles
-//! — a graceful teardown whose Drop/shutdown paths may settle state a killed
-//! host never would. Process-global state also survives those "restarts":
+//! one OS process, and a lifetime ends with `stand_down`: its runtime
+//! registrations are unregistered to terminal and its service shuts down, so
+//! the next lifetime may host the sessions. That is a graceful teardown which
+//! may settle state a killed host never would; a test whose subject is what a
+//! crash leaves behind runs its lifetimes as separate processes instead. Process-global state also survives those "restarts":
 //! the validated transcript-graph decode memo, the slim-materialization
 //! substitution memo, and the byte-bound digest-accumulator memo (all honor
 //! the `MEERKAT_DISABLE_GRAPH_DECODE_MEMO` kill switch) can serve host 2
@@ -42,6 +44,70 @@ mod tests {
     use meerkat_runtime::completion::CompletionOutcome;
     use meerkat_runtime::{Input, MeerkatMachine, PromptInput};
     use tokio::time::Duration;
+
+    /// Run `child_test` (an exact test name in this binary) as a "write"
+    /// process and then a "read" process over one temporary realm root. Each
+    /// is a real process, so the writer's exit is a true host death: its
+    /// hosting claims, file locks and process-global memos are all gone.
+    fn run_process_phases(child_test: &str) {
+        let executable = std::env::current_exe().expect("test binary path");
+        let temp = tempfile::tempdir().expect("cross-process realm tempdir");
+        for phase in ["write", "read"] {
+            let output = std::process::Command::new(&executable)
+                .arg("--exact")
+                .arg(child_test)
+                .arg("--nocapture")
+                .env("MEERKAT_COLD_RESTART_PHASE", phase)
+                .env("MEERKAT_COLD_RESTART_ROOT", temp.path())
+                .env("MEERKAT_DISABLE_GRAPH_DECODE_MEMO", "1")
+                .output()
+                .map_err(|error| (phase, error))
+                .expect("spawn cold-restart child process");
+            assert!(
+                output.status.success(),
+                "cold-restart {phase} process failed: {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
+    /// The phase and realm root of a process child, or `None` in the
+    /// ordinary test binary run.
+    fn process_child_phase() -> Option<(String, std::path::PathBuf)> {
+        let phase = std::env::var("MEERKAT_COLD_RESTART_PHASE").ok()?;
+        let root = std::env::var_os("MEERKAT_COLD_RESTART_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("process child requires MEERKAT_COLD_RESTART_ROOT");
+        Some((phase, root))
+    }
+
+    /// End an in-process host lifetime the way a same-process successor
+    /// requires: every runtime registration is unregistered to terminal (which
+    /// joins its session actor) and the service shuts down, so the lifetime's
+    /// session hosting claims are released. A dropped in-process host keeps
+    /// them (its registrations' executors hold the service and the runtime),
+    /// so a successor would be refused; a killed process releases them, which
+    /// the cross-process tests cover.
+    async fn stand_down(
+        service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        adapter: &Arc<MeerkatMachine>,
+    ) {
+        for registration in adapter.current_session_registration_witnesses().await {
+            assert!(
+                adapter
+                    .unregister_session_registration_until_terminal_if_current(&registration)
+                    .await
+                    .expect("unregister the lifetime's runtime registration"),
+                "the lifetime's current registration is torn down"
+            );
+        }
+        service
+            .try_shutdown()
+            .await
+            .expect("shut the lifetime's session service down");
+    }
 
     async fn build_service(
         root: &std::path::Path,
@@ -289,6 +355,7 @@ mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
+            stand_down(&service, &adapter).await;
             (session_id, systems)
         };
 
@@ -381,6 +448,7 @@ mod tests {
                 .await
                 .expect("append ordinary System message");
             run_prompt(&adapter, &session_id, "turn after context append").await;
+            stand_down(&service, &adapter).await;
             session_id
         };
 
@@ -546,15 +614,28 @@ mod tests {
     /// across a simulated host restart, and resumed turns must continue the
     /// persisted history.
     #[cfg(feature = "jsonl-store")]
-    #[tokio::test]
-    async fn cold_restart_resume_jsonl_realm_recovers_runtime_authority() {
-        let temp = tempfile::tempdir().expect("tempdir");
+    #[test]
+    fn cold_restart_resume_jsonl_realm_recovers_runtime_authority() {
+        // Each host lifetime is its own process: the writer really dies, so
+        // the accepted input is left exactly as a crash leaves it.
+        run_process_phases(
+            "tests::cold_restart_resume_jsonl_realm_recovers_runtime_authority_process_child",
+        );
+    }
 
-        // First host lifetime: create the session, run one turn, and accept
-        // one more input that is never consumed before the host dies.
-        let (session_id, queued_input_id) = {
+    /// Exact-filtered child entrypoint for the JSONL-realm parent above; a
+    /// no-op during the ordinary test binary run.
+    #[cfg(feature = "jsonl-store")]
+    #[tokio::test]
+    async fn cold_restart_resume_jsonl_realm_recovers_runtime_authority_process_child() {
+        let Some((phase, root)) = process_child_phase() else {
+            return;
+        };
+        let ids_path = root.join("cross-process-ids");
+        if phase == "write" {
             let (service, adapter) =
-                build_service_with_backend(temp.path(), meerkat_store::RealmBackend::Jsonl).await;
+                build_service_with_backend(root.as_path(), meerkat_store::RealmBackend::Jsonl)
+                    .await;
             let session = Session::new();
             let session_id = session.id().clone();
             materialize(&service, &adapter, session).await;
@@ -565,12 +646,19 @@ mod tests {
                 "queued prompt accepted before the crash",
             )
             .await;
-            // Cold stop: the host dies without archiving or retiring anything,
-            // leaving the accepted input unconsumed.
-            (session_id, queued_input_id)
-        };
-
-        let realm_paths = meerkat_store::realm_paths_in(temp.path(), "restart-realm");
+            // The writer process exits without archiving or retiring
+            // anything, leaving the accepted input unconsumed.
+            std::fs::write(
+                &ids_path,
+                serde_json::to_vec(&(session_id, queued_input_id)).expect("encode ids"),
+            )
+            .expect("record the ids for the reader process");
+            return;
+        }
+        let (session_id, queued_input_id): (meerkat::SessionId, meerkat_core::InputId) =
+            serde_json::from_slice(&std::fs::read(&ids_path).expect("read the writer's ids"))
+                .expect("decode the writer's ids");
+        let realm_paths = meerkat_store::realm_paths_in(root.as_path(), "restart-realm");
         assert!(
             realm_paths.runtime_sqlite_path.exists(),
             "jsonl realms must persist runtime authority in the sqlite runtime companion"
@@ -579,7 +667,7 @@ mod tests {
         // Second host lifetime: fresh service + runtime authority over the
         // same durable stores.
         let (service, adapter) =
-            build_service_with_backend(temp.path(), meerkat_store::RealmBackend::Jsonl).await;
+            build_service_with_backend(root.as_path(), meerkat_store::RealmBackend::Jsonl).await;
         let runtime_store = service.runtime_store();
         let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session_id);
         let recovered_inputs = runtime_store
@@ -701,7 +789,8 @@ mod tests {
                 .env("MEERKAT_COLD_RESTART_ROOT", temp.path())
                 .env("MEERKAT_DISABLE_GRAPH_DECODE_MEMO", "1")
                 .output()
-                .unwrap_or_else(|error| panic!("spawn cold-restart {phase} process: {error}"));
+                .map_err(|error| (phase, error))
+                .expect("spawn cold-restart child process");
             assert!(
                 output.status.success(),
                 "cold-restart {phase} process failed: {}\nstdout:\n{}\nstderr:\n{}",
@@ -799,7 +888,8 @@ mod tests {
             let session_id = session.id().clone();
             materialize(&service, &adapter, session).await;
             run_prompt(&adapter, &session_id, "first turn before restart").await;
-            // Cold stop: the host dies without archiving or retiring anything.
+            // The host stops without archiving or retiring anything.
+            stand_down(&service, &adapter).await;
             session_id
         };
 
@@ -854,6 +944,7 @@ mod tests {
             let session_id = session.id().clone();
             materialize_with_prompt(&service, &adapter, session, "member prompt roster v1").await;
             run_prompt(&adapter, &session_id, "the codeword is birch seventeen").await;
+            stand_down(&service, &adapter).await;
             session_id
         };
 
@@ -873,7 +964,8 @@ mod tests {
                 &format!("member prompt {roster}"),
             )
             .await;
-            // Cold stop: no turn, no archive.
+            // The host stops with no turn and no archive.
+            stand_down(&service, &adapter).await;
         }
 
         // Final lifetime: another drifted resume, and this time a turn runs.

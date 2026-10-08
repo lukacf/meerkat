@@ -3600,6 +3600,18 @@ fn route_literal_expr_allowed(expr: &Expr) -> bool {
         | Expr::EmptyMap => true,
         Expr::Some(inner) => route_literal_expr_allowed(inner),
         Expr::SeqLiteral(items) => items.iter().all(route_literal_expr_allowed),
+        // A populated map literal: at least one entry (an empty map is
+        // `EmptyMap`), literal keys and values, and no key twice.
+        Expr::MapLiteral(entries) => {
+            !entries.is_empty()
+                && entries.iter().all(|(key, value)| {
+                    route_literal_expr_allowed(key) && route_literal_expr_allowed(value)
+                })
+                && entries
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (key, _))| entries[..index].iter().all(|(seen, _)| seen != key))
+        }
         _ => false,
     }
 }
@@ -3628,6 +3640,12 @@ fn literal_matches_type(schema: &MachineSchema, expr: &Expr, ty: &TypeRef) -> bo
         }
         (Expr::EmptySet, TypeRef::Set(_)) => true,
         (Expr::EmptyMap, TypeRef::Map(_, _)) => true,
+        (Expr::MapLiteral(entries), TypeRef::Map(key_ty, value_ty)) => {
+            entries.iter().all(|(key, value)| {
+                literal_matches_type(schema, key, key_ty)
+                    && literal_matches_type(schema, value, value_ty)
+            })
+        }
         (Expr::SeqLiteral(items), TypeRef::Seq(inner)) => items
             .iter()
             .all(|item| literal_matches_type(schema, item, inner)),
@@ -3942,5 +3960,60 @@ mod handoff_feedback_type_tests {
             }
             other => panic!("expected HandoffFeedbackBindingTypeMismatch, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod map_literal_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::{literal_matches_type, route_literal_expr_allowed};
+    use crate::{Expr, TypeRef};
+
+    fn text(value: &str) -> Expr {
+        Expr::String(value.into())
+    }
+
+    /// Witness map literals (#1811) must be populated, have distinct literal
+    /// keys, and match the field's map type entry by entry.
+    #[test]
+    fn witness_map_literals_are_populated_distinct_and_typed() {
+        let schema = crate::catalog::canonical_machine_schemas()
+            .into_iter()
+            .next()
+            .expect("a canonical machine");
+        let manifest = TypeRef::Map(Box::new(TypeRef::String), Box::new(TypeRef::String));
+
+        let populated = Expr::MapLiteral(vec![
+            (text("alpha"), text("member-a")),
+            (text("beta"), text("member-b")),
+        ]);
+        assert!(route_literal_expr_allowed(&populated));
+        assert!(literal_matches_type(&schema, &populated, &manifest));
+
+        let duplicate = Expr::MapLiteral(vec![
+            (text("alpha"), text("member-a")),
+            (text("alpha"), text("member-b")),
+        ]);
+        assert!(!route_literal_expr_allowed(&duplicate), "a key twice");
+
+        assert!(
+            !route_literal_expr_allowed(&Expr::MapLiteral(Vec::new())),
+            "an empty map is EmptyMap"
+        );
+
+        let mistyped = Expr::MapLiteral(vec![(text("alpha"), Expr::U64(1))]);
+        assert!(route_literal_expr_allowed(&mistyped));
+        assert!(
+            !literal_matches_type(&schema, &mistyped, &manifest),
+            "a u64 value for a String-valued map"
+        );
+
+        let non_literal =
+            Expr::MapLiteral(vec![(text("alpha"), Expr::Binding("recipient".into()))]);
+        assert!(
+            !route_literal_expr_allowed(&non_literal),
+            "entries are literals"
+        );
     }
 }

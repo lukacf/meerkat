@@ -89,7 +89,7 @@ pub enum MemberRunStarts {
     /// Stopped delivers the hold first).
     NotBound,
     /// Shutdown only, never in a Stop report (a Stop always contacts remote
-    /// members): a remote member a mob Shutdown did not contact (OB3). Its
+    /// members): a remote member a mob Shutdown did not contact. Its
     /// host owns its run starts and teardown; Shutdown never probes a remote
     /// host it is not otherwise stopping a member on.
     DelegatedToHost,

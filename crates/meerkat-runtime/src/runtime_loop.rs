@@ -131,6 +131,19 @@ pub(crate) fn for_bridge_turn_directive(
     }
 }
 
+/// Canonical turn metadata of an original-task continuation input (see
+/// `PromptInput::continuation`): its admitted handling mode and nothing else.
+/// Lives HERE because this file is the single sanctioned construction site
+/// for `RuntimeTurnMetadata` (see `turn_metadata_single_construction_site`).
+pub(crate) fn for_continuation(
+    handling_mode: meerkat_core::types::HandlingMode,
+) -> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        handling_mode: Some(handling_mode),
+        ..Default::default()
+    }
+}
+
 /// Canonical turn metadata of a detached job's completion input (see
 /// `PromptInput::detached_job_completed`): `Steer` handling and nothing else.
 /// Lives HERE because this file is the single sanctioned construction site
@@ -166,6 +179,7 @@ pub(crate) fn merge_batch_turn_metadata(
 
     let mut acc: Option<RuntimeTurnMetadata> = None;
     let mut transcript_identity = TranscriptIdentityConsensus::default();
+    let mut request_reasoning = ReasoningPreferenceConsensus::default();
     // A batch executes as one turn, so it cannot honor multiple per-input
     // handling modes. The machine has already admitted and ordered every
     // input before this fold; use that admission order as the deterministic
@@ -181,6 +195,12 @@ pub(crate) fn merge_batch_turn_metadata(
         meta.work_authorization = None; // Rebuilt only from accepted contributor rows at staging.
         meta.handling_mode = None;
         transcript_identity.observe(&meta.transcript_identity);
+        // The reasoning preference is folded across the whole batch (set
+        // semantics, never a pairwise conflict), from each contributor's own
+        // preference and its own explicit reasoning settings.
+        request_reasoning.observe(&meta);
+        meta.request_reasoning = None;
+        meta.request_reasoning_disposition = None;
         // Identity consensus needs a sticky conflict state across the whole
         // batch. Feeding the lossy empty result of a pairwise conflict into a
         // later merge would let unrelated causality reseed the accumulator.
@@ -195,6 +215,7 @@ pub(crate) fn merge_batch_turn_metadata(
     if let Some(metadata) = acc.as_mut() {
         metadata.handling_mode = batch_handling_mode;
         metadata.transcript_identity = transcript_identity.finish();
+        metadata.request_reasoning_disposition = request_reasoning.finish();
     }
     // Batch-level peer-reply capability mint: every peer *message* delivery
     // in the admitted batch contributes one typed reply capability. Minted
@@ -219,6 +240,52 @@ pub(crate) fn merge_batch_turn_metadata(
         attach_peer_reply_capabilities(metadata, deliveries)?;
     }
     Ok(acc.filter(|m| !m.is_empty()))
+}
+
+/// Order-independent fold of a batch's reasoning preferences: which levels
+/// were preferred, whether any contributor set reasoning explicitly (its own
+/// params, cleared or touching a reasoning knob), and whether any
+/// contributor went without a preference. A sticky value from an earlier
+/// turn is session baseline, not a contributor's explicit setting.
+#[derive(Debug, Clone, Default)]
+struct ReasoningPreferenceConsensus {
+    levels: std::collections::BTreeSet<meerkat_core::model_profile::capabilities::EffortLevel>,
+    explicit: bool,
+    unpreferred: bool,
+}
+
+impl ReasoningPreferenceConsensus {
+    fn observe(&mut self, meta: &meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata) {
+        let explicit = meta.provider_params.as_ref().is_some_and(
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::decides_reasoning,
+        );
+        let preference = meta.request_reasoning.map(|preference| preference.level());
+        self.explicit |= explicit;
+        match preference {
+            Some(level) => {
+                self.levels.insert(level);
+            }
+            None if !explicit => self.unpreferred = true,
+            None => {}
+        }
+    }
+
+    /// `None` when no contributor preferred a level: the batch takes the
+    /// path it always took.
+    fn finish(self) -> Option<meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition> {
+        use meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition;
+        let mut levels = self.levels.into_iter();
+        let first = levels.next()?;
+        Some(if self.explicit {
+            ReasoningBatchDisposition::SupersededByExplicit
+        } else if levels.next().is_some() {
+            ReasoningBatchDisposition::Conflicting
+        } else if self.unpreferred {
+            ReasoningBatchDisposition::MixedWithUnpreferred
+        } else {
+            ReasoningBatchDisposition::Apply(first)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -788,14 +855,18 @@ impl InteractionTerminalPublicationError {
             | crate::RuntimeDriverError::Destroyed
             | crate::RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
             | crate::RuntimeDriverError::LiveContextBarrierRevoked { .. }
+            | crate::RuntimeDriverError::ServedElsewhere { .. }
+            | crate::RuntimeDriverError::HostingUnavailable { .. }
             | crate::RuntimeDriverError::StaleAuthority { .. } => Self::StaleAuthority(detail),
             // A receipt-less terminal is a legitimate read verdict, but
             // terminal publication expects the receipt its run staged.
             crate::RuntimeDriverError::ValidationFailed { .. }
             | crate::RuntimeDriverError::InputRefused { .. }
+            | crate::RuntimeDriverError::RetainedResumeRefused { .. }
             | crate::RuntimeDriverError::InputIdempotencyConflict { .. }
             | crate::RuntimeDriverError::RecoveryCorruption { .. }
             | crate::RuntimeDriverError::InputTerminalWithoutReceipt { .. }
+            | crate::RuntimeDriverError::HostingClaimInvariantViolated { .. }
             | crate::RuntimeDriverError::RecoveryRepairBlocked { .. } => Self::Corrupt(detail),
             crate::RuntimeDriverError::ControllerReadinessUnavailable { .. }
             | crate::RuntimeDriverError::ControllerInUse
@@ -3935,8 +4006,8 @@ fn machine_terminal_completion_error(
             //
             // Refusing this pair corrupted the recovery carrier, which ended
             // the loop task for the remaining life of the process and left the
-            // session unable to run another turn (field regression, household
-            // fleet, 0.8.23). Resolve the typed terminal instead of refusing
+            // session unable to run another turn (field regression, production
+            // deployment, 0.8.23). Resolve the typed terminal instead of refusing
             // it.
             //
             // DERIVE THE CAUSE, DO NOT ASSERT IT, AND DO NOT READ
@@ -5374,6 +5445,12 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         let mut feed_hold: Option<FeedWakeHoldState> = None;
         // The loop's exit (stop, terminal handoff) can end a run too.
         let _loop_exit_run_settlement = authority_binding.run_settlement_publication();
+        // Keep this readiness future across unrelated wakes. With no hooks it
+        // only awaits configuration; no timer, source scan or task allocation
+        // is repeated for ordinary runtime traffic.
+        let background_ready =
+            post_commit_hooks.wait_for_background_completion(FEED_HOLD_REPOLL_CAP);
+        tokio::pin!(background_ready);
         loop {
             // Effects handled in an iteration (a terminal run effect, a stop)
             // can end a run outside `process_queue`.
@@ -5509,6 +5586,22 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             break;
                         }
                     }
+                }
+                () = park_marker.unpark_after(&mut background_ready) => {
+                    // Fixed same-session facts wake the existing idle owner.
+                    // Processing records them without admitting a model turn.
+                    if process_queue(
+                        &driver,
+                        executor_or_return!(),
+                        &mut effect_rx,
+                        completions.as_ref(),
+                        &authority_binding,
+                        &loop_process_teardown_slot,
+                        &mut terminal_handoff,
+                    ).await {
+                        break;
+                    }
+                    background_ready.set(post_commit_hooks.wait_for_background_completion(FEED_HOLD_REPOLL_CAP));
                 }
                 maybe_wake = park_marker.unpark_after(wake_rx.recv()) => {
                     match maybe_wake {
@@ -6045,7 +6138,7 @@ async fn resolve_failed_batch_backlog(
             // back, and no wake producer will ask for it: wakes come from
             // ingress admission, attachment commit, the completion feed and
             // retire, and a rollback triggers none of them. Field evidence
-            // (2026-08-12, household fleet): a rolled-back input sat queued
+            // (2026-08-12, production deployment): a rolled-back input sat queued
             // for 21 minutes with no attempts and no refusals until an app
             // restart re-armed the loop, while its sibling moved only because
             // unrelated ingress happened to wake the loop 288 seconds later.
@@ -6302,6 +6395,33 @@ async fn process_queue(
         authority_binding
             .record_interrupted_tool_notices(&*executor)
             .await;
+
+        if post_commit_hooks.has_ready_background_completions() {
+            // B is held and the actor is idle. Retain exact driver authority
+            // through the writer await; no original work or new-run authority
+            // is borrowed to append these closed runtime-owned facts.
+            let hook_authority = match authority_binding
+                .lock_current_driver_authority(driver, "background hook transcript notices")
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => return true,
+            };
+            if let Some(writer) = executor.transcript_notice_handle() {
+                if let Err(error) = post_commit_hooks
+                    .flush_background_completions_under_turn_finalization_boundary(writer.as_ref())
+                    .await
+                {
+                    tracing::warn!(session_id = %authority_binding.session_id, %error,
+                        "background hook transcript append failed; fixed facts remain retained for retry");
+                }
+            } else {
+                post_commit_hooks.retain_ready_background_completions();
+                tracing::warn!(session_id = %authority_binding.session_id,
+                    "executor cannot persist background hook facts; they remain retained");
+            }
+            drop(hook_authority);
+        }
 
         // A handoff is defined to move the next admitted input, not to mutate
         // an otherwise idle attachment. Returning to the outer wake loop when
@@ -9076,6 +9196,7 @@ mod tests {
             injected_context: Vec::new(),
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9108,6 +9229,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9140,6 +9262,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9173,6 +9296,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9217,6 +9341,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9274,6 +9399,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9500,6 +9626,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9575,6 +9702,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9634,6 +9762,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9689,6 +9818,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9759,6 +9889,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9834,6 +9965,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -9873,6 +10005,151 @@ mod tests {
             Some(InteractionId(interaction_uuid))
         );
         assert_eq!(metadata.transcript_identity.run_id, None);
+    }
+
+    /// One batch contributor for the reasoning-preference fold.
+    #[derive(Debug, Clone, Copy)]
+    enum ReasoningContributor {
+        Prefers(meerkat_core::model_profile::capabilities::EffortLevel),
+        Explicit,
+        ExplicitAndPrefers(meerkat_core::model_profile::capabilities::EffortLevel),
+        UnrelatedKnob,
+        Plain,
+    }
+
+    fn reasoning_contributor(contributor: ReasoningContributor) -> Input {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, ProviderTag, RequestReasoningPreference, RuntimeTurnMetadata,
+            TurnMetadataOverride,
+        };
+        let explicit = || {
+            TurnMetadataOverride::Set(ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(
+                    meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                        reasoning_effort: Some(
+                            meerkat_core::lifecycle::run_primitive::ReasoningEffort::High,
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            })
+        };
+        let prefer = |level| Some(RequestReasoningPreference::set(level).expect("level"));
+        let metadata = match contributor {
+            ReasoningContributor::Prefers(level) => RuntimeTurnMetadata {
+                request_reasoning: prefer(level),
+                ..Default::default()
+            },
+            ReasoningContributor::Explicit => RuntimeTurnMetadata {
+                provider_params: Some(explicit()),
+                ..Default::default()
+            },
+            ReasoningContributor::ExplicitAndPrefers(level) => RuntimeTurnMetadata {
+                provider_params: Some(explicit()),
+                request_reasoning: prefer(level),
+                ..Default::default()
+            },
+            ReasoningContributor::UnrelatedKnob => RuntimeTurnMetadata {
+                provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                    temperature: Some(0.3),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ReasoningContributor::Plain => RuntimeTurnMetadata::default(),
+        };
+        let mut input = make_prompt("batched");
+        if let Input::Prompt(prompt) = &mut input {
+            prompt.turn_metadata = Some(metadata);
+        }
+        input
+    }
+
+    fn reasoning_disposition(
+        contributors: &[ReasoningContributor],
+    ) -> Option<meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition> {
+        let inputs = contributors
+            .iter()
+            .map(|contributor| (InputId::new(), reasoning_contributor(*contributor)))
+            .collect::<Vec<_>>();
+        let semantics = inputs
+            .iter()
+            .map(|(_, input)| admission_semantics(input))
+            .collect::<Vec<_>>();
+        let metadata = merge_batch_turn_metadata(&inputs, &semantics)
+            .expect("a reasoning preference never aborts the batch")
+            .expect("metadata");
+        assert_eq!(
+            metadata.request_reasoning, None,
+            "the per-input preference is folded, never carried as a scalar"
+        );
+        metadata.request_reasoning_disposition
+    }
+
+    /// #1823: the batch's reasoning preference is a set fold (order never
+    /// matters), an explicit reasoning setting on any contributor supersedes
+    /// it, an unrelated explicit knob does not, and a batch without any
+    /// preference takes the path it always took.
+    #[test]
+    fn batch_reasoning_preference_is_an_order_independent_fold() {
+        use ReasoningContributor::*;
+        use meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition as D;
+        use meerkat_core::model_profile::capabilities::EffortLevel::{High, Low};
+        let cases: Vec<(Vec<ReasoningContributor>, Option<D>)> = vec![
+            (vec![Prefers(Low)], Some(D::Apply(Low))),
+            (vec![Prefers(Low), Prefers(Low)], Some(D::Apply(Low))),
+            (
+                vec![Prefers(Low), UnrelatedKnob],
+                Some(D::MixedWithUnpreferred),
+            ),
+            (vec![Prefers(Low), Plain], Some(D::MixedWithUnpreferred)),
+            (vec![Prefers(Low), Prefers(High)], Some(D::Conflicting)),
+            (vec![Prefers(Low), Explicit], Some(D::SupersededByExplicit)),
+            (vec![ExplicitAndPrefers(Low)], Some(D::SupersededByExplicit)),
+            (
+                vec![Prefers(Low), Prefers(High), Plain],
+                Some(D::Conflicting),
+            ),
+            (
+                vec![Prefers(Low), Prefers(High), Explicit],
+                Some(D::SupersededByExplicit),
+            ),
+            (
+                vec![Prefers(Low), Prefers(Low), Plain],
+                Some(D::MixedWithUnpreferred),
+            ),
+            (vec![Plain], None),
+            (vec![Explicit, Plain], None),
+            (vec![UnrelatedKnob], None),
+        ];
+        for (contributors, expected) in cases {
+            // Every ordering of the contributors folds to the same result.
+            let mut order: Vec<usize> = (0..contributors.len()).collect();
+            loop {
+                let ordered = order
+                    .iter()
+                    .map(|index| contributors[*index])
+                    .collect::<Vec<_>>();
+                assert_eq!(reasoning_disposition(&ordered), expected, "{ordered:?}");
+                if !next_permutation(&mut order) {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn next_permutation(order: &mut [usize]) -> bool {
+        let Some(pivot) = (1..order.len()).rev().find(|&i| order[i - 1] < order[i]) else {
+            return false;
+        };
+        let swap = (pivot..order.len())
+            .rev()
+            .find(|&j| order[j] > order[pivot - 1])
+            .unwrap_or(pivot);
+        order.swap(pivot - 1, swap);
+        order[pivot..].reverse();
+        true
     }
 
     #[test]
@@ -10254,6 +10531,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -10527,7 +10805,7 @@ mod tests {
         staged_run_id
     }
 
-    /// Field class (0.8.22 household fleet): a recovery pass rolled two
+    /// Field class (0.8.22 production deployment): a recovery pass rolled two
     /// members' head-of-line inputs from Staged back to Queued, keeping the
     /// durable attribution of the run they had been staged for. `StageForRun`'s
     /// `input_not_run_associated` guard then refused those inputs against every
@@ -10968,7 +11246,7 @@ mod tests {
         }
     }
 
-    /// Field class (0.8.22, household fleet): `QueueAccepted`, then
+    /// Field class (0.8.22, production deployment): `QueueAccepted`, then
     /// `StageForRun(run …)`, then 757+ seconds of nothing. Zero gateway lines
     /// for the run or the input, no error, no transcript append, no state
     /// change. The run existed and owned the input; the executor that had to
@@ -11732,6 +12010,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -11798,6 +12077,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -11858,6 +12138,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -11917,6 +12198,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -11977,6 +12259,7 @@ mod tests {
         let input = Input::FlowStep(FlowStepInput {
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -12034,6 +12317,7 @@ mod tests {
             objective_id: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -12085,6 +12369,7 @@ mod tests {
             objective_id: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -12130,6 +12415,7 @@ mod tests {
             objective_id: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -12196,6 +12482,7 @@ mod tests {
             objective_id: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -12233,6 +12520,7 @@ mod tests {
             objective_id: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -13533,6 +13821,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -13580,6 +13869,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),

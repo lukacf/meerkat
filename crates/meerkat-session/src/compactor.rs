@@ -246,7 +246,7 @@ impl Compactor for DefaultCompactor {
         // never reports usage (voice-only sessions can run for hours
         // without an agent-loop turn, so the fallback is what keeps history
         // bounded). The byte trigger measures the transcript in the unit
-        // providers actually enforce: the 2026-07-29 household incident grew
+        // providers actually enforce: the 2026-07-29 production incident grew
         // a byte-heavy/token-light transcript past Anthropic's request-size
         // cap and failed every turn with `request_too_large` while both
         // token triggers stayed far below threshold. All paths are traced so

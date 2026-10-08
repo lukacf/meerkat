@@ -270,3 +270,33 @@ fn observation_infrastructure_failed_final_refusal_append_is_not_swallowed() {
         "current() must not ignore a failed refusal observation"
     );
 }
+
+#[test]
+fn owner_review_tier_survives_the_audited_production_chain_and_reprepare() {
+    use meerkat_core::authorization::OperationReviewTier;
+    let fixture = Fixture::new();
+    let association = fixture.association();
+    let (policy, _, resources) = fixture.policy(association.clone());
+    let sink = Arc::new(RecordingSink::default());
+    let context = policy
+        .audited_work_context(vec![association].into(), scope(), sink)
+        .expect("audited context");
+    let binding = source(SourceAuthorizationUse::Read, "public");
+    let check = PreparedOperationCheck::prepare(context, binding).expect("real grant checks");
+    assert_eq!(check.review_tier(), OperationReviewTier::R1);
+
+    // The owner requires R2 under the same publication as its permission.
+    let change = fixture
+        .publication
+        .begin_owner_change()
+        .expect("owner publication");
+    *resources.review_tier.lock().expect("review tier") = OperationReviewTier::R2;
+    drop(change);
+
+    // The retained decision keeps its own tier; the current check re-prepares
+    // and carries the freshly resolved tier through every wrapper.
+    assert_eq!(check.review_tier(), OperationReviewTier::R1);
+    let current = check.current().expect("still permitted");
+    assert!(!current.same_check(&check), "owner change re-prepared");
+    assert_eq!(current.review_tier(), OperationReviewTier::R2);
+}

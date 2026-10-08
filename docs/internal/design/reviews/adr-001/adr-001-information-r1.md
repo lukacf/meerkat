@@ -2,7 +2,7 @@
 
 Verdict: GREEN for this review scope. No independently confirmed material design gap. This is a design verdict, not implementation acceptance or evidence that current binaries enforce the proposal.
 
-Reviewed file: `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md`, draft with 444 lines, on 2026-09-30.
+Reviewed file: `(operator-retained path)/docs/internal/design/adr-001-runtime-security.md`, draft with 444 lines, on 2026-09-30.
 
 Source baseline verified locally: Meerkat `54d14e91bd426fcaaafc156227b0b5ab0e23d9a6`, matching ADR lines 50-52. I read the canonical Meerkat dogma and the commentary for singular authority, mechanical projections, and provider/policy seams. I did not edit the ADR or repository source, run builds, or execute security tests.
 

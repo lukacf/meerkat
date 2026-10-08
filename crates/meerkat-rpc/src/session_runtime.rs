@@ -1204,6 +1204,24 @@ impl SessionServiceControlExt for RpcMobSessionService {
         self.service.append_system_context(id, req).await
     }
 
+    async fn append_authenticated_system_context(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        self.service
+            .append_authenticated_system_context(control)
+            .await
+    }
+
+    async fn append_authorized_system_context(
+        &self,
+        prepared: meerkat_core::service::PreparedSystemContextAppend,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        self.service
+            .append_authorized_system_context(prepared)
+            .await
+    }
+
     async fn stage_tool_results(
         &self,
         id: &SessionId,
@@ -1964,6 +1982,10 @@ pub(crate) fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     if let Some(in_progress) = err.teardown_in_progress_session_error() {
         return session_error_to_rpc(in_progress);
     }
+    // A session another runtime owner hosts keeps its typed refusal (#1813).
+    if let Some(hosting) = err.hosting_session_error() {
+        return session_error_to_rpc(hosting);
+    }
     match err {
         RuntimeDriverError::ValidationFailed { reason } => RpcError {
             code: error::INVALID_PARAMS,
@@ -2187,6 +2209,9 @@ pub struct SessionRuntime {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     job_store: Arc<dyn meerkat::DetachedJobStore>,
     runtime_delivery_inbox: meerkat_runtime::RuntimeDeliveryInbox,
+    /// The member address resolver and fork_off/council job owner the mob
+    /// state binds for the delivery owner once it exists.
+    continuation_bindings: Arc<meerkat::ContinuationHostBindings>,
     /// The library delivery owner over `job_store` and
     /// `runtime_delivery_inbox`, once armed.
     runtime_delivery_owner: std::sync::Mutex<Option<meerkat::RuntimeDeliveryOwnerHandle>>,
@@ -2320,33 +2345,214 @@ struct SessionRuntimeDeliveryHost {
     realm_id: String,
 }
 
+/// Admits continuations into this runtime's sessions. A session the runtime
+/// is executing (an owner the host resolver made live, or one mid-turn)
+/// takes the continuation like any runtime input: it joins a running turn at
+/// its next boundary or wakes an idle session. A session without an executor
+/// is cold-attached first and admitted through the RPC waking path, which
+/// starts one.
+struct SessionRuntimeContinuationSink {
+    runtime: Arc<SessionRuntime>,
+}
+
+#[async_trait::async_trait]
+impl meerkat::ContinuationDeliverySink for SessionRuntimeContinuationSink {
+    async fn admit(
+        &self,
+        session: &SessionId,
+        input: meerkat_runtime::Input,
+    ) -> Result<meerkat_core::lifecycle::InputId, String> {
+        let adapter = Arc::clone(&self.runtime.runtime_adapter);
+        let executing = adapter
+            .session_has_executor(session)
+            .await
+            .map_err(|error| error.to_string())?;
+        let outcome = if executing {
+            adapter
+                .accept_input_with_completion(session, input)
+                .await
+                .map_err(|error| error.to_string())?
+                .0
+        } else {
+            self.runtime
+                .prepare_cold_attach(session)
+                .await
+                .map_err(|error| error.message)?;
+            self.runtime
+                .accept_runtime_input_with_active_admission(&adapter, session, input)
+                .await
+                .map_err(|error| error.message)?
+        };
+        match outcome {
+            meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => Ok(input_id),
+            meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => Ok(existing_id),
+            other => Err(format!(
+                "continuation admission was not accepted: {other:?}"
+            )),
+        }
+    }
+
+    async fn admitted_input(
+        &self,
+        session: &SessionId,
+        admission_key: &str,
+    ) -> Result<Option<meerkat_runtime::input_state::StoredInputState>, String> {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+        self.runtime
+            .runtime_adapter
+            .input_state_by_idempotency_key(session, admission_key)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    fn governs_work_authority(&self) -> bool {
+        self.runtime
+            .runtime_adapter
+            .has_native_work_authorization_host()
+    }
+
+    async fn admit_retained(
+        &self,
+        session: &SessionId,
+        input: meerkat_runtime::Input,
+        request: meerkat_runtime::retained_work::RetainedResumeRequest,
+    ) -> Result<meerkat_core::lifecycle::InputId, meerkat::ContinuationAdmitError> {
+        self.runtime
+            .prepare_cold_attach(session)
+            .await
+            .map_err(|error| meerkat::ContinuationAdmitError::Failed(error.message))?;
+        meerkat::retained_admission_outcome(
+            self.runtime
+                .runtime_adapter
+                .accept_retained_resume(session, input, request)
+                .await
+                .map(|(outcome, _completion)| outcome),
+        )
+    }
+}
+
 #[async_trait::async_trait]
 impl meerkat::RuntimeDeliveryHost for SessionRuntimeDeliveryHost {
-    async fn delivery_sink(
+    async fn resolve_address(
         &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat::JobDeliverySink>> {
+        address: &meerkat_runtime::LogicalRuntimeId,
+    ) -> meerkat::AddressResolution {
+        match self.runtime.upgrade() {
+            Some(runtime) => runtime.continuation_bindings.resolve_address(address).await,
+            None => meerkat::AddressResolution::NotServed,
+        }
+    }
+
+    fn retained_job_source(&self) -> Option<Arc<dyn meerkat::RetainedJobSource>> {
+        self.runtime.upgrade()?.continuation_bindings.job_source()
+    }
+
+    async fn continuation_sink(
+        &self,
+        _session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat::ContinuationDeliverySink>> {
         let runtime = self.runtime.upgrade()?;
+        Some(Arc::new(SessionRuntimeContinuationSink { runtime }))
+    }
+
+    async fn delivery_route(&self, session_id: &SessionId) -> Option<meerkat::DeliveryRoute> {
+        let runtime = self.runtime.upgrade()?;
+        // #1813: routed from this runtime owner's claim registry only. A
+        // session another runtime owner of this process hosts is that
+        // owner's to deliver; one held nowhere here is a cold delivery,
+        // decided by the cold-delivery owner's claim attempt.
+        let serving = runtime.runtime_adapter.session_serving(session_id);
+        if serving == meerkat_runtime::SessionServing::HeldByAnotherLocalOwner {
+            return Some(meerkat::DeliveryRoute::ServedElsewhere);
+        }
         let base: Arc<dyn meerkat::JobDeliverySink> = Arc::new(SessionRuntimeJobDeliverySink {
             runtime: Arc::clone(&runtime),
         });
+        let sink: Arc<dyn meerkat::JobDeliverySink> = match runtime
+            .runtime_adapter
+            .ops_lifecycle_registry(session_id)
+            .await
+        {
+            Some(operations) => Arc::new(meerkat::JobAwaitDeliverySink::new(
+                meerkat::JobAwaitCoordinator::new(
+                    self.realm_id.clone(),
+                    runtime.detached_job_service(),
+                    operations,
+                ),
+                base,
+            )),
+            None => base,
+        };
+        Some(match serving {
+            meerkat_runtime::SessionServing::HeldHere => meerkat::DeliveryRoute::ServedHere(sink),
+            meerkat_runtime::SessionServing::NotHeldInThisProcess => {
+                meerkat::DeliveryRoute::Unserved(sink)
+            }
+            meerkat_runtime::SessionServing::HeldByAnotherLocalOwner => {
+                meerkat::DeliveryRoute::ServedElsewhere
+            }
+        })
+    }
+
+    async fn claim_cold_delivery(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Result<meerkat_runtime::HostingClaim, meerkat_runtime::HostingRefused>> {
         Some(
-            match runtime
+            self.runtime
+                .upgrade()?
                 .runtime_adapter
-                .ops_lifecycle_registry(session_id)
-                .await
-            {
-                Some(operations) => Arc::new(meerkat::JobAwaitDeliverySink::new(
-                    meerkat::JobAwaitCoordinator::new(
-                        self.realm_id.clone(),
-                        runtime.detached_job_service(),
-                        operations,
-                    ),
-                    base,
-                )),
-                None => base,
-            },
+                .grant_session_hosting(session_id),
         )
+    }
+}
+
+/// Preserve native refusal until the delivery caller, while existing RPC
+/// callers keep their existing projection. Cleanup failure is infrastructure.
+enum RuntimeInputAdmissionFailure {
+    Rpc(Box<RpcError>),
+    Native(Box<RuntimeDriverError>),
+}
+
+impl From<RpcError> for RuntimeInputAdmissionFailure {
+    fn from(error: RpcError) -> Self {
+        Self::Rpc(Box::new(error))
+    }
+}
+
+impl RuntimeInputAdmissionFailure {
+    fn into_rpc(self) -> RpcError {
+        match self {
+            Self::Rpc(error) => *error,
+            Self::Native(error) => runtime_driver_error_to_rpc(*error),
+        }
+    }
+
+    fn into_delivery(self) -> meerkat::JobDeliveryApplyError {
+        match self {
+            Self::Native(error) => match *error {
+                RuntimeDriverError::InputRefused { refusal } => {
+                    meerkat::JobDeliveryApplyError::Authorization(refusal.into())
+                }
+                // Another runtime owner hosts the recipient (#1813): a skip,
+                // never a block.
+                RuntimeDriverError::ServedElsewhere { session_id } => {
+                    meerkat::JobDeliveryApplyError::ServedElsewhere { session_id }
+                }
+                // Its hosting claim is unavailable: nothing was admitted
+                // unclaimed; a skip, never a block.
+                RuntimeDriverError::HostingUnavailable { session_id } => {
+                    meerkat::JobDeliveryApplyError::HostingUnavailable { session_id }
+                }
+                RuntimeDriverError::ControllerReadinessUnavailable { .. } => {
+                    meerkat::JobDeliveryApplyError::Authorization(
+                        meerkat_core::OperationAuthorizationError::Unavailable,
+                    )
+                }
+                other => meerkat::JobDeliveryApplyError::Infrastructure(other.to_string()),
+            },
+            Self::Rpc(error) => meerkat::JobDeliveryApplyError::Infrastructure(error.message),
+        }
     }
 }
 
@@ -2358,7 +2564,10 @@ struct ExternalEventRuntimeContext {
 
 #[async_trait::async_trait]
 impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
-    async fn apply(&self, application: meerkat::JobDeliveryApplication) -> Result<(), String> {
+    async fn apply(
+        &self,
+        application: meerkat::JobDeliveryApplication,
+    ) -> Result<(), meerkat::JobDeliveryApplyError> {
         use meerkat::JobDeliveryApplication;
 
         match application {
@@ -2370,7 +2579,7 @@ impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
                 content,
             } => self
                 .runtime
-                .append_system_context(
+                .append_system_context_typed(
                     subscription.session_id(),
                     meerkat::job_delivery_notification_request(
                         &job_id,
@@ -2381,7 +2590,23 @@ impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
                 )
                 .await
                 .map(|_| ())
-                .map_err(|error| error.message),
+                .map_err(|error| match error {
+                    SessionControlError::Authorization(error) => {
+                        meerkat::JobDeliveryApplyError::Authorization(error)
+                    }
+                    SessionControlError::Review(error) => {
+                        meerkat::JobDeliveryApplyError::Review(error)
+                    }
+                    // Another runtime owner hosts the recipient (#1813): its
+                    // store-only write was refused; a skip, never a block.
+                    SessionControlError::Session(SessionError::ServedElsewhere { id }) => {
+                        meerkat::JobDeliveryApplyError::ServedElsewhere { session_id: id }
+                    }
+                    SessionControlError::Session(SessionError::HostingUnavailable { id }) => {
+                        meerkat::JobDeliveryApplyError::HostingUnavailable { session_id: id }
+                    }
+                    other => meerkat::JobDeliveryApplyError::Infrastructure(other.to_string()),
+                }),
             JobDeliveryApplication::Event {
                 job_id,
                 delivery_sequence,
@@ -2401,16 +2626,51 @@ impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
                     handling_mode,
                     &content,
                 );
+                // #1813: the session's hosting claim (shared with the cold
+                // delivery's, when this is one) is held from the cold attach
+                // through the admission's registration, so no other runtime
+                // owner can take the session in between. A session another
+                // owner hosts is refused here and skipped, never failed.
+                let hosting = match self.runtime.service.grant_session_hosting(session_id) {
+                    Ok(claim) => claim,
+                    Err(SessionError::ServedElsewhere { id }) => {
+                        return Err(meerkat::JobDeliveryApplyError::ServedElsewhere {
+                            session_id: id,
+                        });
+                    }
+                    Err(SessionError::HostingUnavailable { id }) => {
+                        return Err(meerkat::JobDeliveryApplyError::HostingUnavailable {
+                            session_id: id,
+                        });
+                    }
+                    Err(other) => {
+                        return Err(meerkat::JobDeliveryApplyError::Infrastructure(
+                            other.to_string(),
+                        ));
+                    }
+                };
                 self.runtime
-                    .prepare_cold_attach(session_id)
+                    .service
+                    .prepare_cold_attach(session_id, hosting.clone())
                     .await
-                    .map_err(|error| error.message)?;
+                    .map_err(|error| match error {
+                        SessionError::ServedElsewhere { id } => {
+                            meerkat::JobDeliveryApplyError::ServedElsewhere { session_id: id }
+                        }
+                        SessionError::HostingUnavailable { id } => {
+                            meerkat::JobDeliveryApplyError::HostingUnavailable { session_id: id }
+                        }
+                        other => meerkat::JobDeliveryApplyError::Infrastructure(other.to_string()),
+                    })?;
                 let adapter = Arc::clone(&self.runtime.runtime_adapter);
-                self.runtime
-                    .accept_runtime_input_with_active_admission(&adapter, session_id, input)
+                let admitted = self
+                    .runtime
+                    .accept_runtime_input_with_active_admission_typed(&adapter, session_id, input)
                     .await
                     .map(|_| ())
-                    .map_err(|error| error.message)
+                    .map_err(RuntimeInputAdmissionFailure::into_delivery);
+                drop(hosting);
+                admitted
             }
         }
     }
@@ -2616,6 +2876,8 @@ impl SessionRuntime {
             peer_response_terminal_apply_intent: None,
             directed_interaction_ids: Vec::new(),
             transcript_identity: Default::default(),
+            request_reasoning: None,
+            request_reasoning_disposition: None,
         };
         (!metadata.is_empty()).then_some(metadata)
     }
@@ -2786,8 +3048,14 @@ impl SessionRuntime {
     /// start/attach entry point before its archive and existence prechecks,
     /// never on plain reads.
     pub(crate) async fn prepare_cold_attach(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        // #1813: the hosting claim is taken first and handed over by move; a
+        // session another process hosts is refused typed here.
+        let claim = self
+            .service
+            .grant_session_hosting(session_id)
+            .map_err(session_error_to_rpc)?;
         self.service
-            .prepare_cold_attach(session_id)
+            .prepare_cold_attach(session_id, claim)
             .await
             .map_err(session_error_to_rpc)
     }
@@ -2809,7 +3077,13 @@ impl SessionRuntime {
     /// A runtime turn commits RuntimeStore before refreshing its SessionStore
     /// projection, so an ingress read in that narrow interval must wait instead
     /// of misclassifying the two valid versions as a durable conflict.
-    async fn prepare_runtime_input_ingress(&self, session_id: &SessionId) -> Result<(), RpcError> {
+    ///
+    /// A stale live session is discarded; the returned hosting claim (#1813)
+    /// is held by the caller until its re-materialization.
+    async fn prepare_runtime_input_ingress(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::session_hosting::HostingClaim>, RpcError> {
         let turn_boundary = self
             .service
             .acquire_runtime_turn_finalization_guard(session_id)
@@ -2826,14 +3100,14 @@ impl SessionRuntime {
         drop(turn_boundary);
 
         if archived {
-            return self
-                .reject_archived_persisted_session_without_live(session_id)
-                .await;
+            self.reject_archived_persisted_session_without_live(session_id)
+                .await?;
+            return Ok(None);
         }
         if stale {
-            self.discard_stale_live_session(session_id).await?;
+            return self.discard_stale_live_session(session_id).await;
         }
-        Ok(())
+        Ok(None)
     }
 
     fn session_not_found_rpc(session_id: &SessionId) -> RpcError {
@@ -2864,6 +3138,7 @@ impl SessionRuntime {
     ) -> Self {
         let job_store = persistence.job_store();
         let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
+        let continuation_bindings = persistence.continuation_bindings();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -2945,6 +3220,7 @@ impl SessionRuntime {
             service,
             job_store,
             runtime_delivery_inbox,
+            continuation_bindings,
             runtime_delivery_owner: std::sync::Mutex::new(None),
             monitor_job_managers: Mutex::new(HashMap::new()),
             schedule_service,
@@ -3011,6 +3287,7 @@ impl SessionRuntime {
     ) -> Self {
         let job_store = persistence.job_store();
         let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
+        let continuation_bindings = persistence.continuation_bindings();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -3093,6 +3370,7 @@ impl SessionRuntime {
             service,
             job_store,
             runtime_delivery_inbox,
+            continuation_bindings,
             runtime_delivery_owner: std::sync::Mutex::new(None),
             monitor_job_managers: Mutex::new(HashMap::new()),
             schedule_service,
@@ -3601,6 +3879,37 @@ impl SessionRuntime {
                 ),
                 data: primary.data,
             },
+        }
+    }
+
+    async fn unregister_new_runtime_registration_after_native_error(
+        self: &Arc<Self>,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        runtime_was_registered: bool,
+        staged_session_existed: bool,
+        protect_active_admission: bool,
+        primary: RuntimeDriverError,
+    ) -> RuntimeInputAdmissionFailure {
+        match self
+            .unregister_new_runtime_registration_if_idle(
+                adapter,
+                session_id,
+                runtime_was_registered,
+                staged_session_existed,
+                protect_active_admission,
+            )
+            .await
+        {
+            Ok(()) => RuntimeInputAdmissionFailure::Native(Box::new(primary)),
+            Err(cleanup) => RuntimeInputAdmissionFailure::Rpc(Box::new(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "runtime input admission cleanup unavailable: {}",
+                    cleanup.message
+                ),
+                data: None,
+            })),
         }
     }
 
@@ -5257,6 +5566,17 @@ impl SessionRuntime {
         }
     }
 
+    /// The runtime delivery inbox the delivery owner drains: where the mob
+    /// state submits fork_off and council completions.
+    pub fn runtime_delivery_inbox(&self) -> meerkat_runtime::RuntimeDeliveryInbox {
+        self.runtime_delivery_inbox.clone()
+    }
+
+    /// The continuation services the mob state binds for the delivery owner.
+    pub fn continuation_bindings(&self) -> &meerkat::ContinuationHostBindings {
+        &self.continuation_bindings
+    }
+
     /// Observe the delivery owner's passes, once armed.
     pub fn subscribe_job_delivery_passes(
         &self,
@@ -5822,7 +6142,13 @@ impl SessionRuntime {
             .await
     }
 
-    async fn discard_stale_live_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
+    /// Discard a stale live session (actor and registration). The returned
+    /// hosting claim (#1813) is held by the caller until it has
+    /// re-materialized the session, so hosting never lapses in between.
+    async fn discard_stale_live_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::session_hosting::HostingClaim>, RpcError> {
         self.runtime_state_ops()
             .discard_stale_live_session(session_id)
             .await
@@ -7160,7 +7486,8 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
-        self.service.prepare_cold_attach(session_id).await?;
+        let claim = self.service.grant_session_hosting(session_id)?;
+        self.service.prepare_cold_attach(session_id, claim).await?;
         self.reject_archived_persisted_session_without_live(session_id)
             .await
             .map_err(|_| meerkat_core::service::SessionError::NotFound {
@@ -7261,12 +7588,15 @@ impl SessionRuntime {
             .await?;
         let workgraph_service = self.workgraph_service().ok();
 
-        if self
+        // Held until this turn re-materializes the session (#1813).
+        let _rematerialization_hosting = if self
             .live_session_is_stale(session_id, LiveStalenessPosition::OutsideTurnBoundary)
             .await?
         {
-            self.discard_stale_live_session(session_id).await?;
-        }
+            self.discard_stale_live_session(session_id).await?
+        } else {
+            None
+        };
 
         // Reject build-only overrides before taking active capacity. A
         // system_prompt is not build config: it is an ordinary ordered System
@@ -7706,6 +8036,7 @@ impl SessionRuntime {
             objective_id: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -7731,12 +8062,15 @@ impl SessionRuntime {
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
 
-        if self
+        // Held until the executor below re-registers the session (#1813).
+        let _rematerialization_hosting = if self
             .live_session_is_stale(session_id, LiveStalenessPosition::OutsideTurnBoundary)
             .await?
         {
-            self.discard_stale_live_session(session_id).await?;
-        }
+            self.discard_stale_live_session(session_id).await?
+        } else {
+            None
+        };
         if let Err(primary) = self.ensure_runtime_executor(session_id).await {
             return Err(self
                 .unregister_new_runtime_registration_after_rpc_error(
@@ -7876,7 +8210,19 @@ impl SessionRuntime {
         session_id: &SessionId,
         input: meerkat_runtime::Input,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
-        self.prepare_runtime_input_ingress(session_id).await?;
+        self.accept_runtime_input_with_active_admission_typed(adapter, session_id, input)
+            .await
+            .map_err(RuntimeInputAdmissionFailure::into_rpc)
+    }
+
+    async fn accept_runtime_input_with_active_admission_typed(
+        self: &Arc<Self>,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        input: meerkat_runtime::Input,
+    ) -> Result<meerkat_runtime::AcceptOutcome, RuntimeInputAdmissionFailure> {
+        // Held until the admission below re-registers the session (#1813).
+        let _rematerialization_hosting = self.prepare_runtime_input_ingress(session_id).await?;
         let input_id = input.id().clone();
 
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
@@ -7898,7 +8244,8 @@ impl SessionRuntime {
                     true,
                     primary,
                 )
-                .await);
+                .await
+                .into());
         }
 
         let should_pre_admit = match adapter
@@ -7908,13 +8255,13 @@ impl SessionRuntime {
             Ok(should_pre_admit) => should_pre_admit,
             Err(error) => {
                 return Err(self
-                    .unregister_new_runtime_registration_after_rpc_error(
+                    .unregister_new_runtime_registration_after_native_error(
                         adapter,
                         session_id,
                         runtime_was_registered,
                         staged_session_existed,
                         true,
-                        runtime_driver_error_to_rpc(error),
+                        error,
                     )
                     .await);
             }
@@ -7933,7 +8280,8 @@ impl SessionRuntime {
                             cleanup_protects_active_admission,
                             err,
                         )
-                        .await);
+                        .await
+                        .into());
                 }
             }
         } else {
@@ -7954,7 +8302,8 @@ impl SessionRuntime {
                                 cleanup_protects_active_admission,
                                 err,
                             )
-                            .await);
+                            .await
+                            .into());
                     }
                 };
             pre_admission_registration = Some(
@@ -7974,7 +8323,8 @@ impl SessionRuntime {
                                 cleanup_protects_active_admission,
                                 err,
                             )
-                            .await);
+                            .await
+                            .into());
                     }
                 },
             );
@@ -7987,13 +8337,13 @@ impl SessionRuntime {
             Ok(pair) => pair,
             Err(error) => {
                 return Err(self
-                    .unregister_new_runtime_registration_after_rpc_error(
+                    .unregister_new_runtime_registration_after_native_error(
                         adapter,
                         session_id,
                         runtime_was_registered,
                         staged_session_existed,
                         cleanup_protects_active_admission,
-                        runtime_driver_error_to_rpc(error),
+                        error,
                     )
                     .await);
             }
@@ -10172,45 +10522,134 @@ impl SessionRuntime {
         session_id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, RpcError> {
-        match self
-            .staged_sessions
-            .append_ordered_system_message(session_id, &req, now_unix_secs())
-            .await
-        {
-            Ok(Some(status)) => return Ok(AppendSystemContextResult { status }),
-            Ok(None) => {}
-            Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
-                // Promotion moves the staged slot to `Promoting` before the
-                // live service actor becomes observable. Once the actor is
-                // present it owns ordered context, so fall through to that
-                // authority instead of permanently classifying the overlap
-                // as busy. A still-absent actor means the handoff has not
-                // completed yet and remains a genuine retryable busy window.
-                return match self.service.append_system_context(session_id, req).await {
-                    Ok(result) => Ok(result),
-                    Err(SessionControlError::Session(SessionError::NotFound { .. })) => {
-                        Err(RpcError {
-                            code: error::SESSION_BUSY,
-                            message: format!("session {session_id} is already being materialized"),
-                            data: None,
-                        })
-                    }
-                    Err(err) => Err(system_context_error_to_rpc(err)),
-                };
-            }
-            Err(err) => {
-                return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: err.to_string(),
-                    data: None,
-                });
-            }
-        }
-
-        self.service
-            .append_system_context(session_id, req)
+        self.append_system_context_typed(session_id, req)
             .await
             .map_err(system_context_error_to_rpc)
+    }
+
+    /// Internal typed path also used by durable delivery. Never recover native
+    /// authorization dispositions by parsing an RPC message.
+    async fn append_system_context_typed(
+        &self,
+        session_id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        if self.runtime_adapter.has_native_work_authorization_host() {
+            let control = meerkat_core::service::SystemContextAppendControl::unavailable(
+                session_id.clone(),
+                req.clone(),
+            )?;
+            match self
+                .staged_sessions
+                .apply_system_context_control(&control, now_unix_secs())
+                .await
+            {
+                Ok(Some(result)) => return result,
+                Ok(None) => {}
+                Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
+                    return self
+                        .service
+                        .append_system_context(session_id, req)
+                        .await
+                        .map_err(|error| system_context_promotion_error(error, session_id));
+                }
+                Err(error) => {
+                    return Err(SessionControlError::InvalidRequest {
+                        message: error.to_string(),
+                    });
+                }
+            }
+        } else {
+            match self
+                .staged_sessions
+                .append_ordered_system_message(session_id, &req, now_unix_secs())
+                .await
+            {
+                Ok(Some(status)) => return Ok(AppendSystemContextResult { status }),
+                Ok(None) => {}
+                Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
+                    return self
+                        .service
+                        .append_system_context(session_id, req)
+                        .await
+                        .map_err(|error| system_context_promotion_error(error, session_id));
+                }
+                Err(error) => {
+                    return Err(SessionControlError::InvalidRequest {
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+        self.service.append_system_context(session_id, req).await
+    }
+
+    pub async fn append_authenticated_system_context(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let prepared = self
+            .runtime_adapter
+            .prepare_context_append_observed(Arc::clone(&control));
+        let command = meerkat_core::service::SystemContextAppendControl::from_observed_preparation(
+            Arc::clone(&control),
+            prepared,
+        );
+        match self
+            .staged_sessions
+            .apply_system_context_control(&command, now_unix_secs())
+            .await
+        {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                self.service
+                    .append_authenticated_system_context(control)
+                    .await
+            }
+            Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
+                let id = control.session_id().clone();
+                self.service
+                    .append_authenticated_system_context(control)
+                    .await
+                    .map_err(|error| system_context_promotion_error(error, &id))
+            }
+            Err(error) => Err(SessionControlError::InvalidRequest {
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    pub async fn append_authorized_system_context(
+        &self,
+        prepared: meerkat_core::service::PreparedSystemContextAppend,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        if !self.runtime_adapter.owns_context_append(&prepared) {
+            return Err(meerkat_core::OperationAuthorizationError::Unavailable.into());
+        }
+        let control =
+            meerkat_core::service::SystemContextAppendControl::authorized(prepared.clone());
+        match self
+            .staged_sessions
+            .apply_system_context_control(&control, now_unix_secs())
+            .await
+        {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                self.service
+                    .append_authorized_system_context(prepared)
+                    .await
+            }
+            Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
+                let id = prepared.session_id().clone();
+                self.service
+                    .append_authorized_system_context(prepared)
+                    .await
+                    .map_err(|error| system_context_promotion_error(error, &id))
+            }
+            Err(error) => Err(SessionControlError::InvalidRequest {
+                message: error.to_string(),
+            }),
+        }
     }
 
     /// Get the current state of a session, or `Ok(None)` if the session does
@@ -11281,6 +11720,12 @@ impl SessionRuntime {
 
         self.shutdown_schedule_host().await;
 
+        // Each runtime registration owns its session's hosting claim (#1813),
+        // and its executor holds this runtime, so the claim outlives a drop.
+        // Tear every registration down to terminal (which also joins its
+        // removed session actor) while the service can still discard actors.
+        let registration_teardown = self.unregister_runtime_registrations_for_shutdown().await;
+
         // Shut down the service.
         let service_shutdown = self.service.try_shutdown().await;
 
@@ -11302,7 +11747,40 @@ impl SessionRuntime {
         if let Err(error) = self.runtime_adapter.abort_comms_drains().await {
             tracing::warn!(%error, "failed to abort comms drains during runtime shutdown");
         }
-        service_shutdown
+        registration_teardown.and(service_shutdown)
+    }
+
+    /// Unregister every current runtime registration until terminal, keeping
+    /// the first failure and still tearing down the rest.
+    async fn unregister_runtime_registrations_for_shutdown(
+        &self,
+    ) -> Result<(), meerkat_core::SessionError> {
+        let mut first_error = None;
+        for registration in self
+            .runtime_adapter
+            .current_session_registration_witnesses()
+            .await
+        {
+            if let Err(error) = self
+                .runtime_adapter
+                .unregister_session_registration_until_terminal_if_current(&registration)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %registration.session_id(),
+                    %error,
+                    "runtime registration teardown failed during runtime shutdown"
+                );
+                if first_error.is_none() {
+                    first_error = Some(
+                        error
+                            .hosting_session_error()
+                            .unwrap_or_else(|| meerkat_core::SessionError::Store(Box::new(error))),
+                    );
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     #[cfg(feature = "mcp")]
@@ -11812,7 +12290,8 @@ fn instruction_activation_host_error_to_rpc(
 }
 
 pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
-    if let SessionError::RuntimeUnavailable { .. } = &err {
+    if let SessionError::RuntimeUnavailable { .. } | SessionError::HostingUnavailable { .. } = &err
+    {
         return RpcError {
             code: meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
             message: err.to_string(),
@@ -11821,7 +12300,9 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
     }
     let code = match &err {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
-        SessionError::Busy { .. } => error::SESSION_BUSY,
+        // Another runtime owner hosts the session (#1813): the busy class,
+        // with `kind = "session_served_elsewhere"` in the data.
+        SessionError::Busy { .. } | SessionError::ServedElsewhere { .. } => error::SESSION_BUSY,
         SessionError::FailedWithData { .. } if err.is_runtime_teardown_in_progress() => {
             error::SESSION_BUSY
         }
@@ -12057,9 +12538,55 @@ fn runtime_completion_wait_failure_rpc_reason(
     }
 }
 
+fn system_context_promotion_error(
+    error: SessionControlError,
+    id: &SessionId,
+) -> SessionControlError {
+    match error {
+        SessionControlError::Session(SessionError::NotFound { .. }) => {
+            SessionError::Busy { id: id.clone() }.into()
+        }
+        other => other,
+    }
+}
+
+/// Review feedback keeps its own code and kind: an unsatisfied review is a
+/// local settlement (scope class), an unavailable review is infrastructure.
+pub(crate) fn review_refusal_to_rpc(refusal: meerkat_core::OperationReviewRefusal) -> RpcError {
+    let (code, kind) = match refusal {
+        meerkat_core::OperationReviewRefusal::Unsatisfied { kind } => (
+            meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+            serde_json::json!(kind),
+        ),
+        meerkat_core::OperationReviewRefusal::Unavailable { kind } => {
+            (error::INTERNAL_ERROR, serde_json::json!(kind))
+        }
+    };
+    RpcError {
+        code,
+        message: refusal.to_string(),
+        data: Some(serde_json::json!({ "code": refusal.code(), "kind": kind })),
+    }
+}
+
 fn system_context_error_to_rpc(err: SessionControlError) -> RpcError {
     match err {
         SessionControlError::Session(session_err) => session_error_to_rpc(session_err),
+        auth @ SessionControlError::Authorization(_) => RpcError {
+            code: if matches!(
+                &auth,
+                SessionControlError::Authorization(
+                    meerkat_core::OperationAuthorizationError::Refused(_)
+                )
+            ) {
+                meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code()
+            } else {
+                error::INTERNAL_ERROR
+            },
+            message: auth.to_string(),
+            data: Some(serde_json::json!({ "code": auth.code() })),
+        },
+        SessionControlError::Review(refusal) => review_refusal_to_rpc(refusal),
         SessionControlError::InvalidRequest { message } => RpcError {
             code: error::INVALID_PARAMS,
             message,
@@ -12093,6 +12620,36 @@ mod tests {
     // The module-level import is `mcp`-gated; tests use Duration in every
     // feature set (the governed JSONL lane builds without `mcp`).
     use std::time::Duration;
+
+    #[test]
+    fn delivery_admission_preserves_native_refusal_without_parsing_rpc_text() {
+        let refusal =
+            meerkat_core::OperationRefused::new(meerkat_core::OperationRefusalKind::Denied);
+        let native =
+            RuntimeInputAdmissionFailure::Native(Box::new(RuntimeDriverError::InputRefused {
+                refusal,
+            }));
+        assert!(
+            matches!(native.into_delivery(), meerkat::JobDeliveryApplyError::Authorization(meerkat_core::OperationAuthorizationError::Refused(reason)) if reason.kind() == meerkat_core::OperationRefusalKind::Denied)
+        );
+        let untyped = RuntimeInputAdmissionFailure::from(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: refusal.to_string(),
+            data: None,
+        });
+        assert!(matches!(
+            untyped.into_delivery(),
+            meerkat::JobDeliveryApplyError::Infrastructure(_)
+        ));
+        let unavailable = system_context_error_to_rpc(
+            meerkat_core::OperationAuthorizationError::Unavailable.into(),
+        );
+        assert_eq!(unavailable.code, error::INTERNAL_ERROR);
+        assert_eq!(
+            unavailable.data.unwrap()["code"],
+            "OPERATION_AUTHORIZATION_UNAVAILABLE"
+        );
+    }
 
     fn mutate_test_session(session: &mut Session, mutate: impl FnOnce(&mut Session)) {
         mutate(session);
@@ -14543,6 +15100,296 @@ mod tests {
                 Some(meerkat_runtime::terminal_status::InputTerminalReceiptWait::Resolved(_))
             ),
             "the event input reached its terminal receipt: {wait:?}"
+        );
+    }
+
+    /// A continuation for an idle RPC session is admitted through the
+    /// delivery owner, reads Applied, and its input runs to a terminal.
+    #[tokio::test]
+    async fn a_continuation_wakes_an_idle_rpc_session_and_reads_applied() {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        runtime.set_realm_context(
+            Some(meerkat_core::connection::RealmId::global()),
+            None,
+            None,
+        );
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create_session");
+        runtime.arm_runtime_delivery_owner();
+        let mut passes = runtime
+            .subscribe_job_delivery_passes()
+            .expect("a runtime with a realm arms its owner");
+
+        let continuations = meerkat::ContinuationOwnerService::new(
+            runtime.runtime_delivery_inbox.clone(),
+            Arc::new(meerkat::SessionAddressResolver),
+            Arc::clone(&runtime.runtime_adapter),
+        );
+        let owner = meerkat::ContinuationOwner::Session {
+            session_id: session_id.clone(),
+        };
+        let key = meerkat::ContinuationKey::new("task-1").expect("key");
+        continuations
+            .submit(
+                &owner,
+                meerkat::ContinuationDelivery {
+                    key: key.clone(),
+                    result: meerkat::ContinuationResultRef {
+                        producer: meerkat::ContinuationProducer::Host {
+                            namespace: "tasks".into(),
+                        },
+                        producer_id: "op-1".into(),
+                        result_digest: "sha256:result".into(),
+                        summary: None,
+                    },
+                    body: "the task finished".into(),
+                    handling: meerkat::ContinuationHandling::Queue,
+                },
+                1,
+            )
+            .await
+            .expect("submit");
+
+        let input = tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, async {
+            loop {
+                if let meerkat::ContinuationStatus::Applied { session, input, .. } = continuations
+                    .continuation_status(&owner, &key)
+                    .await
+                    .expect("status")
+                {
+                    assert_eq!(session, session_id);
+                    return input;
+                }
+                passes.changed().await.expect("owner pass channel open");
+            }
+        })
+        .await
+        .expect("the continuation is applied");
+        let wait = tokio::time::timeout(
+            TEST_ASYNC_WITNESS_TIMEOUT,
+            runtime
+                .runtime_adapter()
+                .wait_input_terminal_receipt(&session_id, &input),
+        )
+        .await
+        .expect("the woken session runs the continuation input")
+        .expect("terminal receipt wait");
+        assert!(
+            matches!(
+                wait,
+                Some(meerkat_runtime::terminal_status::InputTerminalReceiptWait::Resolved(_))
+            ),
+            "the continuation input reached its terminal receipt: {wait:?}"
+        );
+        assert!(
+            runtime
+                .runtime_adapter()
+                .input_state_by_idempotency_key(&session_id, "never-admitted")
+                .await
+                .expect("lookup")
+                .is_none()
+        );
+    }
+
+    /// P3-B: a fork_off or council completion owed to a plain RPC session
+    /// whose idle executor the runtime retired reaches it through the mob
+    /// state's bound continuation services: the host resolver asks the RPC
+    /// owner hook (`DetachedOwnerHost`) to make the session live, and the
+    /// completion is applied once and wakes it.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_completion_for_a_retired_plain_rpc_session_wakes_it_through_the_owner_hook() {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        runtime.set_realm_context(
+            Some(meerkat_core::connection::RealmId::global()),
+            None,
+            None,
+        );
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(Config::default(), meerkat_models::canonical()),
+        );
+        let mob_state = crate::router::compose_rpc_mob_state(&runtime, &config_store, None)
+            .expect("compose the RPC mob state");
+        assert!(
+            mob_state.continuation_binding_generation().is_some(),
+            "the RPC mob state binds the runtime's continuation services"
+        );
+        assert!(mob_state.detached_owner_host().is_some());
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create_session");
+        // A detached job's owner ran the turn that dispatched it, so the
+        // session is materialized and reads; a session staged without a turn
+        // reads as gone and its rows are retired, not woken.
+        let (turn_event_tx, _turn_event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "dispatch the detached job".into(),
+                turn_event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the owner's dispatching turn");
+        runtime.arm_runtime_delivery_owner();
+        let mut passes = runtime
+            .subscribe_job_delivery_passes()
+            .expect("a runtime with a realm arms its owner");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("the runtime retires the idle executor");
+        assert!(!runtime.runtime_adapter.contains_session(&session_id).await);
+        mob_state
+            .session_service()
+            .read(&session_id)
+            .await
+            .expect("the retired owner still reads");
+
+        let continuations = meerkat::ContinuationOwnerService::new(
+            runtime.runtime_delivery_inbox(),
+            Arc::new(meerkat::SessionAddressResolver),
+            Arc::clone(&runtime.runtime_adapter),
+        );
+        let owner = meerkat::ContinuationOwner::Session {
+            session_id: session_id.clone(),
+        };
+        let key = meerkat::ContinuationKey::new("council:job-rpc").expect("key");
+        let outcome = serde_json::json!({"result": "COUNCIL-DONE"});
+        continuations
+            .submit(
+                &owner,
+                meerkat::ContinuationDelivery {
+                    key: key.clone(),
+                    result: meerkat::ContinuationResultRef {
+                        producer: meerkat::ContinuationProducer::Council,
+                        producer_id: "job-rpc".into(),
+                        result_digest: meerkat_mob::detached_outcome_digest(&outcome),
+                        summary: None,
+                    },
+                    body: meerkat::ContinuationBody::notice(
+                        meerkat_mob_mcp::detached_completion_notice(
+                            "council",
+                            "job-rpc",
+                            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+                            &outcome,
+                        )
+                        .expect("notice"),
+                    ),
+                    handling: meerkat::ContinuationHandling::Queue,
+                },
+                1,
+            )
+            .await
+            .expect("submit");
+
+        let applied = tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, async {
+            loop {
+                if let meerkat::ContinuationStatus::Applied { session, input, .. } = continuations
+                    .continuation_status(&owner, &key)
+                    .await
+                    .expect("status")
+                {
+                    assert_eq!(session, session_id);
+                    return input;
+                }
+                passes.changed().await.expect("owner pass channel open");
+            }
+        })
+        .await;
+        let input = match applied {
+            Ok(input) => input,
+            Err(_) => {
+                let last_pass = passes.borrow().clone();
+                let read = mob_state
+                    .session_service()
+                    .read(&session_id)
+                    .await
+                    .map(|_| ());
+                let resolved = runtime
+                    .continuation_bindings()
+                    .resolve_address(&meerkat_runtime::LogicalRuntimeId::for_session(&session_id))
+                    .await;
+                let status = continuations.continuation_status(&owner, &key).await;
+                panic!(
+                    "the completion is applied; last pass {last_pass:?}; session read {read:?}; \
+                     resolved {resolved:?}; status {status:?}"
+                )
+            }
+        };
+        let wait = tokio::time::timeout(
+            TEST_ASYNC_WITNESS_TIMEOUT,
+            runtime
+                .runtime_adapter()
+                .wait_input_terminal_receipt(&session_id, &input),
+        )
+        .await
+        .expect("the woken session runs the completion input")
+        .expect("terminal receipt wait");
+        assert!(
+            matches!(
+                wait,
+                Some(meerkat_runtime::terminal_status::InputTerminalReceiptWait::Resolved(_))
+            ),
+            "the completion input reached its terminal receipt: {wait:?}"
+        );
+        assert!(runtime.runtime_adapter.contains_session(&session_id).await);
+    }
+
+    /// #1497 reserve-first rests on this: once a session is retired, a
+    /// continuation can no longer be admitted into it under its admission
+    /// key, so a reservation it never took is safe to repoint.
+    #[tokio::test]
+    async fn a_retired_session_refuses_a_continuation_admission() {
+        use meerkat::ContinuationDeliverySink as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create_session");
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("archive the session");
+
+        let sink = SessionRuntimeContinuationSink {
+            runtime: Arc::clone(&runtime),
+        };
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::continuation(
+            meerkat_core::lifecycle::InputId::new(),
+            "continuation:retired",
+            "the task finished".into(),
+            meerkat_core::types::HandlingMode::Queue,
+        ));
+        let refused = sink.admit(&session_id, input).await;
+        assert!(
+            refused.is_err(),
+            "a retired session must refuse the admission: {refused:?}"
+        );
+        assert!(
+            sink.admitted_input(&session_id, "continuation:retired")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "nothing was admitted under the key"
         );
     }
 
@@ -17234,6 +18081,7 @@ mod tests {
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         ingress_context: None,
+                        retained_resume: None,
                         authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -17354,6 +18202,7 @@ mod tests {
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         ingress_context: None,
+                        retained_resume: None,
                         authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -17530,6 +18379,7 @@ mod tests {
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         ingress_context: None,
+                        retained_resume: None,
                         authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -17652,6 +18502,7 @@ mod tests {
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         ingress_context: None,
+                        retained_resume: None,
                         authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -19584,6 +20435,10 @@ mod tests {
             )
             .await
             .expect("append before runtime reconstruction");
+        // The runtime registration and session actor own the hosting claim
+        // until torn down: a same-process successor needs the awaited
+        // shutdown, not a drop.
+        runtime.shutdown().await;
         drop(runtime);
 
         let (_manifest, reopened_bundle) = meerkat::open_realm_persistence_in(
@@ -21230,6 +22085,7 @@ mod tests {
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -21304,6 +22160,7 @@ mod tests {
         let input = meerkat_runtime::Input::Operation(meerkat_runtime::OperationInput {
             header: meerkat_runtime::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

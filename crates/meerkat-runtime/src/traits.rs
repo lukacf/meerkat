@@ -53,9 +53,55 @@ pub enum RuntimeDriverError {
     #[error("input idempotency conflicts with existing input {existing_id}")]
     InputIdempotencyConflict { existing_id: InputId },
 
+    /// A governed resume of retained work met a terminal policy outcome: the
+    /// original work binding is immutably missing or invalid, or the native
+    /// owner actually denied it. Unavailable owners, observation and store
+    /// failures are never this error.
+    #[error("retained work resume refused: {reason:?}")]
+    RetainedResumeRefused {
+        reason: crate::retained_work::RetainedResumeRefusal,
+    },
+
     /// The runtime has been destroyed.
     #[error("Runtime destroyed")]
     Destroyed,
+
+    /// Another runtime owner hosts this session (another process on the same
+    /// realm, or another machine of this process): it holds the session's
+    /// hosting claim (#1813). No registration was created and no durable
+    /// state was read for registration or written.
+    #[error("session {session_id} is served by another runtime owner on this realm")]
+    ServedElsewhere {
+        session_id: meerkat_core::types::SessionId,
+    },
+
+    /// The store selected cross-process hosting claims, but this session's
+    /// claim cannot be taken for a reason other than another holder (#1813).
+    /// No registration was created and nothing was written without the
+    /// claim; the refusal clears once the claim can be taken.
+    #[error("hosting claim for session {session_id} is unavailable")]
+    HostingUnavailable {
+        session_id: meerkat_core::types::SessionId,
+    },
+
+    /// An admission's durable commit met another writer's mapping in the
+    /// input idempotency index (#1813). Admission requires the session's
+    /// owner-scoped hosting claim, so the other writer bypassed it: a hosting
+    /// invariant was broken. Nothing of this admission was written, and the
+    /// shared durability health is reload-required (fail closed, exactly as
+    /// any failed admission commit): the registration must cold-reload.
+    #[error(
+        "hosting claim invariant violated: admission of input {input_id} on runtime \
+         {runtime_id} conflicts with another writer on the input idempotency index \
+         ({constraint}); the registration requires a cold reload"
+    )]
+    HostingClaimInvariantViolated {
+        runtime_id: String,
+        input_id: String,
+        /// The qualified key the index stores, when the input carries one.
+        idempotency_key: Option<String>,
+        constraint: crate::store::InputIdempotencyIndexConstraint,
+    },
 
     /// A live channel's bootstrap delivery barrier was revoked (the channel
     /// closed or its execution was revoked) while a delegation result waited
@@ -149,6 +195,27 @@ pub enum RuntimeDriverError {
 }
 
 impl RuntimeDriverError {
+    /// The typed session refusal for a session this runtime owner may not
+    /// host (#1813): another runtime owner hosts it, or its hosting claim is
+    /// unavailable. `None` for any other error. Surfaces use it so the
+    /// refusal keeps its typed wire form instead of becoming an internal
+    /// error.
+    pub fn hosting_session_error(&self) -> Option<meerkat_core::SessionError> {
+        match self {
+            Self::ServedElsewhere { session_id } => {
+                Some(meerkat_core::SessionError::ServedElsewhere {
+                    id: session_id.clone(),
+                })
+            }
+            Self::HostingUnavailable { session_id } => {
+                Some(meerkat_core::SessionError::HostingUnavailable {
+                    id: session_id.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// The typed retryable session error for a teardown that outlived the
     /// caller's bounded wait (`UnregisterInProgress`, `RuntimeStopInProgress`),
     /// or `None` for any other error. Surfaces use it instead of reporting

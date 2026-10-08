@@ -3120,6 +3120,7 @@ mod tests {
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),

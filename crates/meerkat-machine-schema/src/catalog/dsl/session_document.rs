@@ -16,8 +16,6 @@
 
 use meerkat_machine_dsl::machine;
 
-use super::OptionValueExt;
-
 /// Bridging key type for session identity. Maps to `meerkat_core::SessionId`.
 ///
 /// The DSL needs `Ord + Hash + Clone` for `Map` keys; this newtype satisfies
@@ -69,8 +67,10 @@ impl SessionId {
 
 /// Per-session first-turn lifecycle phase.
 ///
-/// `Inactive` is the default (and the value for any session id absent from the
-/// `session_first_turn_phase` map), `Pending` means the deferred first turn is
+/// `Inactive` is the Rust `Default`. The machine never reads an absent session:
+/// its guards read `session_first_turn_phase` strictly (#1811), so the shell
+/// recover-seeds the phase before driving any first-turn input, and an
+/// unseeded session is refused (`AbsentMapKey`). `Pending` means the deferred first turn is
 /// staged but not yet started, and `Consumed` is the absorbing terminal phase
 /// once the first turn has started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -471,7 +471,9 @@ pub enum DurableHeadRelation {
 // ---------------------------------------------------------------------------
 
 /// Canonical lifecycle-terminal class for a session document. `Active` is the
-/// default (and the recovered value for a document with no terminal fact);
+/// Rust `Default` and the value the shell recover-seeds for a document with no
+/// terminal fact; the machine never reads an unseeded session (strict guard
+/// reads, #1811), it refuses it;
 /// `Archived` is the absorbing terminal class. Maps to
 /// `meerkat_core::SessionLifecycleTerminal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

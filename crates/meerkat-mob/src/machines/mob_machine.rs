@@ -4961,7 +4961,7 @@ mod tests {
         );
     }
 
-    /// Defect regression (HomeCore report, defect C): force-cancel is the
+    /// Defect regression (downstream report, defect C): force-cancel is the
     /// operator remedy for a wedged member run and must stay admissible from
     /// Running for every KNOWN member identity. A member whose runtime retired
     /// out from under its identity binding (`ObserveRuntimeRetired`) used to

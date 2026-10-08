@@ -36,7 +36,7 @@
 //! session's own identity, so the model cannot use this tool to reach a
 //! provider or credential it was not already entitled to.
 
-use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
+use crate::builtin::{BuiltinTool, BuiltinToolError, LeafEntry, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::ToolMutationClass;
 use meerkat_core::image_generation::SwitchTurnRequestId;
@@ -169,6 +169,32 @@ impl BuiltinTool for BrainSwapTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::none()).await
+    }
+
+    async fn call_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::for_call(context, call)?)
+            .await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
+    }
+}
+
+impl BrainSwapTool {
+    /// The single native entry step runs immediately before staging, the
+    /// tool's first (and only) change; argument and model checks precede it.
+    async fn call_entering(
+        &self,
+        args: Value,
+        mut entry: LeafEntry,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let args: BrainSwapToolArgs = serde_json::from_value(args)
             .map_err(|error| BuiltinToolError::invalid_args(error.to_string()))?;
         if !self.models.contains(&args.target_model) {
@@ -177,6 +203,7 @@ impl BuiltinTool for BrainSwapTool {
                 args.target_model
             )));
         }
+        entry.enter()?;
         let outcome = self
             .staging
             .stage(
@@ -210,5 +237,48 @@ impl BuiltinTool for BrainSwapTool {
         serde_json::to_value(outcome)
             .map(ToolOutput::Json)
             .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod entry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn refused_entry_stages_nothing_and_unknown_models_never_enter() {
+        let staging = Arc::new(ModelRoutingHandoffStagingSlot::new());
+        let tool = BrainSwapTool::new(Arc::clone(&staging), ["model-a".to_string()]);
+        let refusal = meerkat_core::ToolError::ReviewUnavailable {
+            kind: meerkat_core::ReviewUnavailableKind::DeadlineExpired,
+        };
+        let result = tool
+            .call_entering(
+                serde_json::json!({"target_model": "model-a"}),
+                LeafEntry::refusing(refusal.clone()),
+            )
+            .await;
+        assert!(
+            matches!(&result, Err(BuiltinToolError::EntryRefused(error)) if **error == refusal),
+            "expected the typed entry refusal, got {result:?}"
+        );
+        assert!(staging.peek().unwrap().is_none(), "nothing was staged");
+
+        // An argument check precedes entry, so it never spends it.
+        let unknown = tool
+            .call_entering(
+                serde_json::json!({"target_model": "model-z"}),
+                LeafEntry::refusing(refusal),
+            )
+            .await;
+        assert!(matches!(unknown, Err(BuiltinToolError::InvalidArgs(_))));
+
+        tool.call_entering(
+            serde_json::json!({"target_model": "model-a"}),
+            LeafEntry::none(),
+        )
+        .await
+        .expect("an open entry stages");
+        assert!(staging.peek().unwrap().is_some());
     }
 }

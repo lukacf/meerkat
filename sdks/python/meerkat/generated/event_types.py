@@ -18,6 +18,7 @@ from .types import (  # noqa: F401
     BindingId,
     BlobId,
     CommsNoticeKind,
+    ConfinementRefusal,
     ContentBlock,
     ContentInput,
     ExternalToolDeltaPhase,
@@ -60,11 +61,6 @@ Value = Any
 
 
 AgentErrorClass = Literal['llm', 'operation_refused', 'store', 'tool', 'policy_indeterminate', 'mcp', 'session_not_found', 'budget', 'max_tokens', 'content_filtered', 'max_turns', 'cancelled', 'invalid_state', 'operation_not_found', 'depth_limit', 'concurrency_limit', 'config', 'internal', 'build', 'auth', 'callback_pending', 'skill', 'structured_output', 'invalid_output_schema', 'hook', 'terminal', 'no_pending_boundary']
-
-
-# Bounded operation-local diagnostics. Never expose an environment value,
-# credential path, gate token, or secret-bearing command line in this error.
-ConfinementRefusal = Literal['invalid_requirement', 'invalid_launch', 'unsupported_requirement', 'backend_unavailable', 'preparation_failed']
 
 
 class HookFailureReasonTimeout(TypedDict, total=False):
@@ -1165,6 +1161,90 @@ class PendingCallbackToolCall(TypedDict, total=False):
     tool_use_id: Required[str]
 
 
+# Reasoning/effort control level, the shared typed vocabulary behind both
+# Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
+#
+# The two providers expose effort in different request shapes but draw from
+# the same level vocabulary; modeling it as a typed enum keeps the catalog
+# value-domain compiler-checked instead of relying on raw string literals.
+# Each catalog row declares its accepted subset via `effort_levels`.
+EffortLevel = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+
+class ReasoningBatchDispositionApply(TypedDict, total=False):
+    """Every contributor that expressed one preferred this level, and no
+    contributor set reasoning explicitly or went without a preference.
+    """
+    disposition: Required[Literal['apply']]
+    level: Required[EffortLevel]
+
+
+class ReasoningBatchDispositionSupersededByExplicit(TypedDict, total=False):
+    """A contributor set a reasoning knob explicitly (or cleared its
+    params): that setting wins over any preference.
+    """
+    disposition: Required[Literal['superseded_by_explicit']]
+
+
+class ReasoningBatchDispositionConflicting(TypedDict, total=False):
+    """Contributors preferred different levels.
+    """
+    disposition: Required[Literal['conflicting']]
+
+
+class ReasoningBatchDispositionMixedWithUnpreferred(TypedDict, total=False):
+    """Some contributors preferred a level and others expressed none.
+    """
+    disposition: Required[Literal['mixed_with_unpreferred']]
+
+
+# How one runtime batch resolved its inputs' reasoning preferences. The
+# fold is order-independent (set semantics over the batch); every outcome
+# other than [`Self::Apply`] leaves the baseline request unchanged, and the
+# batch always runs.
+ReasoningBatchDisposition = ReasoningBatchDispositionApply | ReasoningBatchDispositionSupersededByExplicit | ReasoningBatchDispositionConflicting | ReasoningBatchDispositionMixedWithUnpreferred
+
+
+class ReasoningLoweringBaselineExplicit(TypedDict, total=False):
+    """The baseline carried this effort level explicitly.
+    """
+    kind: Required[Literal['explicit']]
+    level: Required[EffortLevel]
+
+
+class ReasoningLoweringBaselineProviderDefault(TypedDict, total=False):
+    """The baseline carried none: the provider's own default applies.
+    """
+    kind: Required[Literal['provider_default']]
+
+
+# What one provider attempt's baseline request already said about effort,
+# before any preference was considered.
+ReasoningLoweringBaseline = ReasoningLoweringBaselineExplicit | ReasoningLoweringBaselineProviderDefault
+
+
+# Why a reasoning preference left one attempt's request unchanged.
+ReasoningNotAppliedReason = Literal['no_catalog_fact', 'unsupported_level', 'unknown_supported_levels', 'budget_conflict', 'thinking_mode_conflict', 'opaque_reasoning_body', 'reasoning_disabled_by_baseline']
+
+
+class ReasoningLoweringOutcomeApplied(TypedDict, total=False):
+    """The request carries this level.
+    """
+    detail: Required[EffortLevel]
+    kind: Required[Literal['applied']]
+
+
+class ReasoningLoweringOutcomeNotApplied(TypedDict, total=False):
+    """The request is the baseline, unchanged.
+    """
+    detail: Required[ReasoningNotAppliedReason]
+    kind: Required[Literal['not_applied']]
+
+
+# What one provider attempt did with the turn's reasoning preference.
+ReasoningLoweringOutcome = ReasoningLoweringOutcomeApplied | ReasoningLoweringOutcomeNotApplied
+
+
 class RunInputContent(TypedDict, total=False):
     """The run starts from caller-provided content (text or blocks).
     """
@@ -1635,6 +1715,7 @@ class AgentEventRunStarted(TypedDict, total=False):
     """
     identity: NotRequired[TranscriptMessageIdentity]
     input: Required[RunInput]
+    request_reasoning: NotRequired[Optional[ReasoningBatchDisposition]]
     session_id: Required[SessionId]
     type: Required[Literal['run_started']]
 
@@ -2252,10 +2333,27 @@ class AgentEventHookLaunchRefused(TypedDict, total=False):
     type: Required[Literal['hook_launch_refused']]
 
 
+class AgentEventRequestReasoningLowered(TypedDict, total=False):
+    """One provider attempt of a turn that carries a reasoning-effort
+    preference: what the batch requested, what the attempt's baseline
+    request already said, and what the attempt actually sent. Emitted per
+    prepared request (and again for a model-fallback attempt), so a turn
+    whose attempts differ reports each one; never a turn-level claim.
+    """
+    baseline: Required[ReasoningLoweringBaseline]
+    fallback_attempt: NotRequired[Optional[int]]
+    model: NotRequired[Optional[str]]
+    outcome: NotRequired[Optional[ReasoningLoweringOutcome]]
+    provider: NotRequired[Optional[Provider]]
+    requested: Required[ReasoningBatchDisposition]
+    turn_number: NotRequired[Optional[int]]
+    type: Required[Literal['request_reasoning_lowered']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

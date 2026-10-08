@@ -143,6 +143,19 @@ fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcR
             error::INVALID_PARAMS,
             format!("Generation conflict: expected {expected}, current {current}"),
         ),
+        // The store refused the caller's candidate config: its own new or
+        // changed realm MCP server holds an environment reference, or the
+        // written config is invalid (for example after a concurrent edit
+        // since the preview). An unreadable document or a store I/O failure
+        // stays internal.
+        ConfigRuntimeError::Config(
+            error @ (meerkat_core::ConfigError::RealmMcpServerEnvReference(_)
+            | meerkat_core::ConfigError::Validation(_)),
+        ) => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("Invalid config: {error}"),
+        ),
         other => RpcResponse::error(id, error::INTERNAL_ERROR, other.to_string()),
     }
 }

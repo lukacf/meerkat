@@ -1227,7 +1227,12 @@ async fn refresh_save_failure_restores_previous_token_and_machine_snapshot() {
         .stored_bearer_token(&target)
         .await
         .expect_err("injected refresh commit failure must surface");
-    assert!(matches!(error, McpOAuthError::RefreshFailed { .. }));
+    // A local store failure is infrastructure, not an upstream refresh report.
+    assert!(
+        matches!(error, McpOAuthError::AuthLifecycle { .. }),
+        "{error:?}"
+    );
+    assert!(!error.is_refusal());
     let key = target.token_key().unwrap();
     let restored = inner.load(&key).await.unwrap().unwrap();
     assert_eq!(restored.primary_secret, previous.primary_secret);
@@ -4639,14 +4644,22 @@ async fn known_refresh_reobserves_the_subject_and_keeps_unavailable_distinct() {
             Some(expired.clone())
         );
 
-        // The subject cannot be observed: a refresh failure, not a mismatch.
+        // The subject cannot be observed: a local refresh failure, not a
+        // mismatch. It is not a token-endpoint report, so it is
+        // infrastructure (AuthLifecycle), never a caller refusal (#1737).
         let expired = republish_stored_tokens(&authority, store.as_ref(), &target, expire).await;
         *strategy.subject.lock() = "subject-7".to_owned();
         strategy.unavailable.store(true, Ordering::SeqCst);
-        assert!(matches!(
-            authority.stored_bearer_token(&target).await,
-            Err(McpOAuthError::RefreshFailed { .. })
-        ));
+        let unavailable = authority
+            .stored_bearer_token(&target)
+            .await
+            .expect_err("an unobservable refreshed subject must not publish");
+        assert!(
+            matches!(&unavailable, McpOAuthError::AuthLifecycle { reason, .. }
+                if reason.contains("subject could not be observed")),
+            "{unavailable:?}"
+        );
+        assert!(!unavailable.is_refusal(), "{unavailable:?}");
         assert_eq!(
             store.load(&target.token_key().unwrap()).await.unwrap(),
             Some(expired)

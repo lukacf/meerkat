@@ -26,7 +26,7 @@ fn spec(realm_id: &str, key: &str) -> JobSpec {
         ExecutionIntentId::new(),
         InteractionLineageId::new(),
         ToolIdentity::new("security_scan", "v1").expect("tool identity"),
-        RunnerIdentity::new("homecore.security_scan", "v1").expect("runner identity"),
+        RunnerIdentity::new("example.security_scan", "v1").expect("runner identity"),
         RestartClass::NonResumable,
         CanonicalArgumentsHash::new("sha256:scan-a").expect("arguments hash"),
         JobSubmissionKey::new(key).expect("submission key"),

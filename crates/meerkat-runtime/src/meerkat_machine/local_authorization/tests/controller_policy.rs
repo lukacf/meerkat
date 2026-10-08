@@ -128,6 +128,7 @@ impl OperationPolicyOwner for AccountPolicy {
             operation_values: allowance.operation_values,
             restrictions: allowance.restrictions,
             expires_at_ms: 10_000,
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
 }

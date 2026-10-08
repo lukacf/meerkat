@@ -240,7 +240,7 @@ impl ShellTool {
         working_dir: Option<&Path>,
         timeout_secs: u64,
     ) -> Result<ShellOutput, ShellError> {
-        self.execute_command_for_call(command, working_dir, timeout_secs, None, None)
+        self.execute_command_for_call(command, working_dir, timeout_secs, None, None, None)
             .await
     }
 
@@ -256,6 +256,7 @@ impl ShellTool {
         timeout_secs: u64,
         tool_call_id: Option<&str>,
         run_id: Option<&meerkat_core::RunId>,
+        entry: super::custody_spawn::EntryHook<'_>,
     ) -> Result<ShellOutput, ShellError> {
         // Enforce concurrency limit via job manager
         let _guard = self.job_manager.acquire_sync_slot().await?;
@@ -302,6 +303,7 @@ impl ShellTool {
                 directory: &effective_dir,
                 environment: &environment,
             },
+            entry,
             |child| self.foreground_process_group(child),
         )
         .await
@@ -406,6 +408,19 @@ impl ShellTool {
         tool_call_id: Option<&str>,
         run_id: Option<&meerkat_core::RunId>,
     ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_with_entry(args, tool_call_id, run_id, None).await
+    }
+
+    /// One shell call whose single native entry step runs inside the shared
+    /// custody spawner, after all launch preparation and immediately before
+    /// the process spawn (foreground or background).
+    pub(super) async fn call_with_entry(
+        &self,
+        args: Value,
+        tool_call_id: Option<&str>,
+        run_id: Option<&meerkat_core::RunId>,
+        entry: super::custody_spawn::EntryHook<'_>,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let input: ShellInput = serde_json::from_value(args)
             .map_err(|error| BuiltinToolError::invalid_args(error.to_string()))?;
         let timeout_secs = self
@@ -446,12 +461,13 @@ impl ShellTool {
             let job_id = match tool_call_id {
                 Some(tool_call_id) => {
                     self.job_manager
-                        .spawn_job_for_call_in_run(
+                        .spawn_job_for_call_in_run_entering(
                             &input.command,
                             working_dir.as_deref(),
                             timeout_secs,
                             tool_call_id,
                             run_id,
+                            entry,
                         )
                         .await
                 }
@@ -479,6 +495,7 @@ impl ShellTool {
                 timeout_secs,
                 tool_call_id,
                 run_id,
+                entry,
             )
             .await
             .map_err(|error| {
@@ -688,8 +705,16 @@ impl BuiltinTool for ShellTool {
         args: Value,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<ToolOutput, BuiltinToolError> {
-        self.call_with_tool_call_id(args, Some(call.id), context.run_id())
+        // The single consuming entry step, run by the custody spawner after
+        // all launch preparation and immediately before the process spawn.
+        let enter: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) =
+            &|| context.enter_reviewed_effect(call, None).map(drop);
+        self.call_with_entry(args, Some(call.id), context.run_id(), Some(enter))
             .await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
     }
 
     fn async_ops_for_output(&self, output: &ToolOutput) -> Vec<meerkat_core::ops::AsyncOpRef> {
@@ -910,6 +935,48 @@ mod tests {
     /// fallback), and a 1 s call's dispatch deadline is its timeout plus the
     /// setup failure bound, while the command itself still gets 1 s from
     /// its spawn.
+    /// The single native entry step runs inside the custody spawner right
+    /// before the process spawn: a refusal spawns nothing and keeps its exact
+    /// typed tool error; the paired allowed entry runs the command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refused_native_entry_spawns_nothing_and_keeps_its_typed_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let temp = TempDir::new().unwrap();
+        let marker = temp.path().join("entered");
+        let config = ShellConfig {
+            enabled: true,
+            shell: "sh".to_string(),
+            ..ShellConfig::with_project_root(temp.path().to_path_buf())
+        };
+        let tool = ShellTool::new(config);
+        let command = json!({"command": format!("touch {}", marker.display())});
+        let refusal = meerkat_core::ToolError::ReviewUnavailable {
+            kind: meerkat_core::ReviewUnavailableKind::DeadlineExpired,
+        };
+        let entries = AtomicUsize::new(0);
+        let refuse: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) = &|| {
+            entries.fetch_add(1, Ordering::SeqCst);
+            Err(refusal.clone())
+        };
+        let result = tool
+            .call_with_entry(command.clone(), Some("refused-entry"), None, Some(refuse))
+            .await;
+        let refused = result.as_ref().err();
+        assert!(
+            matches!(refused, Some(BuiltinToolError::EntryRefused(error)) if **error == refusal),
+            "a refused entry must not run: expected the typed entry refusal, got {refused:?}"
+        );
+        assert_eq!(entries.load(Ordering::SeqCst), 1, "entered exactly once");
+        assert!(!marker.exists(), "nothing spawned after a refused entry");
+
+        let allow: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) = &|| Ok(());
+        tool.call_with_entry(command, Some("allowed-entry"), None, Some(allow))
+            .await
+            .expect("an allowed entry runs the command");
+        assert!(marker.exists(), "the paired control spawned the command");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_one_second_timeout_is_not_consumed_by_setup() {

@@ -77,6 +77,10 @@ struct Check {
     binding: PreparedAuthorizationBinding,
 }
 impl PreparedOperationAuthorization for Check {
+    fn review_tier(&self) -> meerkat_core::authorization::OperationReviewTier {
+        meerkat_core::authorization::OperationReviewTier::R1
+    }
+
     fn observe(
         &self,
         binding: &PreparedAuthorizationBinding,
@@ -89,6 +93,7 @@ impl PreparedOperationAuthorization for Check {
         let fail = match &observation {
             OperationObservation::Entry => self.fail_entry.load(Ordering::SeqCst),
             OperationObservation::Outcome(_) => self.fail_outcome.load(Ordering::SeqCst),
+            OperationObservation::ReviewAttemptStarted { .. } => false,
             OperationObservation::AuthorizationUnavailable => false,
             OperationObservation::Refused(_) => self.fail_refused.load(Ordering::SeqCst),
         };

@@ -1420,7 +1420,7 @@ pub trait SessionStore: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Incremental session persistence (OB3 ask 11): O(delta) writes, compaction
+// Incremental session persistence (a downstream ask): O(delta) writes, compaction
 // that SHRINKS the persisted head, retained history out-of-line.
 // ---------------------------------------------------------------------------
 
@@ -7497,6 +7497,7 @@ mod tests {
                 phase: None,
                 persisted: true,
                 detail: None,
+                confinement_refusal: None,
                 pending_sources: Vec::new(),
             },
         )));
@@ -7849,6 +7850,7 @@ mod tests {
                 phase: None,
                 persisted: false,
                 detail: Some("connecting".to_string()),
+                confinement_refusal: None,
                 pending_sources: vec!["test-server".to_string()],
             }],
             created_at: crate::types::message_timestamp_now(),
@@ -8203,7 +8205,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Incremental session persistence (OB3 ask 11)
+    // Incremental session persistence (a downstream ask)
     // -----------------------------------------------------------------------
 
     #[allow(clippy::expect_used)]
@@ -8391,6 +8393,7 @@ mod tests {
                 phase: Some(crate::event::ExternalToolDeltaPhase::Pending),
                 persisted: false,
                 detail: Some(body.to_string()),
+                confinement_refusal: None,
                 pending_sources: vec!["king-search".to_string()],
             },
         ))

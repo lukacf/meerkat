@@ -102,6 +102,10 @@ use crate::event_store::{
 use crate::projector::SessionProjector;
 
 fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
+    // A session this owner may not host keeps its typed refusal (#1813).
+    if let Some(hosting) = err.hosting_session_error() {
+        return hosting;
+    }
     SessionError::Agent(AgentError::InternalError(err.to_string()))
 }
 
@@ -5371,7 +5375,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // is the typed "session needs the sanctioned repair" fact,
             // not an internal recovery fault: every resume runs recovery
             // first, so laundering it here hid the hold from every host
-            // (HomeCore 2026-09-22 reload storm).
+            // (a 2026-09-22 production reload storm).
             meerkat_runtime::recovery::DurableTailRecoveryError::Store(
                 RuntimeStoreError::AuditedEndpointDivergence { .. },
             ) => SessionError::WholeBlobAuditedEndpointDivergence { id: id.clone() },
@@ -5426,6 +5430,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             reason = ?reason,
             "discarding stale live session in favor of newer RuntimeStore authority"
         );
+        // Only the live actor is discarded: a runtime registration of the
+        // session keeps its hosting claim (#1813), so hosting continues until
+        // the actor is re-materialized. Without a registration this process
+        // stops hosting the session here.
         self.discard_live_session_unfenced(id).await?;
         Ok(true)
     }
@@ -5708,6 +5716,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     async fn persist_replayed_transcript_projection_for_mutation(
+        &self,
+        session: &Session,
+    ) -> Result<(), SessionError> {
+        // #1813: a store-only write holds the session's hosting claim (shared
+        // with its runtime owner's lineage) for its duration, inside its
+        // blocking store writes too, and refuses at once when another runtime
+        // owner hosts the session.
+        let hosting = self.grant_session_hosting(session.id())?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.persist_replayed_transcript_projection_for_mutation_hosted(session),
+        )
+        .await
+    }
+
+    async fn persist_replayed_transcript_projection_for_mutation_hosted(
         &self,
         session: &Session,
     ) -> Result<(), SessionError> {
@@ -6648,6 +6672,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if commits.is_empty() {
             return Ok(session);
         }
+        // #1813: a store-only write holds the session's hosting claim (shared
+        // with its runtime owner's lineage) for its duration, inside its
+        // blocking store writes too, and refuses at once when another runtime
+        // owner hosts the session.
+        let hosting = self.grant_session_hosting(session.id())?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.persist_normalized_transcript_rewrite_chain_hosted(
+                session,
+                commits,
+                converge_live,
+            ),
+        )
+        .await
+    }
+
+    async fn persist_normalized_transcript_rewrite_chain_hosted(
+        &self,
+        session: Session,
+        commits: &[meerkat_core::TranscriptRewriteCommit],
+        converge_live: bool,
+    ) -> Result<Session, SessionError> {
         if self.runtime_store.session_persistence_profile()
             == RuntimeSessionPersistenceProfile::HeadCanonicalV1
         {
@@ -7499,6 +7545,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(current) = self.inner.live_session_actor_witness(id).await else {
             return Ok(false);
         };
+        // The reload's cold successor registration holds the session's
+        // hosting claim (#1813) across this discard and the warm claim that
+        // re-materializes the actor.
         if &current != witness {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "reload-required cleanup for session {id} encountered a replacement live actor"
@@ -10300,6 +10349,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         session: Session,
         write_fence: Option<Arc<dyn RuntimeStoreWriteFence>>,
     ) -> Result<Session, SessionError> {
+        // #1813: a store-only write holds the session's hosting claim (shared
+        // with its runtime owner's lineage) for its duration, inside its
+        // blocking store writes too, and refuses at once when another runtime
+        // owner hosts the session.
+        let hosting = self.grant_session_hosting(session.id())?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.save_normalized_session_with_write_fence_hosted(session, write_fence),
+        )
+        .await
+    }
+
+    async fn save_normalized_session_with_write_fence_hosted(
+        &self,
+        session: Session,
+        write_fence: Option<Arc<dyn RuntimeStoreWriteFence>>,
+    ) -> Result<Session, SessionError> {
         let profile = self.runtime_store.session_persistence_profile();
         if profile != RuntimeSessionPersistenceProfile::WholeBlobV1 {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
@@ -10417,6 +10483,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// for roots (for example, forks) and control paths with no live actor;
     /// ordinary live boundaries stay actor-owned.
     async fn persist_detached_head_canonical_session(
+        &self,
+        session: Session,
+        role: &str,
+    ) -> Result<Session, SessionError> {
+        // #1813: a store-only write holds the session's hosting claim (shared
+        // with its runtime owner's lineage) for its duration, inside its
+        // blocking store writes too, and refuses at once when another runtime
+        // owner hosts the session.
+        let hosting = self.grant_session_hosting(session.id())?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.persist_detached_head_canonical_session_hosted(session, role),
+        )
+        .await
+    }
+
+    async fn persist_detached_head_canonical_session_hosted(
         &self,
         mut session: Session,
         role: &str,
@@ -12762,6 +12845,34 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    /// This service's authority to grant session hosting claims (#1813):
+    /// its canonical runtime owner's. The service never mints claims of its
+    /// own, so its actors, cold attaches and store-only writes share one
+    /// lineage with the machine's registrations, and another runtime owner
+    /// over the same store is refused.
+    pub fn hosting_authority(
+        &self,
+    ) -> Result<meerkat_core::session_hosting::SessionHostingAuthority, SessionError> {
+        self.acquire_canonical_runtime_adapter(None)
+            .map(|owner| owner.hosting_authority())
+            .map_err(runtime_driver_error_to_session_error)
+    }
+
+    /// Take this service's hosting claim for `session_id` (#1813), shared
+    /// with its runtime owner's lineage, or refuse at once with
+    /// [`SessionError::ServedElsewhere`] when another runtime owner (another
+    /// process, or another machine of this process) hosts it, or with
+    /// [`SessionError::HostingUnavailable`] when its cross-process claim
+    /// cannot be taken. Never waits.
+    pub fn grant_session_hosting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::session_hosting::HostingClaim, SessionError> {
+        self.hosting_authority()?
+            .grant(session_id)
+            .map_err(SessionError::from)
+    }
+
     async fn create_session_with_admission(
         &self,
         mut req: CreateSessionRequest,
@@ -12776,6 +12887,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             actor_witness_slot,
         } = admission;
         self.reject_runtime_backed_eager_create_session(&req)?;
+
+        // #1813: a session is hosted by exactly one runtime owner on a realm.
+        // Take the hosting claim for a session whose id is already known
+        // before any recovery or materialization work, so a session another
+        // owner serves is refused here, typed, without side effects. A
+        // generated-id create claims its brand-new id once it exists.
+        let known_session_id = req.build.as_ref().and_then(|build| {
+            build
+                .resume_session
+                .as_ref()
+                .map(|session| session.id().clone())
+                .or_else(|| match &build.runtime_build_mode {
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
+                        Some(bindings.session_id().clone())
+                    }
+                    meerkat_core::RuntimeBuildMode::StandaloneEphemeral => None,
+                })
+        });
+        let hosting_intent = match known_session_id.as_ref() {
+            // Shares the lineage's claim when the session's registration (or
+            // a reload's scoped hold) already holds it.
+            Some(session_id) => meerkat_core::session_hosting::SessionHostingIntent::Granted(
+                self.grant_session_hosting(session_id)?,
+            ),
+            None => meerkat_core::session_hosting::SessionHostingIntent::GrantAtInsert(
+                self.hosting_authority()?,
+            ),
+        };
+        // The actor takes the claim by move into its task (see
+        // `SessionBuildOptions::hosting`).
+        req.build.get_or_insert_with(Default::default).hosting = hosting_intent;
 
         // Inject a checkpointer for all sessions. The attached loop uses it to
         // prepare provisional store-owned tails between committed runtime
@@ -14728,12 +14870,12 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSess
     }
 }
 
-#[async_trait]
-impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSessionService<B> {
-    async fn append_system_context(
+impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    async fn append_system_context_control_inner(
         &self,
         id: &SessionId,
         req: AppendSystemContextRequest,
+        control: Option<meerkat_core::service::SystemContextAppendControl>,
     ) -> Result<AppendSystemContextResult, SessionControlError> {
         let persistence_profile = self.runtime_store.session_persistence_profile();
         let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
@@ -14757,13 +14899,27 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             {
                 return Err(Self::archived_not_found(id));
             }
-            let status = self
-                .inner
-                .append_system_message_control(id, req)
-                .await
-                .map_err(SessionControlError::Session)?;
-            if status == meerkat_core::service::AppendSystemContextStatus::Duplicate {
-                return Ok(AppendSystemContextResult { status });
+            let governed = control.is_some();
+            let result = match control {
+                Some(control) => self.inner.append_governed_system_context(control).await,
+                None => self
+                    .inner
+                    .append_system_message_control(id, req)
+                    .await
+                    .map(|status| AppendSystemContextResult { status })
+                    .map_err(SessionControlError::Session),
+            };
+            if !governed {
+                match &result {
+                    Ok(result)
+                        if result.status
+                            == meerkat_core::service::AppendSystemContextStatus::Duplicate =>
+                    {
+                        return Ok(result.clone());
+                    }
+                    Err(_) => return result,
+                    _ => {}
+                }
             }
             let persist_result = match persistence_profile {
                 RuntimeSessionPersistenceProfile::WholeBlobV1 => {
@@ -14801,7 +14957,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 let _ = self.discard_live_session_unfenced(id).await;
                 return Err(error);
             }
-            return Ok(AppendSystemContextResult { status });
+            return result;
         }
 
         let mut session = match self
@@ -14817,24 +14973,38 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             }
         };
         self.reject_if_archived_session(id, &session).await?;
-        let status = session
-            .append_system_message_control_idempotent(
-                req.content.render_text(),
-                req.source,
-                req.idempotency_key,
-                meerkat_core::types::message_timestamp_now(),
-            )
-            .map_err(|error| match error {
-                // Retryable once the callback batch resolves.
-                meerkat_core::session::SystemMessageAppendError::CallbackBatchPending => {
-                    SessionControlError::Session(SessionError::Busy { id: id.clone() })
+        let governed = control.is_some();
+        let result = match control {
+            Some(control) => control.apply(&mut session),
+            None => session
+                .append_system_message_control_idempotent(
+                    req.content.render_text(),
+                    req.source,
+                    req.idempotency_key,
+                    meerkat_core::types::message_timestamp_now(),
+                )
+                .map_err(|error| match error {
+                    // Retryable once the callback batch resolves.
+                    meerkat_core::session::SystemMessageAppendError::CallbackBatchPending => {
+                        SessionControlError::Session(SessionError::Busy { id: id.clone() })
+                    }
+                    other => SessionControlError::Session(SessionError::Agent(
+                        AgentError::ConfigError(other.to_string()),
+                    )),
+                })
+                .map(|status| AppendSystemContextResult { status }),
+        };
+        if !governed {
+            match &result {
+                Ok(result)
+                    if result.status
+                        == meerkat_core::service::AppendSystemContextStatus::Duplicate =>
+                {
+                    return Ok(result.clone());
                 }
-                other => SessionControlError::Session(SessionError::Agent(
-                    AgentError::ConfigError(other.to_string()),
-                )),
-            })?;
-        if status == meerkat_core::service::AppendSystemContextStatus::Duplicate {
-            return Ok(AppendSystemContextResult { status });
+                Err(_) => return result,
+                _ => {}
+            }
         }
         match persistence_profile {
             RuntimeSessionPersistenceProfile::WholeBlobV1 => {
@@ -14858,7 +15028,77 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 )));
             }
         }
-        Ok(AppendSystemContextResult { status })
+        result
+    }
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSessionService<B> {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let owner = self
+            .acquire_canonical_runtime_adapter(None)
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        let governed = owner.has_native_work_authorization_host();
+        let control = if governed {
+            Some(
+                meerkat_core::service::SystemContextAppendControl::unavailable(
+                    id.clone(),
+                    req.clone(),
+                )?,
+            )
+        } else {
+            None
+        };
+        self.append_system_context_control_inner(id, req, control)
+            .await
+    }
+
+    async fn append_authenticated_system_context(
+        &self,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let prepared = match self.acquire_canonical_runtime_adapter(None) {
+            Ok(owner) => owner.prepare_context_append_observed(Arc::clone(&control)),
+            Err(_) => meerkat_core::authorization::ObservedAuthorizationResult::unobserved(Err(
+                meerkat_core::OperationAuthorizationError::Unavailable,
+            )),
+        };
+        let id = control.session_id().clone();
+        let request = control.request().clone();
+        self.append_system_context_control_inner(
+            &id,
+            request,
+            Some(
+                meerkat_core::service::SystemContextAppendControl::from_observed_preparation(
+                    control, prepared,
+                ),
+            ),
+        )
+        .await
+    }
+
+    async fn append_authorized_system_context(
+        &self,
+        prepared: meerkat_core::service::PreparedSystemContextAppend,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let owner = self
+            .acquire_canonical_runtime_adapter(None)
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        if !owner.owns_context_append(&prepared) {
+            return Err(meerkat_core::OperationAuthorizationError::Unavailable.into());
+        }
+        let id = prepared.session_id().clone();
+        let request = prepared.request().clone();
+        self.append_system_context_control_inner(
+            &id,
+            request,
+            Some(meerkat_core::service::SystemContextAppendControl::authorized(prepared)),
+        )
+        .await
     }
 
     async fn stage_tool_results(
@@ -15189,6 +15429,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.shutdown().await;
     }
 
+    /// Wait until every actor removed for `id` has exited, so its hosting
+    /// claim is released. Never call this from the actor's own task, nor
+    /// while holding a boundary that actor may still need to finish.
+    pub async fn await_removed_actor_exit(&self, id: &SessionId) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.inner.await_removed_actor_exit(id).await;
+        #[cfg(target_arch = "wasm32")]
+        let _ = id;
+    }
+
+    /// Wait until the exact removed actor incarnation named by `witness` has
+    /// exited; a later actor for the same session is never waited on. The
+    /// same calling constraints as [`Self::await_removed_actor_exit`] apply.
+    pub async fn await_removed_actor_exit_exact(&self, witness: &LiveSessionActorWitness) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.inner.await_removed_actor_exit_exact(witness).await;
+        #[cfg(target_arch = "wasm32")]
+        let _ = witness;
+    }
+
     /// Shut down all sessions, returning the first typed authorization failure.
     pub async fn try_shutdown(&self) -> Result<(), SessionError> {
         self.inner.try_shutdown().await
@@ -15331,24 +15591,57 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ///   run's promotion consumes it, so its presence without a live actor
     ///   means the run ended without its boundary).
     ///
-    /// Multi-process model: the live-actor check sees only this process. A
-    /// realm is owned by one serving host at a time, and a second host that
-    /// starts or attaches a session another host is running is already an
-    /// ownership conflict. That is why this runs only on start and attach
-    /// paths, never on plain reads (`load_authoritative_session`, history,
-    /// status), which keep returning the typed conflict for a session
-    /// another process may still be committing.
+    /// Multi-process model (#1813): the session's owner-scoped hosting claim
+    /// decides who may start or attach it. A session another runtime owner
+    /// hosts is refused with [`SessionError::ServedElsewhere`] when the
+    /// caller takes the claim, before any provisional-tail resolution, so
+    /// this owner never resolves another owner's in-flight tail. The claim is
+    /// held for this preparation (inside its blocking writes too); a caller
+    /// that attaches next keeps a lineage clone across the attach. This runs
+    /// only on start and attach paths, never on plain reads
+    /// (`load_authoritative_session`, history, status), which keep returning
+    /// the typed conflict for a session another process may still be
+    /// committing.
     ///
-    /// Never fails the caller's attach on its own account: a tail it cannot
-    /// observe or resolve (held, refused, or an error) is logged, and the
-    /// caller's committed read then surfaces the original conflict.
-    pub async fn prepare_cold_attach(&self, id: &SessionId) -> Result<(), SessionError> {
+    /// Apart from that refusal it never fails the caller's attach on its own
+    /// account: a tail it cannot observe or resolve (held, refused, or an
+    /// error) is logged, and the caller's committed read then surfaces the
+    /// original conflict.
+    ///
+    /// The caller proves the hosting claim by handing it over: take it with
+    /// [`Self::grant_session_hosting`] (which refuses a session another
+    /// runtime owner hosts) and pass it by move. A claim of another session
+    /// or of another runtime owner's lineage is refused.
+    pub async fn prepare_cold_attach(
+        &self,
+        id: &SessionId,
+        claim: meerkat_core::session_hosting::HostingClaim,
+    ) -> Result<(), SessionError> {
+        if claim.session_id() != id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "cold attach of session {id} was offered the hosting claim of session {}",
+                claim.session_id()
+            ))));
+        }
+        if claim.owner() != self.hosting_authority()?.owner() {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "cold attach of session {id} was offered another runtime owner's hosting claim"
+            ))));
+        }
+        meerkat_core::session_hosting::with_write_hosting(
+            claim,
+            self.prepare_cold_attach_hosted(id),
+        )
+        .await
+    }
+
+    async fn prepare_cold_attach_hosted(&self, id: &SessionId) -> Result<(), SessionError> {
+        if self.inner.has_live_session(id).await? {
+            return Ok(());
+        }
         if self.runtime_store.session_persistence_profile()
             != RuntimeSessionPersistenceProfile::HeadCanonicalV1
         {
-            return Ok(());
-        }
-        if self.inner.has_live_session(id).await? {
             return Ok(());
         }
         match self
@@ -15896,18 +16189,58 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 } = self
                     .prepare_runtime_boundary(id, "direct live session persistence", None)
                     .await?;
-                let result = self
+                let runtime_id = Self::runtime_id_for_session(id);
+                let result = match self
                     .runtime_store
                     .commit_prepared_session_boundary(
-                        &Self::runtime_id_for_session(id),
+                        &runtime_id,
                         meerkat_runtime::PreparedRuntimeSessionCommit::snapshot_only(committed),
                     )
                     .await
-                    .map_err(|error| {
-                        SessionError::Agent(AgentError::InternalError(format!(
-                            "head-canonical live session persistence failed for session {id}: {error}"
-                        )))
-                    })?;
+                {
+                    Ok(result) => result,
+                    Err(commit_error) => {
+                        // The store may report an error after the atomic
+                        // commit landed. Only the exact prepared boundary,
+                        // read back as the current head, proves it did; then
+                        // the actor acknowledges it instead of being
+                        // discarded and the event is never repeated.
+                        return match self
+                            .runtime_store
+                            .load_session_boundary_authority(&runtime_id)
+                            .await
+                        {
+                            Ok(Some(current))
+                                if PreparedRuntimeBoundaryIdentity::from_runtime_authority(
+                                    &current, id,
+                                )
+                                .is_ok_and(|current| current == prepared_boundary) =>
+                            {
+                                self.acknowledge_head_canonical_runtime_boundary_after_commit(
+                                    id,
+                                    &prepared_boundary,
+                                )
+                                .await?;
+                                Ok((message_count, conversation_digest))
+                            }
+                            Ok(_) => Err(SessionError::Agent(AgentError::InternalError(format!(
+                                "head-canonical live session persistence failed for session {id}: {commit_error}"
+                            )))),
+                            Err(read_error) => {
+                                // Neither committed nor refused can be shown:
+                                // the actor is fatalized so nothing classifies
+                                // or replays the boundary, and the next
+                                // materialization reads whatever the store
+                                // holds.
+                                self.fatalize_live_session_after_ambiguous_durable_commit(id)
+                                    .await;
+                                Err(SessionError::runtime_executor_stopped(format!(
+                                    "head-canonical live session persistence for session {id} failed ({commit_error}) and its boundary could not be read back ({read_error}); the live actor was fatalized because the durable outcome is ambiguous"
+                                )))
+                            }
+                        };
+                    }
+                };
                 let committed_authority = result.authority().ok_or_else(|| {
                     SessionError::Agent(AgentError::InternalError(format!(
                         "head-canonical live session persistence committed no session authority for session {id}"
@@ -17035,6 +17368,7 @@ mod tests {
                 0,
                 None,
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
@@ -17133,6 +17467,7 @@ mod tests {
                 0,
                 None,
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
@@ -17234,6 +17569,7 @@ mod tests {
                 1,
                 None,
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
@@ -18583,6 +18919,8 @@ mod tests {
         fail_commits: AtomicBool,
         fail_after_session_boundary_commit: AtomicBool,
         fail_lifecycle_commits: AtomicBool,
+        /// Session-boundary authority reads fail (readback unavailable).
+        fail_boundary_authority_reads: AtomicBool,
         /// Deterministic suspension point inside the durable session-boundary
         /// commit, mirroring the WholeBlob gate. The detached candidate is
         /// prepared, but neither durable authority nor live state has advanced.
@@ -18601,6 +18939,7 @@ mod tests {
                 fail_commits: AtomicBool::new(false),
                 fail_after_session_boundary_commit: AtomicBool::new(false),
                 fail_lifecycle_commits: AtomicBool::new(false),
+                fail_boundary_authority_reads: AtomicBool::new(false),
                 pause_session_boundary_commit: AtomicBool::new(false),
                 entered_session_boundary_commit: tokio::sync::Notify::new(),
                 release_session_boundary_commit: tokio::sync::Notify::new(),
@@ -18647,6 +18986,21 @@ mod tests {
             self.inner.session_authority_ops()
         }
 
+        async fn load_session_boundary_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::store::RuntimeSessionAuthority>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            if self.fail_boundary_authority_reads.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::store::RuntimeStoreError::ReadFailed(
+                    "synthetic session-boundary authority read failure".to_string(),
+                ));
+            }
+            self.inner.load_session_boundary_authority(runtime_id).await
+        }
+
         fn input_state_batch_cas_implementation_profile(
             &self,
         ) -> meerkat_runtime::store::InputStateBatchCasImplementationProfile {
@@ -18678,14 +19032,6 @@ mod tests {
                 .commit_prepared_session_boundary(runtime_id, request)
                 .await?;
             if self
-                .fail_after_session_boundary_commit
-                .swap(false, Ordering::AcqRel)
-            {
-                return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
-                    "synthetic head-canonical post-commit reporting failure".to_string(),
-                ));
-            }
-            if self
                 .pause_after_session_boundary_commit
                 .load(Ordering::Acquire)
             {
@@ -18694,6 +19040,14 @@ mod tests {
                 released.as_mut().enable();
                 self.entered_after_session_boundary_commit.notify_waiters();
                 released.await;
+            }
+            if self
+                .fail_after_session_boundary_commit
+                .swap(false, Ordering::AcqRel)
+            {
+                return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
+                    "synthetic head-canonical post-commit reporting failure".to_string(),
+                ));
             }
             Ok(result)
         }
@@ -20390,6 +20744,17 @@ mod tests {
                 .map_err(|error| AgentError::ConfigError(error.to_string()))
         }
 
+        fn append_system_notice_control(
+            &mut self,
+            record: meerkat_core::types::SystemNoticeRecord,
+        ) -> Result<meerkat_core::service::AppendSystemContextStatus, AgentError> {
+            let mut session = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Ok(session.append_system_notice_once(record))
+        }
+
         fn activate_instruction_control(
             &mut self,
             request: meerkat_core::InstructionActivationRequest,
@@ -20560,6 +20925,7 @@ mod tests {
             let session_id = self.inner.session_id();
             let _ = event_tx
                 .send(AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
@@ -20789,6 +21155,23 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionAgent for CapabilityAgent {
+        async fn prepare_head_canonical_runtime_boundary(
+            &mut self,
+            request: HeadCanonicalRuntimeBoundaryPrepareRequest,
+        ) -> Result<PreparedHeadCanonicalRuntimeBoundary, AgentError> {
+            self.inner
+                .prepare_head_canonical_runtime_boundary(request)
+                .await
+        }
+
+        fn acknowledge_head_canonical_runtime_boundary(
+            &mut self,
+            successor_head_token: &str,
+        ) -> Result<HeadCanonicalRuntimeBoundaryAcknowledgeOutcome, AgentError> {
+            self.inner
+                .acknowledge_head_canonical_runtime_boundary(successor_head_token)
+        }
+
         async fn run_with_events(
             &mut self,
             prompt: meerkat_core::types::ContentInput,
@@ -31013,6 +31396,249 @@ mod tests {
         assert_eq!(legacy_replay.context_observation_id(), Some(&observation));
     }
 
+    #[cfg(feature = "live")]
+    struct HeadCanonicalAdmissionFixture {
+        service: Arc<PersistentSessionService<CapabilityBuilder>>,
+        runtime_store: Arc<FailingHeadCanonicalCommitRuntimeStore>,
+        session_id: SessionId,
+        channel: meerkat_core::LiveChannelId,
+        interaction: meerkat_core::InteractionId,
+        _tempdir: tempfile::TempDir,
+    }
+
+    #[cfg(feature = "live")]
+    impl HeadCanonicalAdmissionFixture {
+        async fn new() -> Self {
+            let tempdir = tempfile::tempdir().expect("runtime store tempdir");
+            let database_path = tempdir.path().join("runtime.sqlite3");
+            let runtime_store = Arc::new(FailingHeadCanonicalCommitRuntimeStore::new(
+                meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path)
+                    .expect("head-canonical runtime store"),
+            ));
+            let store: Arc<dyn SessionStore> = Arc::new(
+                meerkat_store::SqliteSessionStore::open(&database_path)
+                    .expect("co-located head-canonical session store"),
+            );
+            let service = Arc::new(PersistentSessionService::new(
+                CapabilityBuilder,
+                4,
+                store,
+                runtime_store.clone(),
+                memory_blob_store(),
+            ));
+            let created = service
+                .create_session(create_request("seed", InitialTurnPolicy::Defer))
+                .await
+                .expect("create session");
+            Self {
+                service,
+                runtime_store,
+                session_id: created.session_id,
+                channel: meerkat_core::LiveChannelId::new("ack-channel"),
+                interaction: meerkat_core::InteractionId::new(),
+                _tempdir: tempdir,
+            }
+        }
+
+        async fn admit(&self) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
+            self.service
+                .admit_live_assistant_playback_target(
+                    &self.session_id,
+                    self.channel.clone(),
+                    self.interaction,
+                    "response".into(),
+                    "item".into(),
+                    0,
+                )
+                .await
+        }
+
+        /// The target as committed durable authority holds it, read from the
+        /// store rather than the live actor.
+        async fn durable_target(&self) -> Option<meerkat_core::LiveAssistantPlaybackTarget> {
+            self.service
+                .load_committed_runtime_session_for_body(&self.session_id, "durable target read")
+                .await
+                .expect("read committed session")
+                .expect("committed session")
+                .live_assistant_playback_target(&self.channel, "item", 0)
+        }
+    }
+
+    /// B-1: the store commits an assistant admission and then reports an
+    /// error. The exact prepared boundary reads back as the current head, so
+    /// the admission succeeds, the live actor is kept, and an exact retry
+    /// returns the same target without a replacement.
+    #[cfg(feature = "live")]
+    #[tokio::test]
+    async fn an_admission_committed_before_its_error_is_acknowledged_not_discarded() {
+        let fixture = HeadCanonicalAdmissionFixture::new().await;
+        fixture
+            .runtime_store
+            .fail_after_session_boundary_commit
+            .store(true, Ordering::Release);
+        let target = fixture
+            .admit()
+            .await
+            .expect("an exact committed boundary settles the reporting failure");
+        assert!(
+            fixture
+                .service
+                .export_live_session(&fixture.session_id)
+                .await
+                .is_ok(),
+            "the live actor is kept"
+        );
+        assert_eq!(fixture.durable_target().await, Some(target.clone()));
+        assert_eq!(
+            fixture.admit().await.expect("exact retry"),
+            target,
+            "a retry never mints a replacement target"
+        );
+        assert_eq!(fixture.durable_target().await, Some(target));
+    }
+
+    /// B-1, readback unavailable: the commit landed, its error was reported,
+    /// and the boundary cannot be read back. The admission is neither
+    /// classified as refused nor replayed: the actor is fatalized, and once
+    /// the store can be read the committed target is exactly the one durable
+    /// authority holds.
+    #[cfg(feature = "live")]
+    #[tokio::test]
+    async fn an_admission_whose_readback_is_unavailable_stays_unresolved() {
+        let fixture = HeadCanonicalAdmissionFixture::new().await;
+        fixture
+            .runtime_store
+            .set_pause_after_session_boundary_commit(true);
+        fixture
+            .runtime_store
+            .fail_after_session_boundary_commit
+            .store(true, Ordering::Release);
+        let service = Arc::clone(&fixture.service);
+        let session_id = fixture.session_id.clone();
+        let channel = fixture.channel.clone();
+        let interaction = fixture.interaction;
+        let entered = fixture
+            .runtime_store
+            .entered_after_session_boundary_commit
+            .notified();
+        tokio::pin!(entered);
+        entered.as_mut().enable();
+        let admission = tokio::spawn(async move {
+            service
+                .admit_live_assistant_playback_target(
+                    &session_id,
+                    channel,
+                    interaction,
+                    "response".into(),
+                    "item".into(),
+                    0,
+                )
+                .await
+        });
+        entered.await;
+        fixture
+            .runtime_store
+            .fail_boundary_authority_reads
+            .store(true, Ordering::Release);
+        fixture
+            .runtime_store
+            .release_after_session_boundary_commit();
+        let error = admission
+            .await
+            .expect("admission task")
+            .expect_err("an unreadable outcome is not reported as admitted");
+        assert!(
+            error.to_string().contains("could not be read back"),
+            "{error}"
+        );
+        assert!(
+            error.requests_runtime_executor_stop(),
+            "an ambiguous outcome stops the executor: {error}"
+        );
+        assert_eq!(
+            fixture.service.inner.fatalized_actor_task_terminations(),
+            1,
+            "the actor is fatalized, not merely discarded"
+        );
+        assert!(matches!(
+            fixture
+                .service
+                .export_live_session(&fixture.session_id)
+                .await,
+            Err(SessionError::NotFound { .. })
+        ));
+        fixture
+            .runtime_store
+            .fail_boundary_authority_reads
+            .store(false, Ordering::Release);
+        let durable = fixture
+            .durable_target()
+            .await
+            .expect("the commit landed before its reporting failed");
+        assert_eq!(durable.item_id(), "item");
+    }
+
+    /// B-2: the caller is cancelled after the store committed the admission
+    /// but before the actor acknowledged it. An exact retry finds the
+    /// committed boundary and returns the same target; nothing is repeated.
+    #[cfg(feature = "live")]
+    #[tokio::test]
+    async fn a_cancelled_acknowledgement_converges_on_the_committed_admission() {
+        let fixture = HeadCanonicalAdmissionFixture::new().await;
+        fixture
+            .runtime_store
+            .set_pause_after_session_boundary_commit(true);
+        let service = Arc::clone(&fixture.service);
+        let session_id = fixture.session_id.clone();
+        let channel = fixture.channel.clone();
+        let interaction = fixture.interaction;
+        let entered = fixture
+            .runtime_store
+            .entered_after_session_boundary_commit
+            .notified();
+        tokio::pin!(entered);
+        entered.as_mut().enable();
+        let admission = tokio::spawn(async move {
+            service
+                .admit_live_assistant_playback_target(
+                    &session_id,
+                    channel,
+                    interaction,
+                    "response".into(),
+                    "item".into(),
+                    0,
+                )
+                .await
+        });
+        entered.await;
+        let committed = fixture
+            .durable_target()
+            .await
+            .expect("the admission committed before the barrier");
+        admission.abort();
+        assert!(
+            admission.await.is_err_and(|error| error.is_cancelled()),
+            "the caller was cancelled at the post-commit barrier"
+        );
+        fixture
+            .runtime_store
+            .release_after_session_boundary_commit();
+        fixture
+            .runtime_store
+            .set_pause_after_session_boundary_commit(false);
+        let target = fixture
+            .admit()
+            .await
+            .expect("exact retry after cancellation");
+        assert_eq!(target, committed, "the retry returns the committed target");
+        assert_eq!(fixture.durable_target().await, Some(committed.clone()));
+        assert_eq!(
+            fixture.admit().await.expect("second exact retry"),
+            committed
+        );
+    }
+
     #[tokio::test]
     async fn test_realtime_open_snapshot_hydrates_durable_blob_backed_user_image() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -40275,7 +40901,7 @@ mod tests {
     /// must reach the caller as the typed
     /// `WholeBlobAuditedEndpointDivergence` on the heal seam AND on the
     /// operational resume preparation, never as an internal recovery fault,
-    /// or every host classifies the HomeCore 2026-09-22 wedge as retryable.
+    /// or every host classifies the 2026-09-22 production wedge as retryable.
     #[tokio::test]
     async fn recovery_and_resume_report_audited_endpoint_divergence_typed() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -40288,7 +40914,7 @@ mod tests {
             memory_blob_store(),
         );
 
-        // The HomeCore shape: a compaction retained a rewritten row inside the
+        // The field shape: a compaction retained a rewritten row inside the
         // audited endpoint, then the document was encoded past the writer
         // guard.
         let mut session = Session::new();
@@ -40590,7 +41216,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Incremental session persistence (OB3 ask 11)
+    // Incremental session persistence (a downstream ask)
     // -----------------------------------------------------------------------
 
     fn incremental_store_fixture() -> (
@@ -42277,6 +42903,433 @@ mod tests {
                 witness.outcome(),
                 meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Applied
             );
+        }
+    }
+
+    // A passive hook-engine fixture isolates the existing persistent notice
+    // writer. The real default-engine reconfiguration case lives in hooks tests.
+    struct LateReadyFactEngine {
+        ready: std::sync::Mutex<Option<meerkat_core::hooks::HookBackgroundCompletion>>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HookEngine for LateReadyFactEngine {
+        async fn execute(
+            &self,
+            invocation: meerkat_core::HookInvocation,
+            _overrides: Option<&meerkat_core::HookRunOverrides>,
+        ) -> Result<meerkat_core::HookExecutionReport, meerkat_core::HookEngineError> {
+            let hook_id = meerkat_core::HookId::new("persisted-late-observer");
+            let mut ready = self.ready.lock().unwrap();
+            assert!(ready.is_none());
+            *ready = Some(meerkat_core::hooks::HookBackgroundCompletion {
+                ordinal: 1,
+                attribution: meerkat_core::hooks::HookBackgroundAttribution::from_invocation(
+                    hook_id,
+                    &invocation,
+                ),
+                result: meerkat_core::hooks::HookBackgroundResult::LaunchRefused(
+                    meerkat_core::HookFailureReason::ConfinementRefused {
+                        refusal:
+                            meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement,
+                    },
+                ),
+                diagnostic_truncated: false,
+            });
+            Ok(meerkat_core::HookExecutionReport::empty())
+        }
+
+        fn background_session_status(
+            &self,
+            session_id: &SessionId,
+        ) -> Option<meerkat_core::hooks::HookBackgroundSessionStatus> {
+            Some(meerkat_core::hooks::HookBackgroundSessionStatus {
+                running: 0,
+                ready: usize::from(
+                    self.ready
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|fact| &fact.attribution.session_id == session_id),
+                ),
+            })
+        }
+
+        fn take_session_background_completions(
+            &self,
+            session_id: &SessionId,
+            limit: usize,
+        ) -> Vec<meerkat_core::hooks::HookBackgroundCompletion> {
+            let mut ready = self.ready.lock().unwrap();
+            if limit > 0
+                && ready
+                    .as_ref()
+                    .is_some_and(|fact| &fact.attribution.session_id == session_id)
+            {
+                ready.take().into_iter().collect()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    struct LatePersistentNoticeWriter<'a> {
+        fixture: &'a ArchiveHandoffFixture,
+        received: std::sync::Mutex<Vec<meerkat_core::types::SystemNoticeRecord>>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle
+        for LatePersistentNoticeWriter<'_>
+    {
+        async fn append_system_notice_under_turn_finalization_boundary(
+            &self,
+            record: meerkat_core::types::SystemNoticeRecord,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            assert!(record.requests.is_empty());
+            self.received.lock().unwrap().push(record.clone());
+            // This is the real same-session writer used by the facade handle.
+            // The test holds its existing turn-finalization boundary.
+            self.fixture
+                .service
+                .append_system_notice_under_runtime_turn_boundary(&self.fixture.session_id, record)
+                .await
+                .map_err(|error| {
+                    meerkat_core::lifecycle::CoreExecutorError::control_failed_runtime(
+                        error.to_string(),
+                    )
+                })?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn late_hook_notice_store_failure_and_committed_error_retry_the_same_fixed_fact_once() {
+        use meerkat_core::HookEngine as _;
+
+        for profile in ArchiveHandoffProfile::ALL {
+            let fixture = ArchiveHandoffFixture::new(profile, Session::new()).await;
+            let before = fixture.durable_body().await;
+            let original_run = RunId::new();
+            let engine = Arc::new(LateReadyFactEngine {
+                ready: std::sync::Mutex::new(None),
+            });
+            let dispatcher =
+                meerkat_core::PostCommitHookDispatcher::new(fixture.session_id.clone());
+            dispatcher
+                .configure(
+                    Some(engine.clone()),
+                    meerkat_core::HookRunOverrides::default(),
+                )
+                .unwrap();
+            let mut invocation = meerkat_core::HookInvocation::new(
+                meerkat_core::HookPoint::PostToolExecution,
+                fixture.session_id.clone(),
+            );
+            invocation.run_id = Some(original_run.clone());
+            invocation.turn_number = Some(3);
+            engine.execute(invocation, None).await.unwrap();
+            let original_attribution = engine
+                .ready
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .attribution
+                .clone();
+            let writer = LatePersistentNoticeWriter {
+                fixture: &fixture,
+                received: std::sync::Mutex::new(Vec::new()),
+            };
+            let _boundary = fixture
+                .service
+                .acquire_runtime_turn_finalization_guard(&fixture.session_id)
+                .await;
+            assert!(
+                !fixture
+                    .service
+                    .inner
+                    .has_live_session(&fixture.session_id)
+                    .await
+                    .unwrap()
+            );
+
+            fixture.failures.fail_next_document_commit();
+            let first = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                dispatcher.flush_background_completions_under_turn_finalization_boundary(&writer),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                first,
+                Err(meerkat_core::lifecycle::CoreExecutorError::ControlFailed { .. })
+            ));
+            assert_eq!(
+                fixture.durable_body().await.messages(),
+                before.messages(),
+                "failed durable write must not invent a committed notice"
+            );
+            assert!(
+                engine.ready.lock().unwrap().is_none(),
+                "the dispatcher now owes the transferred fact, not a reread from the engine"
+            );
+            assert_eq!(writer.received.lock().unwrap().len(), 1);
+            fixture.failures.allow_document_commits();
+
+            // Reuse each existing store's actual commit-then-error fault. The
+            // retained typed block must survive unchanged so the existing
+            // same-session writer deduplicates the uncertain-commit retry.
+            match &fixture.failures {
+                ArchiveHandoffFailureControl::WholeBlob(store) => store
+                    .fail_after_session_boundary_commit
+                    .store(true, Ordering::Release),
+                ArchiveHandoffFailureControl::HeadCanonical(store) => store
+                    .fail_after_session_boundary_commit
+                    .store(true, Ordering::Release),
+            }
+            let second = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                dispatcher.flush_background_completions_under_turn_finalization_boundary(&writer),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                second,
+                Err(meerkat_core::lifecycle::CoreExecutorError::ControlFailed { .. })
+            ));
+            let after_uncertain = fixture.durable_body().await;
+            assert_eq!(
+                after_uncertain.messages().len(),
+                before.messages().len() + 1
+            );
+            assert_eq!(writer.received.lock().unwrap().len(), 2);
+            let third = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                dispatcher.flush_background_completions_under_turn_finalization_boundary(&writer),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(third, 1);
+            assert_eq!(
+                dispatcher
+                    .flush_background_completions_under_turn_finalization_boundary(&writer)
+                    .await
+                    .unwrap(),
+                0
+            );
+            let records = writer.received.lock().unwrap().clone();
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[0], records[1]);
+            assert_eq!(
+                records[1], records[2],
+                "retry must not regenerate time, identity, or attribution"
+            );
+            let durable = fixture.durable_body().await;
+            assert_eq!(
+                durable.messages(),
+                after_uncertain.messages(),
+                "retry appends no duplicate rows"
+            );
+            let Message::SystemNotice(notice) = durable.messages().last().unwrap() else {
+                panic!("late fixed fact must be a typed system notice");
+            };
+            assert_eq!(notice.blocks, records[0].notice.blocks);
+            let meerkat_core::types::SystemNoticeBlock::RuntimeNotice {
+                category,
+                payload: Some(payload),
+                ..
+            } = &notice.blocks[0]
+            else {
+                panic!("expected completion block");
+            };
+            assert_eq!(category, "background_hook_completion");
+            assert_eq!(
+                payload["attribution"],
+                serde_json::to_value(&original_attribution).unwrap()
+            );
+            assert_eq!(
+                payload["attribution"]["session_id"],
+                serde_json::json!(fixture.session_id)
+            );
+            assert_eq!(
+                payload["attribution"]["run_id"],
+                serde_json::json!(original_run)
+            );
+            assert_eq!(payload["attribution"]["hook_id"], "persisted-late-observer");
+            assert_eq!(payload["disposition"], "launch_refused");
+            assert_eq!(
+                payload["refusal"],
+                serde_json::json!(
+                    meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement
+                )
+            );
+            assert!(
+                payload["registration_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+            assert!(
+                !fixture
+                    .service
+                    .inner
+                    .has_live_session(&fixture.session_id)
+                    .await
+                    .unwrap(),
+                "the detached writer path must not materialize an actor"
+            );
+            dispatcher.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_late_hook_flush_retries_the_exact_live_notice_to_durable_storage() {
+        use meerkat_core::HookEngine as _;
+
+        for profile in ArchiveHandoffProfile::ALL {
+            let fixture = ArchiveHandoffFixture::new(profile, Session::new()).await;
+            let resumed = fixture
+                .service
+                .create_session(resume_request(fixture.durable_body().await))
+                .await
+                .expect("materialize the existing idle actor");
+            assert_eq!(resumed.session_id, fixture.session_id);
+            assert!(
+                fixture
+                    .service
+                    .inner
+                    .has_live_session(&fixture.session_id)
+                    .await
+                    .unwrap()
+            );
+            let before = fixture.durable_body().await;
+            let engine = Arc::new(LateReadyFactEngine {
+                ready: std::sync::Mutex::new(None),
+            });
+            let dispatcher =
+                meerkat_core::PostCommitHookDispatcher::new(fixture.session_id.clone());
+            dispatcher
+                .configure(
+                    Some(engine.clone()),
+                    meerkat_core::HookRunOverrides::default(),
+                )
+                .unwrap();
+            let mut invocation = meerkat_core::HookInvocation::new(
+                meerkat_core::HookPoint::PostToolExecution,
+                fixture.session_id.clone(),
+            );
+            invocation.run_id = Some(RunId::new());
+            invocation.turn_number = Some(9);
+            engine.execute(invocation, None).await.unwrap();
+            let original_attribution = engine
+                .ready
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .attribution
+                .clone();
+            let writer = LatePersistentNoticeWriter {
+                fixture: &fixture,
+                received: std::sync::Mutex::new(Vec::new()),
+            };
+            let gate = match &fixture.failures {
+                ArchiveHandoffFailureControl::WholeBlob(store) => {
+                    TerminalCommitGate::WholeBlob(Arc::clone(store))
+                }
+                ArchiveHandoffFailureControl::HeadCanonical(store) => {
+                    TerminalCommitGate::HeadCanonical(Arc::clone(store))
+                }
+            };
+            let boundary = fixture
+                .service
+                .acquire_runtime_turn_finalization_guard(&fixture.session_id)
+                .await;
+            gate.pause();
+            let mut flush = Box::pin(
+                dispatcher.flush_background_completions_under_turn_finalization_boundary(&writer),
+            );
+            let stopped_at_store = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::select! {
+                    biased;
+                    () = gate.entered() => None,
+                    result = &mut flush => Some(result),
+                }
+            })
+            .await;
+            // Drop the actual append future after it transfers the fact and
+            // mutates the live actor, while the real durable commit is held.
+            // Release the store gate before any assertions, including timeout.
+            drop(flush);
+            gate.release();
+            assert!(
+                matches!(stopped_at_store, Ok(None)),
+                "{profile:?}: expected a held commit, got {stopped_at_store:?}"
+            );
+            assert!(
+                engine.ready.lock().unwrap().is_none(),
+                "the cancelled writer must not return ownership to the engine"
+            );
+            assert_eq!(writer.received.lock().unwrap().len(), 1);
+            assert_eq!(
+                fixture.durable_body().await.messages(),
+                before.messages(),
+                "the held boundary has not committed the live append"
+            );
+
+            let retry = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                dispatcher.flush_background_completions_under_turn_finalization_boundary(&writer),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(retry, 1, "the dispatcher still owes the cancelled append");
+            let records = writer.received.lock().unwrap().clone();
+            assert_eq!(records.len(), 2);
+            assert_eq!(
+                records[0], records[1],
+                "retry preserves the entire frozen record"
+            );
+            let durable = fixture.durable_body().await;
+            assert_eq!(
+                durable.messages().len(),
+                before.messages().len() + 1,
+                "a live duplicate is not sufficient until this notice is durable"
+            );
+            let Message::SystemNotice(notice) = durable.messages().last().unwrap() else {
+                panic!("retry must commit the retained typed notice");
+            };
+            assert_eq!(notice.blocks, records[0].notice.blocks);
+            let meerkat_core::types::SystemNoticeBlock::RuntimeNotice {
+                payload: Some(payload),
+                ..
+            } = &notice.blocks[0]
+            else {
+                panic!("expected completion block");
+            };
+            assert_eq!(
+                payload["attribution"],
+                serde_json::to_value(&original_attribution).unwrap()
+            );
+            assert_eq!(
+                dispatcher
+                    .flush_background_completions_under_turn_finalization_boundary(&writer)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(writer.received.lock().unwrap().len(), 2);
+            assert_eq!(fixture.durable_body().await.messages(), durable.messages());
+            dispatcher.shutdown();
+            drop(boundary);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                fixture.service.shutdown(),
+            )
+            .await
+            .expect("stop the fixture actor");
         }
     }
 }

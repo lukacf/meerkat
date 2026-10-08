@@ -17,6 +17,7 @@ fn make_prompt_input(text: &str) -> Input {
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -42,6 +43,7 @@ fn make_prompt_input_with_handling_mode(
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -79,6 +81,7 @@ fn make_peer_terminal(body: &str) -> Input {
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -112,6 +115,7 @@ fn make_peer_progress() -> Input {
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -288,6 +292,7 @@ async fn reject_derived_prompt() {
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -617,6 +622,7 @@ async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -657,6 +663,7 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -719,6 +726,7 @@ async fn accept_peer_response_terminal_with_empty_request_id_returns_rejected() 
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -759,6 +767,7 @@ async fn accept_peer_message_with_steer_handling_mode_returns_accepted() {
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -856,6 +865,7 @@ async fn post_admission_signal_steer_is_request_immediate() {
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -904,6 +914,7 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),

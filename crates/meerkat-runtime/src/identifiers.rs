@@ -34,8 +34,115 @@ impl std::fmt::Display for RuntimeEventId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LogicalRuntimeId(pub String);
 
+/// The stable delivery address of one mob member incarnation.
+///
+/// A member's sessions change when it is repointed, but its incarnation
+/// (`identity` at `generation`) does not, so durable deliveries addressed to a
+/// member follow it across repoints and never reach a later respawn under a
+/// new generation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemberDeliveryAddress {
+    pub mob_id: String,
+    pub identity: String,
+    pub generation: u64,
+}
+
+/// A logical runtime id that claims a namespace it does not satisfy.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid logical runtime id {id}: {reason}")]
+pub struct LogicalRuntimeIdError {
+    pub id: String,
+    pub reason: &'static str,
+}
+
+fn encode_address_component(component: &str) -> String {
+    component.replace('%', "%25").replace(':', "%3A")
+}
+
+fn decode_address_component(component: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(component.len());
+    let mut rest = component;
+    while let Some(at) = rest.find('%') {
+        decoded.push_str(&rest[..at]);
+        match rest.get(at..at + 3) {
+            Some("%25") => decoded.push('%'),
+            Some("%3A") => decoded.push(':'),
+            _ => return None,
+        }
+        rest = &rest[at + 3..];
+    }
+    decoded.push_str(rest);
+    Some(decoded)
+}
+
+fn valid_address_component(component: &str) -> bool {
+    !component.is_empty() && !component.chars().any(char::is_control)
+}
+
 impl LogicalRuntimeId {
     const SESSION_RUNTIME_PREFIX: &'static str = "rt:session:";
+    const MEMBER_RUNTIME_PREFIX: &'static str = "rt:member:";
+
+    /// The delivery address of one member incarnation:
+    /// `rt:member:{mob}:{identity}:{generation}`, with `%` and `:` escaped
+    /// inside each component. Its own namespace, never read as a session.
+    pub fn for_member(address: &MemberDeliveryAddress) -> Result<Self, LogicalRuntimeIdError> {
+        if !valid_address_component(&address.mob_id) || !valid_address_component(&address.identity)
+        {
+            return Err(LogicalRuntimeIdError {
+                id: format!("{address:?}"),
+                reason: "member address components must be non-empty and free of control characters",
+            });
+        }
+        Ok(Self(format!(
+            "{}{}:{}:{}",
+            Self::MEMBER_RUNTIME_PREFIX,
+            encode_address_component(&address.mob_id),
+            encode_address_component(&address.identity),
+            address.generation
+        )))
+    }
+
+    /// The member address this id names. `Ok(None)` for any id outside the
+    /// `rt:member:` namespace; an id inside it that does not parse is an
+    /// error, never a different kind of runtime.
+    pub fn member_address(&self) -> Result<Option<MemberDeliveryAddress>, LogicalRuntimeIdError> {
+        let Some(rest) = self.0.strip_prefix(Self::MEMBER_RUNTIME_PREFIX) else {
+            return Ok(None);
+        };
+        let malformed = |reason| LogicalRuntimeIdError {
+            id: self.0.clone(),
+            reason,
+        };
+        let mut parts = rest.split(':');
+        let (Some(mob_id), Some(identity), Some(generation), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(malformed(
+                "expected rt:member:{mob}:{identity}:{generation}",
+            ));
+        };
+        let mob_id = decode_address_component(mob_id)
+            .ok_or_else(|| malformed("invalid escape in the mob component"))?;
+        let identity = decode_address_component(identity)
+            .ok_or_else(|| malformed("invalid escape in the identity component"))?;
+        if !valid_address_component(&mob_id) || !valid_address_component(&identity) {
+            return Err(malformed("empty or control-character component"));
+        }
+        let generation = generation
+            .parse::<u64>()
+            .map_err(|_| malformed("the generation is not a u64"))?;
+        let address = MemberDeliveryAddress {
+            mob_id,
+            identity,
+            generation,
+        };
+        // Round-trip: only the canonical spelling is a member address.
+        if Self::for_member(&address)?.0 != self.0 {
+            return Err(malformed("not the canonical member address spelling"));
+        }
+        Ok(Some(address))
+    }
 
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
@@ -311,6 +418,53 @@ impl std::fmt::Display for EventCodeId {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_addresses_round_trip_with_escaped_components() {
+        let address = MemberDeliveryAddress {
+            mob_id: "team:a%b".into(),
+            identity: "lead:1".into(),
+            generation: 7,
+        };
+        let id = LogicalRuntimeId::for_member(&address).unwrap();
+        assert_eq!(id.0, "rt:member:team%3Aa%25b:lead%3A1:7");
+        assert_eq!(id.member_address().unwrap(), Some(address));
+        assert_eq!(id.session_id(), None, "a member address is never a session");
+    }
+
+    #[test]
+    fn session_ids_are_outside_the_member_namespace() {
+        let session = SessionId::new();
+        let id = LogicalRuntimeId::for_session(&session);
+        assert_eq!(id.member_address().unwrap(), None);
+        assert_eq!(id.session_id(), Some(session));
+    }
+
+    #[test]
+    fn a_malformed_member_address_is_an_error_not_another_runtime() {
+        for raw in [
+            "rt:member:",
+            "rt:member:team:lead",
+            "rt:member:team:lead:7:extra",
+            "rt:member:team:lead:seven",
+            "rt:member::lead:7",
+            "rt:member:team%3:lead:7",
+            "rt:member:team:lead:007",
+        ] {
+            assert!(
+                LogicalRuntimeId::new(raw).member_address().is_err(),
+                "{raw} must not parse as a member address"
+            );
+        }
+        assert!(
+            LogicalRuntimeId::for_member(&MemberDeliveryAddress {
+                mob_id: String::new(),
+                identity: "lead".into(),
+                generation: 1,
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn runtime_event_id_unique() {

@@ -1,7 +1,7 @@
 # Meerkat Toolkit product review of r2
 
-Received via agent bus from `toolkit-codex-local`, host `Lukas-BigMac`, at 2026-09-30T20:05:38+00:00.
-Message: `20260930T200538.019276-toolkit-codex-local-b84b93.json`. The text below preserves the review as received.
+Received via agent bus from `connector-codex-local`, host `operator-host`, at 2026-09-30T20:05:38+00:00.
+Message: `20260930T200538.019276-connector-codex-local-b84b93.json`. The text below preserves the review as received, with downstream names and private details neutralised.
 
 # ADR-001 r2: Toolkit consolidated review
 
@@ -32,4 +32,4 @@ The independent report expands these cases, including typed service commissionin
 
 The first governed profile is deliberately narrower than the complete Toolkit end state. Buffered output and unsupported mixed-context, dynamic-audience and multi-principal batching are honest compatibility limits. They must remain explicit in product readiness and later acceptance work; they do not remove any revision 8 requirement from the Toolkit goal. Likewise, future hostile-plugin containment requires its own proven isolation profile.
 
-Local full evidence: /Users/luka/src/meerkat-toolkit/docs/coordination/20260930-upstream-review/adr-001-r2-toolkit-review
+Local full evidence: (operator-retained path)

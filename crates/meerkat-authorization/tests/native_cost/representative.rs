@@ -350,7 +350,7 @@ struct RepresentativeFixture {
 }
 impl RepresentativeFixture {
     async fn new(mode: HostMode, depth: usize, workload: Workload, path: PathBuf) -> Self {
-        Self::new_inner(mode, depth, workload, path, false).await
+        Self::new_inner(mode, depth, workload, path, false, Default::default()).await
     }
     async fn new_inner(
         mode: HostMode,
@@ -358,6 +358,7 @@ impl RepresentativeFixture {
         workload: Workload,
         path: PathBuf,
         queue_control: bool,
+        retry: meerkat_core::config::RetryConfig,
     ) -> Self {
         let (machine, grants, controller, operations) = if mode == HostMode::LocalGoverned {
             let grants = Arc::new(
@@ -449,7 +450,10 @@ impl RepresentativeFixture {
             context: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
         });
-        let mut config = Config::default();
+        let mut config = Config {
+            retry,
+            ..Default::default()
+        };
         config.agent.max_turns = Some(4);
         config.budget.max_tool_calls = Some(400);
         config.compaction.auto_compact_threshold = 1_000_000;
@@ -1108,9 +1112,15 @@ async fn native_representative_correctness() {
     // Queue is a separate canonical selector, inspected at the first provider
     // boundary. Only its first original may have a run before the others cancel.
     for mode in [HostMode::TrustedHost, HostMode::LocalGoverned] {
-        let f =
-            RepresentativeFixture::new_inner(mode, 1, Workload::FreshAdmission, path.clone(), true)
-                .await;
+        let f = RepresentativeFixture::new_inner(
+            mode,
+            1,
+            Workload::FreshAdmission,
+            path.clone(),
+            true,
+            Default::default(),
+        )
+        .await;
         // Retain each waiter's real first admission; these inputs have no replay key.
         let mut completions = Vec::with_capacity(CONTRIBUTORS);
         for input in &f.inputs {
@@ -1429,5 +1439,281 @@ async fn native_representative_matrix() {
     assert!(
         completed.is_ok(),
         "UNCERTAIN: representative overall budget exhausted"
+    );
+}
+
+const TOOL_TAIL_WARMUP: usize = 100;
+const TOOL_TAIL_PAIRS: usize = 2000;
+
+#[derive(Serialize)]
+struct ToolTailSample {
+    depth: usize,
+    mode: HostMode,
+    pair: usize,
+    first_in_pair: bool,
+    call_ordinal: usize,
+    call_id: String,
+    audit_records_before: usize,
+    dispatch_ns: u64,
+}
+
+#[derive(Serialize)]
+struct ToolTailCell {
+    depth: usize,
+    mode: HostMode,
+    old_rows: usize,
+    active_rows: usize,
+    total_rows: usize,
+    contributor_ids: Vec<String>,
+    run_id: String,
+    prefix_audit_records: usize,
+    prefix_audit_digest: EvidenceDigest,
+    prefix_reads: usize,
+    final_reads: usize,
+    final_audit_records: usize,
+    model_requests: usize,
+}
+
+async fn tool_dispatch_tail_depth(
+    depth: usize,
+    path: PathBuf,
+) -> (Vec<ToolTailCell>, Vec<ToolTailSample>) {
+    let mut runs = Vec::with_capacity(2);
+    for mode in [HostMode::TrustedHost, HostMode::LocalGoverned] {
+        // This benchmark holds the second model request while direct tool calls
+        // run. Disable model call/inactivity timeouts only in this tail fixture;
+        // the shared outer deadline and each tool's 30-second deadline remain.
+        let retry = meerkat_core::config::RetryConfig {
+            call_timeout_override: meerkat_core::config::CallTimeoutOverride::Disabled,
+            stream_inactivity_timeout_override: meerkat_core::config::CallTimeoutOverride::Disabled,
+            ..Default::default()
+        };
+        let fixture = RepresentativeFixture::new_inner(
+            mode,
+            depth,
+            Workload::IndividualFencedTools,
+            path.clone(),
+            false,
+            retry,
+        )
+        .await;
+        let completion = fixture.start().await;
+        tokio::time::timeout(Duration::from_secs(60), fixture.provider.barrier.notified())
+            .await
+            .expect("actual prefix reaches its held model boundary");
+        assert_eq!(fixture.provider.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            fixture.tools.inner.reads.load(Ordering::Relaxed),
+            PREFIX_READS
+        );
+        let (run, prefix) = fixture.audit().await;
+        assert_success_audit(&prefix, PREFIX_READS + 1, mode);
+        let context = fixture.context();
+        runs.push((fixture, context, completion, run, prefix));
+    }
+    let mut samples = Vec::with_capacity(2 * TOOL_TAIL_PAIRS);
+    for ordinal in 0..TOOL_TAIL_WARMUP + TOOL_TAIL_PAIRS {
+        let order = if ordinal % 2 == 0 { [0, 1] } else { [1, 0] };
+        let call_id = format!("tool-tail-{ordinal}");
+        for (position, index) in order.into_iter().enumerate() {
+            let (fixture, context, _, _, prefix) = &runs[index];
+            assert_eq!(
+                fixture.tools.inner.reads.load(Ordering::Relaxed),
+                PREFIX_READS + ordinal
+            );
+            // Reuse the full existing public boundary, including plan resolution,
+            // authorization preparation/currentness, Entry/Outcome, the real read
+            // and result construction. No timer or no-op cost is subtracted.
+            let (dispatch_ns, result) = direct_call(fixture, context, &call_id).await;
+            let result = result.expect("failed dispatch invalidates the tail run");
+            assert!(dispatch_ns > 0);
+            assert!(!result.result.is_error && result.result.settlement_failures.is_empty());
+            assert_eq!(result.result.tool_use_id, call_id);
+            assert_eq!(result.result.text_content(), "record-7 value");
+            assert!(
+                result.async_ops.is_empty()
+                    && result.session_effects.is_empty()
+                    && result.terminal_cause().is_none()
+            );
+            assert_eq!(
+                fixture.tools.inner.reads.load(Ordering::Relaxed),
+                PREFIX_READS + ordinal + 1
+            );
+            if ordinal >= TOOL_TAIL_WARMUP {
+                samples.push(ToolTailSample {
+                    depth,
+                    mode: fixture.mode,
+                    pair: ordinal - TOOL_TAIL_WARMUP,
+                    first_in_pair: position == 0,
+                    call_ordinal: ordinal,
+                    call_id: call_id.clone(),
+                    // Verified against the exact retained audit below, outside
+                    // timing. Do not clone/inspect that buffer between dispatches.
+                    audit_records_before: prefix.len()
+                        + if fixture.mode == HostMode::LocalGoverned {
+                            3 * ordinal
+                        } else {
+                            0
+                        },
+                    dispatch_ns,
+                });
+            }
+        }
+    }
+    let dispatches = TOOL_TAIL_WARMUP + TOOL_TAIL_PAIRS;
+    let expected_reads = PREFIX_READS + dispatches;
+    let mut cells = Vec::with_capacity(2);
+    for (fixture, _, completion, run, prefix) in runs {
+        fixture.provider.release.notify_one();
+        let outcome = completion.wait().await.expect("same native run completes");
+        let CompletionOutcome::Completed(result) = outcome else {
+            panic!("tail timing requires normal completion")
+        };
+        assert_eq!(result.session_id, fixture.session);
+        assert_eq!(result.text, "representative completed");
+        assert!(result.terminal_cause_kind.is_none());
+        assert_eq!(result.turns, 2);
+        // The direct calls use the real fence but are outside Agent scheduling.
+        assert_eq!(result.tool_calls as usize, PREFIX_READS);
+        assert_eq!(fixture.provider.requests.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            fixture.tools.inner.reads.load(Ordering::Relaxed),
+            expected_reads
+        );
+        assert_eq!(fixture.tools.inner.deletes.load(Ordering::Relaxed), 0);
+        let (final_run, audit) = fixture.audit().await;
+        assert_eq!(final_run, run);
+        assert!(audit.starts_with(&prefix));
+        assert_success_audit(&audit, expected_reads + 2, fixture.mode);
+        if fixture.mode == HostMode::LocalGoverned {
+            // Every warmup/measured call appends exactly Prepared, Entry,
+            // Outcome before the next call. This proves each sampled audit
+            // position without introducing a timed observation side channel.
+            for (ordinal, records) in audit[prefix.len()..prefix.len() + 3 * dispatches]
+                .chunks_exact(3)
+                .enumerate()
+            {
+                let AuditObservation::Prepared { target, .. } = &records[0].observation.observation
+                else {
+                    panic!("tail call must begin with Prepared")
+                };
+                assert!(
+                    matches!(target.as_ref(), AuditTarget::Tool { call_id, tool_name, .. }
+                    if call_id == &format!("tool-tail-{ordinal}") && tool_name == "read_record")
+                );
+                assert!(
+                    records.iter().all(|record| record.observation.operation_id
+                        == records[0].observation.operation_id)
+                );
+            }
+        }
+        let calls = fixture.tools.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), expected_reads);
+        assert_eq!(
+            calls[..PREFIX_READS]
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            (0..PREFIX_READS).map(|i| format!("prefix-{i}")).collect()
+        );
+        assert_eq!(
+            &calls[PREFIX_READS..],
+            &(0..dispatches)
+                .map(|i| format!("tool-tail-{i}"))
+                .collect::<Vec<_>>()
+        );
+        for input in &fixture.inputs {
+            let row = fixture
+                .machine
+                .input_state(&fixture.session, input.id())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.seed.terminal_outcome,
+                Some(InputTerminalOutcome::Consumed)
+            );
+        }
+        fixture.retained_old_rows().await;
+        assert_eq!(
+            std::fs::read(&fixture.tools.inner.path).unwrap(),
+            FILE_BYTES
+        );
+        cells.push(ToolTailCell {
+            depth,
+            mode: fixture.mode,
+            old_rows: fixture.old_ids.len(),
+            active_rows: fixture.inputs.len(),
+            total_rows: fixture.old_ids.len() + fixture.inputs.len(),
+            contributor_ids: fixture
+                .inputs
+                .iter()
+                .map(|input| input.id().to_string())
+                .collect(),
+            run_id: run.to_string(),
+            prefix_audit_records: prefix.len(),
+            prefix_audit_digest: EvidenceDigest::of_bytes(&serde_json::to_vec(&prefix).unwrap()),
+            prefix_reads: PREFIX_READS,
+            final_reads: expected_reads,
+            final_audit_records: audit.len(),
+            model_requests: 2,
+        });
+        fixture.close().await;
+    }
+    (cells, samples)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit quiet-host performance lease; empirical tool tails, not full acceptance"]
+async fn native_tool_dispatch_tail() {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1200);
+    assert_eq!(
+        std::env::var("NATIVE_COST_RUN").as_deref(),
+        Ok("approved-quiet-window")
+    );
+    assert_eq!(
+        std::env::var("NATIVE_COST_MEASUREMENT_PROFILE").as_deref(),
+        Ok("tool_dispatch_tail")
+    );
+    assert!(!std::hint::black_box(cfg!(debug_assertions)));
+    for (name, expected) in [
+        ("NATIVE_COST_WARMUP_PAIRS", TOOL_TAIL_WARMUP),
+        ("NATIVE_COST_PAIRS", TOOL_TAIL_PAIRS),
+    ] {
+        match std::env::var(name) {
+            Ok(value) => assert_eq!(value.parse::<usize>().expect("integer count"), expected),
+            Err(std::env::VarError::NotPresent) => {}
+            Err(error) => panic!("invalid count environment: {error}"),
+        }
+    }
+    let output_path = std::env::var_os("NATIVE_COST_OUTPUT").expect("fresh raw output path");
+    let output_created = std::cell::Cell::new(false);
+    let completed = with_representative_deadline(deadline, async {
+        let path = fixture_file();
+        let mut cells = Vec::new();
+        let mut samples = Vec::new();
+        for depth in [1, 3] {
+            let (mut depth_cells, mut depth_samples) = tool_dispatch_tail_depth(depth, path.clone()).await;
+            cells.append(&mut depth_cells);
+            samples.append(&mut depth_samples);
+        }
+        std::fs::remove_file(path).unwrap();
+        let payload = serde_json::json!({
+            "schema": 3, "suite": "tool_dispatch_tail", "measurement_status": "complete",
+            "warmup_pairs": TOOL_TAIL_WARMUP, "pairs_per_cell": TOOL_TAIL_PAIRS,
+            "failures": 0, "timeouts": 0, "cells": cells, "samples": samples,
+            "scope": "correlated calls in retained native runs with growing audit history; full fenced read dispatch, not model preparation or independent tail confidence"
+        });
+        use std::io::Write;
+        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&output_path).unwrap();
+        output_created.set(true);
+        output.write_all(&serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+    }).await;
+    if completed.is_err() && output_created.get() {
+        std::fs::remove_file(&output_path).expect("remove only this run's late output");
+    }
+    assert!(
+        completed.is_ok(),
+        "UNCERTAIN: tool-tail overall budget exhausted"
     );
 }

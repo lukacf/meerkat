@@ -41,6 +41,38 @@ pub enum ApprovalLifecycleRejectionReason {
     InvalidDecision,
     EmptyAllowedDecisions,
     InvalidRestoredRecord,
+    ReviewRetired,
+    ReviewNotSatisfied,
+    ReviewPending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ReviewAttemptStatus {
+    #[default]
+    Pending,
+    Allowed,
+    Denied,
+    Escalated,
+    Unavailable,
+    Retired,
+    Used,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ReviewVerdict {
+    #[default]
+    Allow,
+    Deny,
+    Escalate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ReviewRetirementReason {
+    #[default]
+    ContextChanged,
+    AuthorityChanged,
+    DeadlineExpired,
+    Abandoned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +99,26 @@ pub enum ApprovalLifecycleInput {
         approval_id: String,
         decision: ApprovalLifecycleDecision,
     },
+    BeginReview {
+        review_id: String,
+    },
+    RecordReviewVerdict {
+        review_id: String,
+        verdict: ReviewVerdict,
+    },
+    RecordReviewUnavailable {
+        review_id: String,
+    },
+    RetireReview {
+        review_id: String,
+        reason: ReviewRetirementReason,
+    },
+    ConsumeReviewForEntry {
+        review_id: String,
+    },
+    ReleaseReview {
+        review_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,11 +131,20 @@ pub enum ApprovalLifecycleEffect {
         approval_id: String,
         reason: ApprovalLifecycleRejectionReason,
     },
+    ReviewStatusResolved {
+        review_id: String,
+        status: ReviewAttemptStatus,
+    },
+    ReviewLifecycleRejected {
+        review_id: String,
+        reason: ApprovalLifecycleRejectionReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalLifecycleOutcome {
     Status(ApprovalLifecycleStatus),
+    ReviewStatus(ReviewAttemptStatus),
     Rejected(ApprovalLifecycleRejectionReason),
 }
 
@@ -118,6 +179,9 @@ pub struct ApprovalLifecycleMachineState {
     approval_approve_allowed: BTreeMap<String, bool>,
     approval_deny_allowed: BTreeMap<String, bool>,
     approval_has_expiry: BTreeMap<String, bool>,
+    review_ids: BTreeSet<String>,
+    review_statuses: BTreeMap<String, ReviewAttemptStatus>,
+    review_retirements: BTreeMap<String, ReviewRetirementReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +211,35 @@ enum ApprovalLifecycleTransition {
     DecideRejectedDenyNotAllowed,
     DecideApprove,
     DecideDeny,
+    BeginReviewRejectedDuplicate,
+    BeginReviewPending,
+    RecordReviewVerdictRejectedMissing,
+    RecordReviewVerdictRejectedRetired,
+    RecordReviewVerdictRejectedSettled,
+    RecordReviewVerdictAllowed,
+    RecordReviewVerdictDenied,
+    RecordReviewVerdictEscalated,
+    RecordReviewUnavailableRejectedMissing,
+    RecordReviewUnavailableRejectedRetired,
+    RecordReviewUnavailableRejectedSettled,
+    RecordReviewUnavailable,
+    RetireReviewRejectedMissing,
+    RetireReviewRejectedRetired,
+    RetireReviewRejectedSettled,
+    RetireReview,
+    ConsumeReviewRejectedMissing,
+    ConsumeReviewRejectedRetired,
+    ConsumeReviewRejectedUsed,
+    ConsumeReviewRejectedNotSatisfied,
+    ConsumeReviewForEntry,
+    ReleaseReviewRejectedMissing,
+    ReleaseReviewRejectedPending,
+    ReleaseReviewAllowed,
+    ReleaseReviewDenied,
+    ReleaseReviewEscalated,
+    ReleaseReviewUnavailable,
+    ReleaseReviewRetired,
+    ReleaseReviewUsed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +257,9 @@ impl ApprovalLifecycleMachineAuthority {
         state.approval_approve_allowed = BTreeMap::new();
         state.approval_deny_allowed = BTreeMap::new();
         state.approval_has_expiry = BTreeMap::new();
+        state.review_ids = BTreeSet::new();
+        state.review_statuses = BTreeMap::new();
+        state.review_retirements = BTreeMap::new();
         Self { state }
     }
 
@@ -177,6 +273,7 @@ impl ApprovalLifecycleMachineAuthority {
         self.state.approval_statuses.get(approval_id).copied()
     }
 
+    #[allow(dead_code)]
     fn approval_statuses_value(
         &self,
         approval_id: &str,
@@ -190,6 +287,7 @@ impl ApprovalLifecycleMachineAuthority {
             })
     }
 
+    #[allow(dead_code)]
     fn approval_approve_allowed_value(
         &self,
         approval_id: &str,
@@ -203,6 +301,7 @@ impl ApprovalLifecycleMachineAuthority {
             })
     }
 
+    #[allow(dead_code)]
     fn approval_deny_allowed_value(
         &self,
         approval_id: &str,
@@ -216,6 +315,7 @@ impl ApprovalLifecycleMachineAuthority {
             })
     }
 
+    #[allow(dead_code)]
     fn approval_has_expiry_value(&self, approval_id: &str) -> Result<bool, ApprovalLifecycleError> {
         self.state
             .approval_has_expiry
@@ -223,6 +323,34 @@ impl ApprovalLifecycleMachineAuthority {
             .copied()
             .ok_or(ApprovalLifecycleError {
                 op: "approval_has_expiry",
+            })
+    }
+
+    #[allow(dead_code)]
+    fn review_statuses_value(
+        &self,
+        approval_id: &str,
+    ) -> Result<ReviewAttemptStatus, ApprovalLifecycleError> {
+        self.state
+            .review_statuses
+            .get(approval_id)
+            .copied()
+            .ok_or(ApprovalLifecycleError {
+                op: "review_statuses",
+            })
+    }
+
+    #[allow(dead_code)]
+    fn review_retirements_value(
+        &self,
+        approval_id: &str,
+    ) -> Result<ReviewRetirementReason, ApprovalLifecycleError> {
+        self.state
+            .review_retirements
+            .get(approval_id)
+            .copied()
+            .ok_or(ApprovalLifecycleError {
+                op: "review_retirements",
             })
     }
 
@@ -528,48 +656,91 @@ impl ApprovalLifecycleMachineAuthority {
                     matches.push(ApprovalLifecycleTransition::ObserveExpiryRejectedMissing);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Pending)
-                        && (self.approval_has_expiry_value(approval_id.as_str())?)
-                        && (expired))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || ((self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str()))
+                            && ((!((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending))
+                                || (self
+                                    .state
+                                    .approval_has_expiry
+                                    .contains_key(approval_id.as_str())))))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending)
+                            && (self.approval_has_expiry_value(approval_id.as_str())?)
+                            && (expired)))
                 {
                     matches.push(ApprovalLifecycleTransition::ObserveExpiryExpiresPending);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Pending)
-                        && ((self.approval_has_expiry_value(approval_id.as_str())? == false)
-                            || (expired == false)))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || ((self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str()))
+                            && ((!((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending))
+                                || (self
+                                    .state
+                                    .approval_has_expiry
+                                    .contains_key(approval_id.as_str())))))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending)
+                            && (((self.approval_has_expiry_value(approval_id.as_str())?)
+                                == false)
+                                || (expired == false))))
                 {
                     matches.push(ApprovalLifecycleTransition::ObserveExpiryPendingNoop);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Approved))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || (self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str())))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Approved)))
                 {
                     matches.push(ApprovalLifecycleTransition::ObserveExpiryApprovedNoop);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Denied))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || (self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str())))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Denied)))
                 {
                     matches.push(ApprovalLifecycleTransition::ObserveExpiryDeniedNoop);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Expired))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || (self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str())))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Expired)))
                 {
                     matches.push(ApprovalLifecycleTransition::ObserveExpiryExpiredNoop);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Cancelled))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || (self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str())))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Cancelled)))
                 {
                     matches.push(ApprovalLifecycleTransition::ObserveExpiryCancelledNoop);
                 }
@@ -643,53 +814,113 @@ impl ApprovalLifecycleMachineAuthority {
                     matches.push(ApprovalLifecycleTransition::DecideRejectedMissing);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Expired))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || (self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str())))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Expired)))
                 {
                     matches.push(ApprovalLifecycleTransition::DecideRejectedExpired);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (is_terminal_status(
-                            self.approval_statuses_value(approval_id.as_str())?,
-                        )))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || (self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str())))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && (is_terminal_status(
+                                self.approval_statuses_value(approval_id.as_str())?,
+                            ))))
                 {
                     matches.push(ApprovalLifecycleTransition::DecideRejectedAlreadyDecided);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Pending)
-                        && (decision == ApprovalLifecycleDecision::Approve)
-                        && (self.approval_approve_allowed_value(approval_id.as_str())? == false))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || ((self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str()))
+                            && ((!((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending))
+                                || ((!(decision == ApprovalLifecycleDecision::Approve))
+                                    || (self
+                                        .state
+                                        .approval_approve_allowed
+                                        .contains_key(approval_id.as_str()))))))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending)
+                            && (decision == ApprovalLifecycleDecision::Approve)
+                            && ((self.approval_approve_allowed_value(approval_id.as_str())?)
+                                == false)))
                 {
                     matches.push(ApprovalLifecycleTransition::DecideRejectedApproveNotAllowed);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Pending)
-                        && (decision == ApprovalLifecycleDecision::Deny)
-                        && (self.approval_deny_allowed_value(approval_id.as_str())? == false))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || ((self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str()))
+                            && ((!((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending))
+                                || ((!(decision == ApprovalLifecycleDecision::Deny))
+                                    || (self
+                                        .state
+                                        .approval_deny_allowed
+                                        .contains_key(approval_id.as_str()))))))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending)
+                            && (decision == ApprovalLifecycleDecision::Deny)
+                            && ((self.approval_deny_allowed_value(approval_id.as_str())?)
+                                == false)))
                 {
                     matches.push(ApprovalLifecycleTransition::DecideRejectedDenyNotAllowed);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Pending)
-                        && (decision == ApprovalLifecycleDecision::Approve)
-                        && (self.approval_approve_allowed_value(approval_id.as_str())?))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || ((self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str()))
+                            && ((!((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending))
+                                || ((!(decision == ApprovalLifecycleDecision::Approve))
+                                    || (self
+                                        .state
+                                        .approval_approve_allowed
+                                        .contains_key(approval_id.as_str()))))))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending)
+                            && (decision == ApprovalLifecycleDecision::Approve)
+                            && (self.approval_approve_allowed_value(approval_id.as_str())?)))
                 {
                     matches.push(ApprovalLifecycleTransition::DecideApprove);
                 }
                 if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
-                    && ((self.state.approval_ids.contains(approval_id.as_str()))
-                        && (self.approval_statuses_value(approval_id.as_str())?
-                            == ApprovalLifecycleStatus::Pending)
-                        && (decision == ApprovalLifecycleDecision::Deny)
-                        && (self.approval_deny_allowed_value(approval_id.as_str())?))
+                    && (((!(self.state.approval_ids.contains(approval_id.as_str())))
+                        || ((self
+                            .state
+                            .approval_statuses
+                            .contains_key(approval_id.as_str()))
+                            && ((!((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending))
+                                || ((!(decision == ApprovalLifecycleDecision::Deny))
+                                    || (self
+                                        .state
+                                        .approval_deny_allowed
+                                        .contains_key(approval_id.as_str()))))))
+                        && ((self.state.approval_ids.contains(approval_id.as_str()))
+                            && ((self.approval_statuses_value(approval_id.as_str())?)
+                                == ApprovalLifecycleStatus::Pending)
+                            && (decision == ApprovalLifecycleDecision::Deny)
+                            && (self.approval_deny_allowed_value(approval_id.as_str())?)))
                 {
                     matches.push(ApprovalLifecycleTransition::DecideDeny);
                 }
@@ -755,6 +986,602 @@ impl ApprovalLifecycleMachineAuthority {
                     }),
                 }
             }
+            ApprovalLifecycleInput::BeginReview { review_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (self.state.review_ids.contains(review_id.as_str()))
+                {
+                    matches.push(ApprovalLifecycleTransition::BeginReviewRejectedDuplicate);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (self.state.review_ids.contains(review_id.as_str()) == false)
+                {
+                    matches.push(ApprovalLifecycleTransition::BeginReviewPending);
+                }
+                let transition = Self::single_transition(matches, "BeginReview")?;
+                match transition {
+                    ApprovalLifecycleTransition::BeginReviewRejectedDuplicate => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::AlreadyExists,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::BeginReviewPending => {
+                        self.state.review_ids.insert(review_id.clone());
+                        self.state
+                            .review_statuses
+                            .insert(review_id.clone(), ReviewAttemptStatus::Pending);
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Pending,
+                        }])
+                    }
+                    _ => Err(ApprovalLifecycleError {
+                        op: "BeginReview_transition",
+                    }),
+                }
+            }
+            ApprovalLifecycleInput::RecordReviewVerdict { review_id, verdict } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (self.state.review_ids.contains(review_id.as_str()) == false)
+                {
+                    matches.push(ApprovalLifecycleTransition::RecordReviewVerdictRejectedMissing);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Retired)))
+                {
+                    matches.push(ApprovalLifecycleTransition::RecordReviewVerdictRejectedRetired);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || ((self.state.review_statuses.contains_key(review_id.as_str()))
+                            && ((!((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Pending))
+                                || (self.state.review_statuses.contains_key(review_id.as_str())))))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Pending)
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Retired)))
+                {
+                    matches.push(ApprovalLifecycleTransition::RecordReviewVerdictRejectedSettled);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)
+                            && (verdict == ReviewVerdict::Allow)))
+                {
+                    matches.push(ApprovalLifecycleTransition::RecordReviewVerdictAllowed);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)
+                            && (verdict == ReviewVerdict::Deny)))
+                {
+                    matches.push(ApprovalLifecycleTransition::RecordReviewVerdictDenied);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)
+                            && (verdict == ReviewVerdict::Escalate)))
+                {
+                    matches.push(ApprovalLifecycleTransition::RecordReviewVerdictEscalated);
+                }
+                let transition = Self::single_transition(matches, "RecordReviewVerdict")?;
+                match transition {
+                    ApprovalLifecycleTransition::RecordReviewVerdictRejectedMissing => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::NotFound,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RecordReviewVerdictRejectedRetired => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::ReviewRetired,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RecordReviewVerdictRejectedSettled => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::AlreadyDecided,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RecordReviewVerdictAllowed => {
+                        self.state
+                            .review_statuses
+                            .insert(review_id.clone(), ReviewAttemptStatus::Allowed);
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Allowed,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RecordReviewVerdictDenied => {
+                        self.state
+                            .review_statuses
+                            .insert(review_id.clone(), ReviewAttemptStatus::Denied);
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Denied,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RecordReviewVerdictEscalated => {
+                        self.state
+                            .review_statuses
+                            .insert(review_id.clone(), ReviewAttemptStatus::Escalated);
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Escalated,
+                        }])
+                    }
+                    _ => Err(ApprovalLifecycleError {
+                        op: "RecordReviewVerdict_transition",
+                    }),
+                }
+            }
+            ApprovalLifecycleInput::RecordReviewUnavailable { review_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (self.state.review_ids.contains(review_id.as_str()) == false)
+                {
+                    matches
+                        .push(ApprovalLifecycleTransition::RecordReviewUnavailableRejectedMissing);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Retired)))
+                {
+                    matches
+                        .push(ApprovalLifecycleTransition::RecordReviewUnavailableRejectedRetired);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || ((self.state.review_statuses.contains_key(review_id.as_str()))
+                            && ((!((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Pending))
+                                || (self.state.review_statuses.contains_key(review_id.as_str())))))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Pending)
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Retired)))
+                {
+                    matches
+                        .push(ApprovalLifecycleTransition::RecordReviewUnavailableRejectedSettled);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)))
+                {
+                    matches.push(ApprovalLifecycleTransition::RecordReviewUnavailable);
+                }
+                let transition = Self::single_transition(matches, "RecordReviewUnavailable")?;
+                match transition {
+                    ApprovalLifecycleTransition::RecordReviewUnavailableRejectedMissing => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::NotFound,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RecordReviewUnavailableRejectedRetired => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::ReviewRetired,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RecordReviewUnavailableRejectedSettled => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::AlreadyDecided,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RecordReviewUnavailable => {
+                        self.state
+                            .review_statuses
+                            .insert(review_id.clone(), ReviewAttemptStatus::Unavailable);
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Unavailable,
+                        }])
+                    }
+                    _ => Err(ApprovalLifecycleError {
+                        op: "RecordReviewUnavailable_transition",
+                    }),
+                }
+            }
+            ApprovalLifecycleInput::RetireReview { review_id, reason } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (self.state.review_ids.contains(review_id.as_str()) == false)
+                {
+                    matches.push(ApprovalLifecycleTransition::RetireReviewRejectedMissing);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Retired)))
+                {
+                    matches.push(ApprovalLifecycleTransition::RetireReviewRejectedRetired);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || ((self.state.review_statuses.contains_key(review_id.as_str()))
+                            && ((!((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Pending))
+                                || ((self
+                                    .state
+                                    .review_statuses
+                                    .contains_key(review_id.as_str()))
+                                    && ((!((self
+                                        .review_statuses_value(review_id.as_str())?)
+                                        != ReviewAttemptStatus::Allowed))
+                                        || (self
+                                            .state
+                                            .review_statuses
+                                            .contains_key(review_id.as_str())))))))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Pending)
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Allowed)
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                != ReviewAttemptStatus::Retired)))
+                {
+                    matches.push(ApprovalLifecycleTransition::RetireReviewRejectedSettled);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || ((self.state.review_statuses.contains_key(review_id.as_str()))
+                            && (((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)
+                                || (self.state.review_statuses.contains_key(review_id.as_str())))))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && (((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)
+                                || ((self.review_statuses_value(review_id.as_str())?)
+                                    == ReviewAttemptStatus::Allowed))))
+                {
+                    matches.push(ApprovalLifecycleTransition::RetireReview);
+                }
+                let transition = Self::single_transition(matches, "RetireReview")?;
+                match transition {
+                    ApprovalLifecycleTransition::RetireReviewRejectedMissing => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::NotFound,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RetireReviewRejectedRetired => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::ReviewRetired,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RetireReviewRejectedSettled => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::AlreadyDecided,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::RetireReview => {
+                        self.state
+                            .review_statuses
+                            .insert(review_id.clone(), ReviewAttemptStatus::Retired);
+                        self.state
+                            .review_retirements
+                            .insert(review_id.clone(), reason);
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Retired,
+                        }])
+                    }
+                    _ => Err(ApprovalLifecycleError {
+                        op: "RetireReview_transition",
+                    }),
+                }
+            }
+            ApprovalLifecycleInput::ConsumeReviewForEntry { review_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (self.state.review_ids.contains(review_id.as_str()) == false)
+                {
+                    matches.push(ApprovalLifecycleTransition::ConsumeReviewRejectedMissing);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Retired)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ConsumeReviewRejectedRetired);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Used)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ConsumeReviewRejectedUsed);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || ((self.state.review_statuses.contains_key(review_id.as_str()))
+                            && (((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)
+                                || ((self
+                                    .state
+                                    .review_statuses
+                                    .contains_key(review_id.as_str()))
+                                    && (((self.review_statuses_value(review_id.as_str())?)
+                                        == ReviewAttemptStatus::Denied)
+                                        || ((self
+                                            .state
+                                            .review_statuses
+                                            .contains_key(review_id.as_str()))
+                                            && (((self.review_statuses_value(
+                                                review_id.as_str(),
+                                            )?) == ReviewAttemptStatus::Escalated)
+                                                || (self
+                                                    .state
+                                                    .review_statuses
+                                                    .contains_key(review_id.as_str())))))))))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && (((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)
+                                || ((self.review_statuses_value(review_id.as_str())?)
+                                    == ReviewAttemptStatus::Denied)
+                                || ((self.review_statuses_value(review_id.as_str())?)
+                                    == ReviewAttemptStatus::Escalated)
+                                || ((self.review_statuses_value(review_id.as_str())?)
+                                    == ReviewAttemptStatus::Unavailable))))
+                {
+                    matches.push(ApprovalLifecycleTransition::ConsumeReviewRejectedNotSatisfied);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Allowed)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ConsumeReviewForEntry);
+                }
+                let transition = Self::single_transition(matches, "ConsumeReviewForEntry")?;
+                match transition {
+                    ApprovalLifecycleTransition::ConsumeReviewRejectedMissing => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::NotFound,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ConsumeReviewRejectedRetired => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::ReviewRetired,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ConsumeReviewRejectedUsed => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::AlreadyDecided,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ConsumeReviewRejectedNotSatisfied => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::ReviewNotSatisfied,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ConsumeReviewForEntry => {
+                        self.state
+                            .review_statuses
+                            .insert(review_id.clone(), ReviewAttemptStatus::Used);
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Used,
+                        }])
+                    }
+                    _ => Err(ApprovalLifecycleError {
+                        op: "ConsumeReviewForEntry_transition",
+                    }),
+                }
+            }
+            ApprovalLifecycleInput::ReleaseReview { review_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (self.state.review_ids.contains(review_id.as_str()) == false)
+                {
+                    matches.push(ApprovalLifecycleTransition::ReleaseReviewRejectedMissing);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Pending)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ReleaseReviewRejectedPending);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Allowed)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ReleaseReviewAllowed);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Denied)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ReleaseReviewDenied);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Escalated)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ReleaseReviewEscalated);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Unavailable)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ReleaseReviewUnavailable);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Retired)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ReleaseReviewRetired);
+                }
+                if (self.state.lifecycle_phase == ApprovalLifecyclePhase::Ready)
+                    && (((!(self.state.review_ids.contains(review_id.as_str())))
+                        || (self.state.review_statuses.contains_key(review_id.as_str())))
+                        && ((self.state.review_ids.contains(review_id.as_str()))
+                            && ((self.review_statuses_value(review_id.as_str())?)
+                                == ReviewAttemptStatus::Used)))
+                {
+                    matches.push(ApprovalLifecycleTransition::ReleaseReviewUsed);
+                }
+                let transition = Self::single_transition(matches, "ReleaseReview")?;
+                match transition {
+                    ApprovalLifecycleTransition::ReleaseReviewRejectedMissing => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::NotFound,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ReleaseReviewRejectedPending => {
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewLifecycleRejected {
+                            review_id: review_id.clone(),
+                            reason: ApprovalLifecycleRejectionReason::ReviewPending,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ReleaseReviewAllowed => {
+                        self.state.review_ids.remove(review_id.as_str());
+                        self.state.review_statuses.remove(review_id.as_str());
+                        self.state.review_retirements.remove(review_id.as_str());
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Allowed,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ReleaseReviewDenied => {
+                        self.state.review_ids.remove(review_id.as_str());
+                        self.state.review_statuses.remove(review_id.as_str());
+                        self.state.review_retirements.remove(review_id.as_str());
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Denied,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ReleaseReviewEscalated => {
+                        self.state.review_ids.remove(review_id.as_str());
+                        self.state.review_statuses.remove(review_id.as_str());
+                        self.state.review_retirements.remove(review_id.as_str());
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Escalated,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ReleaseReviewUnavailable => {
+                        self.state.review_ids.remove(review_id.as_str());
+                        self.state.review_statuses.remove(review_id.as_str());
+                        self.state.review_retirements.remove(review_id.as_str());
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Unavailable,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ReleaseReviewRetired => {
+                        self.state.review_ids.remove(review_id.as_str());
+                        self.state.review_statuses.remove(review_id.as_str());
+                        self.state.review_retirements.remove(review_id.as_str());
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Retired,
+                        }])
+                    }
+                    ApprovalLifecycleTransition::ReleaseReviewUsed => {
+                        self.state.review_ids.remove(review_id.as_str());
+                        self.state.review_statuses.remove(review_id.as_str());
+                        self.state.review_retirements.remove(review_id.as_str());
+                        self.state.lifecycle_phase = ApprovalLifecyclePhase::Ready;
+                        Ok(vec![ApprovalLifecycleEffect::ReviewStatusResolved {
+                            review_id: review_id.clone(),
+                            status: ReviewAttemptStatus::Used,
+                        }])
+                    }
+                    _ => Err(ApprovalLifecycleError {
+                        op: "ReleaseReview_transition",
+                    }),
+                }
+            }
         }
     }
 
@@ -768,6 +1595,12 @@ impl ApprovalLifecycleMachineAuthority {
                     return Ok(ApprovalLifecycleOutcome::Status(status));
                 }
                 ApprovalLifecycleEffect::ApprovalLifecycleRejected { reason, .. } => {
+                    return Ok(ApprovalLifecycleOutcome::Rejected(reason));
+                }
+                ApprovalLifecycleEffect::ReviewStatusResolved { status, .. } => {
+                    return Ok(ApprovalLifecycleOutcome::ReviewStatus(status));
+                }
+                ApprovalLifecycleEffect::ReviewLifecycleRejected { reason, .. } => {
                     return Ok(ApprovalLifecycleOutcome::Rejected(reason));
                 }
             }
@@ -833,6 +1666,60 @@ impl ApprovalLifecycleMachineAuthority {
             decision,
         })?;
         Self::outcome_from_effects(effects, "decide_approval_effect")
+    }
+
+    pub fn begin_review(
+        &mut self,
+        review_id: String,
+    ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError> {
+        let effects = self.apply_input(ApprovalLifecycleInput::BeginReview { review_id })?;
+        Self::outcome_from_effects(effects, "begin_review_effect")
+    }
+
+    pub fn record_review_verdict(
+        &mut self,
+        review_id: String,
+        verdict: ReviewVerdict,
+    ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError> {
+        let effects =
+            self.apply_input(ApprovalLifecycleInput::RecordReviewVerdict { review_id, verdict })?;
+        Self::outcome_from_effects(effects, "record_review_verdict_effect")
+    }
+
+    pub fn record_review_unavailable(
+        &mut self,
+        review_id: String,
+    ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError> {
+        let effects =
+            self.apply_input(ApprovalLifecycleInput::RecordReviewUnavailable { review_id })?;
+        Self::outcome_from_effects(effects, "record_review_unavailable_effect")
+    }
+
+    pub fn retire_review(
+        &mut self,
+        review_id: String,
+        reason: ReviewRetirementReason,
+    ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError> {
+        let effects =
+            self.apply_input(ApprovalLifecycleInput::RetireReview { review_id, reason })?;
+        Self::outcome_from_effects(effects, "retire_review_effect")
+    }
+
+    pub fn consume_review_for_entry(
+        &mut self,
+        review_id: String,
+    ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError> {
+        let effects =
+            self.apply_input(ApprovalLifecycleInput::ConsumeReviewForEntry { review_id })?;
+        Self::outcome_from_effects(effects, "consume_review_for_entry_effect")
+    }
+
+    pub fn release_review(
+        &mut self,
+        review_id: String,
+    ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError> {
+        let effects = self.apply_input(ApprovalLifecycleInput::ReleaseReview { review_id })?;
+        Self::outcome_from_effects(effects, "release_review_effect")
     }
 }
 

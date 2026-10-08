@@ -1654,9 +1654,10 @@ impl MobError {
                 Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
                     error.wire_error_code()
                 }
-                Self::SessionError(meerkat_core::SessionError::RuntimeUnavailable { .. }) => {
-                    Some(meerkat_contracts::ErrorCode::SessionRuntimeUnavailable)
-                }
+                Self::SessionError(
+                    meerkat_core::SessionError::RuntimeUnavailable { .. }
+                    | meerkat_core::SessionError::HostingUnavailable { .. },
+                ) => Some(meerkat_contracts::ErrorCode::SessionRuntimeUnavailable),
                 Self::SessionError(meerkat_core::SessionError::CapabilityUnavailable(_)) => {
                     Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
                 }

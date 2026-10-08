@@ -1185,6 +1185,28 @@ impl GeneratedMachineKernel {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
                 Ok(map.get(&key).cloned().unwrap_or(KernelValue::None))
             }
+            Expr::MapLiteral(entries) => {
+                let mut map = BTreeMap::new();
+                for (key, value) in entries {
+                    let key = self.eval_expr(state, bindings, key, transition_name)?;
+                    let value = self.eval_expr(state, bindings, value, transition_name)?;
+                    map.insert(key, value);
+                }
+                Ok(KernelValue::Map(map))
+            }
+            Expr::MapValue { map, key } => {
+                let map = self.eval_expr(state, bindings, map, transition_name)?;
+                let map = map
+                    .into_map()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                let key = self.eval_expr(state, bindings, key, transition_name)?;
+                map.get(&key).cloned().ok_or_else(|| {
+                    self.eval_error(
+                        transition_name,
+                        format!("strict map read of absent key {key:?}"),
+                    )
+                })
+            }
             Expr::MapContainsKey { map, key } => {
                 let map = self.eval_expr(state, bindings, map, transition_name)?;
                 let map = map
@@ -2636,6 +2658,10 @@ mod tests {
                     tool_filter_all(),
                 ),
                 (
+                    KernelValue::String("policy_base_filter".to_string()),
+                    tool_filter_all(),
+                ),
+                (
                     KernelValue::String("active_filter".to_string()),
                     tool_filter_all(),
                 ),
@@ -2778,6 +2804,7 @@ mod tests {
             fields: BTreeMap::from([
                 (field_id("capability_base_filter"), capability_base_filter),
                 (field_id("inherited_base_filter"), tool_filter_all()),
+                (field_id("policy_base_filter"), tool_filter_all()),
                 (field_id("active_filter"), active_filter),
                 (field_id("staged_filter"), staged_filter),
                 (field_id("active_revision"), KernelValue::U64(1)),
@@ -4324,6 +4351,7 @@ mod tests {
                     field_id("llm_identity"),
                     named_string("SessionLlmIdentity", "openai:gpt-test"),
                 ),
+                (field_id("member_turn_reasoning"), KernelValue::None),
             ]),
         };
 
@@ -4683,5 +4711,63 @@ mod tests {
             serde_json::from_str(&encoded).expect("deserialize kernel value");
 
         assert_eq!(decoded, value);
+    }
+}
+
+#[cfg(test)]
+mod map_literal_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    fn runtime_delivery_kernel() -> GeneratedMachineKernel {
+        let schema = meerkat_machine_schema::canonical_machine_schemas()
+            .into_iter()
+            .find(|machine| machine.machine.as_str() == "RuntimeDeliveryMachine")
+            .expect("RuntimeDeliveryMachine schema");
+        GeneratedMachineKernel::new(schema)
+    }
+
+    /// A populated map literal evaluates to exactly its entries (#1811).
+    #[test]
+    fn a_map_literal_evaluates_to_its_entries() {
+        let kernel = runtime_delivery_kernel();
+        let state = kernel.initial_state().expect("initial state");
+        let transition = TransitionId::parse("ApplyNextDelivery").expect("transition id");
+        let literal = Expr::MapLiteral(vec![
+            (Expr::String("alpha".into()), Expr::U64(1)),
+            (Expr::String("beta".into()), Expr::U64(2)),
+        ]);
+        let value = kernel
+            .eval_expr(&state, &BTreeMap::new(), &literal, &transition)
+            .expect("map literal evaluates");
+        assert_eq!(
+            value,
+            KernelValue::Map(BTreeMap::from([
+                (KernelValue::String("alpha".into()), KernelValue::U64(1)),
+                (KernelValue::String("beta".into()), KernelValue::U64(2)),
+            ]))
+        );
+    }
+
+    /// A strict read of an absent key is an evaluation error, never a
+    /// default (#1811).
+    #[test]
+    fn a_strict_read_of_an_absent_key_is_an_evaluation_error() {
+        let kernel = runtime_delivery_kernel();
+        let state = kernel.initial_state().expect("initial state");
+        let transition = TransitionId::parse("ApplyNextDelivery").expect("transition id");
+        let read = Expr::MapValue {
+            map: Box::new(Expr::Field(
+                meerkat_machine_schema::identity::FieldId::parse("delivery_sequences")
+                    .expect("field id"),
+            )),
+            key: Box::new(Expr::String("absent".into())),
+        };
+        assert!(
+            kernel
+                .eval_expr(&state, &BTreeMap::new(), &read, &transition)
+                .is_err()
+        );
     }
 }

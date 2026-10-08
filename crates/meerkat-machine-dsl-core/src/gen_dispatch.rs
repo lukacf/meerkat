@@ -198,6 +198,11 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             /// duplicates) should treat this as a successful no-op rather
             /// than an error.
             GuardRejected { phase: #phase_name, trigger: #trigger_name },
+            /// A guard read a state map under a key the map does not hold.
+            /// Every executor treats such a read as an error, never as a
+            /// default (TLC reports it on any reachable evaluation), so
+            /// this means the shell drove an input against unseeded state.
+            AbsentMapKey { phase: #phase_name, trigger: #trigger_name, field: &'static str },
             /// A recovered authority state violated a generated invariant
             /// before any transition was attempted.
             RecoveredStateInvariantRejected { phase: #phase_name, invariant: &'static str },
@@ -226,6 +231,15 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     }
                     Self::GuardRejected { phase, trigger } => {
                         write!(f, "guard rejected transition from phase {:?} for {}", phase, trigger)
+                    }
+                    Self::AbsentMapKey { phase, trigger, field } => {
+                        write!(
+                            f,
+                            "guard read absent key of '{}' from phase {:?} for {}",
+                            field,
+                            phase,
+                            trigger
+                        )
                     }
                     Self::RecoveredStateInvariantRejected { phase, invariant } => {
                         write!(
@@ -704,6 +718,106 @@ fn gen_transition_chain(
     error_name: &Ident,
     trigger: TokenStream,
 ) -> TokenStream {
+    let strict = transitions.iter().any(|t| {
+        t.guards
+            .iter()
+            .any(|g| crate::strict_reads::contains_map_value(&g.expr))
+    });
+    if strict {
+        gen_strict_transition_chain(def, transitions, error_name, trigger)
+    } else {
+        gen_transition_chain_inner(def, transitions, error_name, trigger)
+    }
+}
+
+/// A chain with strict map reads (#1811). Each arm's condition is bound
+/// first (guards are pure), and a strict arm misses when its lazy
+/// definedness predicate fails, recording the absent field. With no arm
+/// matching, the input is refused with `AbsentMapKey` if an arm hit an
+/// absent key, else `GuardRejected`: the same refusal TLA+ and the protocol
+/// authorities produce, never a default.
+fn gen_strict_transition_chain(
+    def: &MachineDef,
+    transitions: &[&&TransitionDef],
+    error_name: &Ident,
+    trigger: TokenStream,
+) -> TokenStream {
+    let mut bindings = Vec::new();
+    let mut arms = Vec::new();
+    let mut has_unguarded = false;
+    for (i, t) in transitions.iter().enumerate() {
+        let arm = quote::format_ident!("__arm_{}", i);
+        let body = gen_transition_body(def, t);
+        if t.has_guards() {
+            let guard_exprs: Vec<_> = t
+                .guards
+                .iter()
+                .map(|g| gen_expr(&g.expr, FieldPrefix::AuthorityState))
+                .collect();
+            let combined = quote! { #(#guard_exprs)&&* };
+            let conjunction = ExprDef::And(t.guards.iter().map(|g| g.expr.clone()).collect());
+            let cond = match crate::strict_reads::definedness(&conjunction) {
+                Some(defined) => {
+                    let defined = gen_expr(&defined, FieldPrefix::AuthorityState);
+                    let field = crate::strict_reads::first_map_value_field(&conjunction)
+                        .unwrap_or_else(|| "map".to_string());
+                    quote! {
+                        if #defined {
+                            #combined
+                        } else {
+                            if __absent_field.is_none() {
+                                __absent_field = ::core::option::Option::Some(#field);
+                            }
+                            false
+                        }
+                    }
+                }
+                None => combined,
+            };
+            bindings.push(quote! { let #arm: bool = #cond; });
+            if i == 0 {
+                arms.push(quote! { if #arm { #body } });
+            } else {
+                arms.push(quote! { else if #arm { #body } });
+            }
+        } else {
+            has_unguarded = true;
+            arms.push(quote! { else { #body } });
+        }
+    }
+    if !has_unguarded {
+        arms.push(quote! { else {
+            return ::core::result::Result::Err(match __absent_field {
+                ::core::option::Option::Some(field) => #error_name::AbsentMapKey {
+                    phase: from_phase,
+                    trigger: #trigger,
+                    field,
+                },
+                ::core::option::Option::None => #error_name::GuardRejected {
+                    phase: from_phase,
+                    trigger: #trigger,
+                },
+            });
+        } });
+    }
+    quote! {
+        let __absent_map_key = |field: &'static str| #error_name::AbsentMapKey {
+            phase: from_phase,
+            trigger: #trigger,
+            field,
+        };
+        let mut __absent_field: ::core::option::Option<&'static str> = ::core::option::Option::None;
+        #(#bindings)*
+        #(#arms)*
+    }
+}
+
+fn gen_transition_chain_inner(
+    def: &MachineDef,
+    transitions: &[&&TransitionDef],
+    error_name: &Ident,
+    trigger: TokenStream,
+) -> TokenStream {
     if transitions.len() == 1 {
         let t = transitions[0];
         if t.has_guards() {
@@ -944,6 +1058,25 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let m = gen_expr(map, prefix);
             let k = gen_expr(key, prefix);
             quote! { #m.get(&#k).cloned() }
+        }
+        // Strict read (#1811), only produced in transition guards: an absent
+        // key returns from the dispatch method through the
+        // `__absent_map_key` closure that `gen_transition_chain` binds.
+        ExprDef::MapValue { map, key } => {
+            let field = match map.as_ref() {
+                ExprDef::Field(name) => name.to_string(),
+                _ => "map".to_string(),
+            };
+            let m = gen_expr(map, prefix);
+            let k = gen_expr(key, prefix);
+            quote! {
+                match #m.get(&#k).cloned() {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None => {
+                        return ::core::result::Result::Err(__absent_map_key(#field));
+                    }
+                }
+            }
         }
         ExprDef::MapKeys(inner) => {
             let e = gen_expr(inner, prefix);

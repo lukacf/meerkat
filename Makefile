@@ -27,7 +27,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-mobkit release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit audit-generated-headers semver-breaks protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
+.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-mobkit release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit audit-generated-headers semver-breaks protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
 
 # Default target
 all: ci
@@ -61,6 +61,46 @@ test-unit:
 test-mob-dense-topology:
 	@echo "$(GREEN)Running dense Mob topology stress lane...$(NC)"
 	$(CARGO) nextest run --profile mob-dense-topology -p meerkat-mob --lib --run-ignored all --no-tests=fail
+
+# Linux positive confinement acceptance. These cases need a host whose kernel
+# policy allows the native backend, so on Linux they are ignored in ordinary
+# test runs and selected here explicitly; a backend refusal (BackendUnavailable)
+# fails. Each suite runs even when another fails, and each must select exactly
+# its expected number of tests, so a zero, partial or missing selection fails
+# the lane and a renamed or removed case cannot silently drop out. A fixture
+# setup failure also fails the lane, and every suite is still attempted.
+# Refusal controls and the subprocess probe entrypoints stay in the ordinary
+# runs and are not selected here.
+CONFINEMENT_MCP_POSITIVE := test(/^connection::process_confinement_tests::supported_native::/)
+CONFINEMENT_MCP_POSITIVE_COUNT := 5
+CONFINEMENT_HOOK_POSITIVE := test(=process_custody::tests::required_command_hook_enters_only_with_its_durable_custody_record) | test(=required_command_hook_enters_with_exact_argv_cwd_environment_and_custody)
+CONFINEMENT_HOOK_POSITIVE_COUNT := 2
+CONFINEMENT_SANDBOX_POSITIVE := test(=allowed_command_runs_but_outside_read_write_and_symlink_escape_fail) | test(=baseline_supports_declared_shell_commands_and_spawn_preserves_pid) | test(=child_has_only_explicit_environment) | test(=denial_does_not_prevent_a_later_permitted_launch) | test(=deny_ip_blocks_tcp_udp_and_proxy_environment_cannot_bypass_it) | test(=independent_agent_roots_remain_separate_in_simultaneous_launches) | test(=inherited_connected_socket_cannot_bypass_network_denial) | test(=inherited_descriptor_cannot_bypass_filesystem_denial) | test(=linux_denies_host_signal_and_resource_mutation_equivalents) | test(=linux_denies_unix_connect_independently_of_ip_permission) | test(=linux_initial_backend_compiles_a_supported_profile) | test(=linux_late_setup_failure_never_executes_and_reaps_the_failed_child) | test(=linux_refuses_directory_and_non_stream_stdio_before_target_entry) | test(=linux_strict_paths_cover_metadata_and_namespace_escape) | test(=linux_unix_pair_cannot_bypass_unix_denial_when_ip_is_permitted) | test(=sparse_high_descriptor_is_closed_without_changing_parent_limits) | test(=cancelled_native_wait_retains_child_for_kill_and_cached_reaping) | test(=confined_custody_gate_eof_or_wrong_release_never_runs_target) | test(=confined_custody_gate_waits_for_release_and_preserves_pid) | test(=dropping_live_native_child_kills_and_reaps_the_exact_pid) | test(=one_compiled_profile_binds_distinct_launches_with_exact_capability_report)
+CONFINEMENT_SANDBOX_POSITIVE_COUNT := 21
+
+test-mcp-confinement-positive:
+	@echo "$(GREEN)Running confinement positive acceptance lane...$(NC)"
+	@status=0; \
+	MEERKAT_MCP_TEST_SERVER="$$(scripts/mcp-test-server-fixture)" || { \
+		echo "confinement lane: mcp-test-server fixture setup failed" >&2; \
+		status=1; \
+	}; \
+	export MEERKAT_MCP_TEST_SERVER; \
+	exact_count() { \
+		listed=$$($(CARGO) nextest list --locked --all-features $$1 --run-ignored all -E "$$2" --message-format oneline | grep -c .); \
+		if [ "$$listed" -ne "$$3" ]; then \
+			echo "confinement lane: $$1 selected $$listed test(s), expected $$3" >&2; \
+			return 1; \
+		fi; \
+	}; \
+	suite() { \
+		exact_count "$$1" "$$2" "$$3" || status=1; \
+		$(CARGO) nextest run --locked --all-features $$1 --run-ignored all --no-tests=fail --no-fail-fast -E "$$2" || status=1; \
+	}; \
+	suite "-p meerkat-mcp --lib" '$(CONFINEMENT_MCP_POSITIVE)' $(CONFINEMENT_MCP_POSITIVE_COUNT); \
+	suite "-p meerkat --lib --test command_hook_confinement" '$(CONFINEMENT_HOOK_POSITIVE)' $(CONFINEMENT_HOOK_POSITIVE_COUNT); \
+	suite "-p meerkat-sandbox --test process_confinement --test compiled_confinement" '$(CONFINEMENT_SANDBOX_POSITIVE)' $(CONFINEMENT_SANDBOX_POSITIVE_COUNT); \
+	exit $$status
 
 # Integration-fast tests only (no unit tests). The `int` cargo alias excludes
 # the dedicated e2e lane binaries since those have their own Makefile targets

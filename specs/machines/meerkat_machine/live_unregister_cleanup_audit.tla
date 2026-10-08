@@ -97,11 +97,11 @@ AuditPrefix ==
     \/ model_step_count = 0 /\ Initialize
     \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
     \* closing-idle: admitted without a runtime binding, close recorded.
-    \/ AuditStep(2, {"closing-idle"}) /\ ResolveLiveOpenAdmissionAcceptedIdle(AuditSession, AuditChannel, AuditIdentity)
+    \/ AuditStep(2, {"closing-idle"}) /\ ResolveLiveOpenAdmissionAcceptedIdle(AuditSession, AuditChannel, AuditIdentity, None)
     \/ AuditStep(3, {"closing-idle"}) /\ RecordLiveCloseClosedIdle(AuditSession, AuditChannel, 1)
     \* Everything else: bind the runtime, admit, and (except "admitted") stage.
     \/ AuditStep(2, AuditStaging) /\ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession)
-    \/ AuditStep(3, AuditStaging) /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditChannel, AuditIdentity)
+    \/ AuditStep(3, AuditStaging) /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditChannel, AuditIdentity, None)
     \/ AuditStep(4, AuditStaging \ {"admitted"}) /\ ResolveLiveExecutionModeAdmissionAttached(AuditSession, AuditChannel, "profile_1", "FunctionBridge", TRUE, FALSE)
     \/ AuditStep(5, AuditStaging \ {"admitted"}) /\ StageExperimentalLiveExecutionAttached(AuditSession, AuditChannel, AuditRuntime, 1, 1, 0, "pending_a")
     \* Bind the staged execution.

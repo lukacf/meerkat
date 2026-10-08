@@ -33,7 +33,7 @@ not accepted: rewriting JSON or SQLite rows would no longer exercise bytes
 written by the released artifact.
 
 This corpus intentionally tests the persistence owned by Meerkat. MobKit
-continuity ledgers and HomeCore deployment state are separate stores with
+continuity ledgers and downstream app deployment state are separate stores with
 separate release evidence; they are not fabricated inside a Meerkat realm.
 Likewise, a clean successful shutdown has consumed its accepted inputs. A
 pending accepted input belongs in a crash/recovery corpus, not this

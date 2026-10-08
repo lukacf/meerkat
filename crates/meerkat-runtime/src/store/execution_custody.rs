@@ -73,6 +73,28 @@ impl RuntimeStoreExecutionCustody {
         }
     }
 
+    /// Match the actual retained carrier, not a same-path owner or a claim label.
+    /// Backend implementors use this before acquiring administrative writer
+    /// custody. A match grants no input or credential permission and does not
+    /// replace retaining the claim and the actual writer through mutation.
+    pub fn owns_governed_claim(&self, claim: &RuntimeStoreExecutionClaim) -> bool {
+        match (&self.inner, &claim.owner) {
+            (
+                ExecutionCustodyOwner::Memory(owner),
+                ExecutionClaimOwner::Memory {
+                    owner: actual,
+                    governed,
+                },
+            ) => *governed && Arc::ptr_eq(owner, actual),
+            #[cfg(feature = "sqlite-store")]
+            (ExecutionCustodyOwner::Physical(owner), ExecutionClaimOwner::Physical(actual)) => {
+                actual.is_governed() && actual.belongs_to(owner)
+            }
+            #[cfg(feature = "sqlite-store")]
+            _ => false,
+        }
+    }
+
     /// Attempt one ordinary execution claim without waiting or polling.
     pub fn try_acquire_shared(
         &self,

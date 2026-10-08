@@ -1,5 +1,5 @@
 //! Helper-free compile/bind execution and ownership of native children.
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -25,6 +25,10 @@ struct Fixture {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
 async fn confined_custody_gate_waits_for_release_and_preserves_pid() {
     let fixture = Fixture::new();
     let marker = fixture.root.join("gate-target-ran");
@@ -63,6 +67,10 @@ async fn confined_custody_gate_waits_for_release_and_preserves_pid() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
 async fn confined_custody_gate_eof_or_wrong_release_never_runs_target() {
     for wrong_release in [false, true] {
         let fixture = Fixture::new();
@@ -164,12 +172,22 @@ impl Fixture {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
 async fn one_compiled_profile_binds_distinct_launches_with_exact_capability_report() {
     let fixture = Fixture::new();
     let compiled = CompiledConfinement::compile(&fixture.requirement).unwrap();
+    #[cfg(target_os = "macos")]
     assert_eq!(
         compiled.capabilities().backend(),
         ConfinementBackend::MacOsSeatbeltV1
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        compiled.capabilities().backend(),
+        ConfinementBackend::LinuxNamespaceSeccompV1
     );
     assert_eq!(compiled.capabilities().requirement(), &fixture.requirement);
     assert!(!format!("{compiled:?}").contains(fixture.root.to_str().unwrap()));
@@ -201,6 +219,10 @@ fn setup_refuses_exact_ip_instead_of_broadening_the_requirement() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
 async fn cancelled_native_wait_retains_child_for_kill_and_cached_reaping() {
     let fixture = Fixture::new();
     let mut child = fixture.running_child().await;
@@ -240,6 +262,10 @@ async fn cancelled_native_wait_retains_child_for_kill_and_cached_reaping() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
 async fn dropping_live_native_child_kills_and_reaps_the_exact_pid() {
     let fixture = Fixture::new();
     let child = fixture.running_child().await;

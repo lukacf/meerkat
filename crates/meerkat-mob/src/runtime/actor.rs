@@ -473,6 +473,8 @@ fn identity_session_load_error_class(
         | SessionError::DurableTailRecoveryRefused { .. }
         | SessionError::ExternalWriteFenceConflict { .. }
         | SessionError::ExternalWriteFenceBackoff { .. }
+        | SessionError::ServedElsewhere { .. }
+        | SessionError::HostingUnavailable { .. }
         | SessionError::FailedWithData { .. } => IdentitySessionLoadErrorClass::Unavailable,
     }
 }
@@ -2316,7 +2318,7 @@ impl SubmitWorkDispatchCompletion {
 }
 
 /// Member-local readiness that ran inline on the actor loop before turn
-/// admission until #1102 (OB3 fleet-wide delivery stall). It now runs inside
+/// admission until #1102 (a fleet-wide delivery stall in production). It now runs inside
 /// the member's detached admission lane, after the DSL SubmitWork transition
 /// and before the runtime admission, so one member's slow or wedged step
 /// cannot delay another member's dispatch or the liveness probe.
@@ -5420,6 +5422,7 @@ enum SpawnProvisionInput {
 #[derive(Clone)]
 struct DeferredResumeProvision {
     definition: Arc<MobDefinition>,
+    realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     profile_name: ProfileName,
     agent_identity: AgentIdentity,
     profile: crate::profile::Profile,
@@ -5440,7 +5443,10 @@ struct DeferredResumeProvision {
     tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
     web_search_override: meerkat_core::ToolCategoryOverride,
-    application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
+    /// The member's optional policy choice, kept optional through clones and
+    /// retries until the final build (see
+    /// `build::apply_application_tool_policy_choice`).
+    application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     system_prompt_override: Option<super::handle::SpawnSystemPromptOverride>,
     resume_from_role: Option<ProfileName>,
@@ -5523,6 +5529,7 @@ impl DeferredResumeProvision {
     ) -> Result<ProvisionMemberRequest, MobError> {
         let Self {
             definition,
+            realm_profile_store,
             profile_name,
             agent_identity,
             profile,
@@ -5570,6 +5577,7 @@ impl DeferredResumeProvision {
                 agent_identity: &agent_identity,
                 profile: &profile,
                 definition: &definition,
+                realm_profile_store: realm_profile_store.as_ref(),
                 external_tools,
                 compaction_curator_override,
                 context,
@@ -5590,7 +5598,7 @@ impl DeferredResumeProvision {
         config.tool_dispatch_admission = tool_dispatch_admission;
         config.keep_alive = keep_alive;
         config.override_web_search = web_search_override;
-        config.application_tool_policy = application_tool_policy;
+        build::apply_application_tool_policy_choice(&mut config, application_tool_policy);
         config.tool_consequence_policy_registry = tool_consequence_policy_registry;
         config.fork_source = fork_source;
         if let Some(client) = default_llm_client {
@@ -17809,7 +17817,7 @@ impl MobActor {
 
     /// Hold roster members' run starts (#1500), returning each member's
     /// outcome. Shared by Stop, which holds every member and records the
-    /// outcomes in its report, and Shutdown (OB3), which holds only the
+    /// outcomes in its report, and Shutdown, which holds only the
     /// members whose runtime this mob hosts (`local_only`): a remote member's
     /// host is not contacted during Shutdown, which never probes a placed
     /// member it has no live channel to.
@@ -22000,7 +22008,7 @@ impl MobActor {
     /// (the answer it gets a moment later anyway), and an actor completion is
     /// retained in `retained` for the actor to process after the step. A joined task may have sent this
     /// actor a command and await its reply; served this way, it can never wait
-    /// on the actor that is joining it (OB3: the actor otherwise wedged in an
+    /// on the actor that is joining it (in production the actor otherwise wedged in an
     /// inline Shutdown join until SIGKILL).
     async fn serve_refusals_while<F>(
         command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
@@ -23628,7 +23636,7 @@ impl MobActor {
     /// Refresh the bounded lease immediately before a target write.
     ///
     /// Observation and provisioning may legitimately take longer than one
-    /// lease window (the HomeCore snapshot is 82 MB). The resource witness and
+    /// lease window (a large production snapshot can be tens of MB). The resource witness and
     /// intent authority remain unchanged; only the store-owned lease claim is
     /// renewed/reclaimed here, then atomically revalidated by the actuator.
     async fn renew_identity_actuation_lease(
@@ -24616,6 +24624,42 @@ impl MobActor {
                                     identity,
                                     &completion_authority,
                                     IdentityMemberActuationDisposition::Backoff { detail: reason },
+                                )
+                                .await;
+                                Ok(false)
+                            }
+                            // Another process on the realm hosts the member's
+                            // session (#1813): a hold that clears when that
+                            // process releases it, not a repair.
+                            meerkat_runtime::RuntimeSessionRegistrationOutcome::ServedElsewhere {
+                                session_id,
+                            } => {
+                                self.record_identity_reconcile_disposition(
+                                    identity,
+                                    &completion_authority,
+                                    IdentityMemberActuationDisposition::Backoff {
+                                        detail: format!(
+                                            "session {session_id} is served by another runtime owner"
+                                        ),
+                                    },
+                                )
+                                .await;
+                                Ok(false)
+                            }
+                            // The member session's cross-process hosting
+                            // claim cannot be taken (#1813): a hold that
+                            // clears once it can, never an unclaimed host.
+                            meerkat_runtime::RuntimeSessionRegistrationOutcome::HostingUnavailable {
+                                session_id,
+                            } => {
+                                self.record_identity_reconcile_disposition(
+                                    identity,
+                                    &completion_authority,
+                                    IdentityMemberActuationDisposition::Backoff {
+                                        detail: format!(
+                                            "session {session_id} hosting claim is unavailable"
+                                        ),
+                                    },
                                 )
                                 .await;
                                 Ok(false)
@@ -27615,7 +27659,7 @@ impl MobActor {
                     }
                     self.shutdown_deadline = deadline;
                     // Probe only: Shutdown commits at its end. The probed
-                    // transition owns the run-start hold obligation (OB3).
+                    // transition owns the run-start hold obligation.
                     let admission = self
                         .prepare_dsl_input_transition(
                             mob_dsl::MobMachineInput::Shutdown,
@@ -27640,7 +27684,7 @@ impl MobActor {
                         .send_replace(true);
                     // The lifecycle drains join actor-owned tasks without
                     // aborting them; one may await this actor's reply, so the
-                    // actor keeps answering while it drains (OB3).
+                    // actor keeps answering while it drains.
                     let mut joined = Vec::new();
                     let mut retained = std::mem::take(&mut self.retained_actor_completions);
                     let drained = Self::serve_refusals_while(
@@ -28225,7 +28269,7 @@ impl MobActor {
                 }
                 // A Shutdown in progress (parked on its members' stops or on
                 // its runtime teardown) admits no new member and no member
-                // work it would then neither stop nor report (OB3).
+                // work it would then neither stop nor report.
                 if self.shutdown_in_progress() && cmd.starts_member_work() {
                     cmd.reject_with_error(MobError::ActorCommandChannelClosed);
                     continue;
@@ -30221,6 +30265,7 @@ impl MobActor {
                         let external_tools = precomputed_external_tools?;
                         let deferred = DeferredResumeProvision {
                             definition: preparation_context.definition.clone(),
+                            realm_profile_store: preparation_context.realm_profile_store.clone(),
                             profile_name: profile_name.clone(),
                             agent_identity: agent_identity.clone(),
                             profile,
@@ -30299,6 +30344,9 @@ impl MobActor {
                                 agent_identity: &agent_identity,
                                 profile: &profile,
                                 definition: &preparation_context.definition,
+                                realm_profile_store: preparation_context
+                                    .realm_profile_store
+                                    .as_ref(),
                                 external_tools,
                                 compaction_curator_override: compaction_curator_override.clone(),
                                 context,
@@ -30321,7 +30369,10 @@ impl MobActor {
                     config.keep_alive =
                         selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
                     config.override_web_search = tool_category_overrides.web_search;
-                    config.application_tool_policy = application_tool_policy.clone();
+                    build::apply_application_tool_policy_choice(
+                        &mut config,
+                        application_tool_policy.clone(),
+                    );
                     config.tool_consequence_policy_registry =
                         preparation_context.tool_consequence_policy_registry.clone();
                     config.fork_source = fork_source.clone();
@@ -30402,6 +30453,7 @@ impl MobActor {
                 agent_identity: &agent_identity,
                 profile: &profile,
                 definition: &preparation_context.definition,
+                realm_profile_store: preparation_context.realm_profile_store.as_ref(),
                 external_tools,
                 compaction_curator_override,
                 context,
@@ -30425,7 +30477,7 @@ impl MobActor {
             config.keep_alive =
                 selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             config.override_web_search = tool_category_overrides.web_search;
-            config.application_tool_policy = application_tool_policy.clone();
+            build::apply_application_tool_policy_choice(&mut config, application_tool_policy.clone());
             config.tool_consequence_policy_registry = preparation_context.tool_consequence_policy_registry.clone();
             // Fork lineage rides only fork seatings, which resume; a fresh
             // spawn carries `None` here.
@@ -31937,7 +31989,25 @@ impl MobActor {
         let full_profile_override_requested = override_profile.is_some();
         let effective_model_override = model_override.clone();
         let mut profile = match override_profile {
-            Some(p) => p,
+            Some(mut p) => {
+                // The member host builds from the portable profile alone, so
+                // the role's current restriction rides it (see
+                // `build::build_agent_config`).
+                match build::current_role_profile(
+                    &self.definition,
+                    &profile_name,
+                    self.realm_profile_store.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(role)) => {
+                        build::conjoin_role_tool_restriction(&mut p.tools, &role.tools);
+                    }
+                    Ok(None) => {}
+                    Err(error) => fail!(error),
+                }
+                p
+            }
             None => {
                 match self
                     .definition
@@ -32033,6 +32103,10 @@ impl MobActor {
         };
 
         // §3.2 compile (pure; skill-file reads are small local reads).
+        // The portable overlay carries a concrete binding, so a placed member
+        // cannot yet tell "no choice" from an explicit choice: the host's
+        // absent choice compiles to the default, as before.
+        let placed_application_tool_policy = application_tool_policy.clone().unwrap_or_default();
         let base_prompt = self.spawn_base_prompt_source.clone();
         let compiled = match super::spec_compiler::compile_portable_member_spec(
             super::spec_compiler::CompileMemberSpecParams {
@@ -32047,7 +32121,7 @@ impl MobActor {
                 system_prompt_override: system_prompt_override.as_ref(),
                 tool_access_policy: tool_access_policy.as_ref(),
                 tool_category_overrides,
-                application_tool_policy: &application_tool_policy,
+                application_tool_policy: &placed_application_tool_policy,
                 auth_binding: auth_binding.as_ref(),
                 budget_limits: budget_limits.as_ref(),
                 runtime_mode: selected_runtime_mode,
@@ -33422,6 +33496,7 @@ impl MobActor {
             agent_identity,
             profile: &profile,
             definition: &self.definition,
+            realm_profile_store: self.realm_profile_store.as_ref(),
             external_tools,
             compaction_curator_override,
             context,
@@ -33440,7 +33515,7 @@ impl MobActor {
         );
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         config.override_web_search = tool_category_overrides.web_search;
-        config.application_tool_policy = application_tool_policy;
+        build::apply_application_tool_policy_choice(&mut config, application_tool_policy);
         config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());

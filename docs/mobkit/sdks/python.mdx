@@ -4,7 +4,7 @@ description: "MobKit Python SDK — typed builder API, async runtime, and stream
 icon: "python"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 The MobKit Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -105,7 +105,7 @@ class AppAgentBuilder:
             lambda args: {"error": "detached owner required"},
             description="Run a durable security scan",
             execution=DetachedJobExecution(
-                runner="homecore.security_scan",
+                runner="example.security_scan",
                 version="v1",
                 restart_class="checkpoint_resumable",
                 idempotency_scope="interaction_and_arguments",
@@ -138,11 +138,11 @@ Resolved credentials are attempt-local and never enter durable job state.
 
 ## Identity-First API
 
-For household-style apps (HomeCore), the identity-first API provides durable lifecycle management.
-Agents are addressed by stable identities (`identity:luka`, `triage:main`), not member IDs.
+For apps with durable agent identities, the identity-first API provides durable lifecycle management.
+Agents are addressed by stable identities (`identity:alice`, `triage:main`), not member IDs.
 
 ```python
-from meerkat_mobkit import MobKit
+from meerkat_mobkit import MobKit, TurnOutputStatus
 from meerkat_mobkit.identity_first_models import DispatchInput, DurableAgentSpec, ManagedPeerEdge
 
 # Boot with roster provider
@@ -160,36 +160,144 @@ rt = await (
 
 # Identity-scoped agent handles
 triage = rt.agent("triage:main")
-luka = rt.agent("identity:luka")
+alice = rt.agent("identity:alice")
 
 # Delivery
-await luka.send("Hello")                                          # Addressable only
+await alice.send("Hello")                                          # Addressable only
 await triage.dispatch_text("School closed", origin="connector")   # Any identity
 
-# Wait for an identity completion after the pre-delivery cursor baseline,
-# even if consecutive answers have identical text. This is not request
-# correlation: concurrent/in-flight work can satisfy the same barrier.
-answer = await luka.send_and_wait("Hello", timeout=90)
+# On a turn_driven member (runtime_mode = "turn_driven"): send, then wait for
+# THAT turn and return its own output. The send carries a turn ticket, so
+# another delivery to the identity (a peer message, a scheduled turn, a fork
+# completion wake) cannot satisfy the wait. On an autonomous_host member (the
+# default mode) the send is still delivered once, but the turn cannot be
+# tracked: the call waits identity-wide with a TurnTrackingUnavailableWarning,
+# and send_and_wait_outcome(...).attributed is False (the text may be another
+# turn's). require_attribution=True raises instead.
+answer = await alice.send_and_wait("Hello", timeout=90)
+
+# The same, in two steps: track the turn, then wait on its ticket.
+sent = await alice.send("Hello", track_turn=True)
+if sent.turn_ticket is not None:
+    turn = await alice.wait_for_turn(sent.turn_ticket, timeout=90)
+    if turn.output_status is TurnOutputStatus.TEXT:
+        answer = turn.output  # turn.output_truncated says whether it was cut
+elif sent.turn_unavailable is not None:
+    # e.g. "autonomous_host"; delivered is False only for "not_delivered"
+    print("untracked:", sent.turn_unavailable.code, sent.turn_unavailable.delivered)
+else:
+    print("untracked: the gateway predates turn tickets")
 
 # Observation (no mob_handle, no member IDs needed)
 inspection = await triage.inspect()   # output_preview, completion_cursor, peers
+cursor = await triage.completion_cursor()  # cursor only; never reads the member session
 output = await triage.wait_for_output(timeout=90)   # any output, including an earlier turn's
-await rt.wait_until_ready(["triage:main", "identity:luka"])
+await rt.wait_until_ready(["triage:main", "identity:alice"])
 
 # Status
-status = await luka.status()          # state, session_id, generation, labels
+status = await alice.status()          # state, session_id, generation, labels
 
 # Lifecycle
-await luka.reset()                    # Destructive: new generation, new session
+await alice.reset()                    # Destructive: new generation, new session
 await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
 await rt.reconcile()                  # In-process roster reconciliation
 ```
 
-`send_and_wait` returns the `output_preview` observed after that identity's
-completion cursor advances; the preview is not request-correlated. Interpret
-it as this send's answer only if you exclude all other completion-producing
-work for the identity throughout the wait, including already-running kickoff
-turns and peer or background work.
+`send_and_wait`, `dispatch_and_wait` and `dispatch_text_and_wait` are
+per-admission: the runtime mints a turn ticket for the delivery and keeps the
+admitted turn's own completion handle under it, and the wait reads
+`mobkit/turn_result` for that ticket, which reports that turn's own output
+from its committed run result. A failed turn raises `TurnFailedError`, and a
+ticket the gateway does not know (for example after a gateway restart) raises
+`TurnUnknownError`. Text cut at the 256 KiB bound emits
+`TurnOutputTruncatedWarning`; a turn that completed without output of its own
+(the runtime folded it into a run in progress, or deduplicated it) returns
+`None` with `TurnOutputUnavailableWarning`. `wait_for_turn` returns the typed
+`TurnResult` (`output_status`, `output`, `output_truncated`) instead.
+
+`send_and_wait_outcome`, `dispatch_and_wait_outcome` and
+`dispatch_text_and_wait_outcome` take the same arguments and return the typed
+`AwaitedTurn`: `text`, `attributed` (whether the text provably belongs to this
+delivery's turn), `admission`, `ticket`, `output_status` and `untracked_code`.
+The plain methods return its `text`.
+
+The delivery happens exactly once and the call never resends. Every failure
+after admission carries the send/dispatch result as `admission`, so the
+caller keeps the receipt instead of redispatching the work:
+
+- No turn ticket (any delivered `turn_unavailable.code`, below, or a gateway
+  that predates turn tickets): the call waits on the identity-wide completion
+  cursor and emits `TurnTrackingUnavailableWarning` naming the code. That
+  result is NOT attributed: another delivery's completion can satisfy the
+  wait, and the text is the session's latest output. The outcome's
+  `attributed` is `False` and `untracked_code` carries the code.
+  `require_attribution=True` raises `TurnTrackingUnavailableError` (with
+  `code` and `reason`) in every untracked case instead.
+- The exact-ticket wait fails for a transport or RPC reason (for example
+  `observation_lane_saturated`): only that ticket's observation is retried,
+  with bounded backoff, until `timeout`; then
+  `PostAdmissionObservationError` carries `admission`, `ticket` and the last
+  failure as `__cause__`. Read the turn later with `wait_for_turn(ticket)`.
+- Every other error after admission keeps its type and carries `admission`
+  (and `ticket`, `None` when untracked): `TurnFailedError`,
+  `TurnUnknownError`, `WaitEndedError`, the identity-wide wait's
+  missing-baseline, superseded-incarnation and live-alias `RuntimeError`s, the
+  persistent transport's plain `RuntimeError` on a response timeout or closed
+  stdout, a caller's `asyncio.CancelledError` (the same instance,
+  re-raised), and an SDK warning a caller escalated with
+  `filterwarnings("error")`. A wait still pending at `timeout` raises
+  `TurnWaitTimeoutError`, a `TimeoutError` that also carries `admission` and
+  `ticket`. The one exception is a custom exception type that rejects
+  attribute assignment, which cannot carry the fields and still propagates
+  unchanged.
+
+The typed `turn_unavailable.code` says why a turn could not be tracked. Every
+code but `not_delivered` means the delivery still happened, exactly once:
+
+- `autonomous_host`: the member runs in `autonomous_host` mode (the default),
+  read from the runtime's live roster entry, so a profile or override changed
+  without a respawn does not count until the member respawns. The runtime
+  reports no per-turn completion for autonomous inbox delivery, so on these
+  members a per-admission wait is unavailable.
+- `runtime_refused`: the runtime refused per-turn completion for the member's
+  live mode for another reason.
+- `externally_bound`, `host_human_input`, `bridge_cannot_report_output`.
+- A gateway that predates turn tickets returns no `turn_unavailable` at all.
+
+`not_delivered` means nothing was delivered (no session bridge or no bound
+runtime), so the call raises `TurnNotDeliveredError` instead of waiting
+(nothing ran, so a retry is safe). `session_rotated` means a re-dispatch
+landed on a different session after a repair or respawn and ran as its own
+turn. Run a member with
+`runtime_mode = "turn_driven"` for per-admission results.
+
+Do not mix ticket waits and cursor waits on one identity: a ticket can settle
+before the identity health monitor counts the same turn on the cursor, so a
+later `wait_for_output(after=baseline)` can be satisfied by an earlier
+`send_and_wait` turn.
+
+`wait_for_completion(baseline)` and `wait_for_output(after=cursor)` remain
+identity-wide primitives: any completion on the identity after the baseline
+satisfies them, and the returned `output_preview` is the session's latest
+output, not necessarily a specific send's answer. Use `wait_for_turn(ticket)`
+or `wait_for_output(turn=ticket)` to wait for one specific turn.
+
+The recommended completion barrier is `track_turn=True` plus
+`wait_for_turn(ticket)` (or `send_and_wait`): it reads only the ticket ledger.
+Every wait is server-side and event-driven: `wait_for_turn` is one
+`mobkit/wait_for_turn` request, and the identity-wide waits
+(`wait_for_completion`, `wait_for_output(after=...)`, `rt.wait_until_ready`)
+are one `mobkit/wait_for_completion` request each. The gateway answers when
+the ticket settles or a completion is recorded, so nothing polls, and the
+member's output is read once, at completion. `timeout` is only the deadline;
+`poll_interval` applies only against a gateway that predates the server-side
+waits. `completion_cursor()` is a one-shot cursor read that never touches the
+member session. `inspect()` does read the member session, so do not poll it.
+
+A wait that ends before a completion (a failed or cancelled run, a Broken,
+retiring or deleted identity, or gateway shutdown) raises the typed
+`WaitEndedError`, whose `outcome` names why; only the deadline raises
+`TimeoutError`.
 
 ### DurableAgentSpec fields
 
@@ -235,7 +343,7 @@ the Rust struct:
 ```python
 class MyRoster:
     async def roster(self, context):
-        household = (context.mob_definition or {}).get("id")
+        mob_id = (context.mob_definition or {}).get("id")
         known = set(context.previous_identities)
         ...
 ```
@@ -510,7 +618,7 @@ setter keeps a gateway without a roster on the classic path; a configured
 roster with no explicit mode retains eager materialization.
 
 Gateway memory config accepts `{backend: "local_json"}` with an optional
-`health_check_endpoint` (`memory.local_json(...)`); the legacy Elephant
+`health_check_endpoint` (`memory.local_json(...)`); the legacy `elephant`
 `{backend, endpoint}` shape still works but emits a `DeprecationWarning`.
 `memory(stores=...)` is intentionally rejected because the Rust gateway does not
 accept store lists in `mobkit/init`. JWT auth is the gateway-supported auth mode;
@@ -557,6 +665,28 @@ remediation (`mobkit/storage/doctor`, or the explicit ephemeral
 declaration). Blob-store durability has no wire declaration today — it is
 declared by Rust embedders via `ephemeral_blobs(true)` /
 `binary_blob_store(...)` and reported read-only in the census.
+
+A composition provenance refusal surfaces as the typed
+`CompositionProvenanceError` (code `-32019`, `COMPOSITION_PROVENANCE_CODE`).
+The gateway raises it when the persistent mob storage's recorded composition
+cannot be proven to match this launch, for example a `mob.toml` edited since
+the persistent mob storage was created. Its `kind` names the refusal
+(`"divergent"`, `"created_by_rehearsal"`, the manifest kinds, and
+`"candidate_divergent"` from gateways launched as a candidate) and `fields`
+lists the diverged definition fields as dotted paths, so a host can show what
+changed without parsing the message. Revert the edit, or move the stored
+definition with `declare_spec_update(expected_revision=...)`:
+
+```python
+from meerkat_mobkit import CompositionProvenanceError
+
+try:
+    runtime = await builder.build()
+except CompositionProvenanceError as err:
+    if err.kind == "divergent":
+        print("mob.toml differs from the stored definition in", err.fields)
+    raise
+```
 
 ### Console access
 
@@ -608,6 +738,47 @@ finally:
     await rt.shutdown()
 ```
 
+### Startup: no built-in total deadline
+
+`connect()` (and `build()`) runs `mobkit/init` as accepted-then-settled. The
+gateway accepts the init at once, reports each startup phase, and then
+settles it `ready` or `failed`. The SDK has **no built-in total deadline** for
+that wait. Startup legitimately includes provider callbacks (each bounded at
+130 s by the gateway) and native persisted-authority prewarm, which is
+deliberately unbounded and can run for minutes on a large roster. Any fixed
+SDK timer would sooner or later abort a healthy restore. A 60 s timeout still
+bounds the wait for the `accepted` answer, and for an older gateway's single
+init response. A host whose gateway answers init late can raise it with
+`MobKit.builder().gateway_init_timeout(seconds)` (a positive finite number of
+seconds). That bounds a slow host startup; it does not fix one. It applies only
+to the `mobkit/init` request: ordinary RPCs and provider callback deadlines
+keep their own timeouts.
+
+The wait ends only when one of these happens:
+
+- the init settles `ready` (connected);
+- the init settles `failed`. You get the typed error, for example
+  `StorageResolutionError`, with `err.data["durable_effects"]`: `"none"` when
+  nothing durable was touched, otherwise `"possible"`;
+- the gateway exits, or the transport reader fails. You get
+  `InitOutcomeUnknownError`;
+- your own deadline runs out. Set it with
+  `MobKit.builder().init_deadline(seconds)`, and running out also raises
+  `InitOutcomeUnknownError`;
+- your task is cancelled.
+
+`InitOutcomeUnknownError` carries `init_id`, `last_phase` (the last
+`mobkit/init_progress` phase seen, such as `"prewarm"` or `"restore"`) and
+`reason`. That makes a stuck or interrupted init diagnosable. The gateway may
+already have changed native state, so the SDK never retries it automatically
+and asks the gateway to shut down.
+
+Provider callbacks that run during startup (roster, topology, continuity,
+lease, session builder, customizer) must not call ordinary runtime RPCs on the
+same runtime. Ordinary dispatch starts only after init settles, and the
+gateway refuses an earlier request at once with `InitInProgressError`
+(`-32018`, exported as `INIT_IN_PROGRESS_CODE`).
+
 ## Gateway logging (stderr)
 
 The persistent gateway reports tracing lines, panic hooks, and storage
@@ -636,6 +807,15 @@ resume). The gateway pre-fills `SessionBuildOptions` before it calls you:
 | `app_context` | The host context attached to the spawn, if any |
 | `session_id` | The spawn's `session_id` label when it carries one, else the resumed session's id |
 | `resume_session_id` | The resumed session's id on a resume; `None` on a mint |
+| `fork_source` | On a fork child's builds (meerkat 0.8.45+), a `ForkBuildSource`: the source member (`source_member.mob_id`, `.role`, and `.member`, MobKit's encoded roster id) and the source session it was forked from (`source_session_id`); `None` otherwise |
+| `fork_source_identity` | On a fork child's builds, the source's durable identity (for example `domain:calendar`), the key to resolve the source's grants by; `None` otherwise |
+
+meerkat sets the fork lineage on the build that seats a durable fork
+(`fork_off` children, `fork_member` children, local council participants) and
+on every later rebuild of that member, so a builder can build the child as its
+source. The child's own `labels` and `session_id` still name the child; they
+never carry the source's `agent_identity`. The lineage is receive-only: it is
+not sent back, and the gateway ignores it in a build response.
 
 Read `profile_name`, do not assign it. There is no way to select a profile
 from `build_agent`: the gateway applies only `additional_instructions` (mint
@@ -709,8 +889,29 @@ class MyCustomizer(AgentCustomizerProtocol):
 
 `draft` also carries `model`, `system_prompt`, `additional_instructions`,
 `labels`, `app_context`, and `provider_params`. A tool registered here rides
-the same `callback/call_tool` dispatch as `build_agent` tools, so resumed
-identities keep it.
+the same `callback/call_tool` dispatch as `build_agent` tools.
+
+Each identity member has one stable tool dispatcher for its whole life, and
+every `customize_build` publishes its tools into it. The tool list and the
+handler scope that serves it always change together. The tools therefore
+follow the member through every rebuild: a gateway restart, a member that is
+adopted instead of respawned, a respawn, and delivery-time repair. On a
+restart MobKit runs `customize_build` for each roster identity before the mob
+is restored, so every restored member starts with its tools. They are listed by
+`mobkit/identity/resolved_tools` before any turn, and a run that starts at
+activation (a queued input, a kickoff) sees them. The materialization that
+follows runs `customize_build` again and republishes. If that early call fails,
+the failure is logged for the identity and reported as
+`customizer_tools_pending` (with the reason) in its identity status. The member
+advertises no customizer tools until its materialization publishes them. A tool
+from an earlier build that the latest build no longer declares is refused,
+never routed to stale handlers.
+
+Customizer tools belong to roster identities only. Helpers, forks,
+flow-provisioned members, and members spawned under their own ids never get
+them; use profile tools or the session builder's per-spawn tools for those.
+A raw spawn that reuses a roster identity's member id does get that
+identity's current tools.
 
 ### Provider parameters (`provider_params`)
 
@@ -760,6 +961,9 @@ from meerkat_mobkit.errors import (
     CapabilityUnavailableError,  # Requested capability unavailable
     ContractMismatchError,       # SDK/runtime version mismatch
     StorageResolutionError,      # Fail-closed storage refusal at init (-32014)
+    CompositionProvenanceError,  # Mob composition provenance refusal at init (-32019): .kind, .fields
+    InitOutcomeUnknownError,     # Init written, settlement never arrived (native state may have changed)
+    TransportReaderFailedError,  # The transport reader stopped; no response can arrive
 )
 ```
 
@@ -827,6 +1031,7 @@ from meerkat_mobkit import (
     MobKitError, TransportError, RpcError,
     MobEventsStaleError, MOB_EVENTS_STALE_CURSOR_CODE,
     StorageResolutionError, STORAGE_RESOLUTION_CODE,
+    CompositionProvenanceError, COMPOSITION_PROVENANCE_CODE,
     NotConnectedError, CapabilityUnavailableError, ContractMismatchError,
     # Typed results
     StatusResult, CapabilitiesResult, ReconcileResult,

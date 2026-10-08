@@ -1085,6 +1085,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::HookCompleted { .. } => "hook_completed",
         AgentEvent::HookFailed { .. } => "hook_failed",
         AgentEvent::HookLaunchRefused { .. } => "hook_launch_refused",
+        AgentEvent::RequestReasoningLowered { .. } => "request_reasoning_lowered",
         AgentEvent::HookDenied { .. } => "hook_denied",
         AgentEvent::TurnStarted { .. } => "turn_started",
         AgentEvent::ReasoningDelta { .. } => "reasoning_delta",
@@ -1506,6 +1507,9 @@ pub enum ToolConfigChangeStatus {
         phase: ExternalToolDeltaPhase,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// Historical setup refusal, separate from the lifecycle phase.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confinement_refusal: Option<crate::confinement::ConfinementRefusal>,
     },
 }
 
@@ -1541,7 +1545,11 @@ impl ToolConfigChangeStatus {
 
     #[must_use]
     pub fn external_tool_delta(phase: ExternalToolDeltaPhase, detail: Option<String>) -> Self {
-        Self::ExternalToolDelta { phase, detail }
+        Self::ExternalToolDelta {
+            phase,
+            detail,
+            confinement_refusal: None,
+        }
     }
 
     #[must_use]
@@ -1564,7 +1572,7 @@ impl ToolConfigChangeStatus {
             Self::WarningFailedClosed { error } => {
                 format!("warning_failed_closed({error})")
             }
-            Self::ExternalToolDelta { phase, detail } => {
+            Self::ExternalToolDelta { phase, detail, .. } => {
                 let mut status = phase.as_status().to_string();
                 if *phase == ExternalToolDeltaPhase::Failed
                     && let Some(detail) = detail
@@ -1590,9 +1598,53 @@ pub struct ExternalToolDelta {
     pub tool_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The exact bounded refusal returned by setup, after its completion was
+    /// accepted by the lifecycle owner. This observation grants no permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confinement_refusal: Option<crate::confinement::ConfinementRefusal>,
 }
 
 impl ExternalToolDelta {
+    /// Audience-safe model feedback for a completed server setup failure.
+    ///
+    /// The lifecycle owner supplies the typed operation and phase. Diagnostic
+    /// detail is deliberately excluded: it may contain host paths, transport
+    /// headers or process output. This projection does not classify those
+    /// strings as permission, nor does it terminate the run. A typed setup
+    /// refusal contributes only its bounded enum text and structured reason.
+    #[must_use]
+    pub fn model_setup_failure_notice(&self) -> Option<crate::types::Message> {
+        if self.phase != ExternalToolDeltaPhase::Failed
+            || !matches!(
+                self.operation,
+                ToolConfigChangeOperation::Add | ToolConfigChangeOperation::Reload
+            )
+        {
+            return None;
+        }
+        let detail = match self.confinement_refusal {
+            Some(refusal) => format!(
+                "An MCP server could not be started or reloaded: {refusal}. Continue with the tools that are currently available."
+            ),
+            None => "An MCP server could not be started or reloaded. Continue with the tools that are currently available.".to_string(),
+        };
+        Some(crate::types::Message::SystemNotice(
+            crate::types::SystemNoticeMessage::with_block(
+                crate::types::SystemNoticeKind::Mcp,
+                Some(detail.clone()),
+                crate::types::SystemNoticeBlock::Mcp {
+                    server_id: Some(self.target.clone()),
+                    operation: Some(self.operation.clone()),
+                    phase: Some(self.phase),
+                    persisted: self.persisted,
+                    detail: Some(detail),
+                    confinement_refusal: self.confinement_refusal,
+                    pending_sources: Vec::new(),
+                },
+            ),
+        ))
+    }
+
     #[must_use]
     pub fn new(
         target: impl Into<String>,
@@ -1610,6 +1662,7 @@ impl ExternalToolDelta {
             applied_at_turn: None,
             tool_count: None,
             detail: None,
+            confinement_refusal: None,
         }
     }
 
@@ -1626,14 +1679,26 @@ impl ExternalToolDelta {
     }
 
     #[must_use]
+    pub fn with_confinement_refusal(
+        mut self,
+        refusal: Option<crate::confinement::ConfinementRefusal>,
+    ) -> Self {
+        self.confinement_refusal = refusal;
+        self
+    }
+
+    #[must_use]
     pub fn status_text(&self) -> String {
         ToolConfigChangeStatus::external_tool_delta(self.phase, self.detail.clone()).status_text()
     }
 
     #[must_use]
     pub fn to_tool_config_changed_payload(&self) -> ToolConfigChangedPayload {
-        let status_info =
-            ToolConfigChangeStatus::external_tool_delta(self.phase, self.detail.clone());
+        let status_info = ToolConfigChangeStatus::ExternalToolDelta {
+            phase: self.phase,
+            detail: self.detail.clone(),
+            confinement_refusal: self.confinement_refusal,
+        };
         ToolConfigChangedPayload::new(
             self.operation.clone(),
             self.target.clone(),
@@ -2159,6 +2224,12 @@ pub enum AgentEvent {
         /// Typed run input: caller content, or the pending tool-results
         /// continuation variant (no fabricated empty prompt).
         input: RunInput,
+        /// The reasoning-effort preference this run's batch requested, when
+        /// it carries one. This is the request only: what each provider
+        /// attempt actually sent is reported per attempt by
+        /// `request_reasoning_lowered`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_reasoning: Option<crate::lifecycle::run_primitive::ReasoningBatchDisposition>,
     },
 
     /// Agent run completed successfully
@@ -2795,6 +2866,33 @@ pub enum AgentEvent {
         /// Exact attempted tool call, when this hook belongs to one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_use_id: Option<String>,
+    },
+    /// One provider attempt of a turn that carries a reasoning-effort
+    /// preference: what the batch requested, what the attempt's baseline
+    /// request already said, and what the attempt actually sent. Emitted per
+    /// prepared request (and again for a model-fallback attempt), so a turn
+    /// whose attempts differ reports each one; never a turn-level claim.
+    RequestReasoningLowered {
+        /// The provider turn this attempt belongs to; absent for a
+        /// model-fallback attempt (see `fallback_attempt`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_number: Option<u32>,
+        /// The failed attempt this model-fallback attempt replaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback_attempt: Option<u32>,
+        /// The selected model's provider, when the registry knows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<crate::Provider>,
+        /// The selected model, when the registry knows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// The batch's resolved preference.
+        requested: crate::lifecycle::run_primitive::ReasoningBatchDisposition,
+        /// What the baseline request said about effort.
+        baseline: crate::lifecycle::run_primitive::ReasoningLoweringBaseline,
+        /// What this attempt sent; absent when the batch applies no level.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<crate::lifecycle::run_primitive::ReasoningLoweringOutcome>,
     },
 }
 
@@ -4068,6 +4166,7 @@ mod tests {
         // Test all event variants serialize correctly
         let events = vec![
             AgentEvent::RunStarted {
+                request_reasoning: None,
                 identity: Default::default(),
                 session_id: SessionId::new(),
                 input: RunInput::Content {
@@ -4470,6 +4569,7 @@ mod tests {
     #[test]
     fn run_started_pending_tail_serializes_typed_variant() {
         let event = AgentEvent::RunStarted {
+            request_reasoning: None,
             identity: Default::default(),
             session_id: SessionId::new(),
             input: RunInput::PendingToolResults,
@@ -4797,6 +4897,7 @@ mod tests {
     fn test_agent_event_type_mapping_is_total_for_all_variants() {
         let events = vec![
             AgentEvent::RunStarted {
+                request_reasoning: None,
                 identity: Default::default(),
                 session_id: SessionId::new(),
                 input: RunInput::Content {
@@ -5259,6 +5360,149 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn setup_failure_model_projection_excludes_raw_diagnostics_and_nonfailures() {
+        for operation in [
+            ToolConfigChangeOperation::Add,
+            ToolConfigChangeOperation::Reload,
+        ] {
+            let notice =
+                ExternalToolDelta::new("local-server", operation, ExternalToolDeltaPhase::Failed)
+                    .with_detail(Some("/private/host-path TOKEN=secret raw stderr".into()));
+            let message = notice
+                .model_setup_failure_notice()
+                .expect("typed setup failure");
+            let encoded = serde_json::to_string(&message).unwrap();
+            assert!(encoded.contains("local-server"));
+            assert!(!encoded.contains("/private/host-path"));
+            assert!(!encoded.contains("TOKEN=secret"));
+            assert!(!encoded.contains("raw stderr"));
+        }
+        for phase in [
+            ExternalToolDeltaPhase::Pending,
+            ExternalToolDeltaPhase::Applied,
+            ExternalToolDeltaPhase::Draining,
+            ExternalToolDeltaPhase::Forced,
+        ] {
+            assert!(
+                ExternalToolDelta::new("local-server", ToolConfigChangeOperation::Add, phase)
+                    .model_setup_failure_notice()
+                    .is_none()
+            );
+        }
+        assert!(
+            ExternalToolDelta::new(
+                "local-server",
+                ToolConfigChangeOperation::Remove,
+                ExternalToolDeltaPhase::Failed
+            )
+            .model_setup_failure_notice()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn setup_confinement_refusal_survives_model_and_host_projection_without_diagnostics() {
+        use crate::confinement::ConfinementRefusal;
+        for operation in [
+            ToolConfigChangeOperation::Add,
+            ToolConfigChangeOperation::Reload,
+        ] {
+            for refusal in [
+                ConfinementRefusal::InvalidRequirement,
+                ConfinementRefusal::InvalidLaunch,
+                ConfinementRefusal::UnsupportedRequirement,
+                ConfinementRefusal::BackendUnavailable,
+                ConfinementRefusal::PreparationFailed,
+            ] {
+                // Exercise the outward wire carrier and the private notice
+                // decoder as well as the in-memory projection.
+                let mut wire = serde_json::to_value(
+                    ExternalToolDelta::new(
+                        "local-server",
+                        operation.clone(),
+                        ExternalToolDeltaPhase::Failed,
+                    )
+                    .with_detail(Some("/private/host-path TOKEN=secret raw stderr".into())),
+                )
+                .unwrap();
+                wire["confinement_refusal"] = serde_json::to_value(refusal).unwrap();
+                let delta: ExternalToolDelta = serde_json::from_value(wire).unwrap();
+                let message = delta
+                    .model_setup_failure_notice()
+                    .expect("failed setup notice");
+                let crate::types::Message::SystemNotice(notice) = &message else {
+                    panic!("expected a system notice");
+                };
+                assert!(
+                    notice
+                        .model_projection_text()
+                        .contains(&refusal.to_string())
+                );
+                assert!(
+                    notice
+                        .model_projection_text()
+                        .contains("Continue with the tools")
+                );
+                let encoded = serde_json::to_value(&notice.blocks[0]).unwrap();
+                assert_eq!(encoded["phase"], "failed");
+                assert_eq!(
+                    encoded["confinement_refusal"],
+                    serde_json::to_value(refusal).unwrap()
+                );
+                let decoded: crate::types::SystemNoticeBlock =
+                    serde_json::from_value(encoded.clone()).unwrap();
+                assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+                let model_wire = serde_json::to_string(&message).unwrap();
+                assert!(!model_wire.contains("/private/host-path"));
+                assert!(!model_wire.contains("TOKEN=secret"));
+                assert!(!model_wire.contains("raw stderr"));
+                let host = serde_json::to_value(delta.to_tool_config_changed_payload()).unwrap();
+                assert_eq!(host["status_info"]["phase"], "failed");
+                assert_eq!(
+                    host["status_info"]["confinement_refusal"],
+                    serde_json::to_value(refusal).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_setup_failure_and_text_lookalike_do_not_acquire_typed_refusal() {
+        let delta = ExternalToolDelta::new(
+            "local-server",
+            ToolConfigChangeOperation::Add,
+            ExternalToolDeltaPhase::Failed,
+        )
+        .with_detail(Some(
+            crate::confinement::ConfinementRefusal::UnsupportedRequirement.to_string(),
+        ));
+        let legacy = serde_json::to_value(&delta).unwrap();
+        assert!(legacy.get("confinement_refusal").is_none());
+        let decoded: ExternalToolDelta = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), legacy);
+        let host = serde_json::to_value(decoded.to_tool_config_changed_payload()).unwrap();
+        assert!(host["status_info"].get("confinement_refusal").is_none());
+        let status: ToolConfigChangeStatus =
+            serde_json::from_value(host["status_info"].clone()).unwrap();
+        assert_eq!(serde_json::to_value(status).unwrap(), host["status_info"]);
+        let crate::types::Message::SystemNotice(notice) =
+            decoded.model_setup_failure_notice().unwrap()
+        else {
+            panic!("expected generic setup failure");
+        };
+        let block = serde_json::to_value(&notice.blocks[0]).unwrap();
+        assert!(block.get("confinement_refusal").is_none());
+        let decoded: crate::types::SystemNoticeBlock =
+            serde_json::from_value(block.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), block);
+        assert!(
+            !notice
+                .model_projection_text()
+                .contains("unsupported by this backend")
+        );
     }
 
     #[test]

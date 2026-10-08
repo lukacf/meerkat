@@ -823,4 +823,56 @@ impl meerkat_runtime::RuntimeStore for CommitGateRuntimeStore {
             .load_runtime_delivery_record(runtime_id, delivery_id)
             .await
     }
+
+    async fn load_continuation_key_binding(
+        &self,
+        owner: &str,
+        key: &str,
+    ) -> Result<Option<meerkat_runtime::ContinuationKeyBinding>, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner.load_continuation_key_binding(owner, key).await
+    }
+
+    async fn compare_and_swap_runtime_delivery_authority_with_key_binding(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        expected_revision: Option<u64>,
+        replacement: meerkat_runtime::store::RuntimeDeliveryAuthorityRecord,
+        inserted_delivery: meerkat_runtime::store::RuntimeDeliveryStoreRecord,
+        binding: meerkat_runtime::ContinuationKeyBinding,
+    ) -> Result<meerkat_runtime::KeyedRuntimeDeliveryCasOutcome, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .compare_and_swap_runtime_delivery_authority_with_key_binding(
+                runtime_id,
+                expected_revision,
+                replacement,
+                inserted_delivery,
+                binding,
+            )
+            .await
+    }
+
+    async fn load_continuation_admission(
+        &self,
+        address: &meerkat_runtime::LogicalRuntimeId,
+        delivery_id: &str,
+    ) -> Result<Option<meerkat_runtime::ContinuationAdmission>, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .load_continuation_admission(address, delivery_id)
+            .await
+    }
+
+    async fn transition_continuation_admission(
+        &self,
+        address: &meerkat_runtime::LogicalRuntimeId,
+        delivery_id: &str,
+        transition: meerkat_runtime::ContinuationAdmissionTransition,
+    ) -> Result<meerkat_runtime::ContinuationAdmissionOutcome, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .transition_continuation_admission(address, delivery_id, transition)
+            .await
+    }
 }

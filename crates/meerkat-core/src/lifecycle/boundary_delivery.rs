@@ -486,6 +486,7 @@ mod tests {
             phase: None,
             persisted,
             detail: None,
+            confinement_refusal: None,
             pending_sources: Vec::new(),
         }
     }

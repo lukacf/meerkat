@@ -568,7 +568,7 @@ restart.
 - Crash during an in-flight turn loses at most the work the intra-turn
   persistence hook had not yet written; any durable tail it did write is
   preserved and recovered (see below), never discarded.
-- SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows.
+- SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows. Declare `[storage] hosting = "multiprocess"` so each session is hosted by one process and deliveries route to it (see [Realms: multi-process hosting](/concepts/realms#multi-process-hosting)).
 
 Persistent session metadata is the source of truth for resumed durable session behavior unless an interactive surface supplies an explicit typed override.
 

@@ -61,7 +61,7 @@ restricted identities/tokens plus the required ACL, firewall and job machinery
 on Windows. Preserve applicable source attribution and licenses. Do not import
 the Codex application, permission authority or child supervisor into Meerkat.
 The inspected reference is `d6c3b448a41311ece3255c52ec3dbfd9ff36f154` in
-`/Users/luka/src/cc/codex`; adapted files record their exact source and changes.
+`(operator-retained path)`; adapted files record their exact source and changes.
 
 A backend reports its actual guarantees. Seatbelt alone does not prove resource
 quotas or termination of descendants that escape an owned process group.
@@ -77,14 +77,19 @@ feedback. Genuine per-launch failures remain local. Do not admit a profile
 known to produce an undiagnosable storm of identical unsupported refusals.
 
 Linux support includes common containers and CI hosts without unprivileged user
-namespaces. A Landlock/filesystem and seccomp/socket backend provides the subset
-the installed kernel can enforce without user namespaces; bubblewrap/namespaces
-provide stronger isolation where available. Neither backend may claim unsupported
-endpoint, IPC or filesystem semantics. A deployment can explicitly select an
-existing container/pod boundary as its backend, declaring its image/volume,
-network and process guarantees. A shared pod is not automatically a boundary
-between differently authorized agents or between tools and privileged brokers.
-Only the isolation actually configured and enforced counts toward requirements.
+namespaces, for requirements that the available backend can actually enforce.
+`LINUX-PATHS-CONTRACT-09` preserves strict `Paths` semantics, including filesystem
+metadata: this release has no content-only reinterpretation or fallback.
+Landlock and seccomp alone cannot claim a path requirement that they do not fully
+enforce. Namespace-required combinations refuse with typed unavailability before
+target entry when the needed isolation is unavailable; this does not make every
+Linux operation unsupported. Namespace creation alone is not enforcement: the
+filesystem view, descriptors, syscalls, network and IPC must satisfy the complete
+request. A deployment can explicitly select an existing container/pod boundary
+as its backend, declaring its image/volume, network and process guarantees. A
+shared pod is not automatically a boundary between differently authorized agents
+or between tools and privileged brokers. Only the isolation actually configured
+and enforced counts toward requirements.
 
 Compile immutable platform policy once for the existing policy owner's
 configuration generation. Each launch binds exact process inputs to that

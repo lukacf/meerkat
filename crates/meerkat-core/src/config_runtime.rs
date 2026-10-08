@@ -139,6 +139,10 @@ impl ConfigRuntime {
     }
 
     /// Replace config with optional generation check.
+    ///
+    /// A full replace (see [`ConfigStore::set`]): in a realm document every
+    /// field becomes an explicit override of the parent realm. Use
+    /// [`Self::patch`] to change individual keys.
     pub async fn set(
         &self,
         config: Config,
@@ -175,6 +179,8 @@ impl ConfigRuntime {
     }
 
     /// Apply JSON merge patch with optional generation check.
+    ///
+    /// Only the keys the patch names are written (see [`ConfigStore::patch`]).
     pub async fn patch(
         &self,
         delta: ConfigDelta,

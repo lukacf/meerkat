@@ -2589,6 +2589,128 @@ mod live_context_mirror_tests {
         );
     }
 
+    /// A registered session with its runtime binding prepared and no live
+    /// channel opened yet.
+    async fn unopened_experimental_live_session(machine: &crate::MeerkatMachine) -> SessionId {
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        let registered = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read registered runtime epoch");
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                    agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId(
+                        "runtime-bound-experimental-live".to_string(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken(41),
+                    generation: Some(crate::meerkat_machine::dsl::Generation(0)),
+                    runtime_epoch_id: registered.active_runtime_epoch_id,
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                },
+                "test:PrepareBindings",
+            )
+            .await
+            .expect("prepare exact runtime binding");
+        session_id
+    }
+
+    /// The public open entry refuses a directly constructed `Set(Minimal)`
+    /// with a typed validation failure before the generated admission runs:
+    /// the channel stays unbound and no preference is recorded. A valid level
+    /// is then admitted and recorded, and an absent preference opens with
+    /// none.
+    #[tokio::test]
+    async fn live_open_refuses_an_unsupported_member_turn_reasoning_before_admission() {
+        use meerkat_core::lifecycle::run_primitive::RequestReasoningPreference;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        let machine = crate::MeerkatMachine::ephemeral();
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "experimental-realtime-model".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let session_id = unopened_experimental_live_session(&machine).await;
+        let channel_id = meerkat_live::LiveChannelId::new("minimal-reasoning-live");
+        let refused = machine
+            .resolve_live_open_admission_with_member_turn_reasoning(
+                &session_id,
+                &channel_id,
+                &identity,
+                Some(RequestReasoningPreference::Set(EffortLevel::Minimal)),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(RuntimeDriverError::ValidationFailed { .. })),
+            "{refused:?}"
+        );
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("state after refusal");
+        assert!(
+            !state
+                .live_channel_identity_by_channel
+                .contains_key(&channel_id.to_string())
+        );
+        assert!(state.live_member_turn_reasoning_by_channel.is_empty());
+
+        machine
+            .resolve_live_open_admission_with_member_turn_reasoning(
+                &session_id,
+                &channel_id,
+                &identity,
+                Some(RequestReasoningPreference::Set(EffortLevel::Low)),
+            )
+            .await
+            .expect("a valid level is admitted");
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("state after a valid open");
+        assert!(
+            state
+                .live_channel_identity_by_channel
+                .contains_key(&channel_id.to_string())
+        );
+        assert_eq!(
+            state
+                .live_member_turn_reasoning_by_channel
+                .get(&channel_id.to_string()),
+            Some(&crate::meerkat_machine::dsl::LiveMemberTurnReasoning::Low)
+        );
+
+        let absent_session = unopened_experimental_live_session(&machine).await;
+        let absent_channel = meerkat_live::LiveChannelId::new("absent-reasoning-live");
+        machine
+            .resolve_live_open_admission_with_member_turn_reasoning(
+                &absent_session,
+                &absent_channel,
+                &identity,
+                None,
+            )
+            .await
+            .expect("an absent preference is admitted");
+        let state = machine
+            .session_dsl_state(&absent_session)
+            .await
+            .expect("state after an open without a preference");
+        assert!(
+            state
+                .live_channel_identity_by_channel
+                .contains_key(&absent_channel.to_string())
+        );
+        assert!(state.live_member_turn_reasoning_by_channel.is_empty());
+    }
+
     async fn prepared_experimental_live_machine() -> (
         crate::MeerkatMachine,
         SessionId,
@@ -3953,6 +4075,7 @@ mod live_context_mirror_tests {
                 "test-durable-member",
                 &canonical_context_revision,
                 request_digest,
+                None,
             )
             .await
             .expect("admit exact durable-member bridge operation");
@@ -5372,6 +5495,7 @@ mod live_context_mirror_tests {
                     canonical_context_revision: "sha256:capacity-context".to_string(),
                     request_digest: "sha256:capacity-request".to_string(),
                     structural_lineage_proven: true,
+                    original_work: String::new(),
                 },
                 "test:AdmitLiveBridgeOperationBeyondCapacity",
             )
@@ -8104,6 +8228,16 @@ impl MeerkatMachine {
             .await
     }
 
+    /// Admit one function-bridge operation dispatched inside a staged run.
+    ///
+    /// `original_work` is the passive retained work identity the dispatching
+    /// run's tool dispatch carries (`ToolDispatchContext::retained_work`).
+    /// Whether the dispatch is governed is decided from the dispatch's actual
+    /// native work identity (the identity the driver minted for the current
+    /// staged run), never from whether the caller supplied one: a governed
+    /// dispatch requires exactly that identity, which is then recorded with the
+    /// operation in the same generated commit; an ungoverned dispatch (no
+    /// native work identity) requires none and records none.
     #[cfg(feature = "live")]
     pub async fn admit_live_bridge_operation(
         &self,
@@ -8112,6 +8246,7 @@ impl MeerkatMachine {
         agent_identity: &str,
         canonical_context_revision: &meerkat_core::CanonicalContextRevision,
         request_digest: meerkat_core::LiveBridgeRequestDigest,
+        original_work: Option<&meerkat_core::retained_work::RetainedWorkIdentity>,
     ) -> Result<crate::live_execution::LiveBridgeOperationAdmission, RuntimeDriverError> {
         if agent_identity.trim().is_empty() || canonical_context_revision.as_str().is_empty() {
             return Err(RuntimeDriverError::ValidationFailed {
@@ -8139,6 +8274,20 @@ impl MeerkatMachine {
         let binding = self
             .live_delegation_runtime_binding(session_id, correlation.channel_id())
             .await?;
+        let actual = self.live_bridge_dispatch_original_work(session_id).await?;
+        let original_work = match (actual, original_work) {
+            (Some(actual), Some(supplied)) if &actual == supplied => serde_json::to_string(&actual)
+                .map_err(|_| RuntimeDriverError::ValidationFailed {
+                    reason: "live bridge original work could not be recorded".to_string(),
+                })?,
+            (None, None) => String::new(),
+            _ => {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "live bridge original work does not match the actual dispatching batch"
+                        .to_string(),
+                });
+            }
+        };
         let operation = meerkat_core::exact_operation::ExactOperationIdentity::for_domain(
             meerkat_core::OperationId::new(),
             correlation,
@@ -8170,6 +8319,7 @@ impl MeerkatMachine {
                     ),
                     canonical_context_revision: canonical_context_revision.as_str().to_string(),
                     request_digest: request_digest.as_str().to_string(),
+                    original_work,
                     structural_lineage_proven: true,
                 },
                 "AdmitLiveBridgeOperation",
@@ -8200,6 +8350,182 @@ impl MeerkatMachine {
             reason: "live bridge call was a replay or protocol drift and acquired no execution authority"
                 .to_string(),
         })
+    }
+
+    /// The actual dispatching batch's native work identity, if the dispatch is
+    /// governed.
+    ///
+    /// It is the identity the session's driver minted for its staged work
+    /// context when the generated state shows that run current, staged,
+    /// running and not terminal; then every selected binding must be
+    /// associated with that run with the same binding and batch key and no
+    /// other input may be associated with it (the native membership rule), or
+    /// the dispatch is refused. Otherwise the dispatch has no native work
+    /// identity and is ungoverned (`None`). Runs under the caller's mutation
+    /// gate; the driver lock is held only to read the minted identity.
+    #[cfg(feature = "live")]
+    async fn live_bridge_dispatch_original_work(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::retained_work::RetainedWorkIdentity>, RuntimeDriverError> {
+        use crate::meerkat_machine::dsl;
+        let refused = || RuntimeDriverError::ValidationFailed {
+            reason: "live bridge dispatch does not match its staged work".to_string(),
+        };
+        let staged = {
+            let driver = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .ok_or(RuntimeDriverError::NotReady {
+                        state: crate::runtime_state::RuntimeState::Destroyed,
+                    })?
+                    .driver
+                    .clone()
+            };
+            let driver = driver.lock().await;
+            match &*driver {
+                crate::meerkat_machine::driver::DriverEntry::Ephemeral(driver) => {
+                    driver.staged_retained_work()
+                }
+                crate::meerkat_machine::driver::DriverEntry::Persistent(driver) => {
+                    driver.inner_ref().staged_retained_work()
+                }
+            }
+        };
+        let Some(staged) = staged else {
+            return Ok(None);
+        };
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        let run = dsl::RunId::from_domain(staged.run_id());
+        if state.current_run_id.as_ref() != Some(&run)
+            || state.authority_staged_run.as_ref() != Some(&run)
+            || state.lifecycle_phase != dsl::MeerkatPhase::Running
+            || state.turn_terminal_run_id.as_ref() == Some(&run)
+        {
+            // The minted identity names a run that is not the current staged
+            // one: this dispatch has no native work identity.
+            return Ok(None);
+        }
+        if staged.runtime_id() != Self::logical_runtime_id(session_id).to_string() {
+            return Err(refused());
+        }
+        let selected = staged.selected_input_bindings();
+        for (key, binding) in selected {
+            if state.input_run_associations.get(key) != Some(&run)
+                || state.input_authority_bindings.get(key) != Some(&binding.binding)
+                || state.input_authority_batch_keys.get(key) != Some(&binding.batch_key)
+            {
+                return Err(refused());
+            }
+        }
+        if state
+            .input_run_associations
+            .iter()
+            .any(|(key, associated)| associated == &run && !selected.contains_key(key))
+        {
+            return Err(refused());
+        }
+        Ok(Some(staged))
+    }
+
+    /// Whether a committed bridge operation was recorded with an original work
+    /// binding (a governed dispatch). The operation must be present with the
+    /// same channel and interaction, or this is unavailable.
+    #[cfg(feature = "live")]
+    pub async fn live_bridge_operation_has_original_work(
+        &self,
+        session_id: &SessionId,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveBridgeOperationCorrelation,
+        >,
+    ) -> Result<bool, crate::live_execution::LiveBridgeOutcomeBindingError> {
+        use crate::meerkat_machine::dsl;
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        let operation_id = dsl::OperationId::from_domain(operation.operation_id());
+        let correlation = operation.domain_correlation();
+        if state.live_bridge_channel_by_operation.get(&operation_id)
+            != Some(&correlation.channel_id().to_string())
+            || state
+                .live_bridge_interaction_by_operation
+                .get(&operation_id)
+                != Some(&correlation.interaction_id().to_string())
+        {
+            return Err(crate::input_authority::unavailable().into());
+        }
+        Ok(state
+            .live_bridge_original_work_by_operation
+            .contains_key(&operation_id))
+    }
+
+    /// Resolve the original work binding of one committed bridge operation for
+    /// its outcome append.
+    ///
+    /// Reads the identity recorded with the operation at admission, then
+    /// re-resolves its contributors from this session's own rows (live ledger,
+    /// then archived store) and checks they are batch compatible. A completed
+    /// original run alongside a later current run is fine: admission already
+    /// proved membership against the actual staged batch. An operation
+    /// admitted before the identity existed, a malformed identity, an absent
+    /// or mismatched operation, a different runtime, or a missing or changed
+    /// row is unavailable. This never decides current permission.
+    #[cfg(feature = "live")]
+    pub async fn live_bridge_outcome_authority(
+        &self,
+        session_id: &SessionId,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveBridgeOperationCorrelation,
+        >,
+    ) -> Result<
+        crate::live_execution::LiveBridgeOutcomeAuthority,
+        crate::live_execution::LiveBridgeOutcomeBindingError,
+    > {
+        use crate::meerkat_machine::dsl;
+        let unavailable = || {
+            crate::live_execution::LiveBridgeOutcomeBindingError::Unavailable(
+                crate::input_authority::unavailable(),
+            )
+        };
+        let encoded = {
+            let state = self
+                .session_dsl_state(session_id)
+                .await
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+            let operation_id = dsl::OperationId::from_domain(operation.operation_id());
+            let correlation = operation.domain_correlation();
+            if state.live_bridge_channel_by_operation.get(&operation_id)
+                != Some(&correlation.channel_id().to_string())
+                || state
+                    .live_bridge_interaction_by_operation
+                    .get(&operation_id)
+                    != Some(&correlation.interaction_id().to_string())
+            {
+                return Err(unavailable());
+            }
+            state
+                .live_bridge_original_work_by_operation
+                .get(&operation_id)
+                .cloned()
+                .ok_or_else(unavailable)?
+        };
+        let identity: meerkat_core::retained_work::RetainedWorkIdentity =
+            serde_json::from_str(&encoded).map_err(|_| unavailable())?;
+        if identity.runtime_id() != Self::logical_runtime_id(session_id).to_string() {
+            return Err(unavailable());
+        }
+        let contributors = self
+            .resolve_retained_work_contributors(session_id, &identity)
+            .await?;
+        Ok(crate::live_execution::LiveBridgeOutcomeAuthority::new(
+            identity,
+            contributors,
+        )?)
     }
 
     /// Return every durable generated bridge operation for one session.
@@ -10381,9 +10707,29 @@ impl MeerkatMachine {
         session_id: &SessionId,
         canonical_seed_cursor: u64,
     ) -> Result<crate::live_execution::LiveDelegationRuntimeBinding, RuntimeDriverError> {
+        self.__test_open_live_context_channel_with_member_turn_reasoning(
+            session_id,
+            canonical_seed_cursor,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::__test_open_live_context_channel`] with the open sealing a
+    /// member-turn reasoning preference.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_open_live_context_channel_with_member_turn_reasoning(
+        &self,
+        session_id: &SessionId,
+        canonical_seed_cursor: u64,
+        member_turn_reasoning: Option<
+            meerkat_core::lifecycle::run_primitive::RequestReasoningPreference,
+        >,
+    ) -> Result<crate::live_execution::LiveDelegationRuntimeBinding, RuntimeDriverError> {
         use crate::meerkat_machine::dsl as mm;
         let channel_id = meerkat_core::LiveChannelId::new(uuid::Uuid::new_v4().to_string());
-        self.resolve_live_open_admission(
+        self.resolve_live_open_admission_with_member_turn_reasoning(
             session_id,
             &channel_id,
             &meerkat_core::SessionLlmIdentity {
@@ -10393,6 +10739,7 @@ impl MeerkatMachine {
                 provider_params: None,
                 auth_binding: None,
             },
+            member_turn_reasoning,
         )
         .await?;
         self.resolve_live_execution_mode_admission(
@@ -10454,6 +10801,86 @@ impl MeerkatMachine {
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         self.live_delegation_runtime_binding(session_id, &channel_id)
             .await
+    }
+
+    /// Test fixture: admit one function-bridge operation on an already bound
+    /// live channel, confirm its final input and authorize its execution
+    /// start, so the caller can commit and recover its terminal.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_admit_started_live_bridge_operation(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+        provider_turn_ref: &str,
+        request: &str,
+    ) -> Result<crate::live_execution::LiveBridgeOperationAdmission, RuntimeDriverError> {
+        use crate::meerkat_machine::dsl as mm;
+        let invalid = |reason: String| RuntimeDriverError::ValidationFailed { reason };
+        let session_id = binding.session_id();
+        let channel_id = binding.channel_id().clone();
+        let runtime_id = mm::AgentRuntimeId::from_domain(binding.runtime_id());
+        let fence_token = mm::FenceToken(binding.fence_token());
+        let generation = mm::Generation(binding.generation());
+        let interaction_id = meerkat_core::InteractionId::new();
+        self.apply_session_dsl_input(
+            session_id,
+            mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+                channel_id: channel_id.to_string(),
+                runtime_id: runtime_id.clone(),
+                fence_token,
+                generation,
+                interaction_id: interaction_id.to_string(),
+                provider_turn_ref: provider_turn_ref.to_string(),
+            },
+            "test:ObserveLiveProviderTurnStarted",
+        )
+        .await
+        .map_err(invalid)?;
+        let provider = meerkat_core::LiveBridgeProviderCorrelation::new(
+            provider_turn_ref,
+            format!("{provider_turn_ref}:delegation"),
+            format!("{provider_turn_ref}:call"),
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        let correlation =
+            meerkat_core::LiveBridgeOperationCorrelation::new(channel_id, interaction_id, provider)
+                .map_err(|error| invalid(error.to_string()))?;
+        let canonical_context_revision = meerkat_core::Session::with_id(session_id.clone())
+            .canonical_context_revision()
+            .map_err(|error| invalid(error.to_string()))?;
+        let request_digest = meerkat_core::LiveBridgeRequestDigest::derive(request)
+            .map_err(|error| invalid(error.to_string()))?;
+        let admission = self
+            .admit_live_bridge_operation(
+                session_id,
+                correlation,
+                "test-durable-member",
+                &canonical_context_revision,
+                request_digest,
+                None,
+            )
+            .await?;
+        let correlation = admission.operation().domain_correlation();
+        self.apply_session_dsl_input(
+            session_id,
+            mm::MeerkatMachineInput::ConfirmLiveBridgeFinalInput {
+                channel_id: correlation.channel_id().to_string(),
+                runtime_id,
+                fence_token,
+                generation,
+                interaction_id: correlation.interaction_id().to_string(),
+                operation_id: mm::OperationId::from_domain(admission.operation().operation_id()),
+                provider_turn_ref: correlation.provider().provider_turn_ref().to_string(),
+            },
+            "test:ConfirmLiveBridgeFinalInput",
+        )
+        .await
+        .map_err(invalid)?;
+        self.persist_live_bridge_recovery_state(session_id, "test:ConfirmLiveBridgeFinalInput")
+            .await?;
+        self.authorize_live_bridge_execution_start(&admission)
+            .await?;
+        Ok(admission)
     }
 
     /// Retire a transport-free context fixture through generated close.
@@ -14511,6 +14938,37 @@ impl MeerkatMachine {
         channel_id: &meerkat_live::LiveChannelId,
         llm_identity: &meerkat_core::SessionLlmIdentity,
     ) -> Result<LiveOpenAdmissionAuthority, RuntimeDriverError> {
+        self.resolve_live_open_admission_with_member_turn_reasoning(
+            session_id,
+            channel_id,
+            llm_identity,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::resolve_live_open_admission`] sealing the reasoning-effort
+    /// preference for the member turns this channel's delegations start
+    /// (#1823). The machine keeps it on the admitted channel, keyed by its
+    /// freshly minted id, and copies it into each worker start authorization.
+    #[cfg(feature = "live")]
+    pub async fn resolve_live_open_admission_with_member_turn_reasoning(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+        llm_identity: &meerkat_core::SessionLlmIdentity,
+        member_turn_reasoning: Option<
+            meerkat_core::lifecycle::run_primitive::RequestReasoningPreference,
+        >,
+    ) -> Result<LiveOpenAdmissionAuthority, RuntimeDriverError> {
+        // An unsupported level is refused before the admission can bind the
+        // channel; it never degrades to an open without a preference.
+        let member_turn_reasoning = member_turn_reasoning
+            .map(crate::meerkat_machine::dsl::LiveMemberTurnReasoning::try_from_domain)
+            .transpose()
+            .map_err(|unsupported| RuntimeDriverError::ValidationFailed {
+                reason: format!("live open member-turn reasoning refused: {unsupported}"),
+            })?;
         let _mutation_guard = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await?;
@@ -14524,6 +14982,7 @@ impl MeerkatMachine {
                     llm_identity: crate::meerkat_machine::dsl::SessionLlmIdentity::from_domain(
                         llm_identity,
                     ),
+                    member_turn_reasoning,
                 },
                 "ResolveLiveOpenAdmission",
             )

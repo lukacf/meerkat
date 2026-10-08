@@ -51,15 +51,15 @@ fn absent_default_deny_fails_before_installation() {
 fn application_policy_binding_rejects_unknown_fields() {
     for (binding, unknown_field) in [
         (
-            r#"{"kind":"provider","provider_id":"homecore","policy_id":"household-tools","risk_tier":"r9"}"#,
+            r#"{"kind":"provider","provider_id":"example","policy_id":"team-tools","risk_tier":"r9"}"#,
             "risk_tier",
         ),
         (
-            r#"{"kind":"unmanaged","provider_id":"homecore"}"#,
+            r#"{"kind":"unmanaged","provider_id":"example"}"#,
             "provider_id",
         ),
         (
-            r#"{"kind":"inherit","policy_id":"household-tools"}"#,
+            r#"{"kind":"inherit","policy_id":"team-tools"}"#,
             "policy_id",
         ),
     ] {
@@ -140,8 +140,8 @@ impl ToolConsequenceNarrowingPolicy for MutableProvider {
 
 #[test]
 fn provider_owned_snapshot_pointer_rejects_revision_rollback() {
-    let provider_id = PolicyProviderId::new("homecore").unwrap();
-    let policy_id = PolicyId::new("household-tools").unwrap();
+    let provider_id = PolicyProviderId::new("example").unwrap();
+    let policy_id = PolicyId::new("team-tools").unwrap();
     let provider = Arc::new(MutableProvider {
         provider_id: provider_id.clone(),
         provenance: RwLock::new(PolicyEvaluationProvenance {
@@ -159,7 +159,7 @@ fn provider_owned_snapshot_pointer_rejects_revision_rollback() {
         .unwrap(),
     );
     let member = MobMemberBinding {
-        mob_id: "homecore".to_string(),
+        mob_id: "example".to_string(),
         role: "coordinator".to_string(),
         member: "alpha".to_string(),
     };

@@ -93,6 +93,12 @@ pub enum ApprovalLifecycleRejectionReason {
     EmptyAllowedDecisions,
     #[serde(rename = "InvalidRestoredRecord")]
     InvalidRestoredRecord,
+    #[serde(rename = "ReviewRetired")]
+    ReviewRetired,
+    #[serde(rename = "ReviewNotSatisfied")]
+    ReviewNotSatisfied,
+    #[serde(rename = "ReviewPending")]
+    ReviewPending,
 }
 impl ApprovalLifecycleRejectionReason {
     pub fn as_str(&self) -> &'static str {
@@ -104,6 +110,9 @@ impl ApprovalLifecycleRejectionReason {
             Self::InvalidDecision => "InvalidDecision",
             Self::EmptyAllowedDecisions => "EmptyAllowedDecisions",
             Self::InvalidRestoredRecord => "InvalidRestoredRecord",
+            Self::ReviewRetired => "ReviewRetired",
+            Self::ReviewNotSatisfied => "ReviewNotSatisfied",
+            Self::ReviewPending => "ReviewPending",
         }
     }
 }
@@ -118,6 +127,9 @@ impl std::convert::TryFrom<&str> for ApprovalLifecycleRejectionReason {
             "InvalidDecision" => Ok(Self::InvalidDecision),
             "EmptyAllowedDecisions" => Ok(Self::EmptyAllowedDecisions),
             "InvalidRestoredRecord" => Ok(Self::InvalidRestoredRecord),
+            "ReviewRetired" => Ok(Self::ReviewRetired),
+            "ReviewNotSatisfied" => Ok(Self::ReviewNotSatisfied),
+            "ReviewPending" => Ok(Self::ReviewPending),
             other => Err(format!(
                 "invalid ApprovalLifecycleRejectionReason value `{other}`"
             )),
@@ -197,6 +209,188 @@ impl std::fmt::Display for ApprovalLifecycleStatus {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ReviewAttemptStatus {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Allowed")]
+    Allowed,
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "Escalated")]
+    Escalated,
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+    #[serde(rename = "Retired")]
+    Retired,
+    #[serde(rename = "Used")]
+    Used,
+}
+impl ReviewAttemptStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Allowed => "Allowed",
+            Self::Denied => "Denied",
+            Self::Escalated => "Escalated",
+            Self::Unavailable => "Unavailable",
+            Self::Retired => "Retired",
+            Self::Used => "Used",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ReviewAttemptStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Allowed" => Ok(Self::Allowed),
+            "Denied" => Ok(Self::Denied),
+            "Escalated" => Ok(Self::Escalated),
+            "Unavailable" => Ok(Self::Unavailable),
+            "Retired" => Ok(Self::Retired),
+            "Used" => Ok(Self::Used),
+            other => Err(format!("invalid ReviewAttemptStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ReviewAttemptStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ReviewAttemptStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ReviewRetirementReason {
+    #[default]
+    #[serde(rename = "ContextChanged")]
+    ContextChanged,
+    #[serde(rename = "AuthorityChanged")]
+    AuthorityChanged,
+    #[serde(rename = "DeadlineExpired")]
+    DeadlineExpired,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+}
+impl ReviewRetirementReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ContextChanged => "ContextChanged",
+            Self::AuthorityChanged => "AuthorityChanged",
+            Self::DeadlineExpired => "DeadlineExpired",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ReviewRetirementReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ContextChanged" => Ok(Self::ContextChanged),
+            "AuthorityChanged" => Ok(Self::AuthorityChanged),
+            "DeadlineExpired" => Ok(Self::DeadlineExpired),
+            "Abandoned" => Ok(Self::Abandoned),
+            other => Err(format!("invalid ReviewRetirementReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ReviewRetirementReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ReviewRetirementReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ReviewVerdict {
+    #[default]
+    #[serde(rename = "Allow")]
+    Allow,
+    #[serde(rename = "Deny")]
+    Deny,
+    #[serde(rename = "Escalate")]
+    Escalate,
+}
+impl ReviewVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "Allow",
+            Self::Deny => "Deny",
+            Self::Escalate => "Escalate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ReviewVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Allow" => Ok(Self::Allow),
+            "Deny" => Ok(Self::Deny),
+            "Escalate" => Ok(Self::Escalate),
+            other => Err(format!("invalid ReviewVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ReviewVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ReviewVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -216,6 +410,9 @@ pub struct State {
     pub approval_approve_allowed: std::collections::BTreeMap<String, bool>,
     pub approval_deny_allowed: std::collections::BTreeMap<String, bool>,
     pub approval_has_expiry: std::collections::BTreeMap<String, bool>,
+    pub review_ids: std::collections::BTreeSet<String>,
+    pub review_statuses: std::collections::BTreeMap<String, ReviewAttemptStatus>,
+    pub review_retirements: std::collections::BTreeMap<String, ReviewRetirementReason>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -252,6 +449,32 @@ pub mod inputs {
         pub approval_id: String,
         pub decision: ApprovalLifecycleDecision,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginReview {
+        pub review_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordReviewVerdict {
+        pub review_id: String,
+        pub verdict: ReviewVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordReviewUnavailable {
+        pub review_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetireReview {
+        pub review_id: String,
+        pub reason: ReviewRetirementReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConsumeReviewForEntry {
+        pub review_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseReview {
+        pub review_id: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -260,6 +483,12 @@ pub enum Input {
     RestoreApproval(inputs::RestoreApproval),
     ObserveApprovalExpiry(inputs::ObserveApprovalExpiry),
     DecideApproval(inputs::DecideApproval),
+    BeginReview(inputs::BeginReview),
+    RecordReviewVerdict(inputs::RecordReviewVerdict),
+    RecordReviewUnavailable(inputs::RecordReviewUnavailable),
+    RetireReview(inputs::RetireReview),
+    ConsumeReviewForEntry(inputs::ConsumeReviewForEntry),
+    ReleaseReview(inputs::ReleaseReview),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -268,6 +497,12 @@ impl Input {
             Self::RestoreApproval(_) => InputKind::RestoreApproval,
             Self::ObserveApprovalExpiry(_) => InputKind::ObserveApprovalExpiry,
             Self::DecideApproval(_) => InputKind::DecideApproval,
+            Self::BeginReview(_) => InputKind::BeginReview,
+            Self::RecordReviewVerdict(_) => InputKind::RecordReviewVerdict,
+            Self::RecordReviewUnavailable(_) => InputKind::RecordReviewUnavailable,
+            Self::RetireReview(_) => InputKind::RetireReview,
+            Self::ConsumeReviewForEntry(_) => InputKind::ConsumeReviewForEntry,
+            Self::ReleaseReview(_) => InputKind::ReleaseReview,
         }
     }
 }
@@ -277,6 +512,12 @@ pub enum InputKind {
     RestoreApproval,
     ObserveApprovalExpiry,
     DecideApproval,
+    BeginReview,
+    RecordReviewVerdict,
+    RecordReviewUnavailable,
+    RetireReview,
+    ConsumeReviewForEntry,
+    ReleaseReview,
 }
 
 pub mod effects {
@@ -292,17 +533,31 @@ pub mod effects {
         pub approval_id: String,
         pub reason: ApprovalLifecycleRejectionReason,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReviewStatusResolved {
+        pub review_id: String,
+        pub status: ReviewAttemptStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReviewLifecycleRejected {
+        pub review_id: String,
+        pub reason: ApprovalLifecycleRejectionReason,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
     ApprovalStatusResolved(effects::ApprovalStatusResolved),
     ApprovalLifecycleRejected(effects::ApprovalLifecycleRejected),
+    ReviewStatusResolved(effects::ReviewStatusResolved),
+    ReviewLifecycleRejected(effects::ReviewLifecycleRejected),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
     ApprovalStatusResolved,
     ApprovalLifecycleRejected,
+    ReviewStatusResolved,
+    ReviewLifecycleRejected,
 }
 
 #[allow(non_camel_case_types)]
@@ -333,6 +588,35 @@ pub enum TransitionId {
     DecideRejectedDenyNotAllowed,
     DecideApprove,
     DecideDeny,
+    BeginReviewRejectedDuplicate,
+    BeginReviewPending,
+    RecordReviewVerdictRejectedMissing,
+    RecordReviewVerdictRejectedRetired,
+    RecordReviewVerdictRejectedSettled,
+    RecordReviewVerdictAllowed,
+    RecordReviewVerdictDenied,
+    RecordReviewVerdictEscalated,
+    RecordReviewUnavailableRejectedMissing,
+    RecordReviewUnavailableRejectedRetired,
+    RecordReviewUnavailableRejectedSettled,
+    RecordReviewUnavailable,
+    RetireReviewRejectedMissing,
+    RetireReviewRejectedRetired,
+    RetireReviewRejectedSettled,
+    RetireReview,
+    ConsumeReviewRejectedMissing,
+    ConsumeReviewRejectedRetired,
+    ConsumeReviewRejectedUsed,
+    ConsumeReviewRejectedNotSatisfied,
+    ConsumeReviewForEntry,
+    ReleaseReviewRejectedMissing,
+    ReleaseReviewRejectedPending,
+    ReleaseReviewAllowed,
+    ReleaseReviewDenied,
+    ReleaseReviewEscalated,
+    ReleaseReviewUnavailable,
+    ReleaseReviewRetired,
+    ReleaseReviewUsed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -410,5 +694,8 @@ pub fn initial_state() -> State {
         approval_approve_allowed: Default::default(),
         approval_deny_allowed: Default::default(),
         approval_has_expiry: Default::default(),
+        review_ids: Default::default(),
+        review_statuses: Default::default(),
+        review_retirements: Default::default(),
     }
 }

@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for MobKit runtime operations: gating, memor
 icon: "plug"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 MobKit exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `mobkit/capabilities` on the surface you use.
 
@@ -35,6 +35,112 @@ together with `http_base_url` and the gateway's runtime metadata. Clients that
 enforce contract compatibility compare `result.contract_version` before
 sending later requests. After init, `mobkit/capabilities` returns the methods
 available on that runtime.
+
+#### Accepted then settled (opt-in)
+
+Startup runs provider callbacks (roster, leases, continuity, agent builds),
+each bounded at 130 seconds by the gateway, and native work such as
+persisted-authority prewarm that is deliberately unbounded. A single response
+written when all of that finishes cannot be bounded by any fixed request
+timeout, so the SDKs opt in to a two-step protocol:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "init-1",
+  "method": "mobkit/init",
+  "params": { "init_protocol": "accepted_then_settled", "init_id": "init-6f1c..." }
+}
+```
+
+The SDK generates `init_id` and starts listening for it before it writes the
+request. Only the exact protocol name together with a non-empty `init_id`
+opts in. Anything else gets the legacy single response, so a client that did
+not opt in never receives `accepted`.
+
+1. **`accepted`.** After the cheap pre-durable gates pass (mob TOML, model
+   resolution, host-config tables), the gateway answers the request at once:
+
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": "init-1",
+     "result": {
+       "init_state": "accepted",
+       "init_id": "init-6f1c...",
+       "provider_callback_timeout_ms": 130000,
+       "stdio_shutdown_handshake": true,
+       "stdio_shutdown_horizon_ms": 352000
+     }
+   }
+   ```
+
+   `accepted` is not readiness and carries no `http_base_url`. A refusal from
+   those gates is still the plain JSON-RPC error response, and it means
+   nothing past them ran.
+
+2. **`mobkit/init_progress`** notifications, one per startup phase as it
+   begins: `storage` (first touch of durable state), `owner_publication`,
+   `prepare` (runtime and storage prepare, module startup), `roster`,
+   `register_owners`, `prewarm`, `activate`, `restore`, `schedules`, `serve`,
+   and `cleanup` (failure cleanup, which can await lease-release callbacks).
+   Progress events are non-terminal, and their order follows the native init
+   order. Callback requests continue to arrive between them.
+
+   ```json
+   { "jsonrpc": "2.0", "method": "mobkit/init_progress", "params": { "init_id": "init-6f1c...", "phase": "prewarm" } }
+   ```
+
+3. **Exactly one `mobkit/init_settled`** notification. Only a `ready`
+   settlement for the same `init_id` establishes readiness. It carries
+   every field of the legacy init result:
+
+   ```json
+   { "jsonrpc": "2.0", "method": "mobkit/init_settled",
+     "params": { "init_id": "init-6f1c...", "outcome": "ready", "http_base_url": "http://127.0.0.1:41234", "contract_version": "0.5.0", "...": "..." } }
+   ```
+
+   A `failed` settlement carries the error that the legacy response would have
+   carried (`code`, `message`, optional `data`) plus `durable_effects`. The
+   gateway exits after writing it.
+
+   ```json
+   { "jsonrpc": "2.0", "method": "mobkit/init_settled",
+     "params": { "init_id": "init-6f1c...", "outcome": "failed", "code": -32014, "message": "...", "durable_effects": "possible" } }
+   ```
+
+   `durable_effects` is `"none"` only when the init failed before the
+   `storage` phase began, which is positive evidence that nothing durable was
+   touched. Every later failure is `"possible"`, including a failure of the
+   cleanup itself. The SDKs raise the same typed errors as before (for example
+   `StorageResolutionError` for `-32014`) and add
+   `data.durable_effects`.
+
+**Shutdown during init.** `mobkit/shutdown` stays admissible while init runs.
+The gateway stops at the next phase boundary. If a runtime exists, it runs
+the normal runtime shutdown, lease-release callbacks included. Only after
+that cleanup has settled does it emit the `failed` settlement (`code:
+-32098`, `data.reason: "shutdown_requested"`). It then answers the shutdown
+request.
+
+**Startup callbacks must not issue ordinary RPCs.** Ordinary request dispatch
+starts only after init settles, so the gateway answers an ordinary request
+that arrives earlier at once with `-32018` (`data: {kind: "init_in_progress",
+method}`). It does not queue the request: a provider callback that awaited
+it during init would otherwise wait on itself, and a full queue would stall
+the routing of callback responses. `mobkit/shutdown` and callback responses
+are never refused. This applies whether or not the SDK opted in to
+accepted-then-settled.
+
+**Outcome unknown.** Once the init request is written, the SDKs never turn a
+missing answer into a refusal. A lost acceptance, a reader failure, the
+gateway exiting before it settles, or the caller's optional init deadline
+(Python `MobKitBuilder.init_deadline(seconds)`, TypeScript
+`MobKitBuilder.initDeadline(ms)`) raises `InitOutcomeUnknownError(init_id,
+last_phase, reason)`. The gateway may already have changed native state, so
+the SDKs never retry automatically. By default the SDKs wait for the
+settlement with no deadline. Every callback is still bounded by the gateway,
+and a callback that runs out settles the init `failed`.
 
 #### `role_migrations`
 
@@ -71,6 +177,12 @@ Meerkat re-verifies `from_role` against the durable predecessor role and refuses
 with `MobError::MemberRoleMigrationRejected` on mismatch, and ignores the
 declaration once the roles already agree, so a leftover declaration is inert
 rather than a repeat restamp.
+
+A declared migration is applied on the restart path even though the mob first
+restores the member under its stored role, or it is refused: the identity is
+then Broken and `identity_bootstrap` in the `mobkit/init` result reports it with
+restore kind `role_migration_not_applied` and `ready: false`. See
+[Roster](/mobkit/concepts/roster) for when MobKit applies and when it refuses.
 
 A malformed payload fails `mobkit/init` with `-32602` rather than arming
 nothing, on both gateway binaries and whether or not an identity plane is
@@ -134,10 +246,12 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32010` | HTTP console mutation refused by read-only policy | `{kind: "read_only"}` |
 | `-32012` | `memory/index` backend persistence failed | none |
 | `-32013` | `mobkit/console/query_timeline` cursor cannot be replayed from the console timeline | `{error: "replay_unavailable"}` |
-| `-32014` | `mobkit/init` fail-closed storage refusal: file-name twins the storage layout refuses to pick between, a session/runtime/blob/metadata/console store that failed to open (formerly a silent in-memory fallback), or an uncreatable state root. The message carries the remediation (the storage doctor, or the explicit ephemeral declaration). The gateway writes the error response and exits. | none |
-| `-32015` | `mobkit/bound_member_transcript` target session is live/running (transcript surgery only supports reject-while-active); quiesce the member first (retire or park it), then retry | none |
+| `-32014` | `mobkit/init` fail-closed storage refusal: file-name twins the storage layout refuses to pick between, a session/runtime/blob/metadata/console store that failed to open (formerly a silent in-memory fallback), or an uncreatable state root. The message carries the remediation (the storage doctor, or the explicit ephemeral declaration). The gateway writes the error response (or, for an accepted init, the `failed` settlement) and exits. | none |
+| `-32015` | `mobkit/bound_member_transcript` target session is live/running (transcript surgery only supports reject-while-active); quiesce the member first (retire or park it), then retry. Also `mobkit/member_activate_instruction` refused at its safe boundary (runtime work still queued at the turn boundary, open live channel, no materialized session, fenced-store backoff); retry at your own next boundary | `mobkit/member_activate_instruction`: `{class: "admission", instruction_activation_code}` |
 | `-32016` | operator verb exists but its gateway wiring is absent (no compaction-floor registry / no concrete transcript-edit service threaded into the RPC context) | none |
 | `-32017` | a covered unified/stdin read arm exhausted its deadline. The member's meerkat session task and the mob actor loop are strict sequential command loops, so a read issued while the member is mid-turn queues behind that turn instead of degrading; the wrapped arms (`identity/resolved_tools`, `identity/routing_status`, `member_status`, `list_members`, `get_member`, `find_members`, `flow_status`, `list_runs`) give up after the read budget and say so. The read is abandoned, never half-applied. Budget defaults to 30s, overridable with `MOBKIT_CONSOLE_READ_TIMEOUT_SECS` (clamped to 1..3600). The independent HTTP console dispatcher does not apply this wrapper. | `{kind: "console_read_timeout", arm, awaiting, timeout_secs}` |
+| `-32018` | stdio gateway: an ordinary request arrived before `mobkit/init` settled. It was refused at once, not queued. Startup provider callbacks must not issue ordinary RPCs on the runtime that is starting. `mobkit/shutdown` is still admitted. | `{kind: "init_in_progress", method}` |
+| `-32019` | `mobkit/init` mob composition provenance refusal: the persistent mob storage's recorded composition cannot be proven to match the launch. Raised before the mob actuates, for a supplied definition that differs from the recorded one, a candidate launch whose definition differs from the stored one it would boot, a store created by a rehearsal launch, a composition manifest that is unreadable, malformed, of an unsupported version or could not be written, or undeclared non-empty storage. (`missing` is part of the kind vocabulary but the gateway does not raise it today: an authoritative launch adopts and records the definition when the manifest is absent.) The message keeps the `Runtime bootstrap failed: ` prefix and names the remedy. The gateway writes the error response (or, for an accepted init, the `failed` settlement) and exits. | `{kind, fields, manifest?, storage?, found_version?, supported_version?}`; `kind` is `divergent`, `candidate_divergent`, `created_by_rehearsal`, `missing`, `unreadable`, `malformed`, `unsupported_version`, `not_recorded` or `unproven_storage`; `fields` is always present and lists the diverged definition fields as dotted paths (empty for other kinds) |
 | `-32030` | HTTP console ABAC gate refused the operation | `{kind: "access_denied", ...}` |
 
 The `-32010` constant is exported from both SDKs as
@@ -151,6 +265,11 @@ Read-only errors apply to classified mutations; ABAC may deny an applicable
 action gate with `-32030`, or filter a read's results rather than reject it.
 Console timeline replay failures use `CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE`
 so they are not mistaken for mob-events ledger cursor errors.
+The `-32019` constant is exported as `COMPOSITION_PROVENANCE_CODE` and
+reified as `CompositionProvenanceError`, which exposes the refusal's `kind`
+and `fields` (for example the `profiles.lead.tools.deny` path a candidate
+launch diverged on), so a deliberate composition refusal is reported without
+parsing the message. Before this code existed these refusals were `-32603`.
 The `-32014` constant is exported as `STORAGE_RESOLUTION_CODE` and reified
 as `StorageResolutionError`, so a deliberate durability refusal at startup
 is a typed init failure, not a transport error. Storage refusals raised by
@@ -348,7 +467,8 @@ not establish that no identities are registered.
 | `mobkit/member_health` | `{member_id}` | `MemberHealthReport`: lifecycle state, materialization in flight, last delivery error class, actor-loop verdict and open `stall_id`; in-process reads only, so it answers during an actor stall |
 | `mobkit/reconcile_edges` | none | `UnifiedRuntimeReconcileEdgesReport` |
 | `mobkit/rediscover` (SDK/stdin only) | none | `RediscoverReport`, or `{status: "no_discovery_configured"}` |
-| `mobkit/reconcile_identity` (SDK/stdin only) | none | `{outcomes: {identity: {outcome, ...}}, managed_edges}` (identity-first runtimes only) |
+| `mobkit/reconcile_identity` (SDK/stdin only) | none | `{outcomes: {identity: {outcome, ...}}, managed_edges, continuity_repair}` (identity-first runtimes only). A `broken` outcome carries its typed `kind`. The settled pass triggers the continuity repair supervisor; `continuity_repair` says what that reached: `scheduled`, `nothing_to_repair` or `no_supervisor` |
+| `mobkit/request_continuity_repair` (SDK/stdin only) | none | `{continuity_repair}`: the explicit continuity repair trigger, answering `scheduled`, `nothing_to_repair` or `no_supervisor` (identity-first runtimes only) |
 | `mobkit/reconcile` (SDK/stdin only) | `{modules: string[]}` | module reconcile report; this reconciles modules, not the roster |
 
 ### `mobkit/ensure_member`
@@ -521,7 +641,11 @@ primitive; absent or lost ownership refuses without discarding the registration.
 Converge the definition-derived edge policy over the live roster and return
 `{desired_edges, wired_edges, unwired_edges, retained_edges,
 preexisting_edges, skipped_missing_members, pruned_stale_managed_edges,
-failures}`. The reconciler only unwires edges it wired itself. It is needed
+failures}`. The definition-policy reconciler only unwires edges it wired
+itself. In an identity-first runtime with a host `TopologyProvider`, the
+provider owns identity edges: an identity edge that neither the provider nor
+the definition's wiring declares is unwired, including an edge wired before a
+restart (see [Roster](/mobkit/concepts/roster)). It is needed
 after `mobkit/reconcile_identity` or an identity-first gateway boot when the
 definition declares wiring, because neither of those converges definition
 edges after materialization; without declared wiring the report is empty.
@@ -612,13 +736,20 @@ Submit an identity-addressed console interaction through the console aggregator.
 
 ```json
 {
-  "identity": "identity:luka",
+  "identity": "identity:alice",
   "content": "What is on my calendar tomorrow?",
   "origin": "console:panel-1",
+  "origin_kind": "operator",
   "idempotency_key": "panel-1:turn-1",
   "handling_mode": "queue"
 }
 ```
+
+`origin_kind` is optional. When present it must be one of `operator`,
+`operator_probe`, `connector`, `scheduler`, `policy`, `flow` or `system`
+(`ConsoleTurnOrigin`); other values are refused with invalid params. It is
+persisted on the `user_input` frame so the console transcript labels the
+turn from typed data.
 
 The response includes `interaction_id` and `identity`. The multipart JSON-RPC endpoint also accepts this method when `content` contains `image_upload` placeholders.
 
@@ -632,6 +763,39 @@ the turn has finished. Changed content or mode (for example `queue` to
 HTTP 409 on the REST form). Changing the target or origin can create a
 distinct send. Member respawn does not clear the key, but this does not
 promise replay after the deduplication records or runtime are lost.
+
+`skill_refs` is optional: typed, source-pinned skills selected for this exact
+turn, in the same shape as meerkat `turn/start`:
+
+```json
+{
+  "identity": "identity:alice",
+  "content": "Draft the weekly update.",
+  "origin": "console:panel-1",
+  "idempotency_key": "panel-1:turn-2",
+  "skill_refs": [
+    {
+      "kind": "structured",
+      "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+      "skill_name": "house-style"
+    }
+  ]
+}
+```
+
+The selection travels with the turn to the addressed member through the same
+fenced host-human admission as the content. The member's own skill engine
+resolves it: the turn emits the typed `skills_resolved` or
+`skill_resolution_failed` event and commits a durable `SkillContext` block.
+MobKit never renders skill bodies into the content. A member without a skill
+engine fails the turn with the typed `no_skill_engine` reason before any
+provider call. A nonempty selection is part of the replay scope: a retry must
+repeat the same selection in the same order to return the original acceptance,
+and a changed or reordered selection under the same key is `-32009`
+(`idempotency_conflict`). Remote or
+externally bound members cannot carry a selection and refuse it typed instead
+of delivering the turn without it. Untyped skill strings are refused as invalid
+params.
 
 ### `mobkit/blob/upload`
 
@@ -835,7 +999,7 @@ explicit memory policies are applied literally.
 
 ### `mobkit/agent_memory/remember`
 
-Write an identity-scoped agent memory record for later per-turn and build-context injection. This is separate from `mobkit/memory/*`, which is the operational assertion ledger. A successful write means the configured hot identity-memory provider accepted the record; optional Elephant enrichment or extraction, when supplied by a custom provider, is out of band.
+Write an identity-scoped agent memory record for later per-turn and build-context injection. This is separate from `mobkit/memory/*`, which is the operational assertion ledger. A successful write means the configured hot identity-memory provider accepted the record; optional external memory hub enrichment or extraction, when supplied by a custom provider, is out of band.
 
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
@@ -1030,6 +1194,181 @@ Neither surface supports `cursor` pagination.
 
 ---
 
+## Identity delivery and turn tickets
+
+`mobkit/send`, `mobkit/interact` and `mobkit/dispatch` deliver to an identity
+and return `completion_baseline`, the identity's completion cursor read before
+delivery. That cursor is an identity-wide barrier: any completion on the
+identity after it (a peer message, a scheduled turn, a fork completion wake)
+passes it, so it does not name one turn.
+
+Pass `"track_turn": true` to name the admitted turn with a ticket. The result
+then also carries `"turn": {"ticket": "<uuid>"}`. The runtime mints the ticket
+for that one admission and keeps the admitted turn's own completion handle
+under it. The caller's interaction id (`mobkit/interact`) and a dispatch's
+correlation id still ride into the runtime unchanged, but neither names the
+ticket: both may repeat across admissions (one correlation fanned out to
+several identities, a reused interaction id), and a ticket derived from them
+could name two turns.
+
+An idempotent re-dispatch (`mobkit/dispatch` with the same `idempotency_key`
+to the same identity) whose tracked original, on the identity's current
+session, is still pending or completed is deduplicated by the runtime onto the
+original, and returns the original's ticket. The runtime deduplicates only
+within one session's ledger, so after a session rotation the re-dispatch is a
+turn of its own. Any other re-dispatch the runtime deduplicates (its original
+was untracked, failed, or aged out) is tracked on its own and settles with
+what the runtime reports for the deduplicated input: the original input's
+result while that input is still running (the runtime shares its
+completion), and `output_status: "no_own_result"` once it has ended.
+
+When the turn cannot be tracked, the result carries `"turn": null` plus
+`"turn_unavailable": {"code": "<code>", "reason": "<text>", "delivered":
+<bool>}`. `delivered` is `false` only for `not_delivered`; every other code
+means the delivery happened, exactly once, on the ordinary lane:
+
+| `code` | Delivered | Meaning |
+|--------|-----------|---------|
+| `autonomous_host` | once | The member runs in `autonomous_host` mode (the default), read from the runtime's live roster entry right before admission, the value the runtime checks. A profile or `runtime_mode_override` changed without a respawn does not count until the member respawns. The runtime reports no per-turn completion for autonomous inbox delivery |
+| `runtime_refused` | once | The runtime refused the tracked admission for the member's live mode for another reason, before anything was submitted |
+| `externally_bound` | once | The member is externally bound; its deliveries are not ticketed |
+| `host_human_input` | once | Host human input rides the console lane, which is not ticketed |
+| `bridge_cannot_report_output` | once | The gateway's session bridge cannot report a turn's own output |
+| `session_rotated` | once | A re-dispatch meant to be deduplicated onto a tracked admission landed on a different session (a delivery repair or respawn moved the member), whose runtime had never seen the idempotency key, so it ran as a turn of its own |
+| `not_delivered` | no | Nothing was delivered (no session bridge or no bound runtime); there is no turn to wait for |
+
+`mobkit/interact` refuses a caller-supplied `interaction_id` that is still in
+flight on the identity (queued, the active interaction, or the interaction of
+the run in progress) with `-32602` and `error.data`
+`{"code": "interaction_id_in_flight", "identity", "interaction_id"}`, before
+anything is delivered: two in-flight runs under one transcript interaction id
+would make both runs' frames and terminals ambiguous. An id whose interaction
+has settled may be sent again, but the transcript then holds two interactions
+with the same id, so mint a fresh UUID per send.
+
+### Waiting for completion
+
+Completion waits are server-side and event-driven. The gateway parks the
+request and answers when the awaited change happens: it waits on the
+runtime's typed completion and ticket-settlement signals, so neither the
+client nor the gateway polls. The caller's `timeout_ms` is only a deadline;
+reaching it is a typed answer, not an error.
+
+The recommended completion barrier is `"track_turn": true` on the delivery
+plus `mobkit/wait_for_turn` on the returned ticket (the SDKs' `send_and_wait`
+/ `sendAndWait`, or `wait_for_turn` / `waitForTurn`). It reads only the ticket
+ledger, names exactly one admitted turn, and returns that turn's own output.
+
+An identity-wide wait on `completion_baseline` uses
+`mobkit/wait_for_completion` and reads the output once, afterwards. Do not
+poll `mobkit/inspect_identity` for completion: it reads the member session (an
+execution snapshot on its session task), and a tight poll of it can hold a
+staged run from starting on large sessions. The SDKs' `wait_for_completion` /
+`waitForCompletion`, `wait_for_output(after=...)` and `wait_until_ready` /
+`waitUntilReady` use the server-side waits, and fall back to polling only
+against a gateway that predates them.
+
+### `mobkit/wait_for_completion`
+
+Wait until the identity's completion cursor moves past `after`, or, with no
+`after`, until it counts at least one completed turn (a startup readiness
+barrier; the identity may not be materialized yet when the wait starts).
+Return `{identity, outcome, completion_cursor}`. It never touches the member
+session, and every wake re-reads the identity's entry, so it never runs to its
+deadline on an identity that can no longer complete:
+
+| `outcome` | Meaning |
+|-----------|---------|
+| `completed` | The cursor moved past `after` (or counts a first turn) |
+| `incarnation_changed` | The lease incarnation moved, so turn counts are not comparable; capture a fresh baseline |
+| `run_failed` | A run on the identity failed or was cancelled while the wait ran (one that ended before the wait started is not visible to it) |
+| `broken` | The identity is parked Broken |
+| `retiring` | The identity is retiring, retired, or being deleted (deletion retires first) |
+| `identity_gone` | The identity was registered when the wait started and no longer is |
+| `shutting_down` | The gateway is shutting down |
+| `timed_out` | The deadline passed first |
+| `untracked` | A raw live alias that no identity authority tracks; `completion_cursor` is `null` |
+
+A baseline for an identity that is not registered is the typed `-32001`
+unknown-identity error. Callers must tolerate future `outcome` values.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | The identity to wait on |
+| `after` | `{epoch, turns}` | no | The baseline, usually a delivery's `completion_baseline` |
+| `timeout_ms` | `integer` | no | The caller's deadline; default 60 000, clamped to 600 000 (10 min). A caller with a longer deadline re-issues the wait on `timed_out`, as the SDKs do |
+</Accordion>
+
+### `mobkit/completion_cursor`
+
+Return `{identity, state, completion_cursor}`: the identity's lifecycle state
+and its completion cursor `{epoch, turns}`, read from memory. A one-shot read
+that never touches the member session; wait with
+`mobkit/wait_for_completion`, not by polling this. `completion_cursor` and
+`state` are `null` for a raw live alias that no identity authority tracks (not
+"no turns yet"). An unknown identity is the typed `-32001` unknown-identity
+error.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | The identity to read |
+</Accordion>
+
+### `mobkit/wait_for_turn`
+
+The `mobkit/turn_result` report, taken once the ticket settles: the gateway
+waits on the ticket registry's settlement signal. The result adds `wait`:
+`settled` (the turn left pending, or the ticket is unknown), `timed_out` (the
+deadline passed with the turn still `pending`) or `shutting_down` (the gateway
+is shutting down; the turn's state at that moment). An unknown ticket answers
+`unknown` at once. Parameters are those of `mobkit/turn_result` plus the
+optional `timeout_ms` (default 60 000, clamped to 600 000).
+
+### `mobkit/turn_result`
+
+Report one ticketed turn: `{identity, ticket, state, completion_cursor, ...}`.
+`state` is `pending`, `completed`, `failed` or `unknown`.
+
+- `completed` adds `output_status`, `output` and `output_truncated`.
+  `output_status` is `text` (`output` is the turn's own final assistant text
+  from its committed run result, cut at 256 KiB when `output_truncated`),
+  `empty` (the turn committed no text), `no_own_result` (the runtime folded
+  the input into a run already in progress, or deduplicated it onto an earlier
+  admission whose turn had ended; no output belongs to this admission) or
+  `unavailable` (the gateway's session bridge cannot report per-turn output).
+  `output` is `null` for every status but `text`.
+- `failed` adds `error`. A turn that ran and succeeded is never reported
+  `failed` because its session could not be resolved afterwards; that
+  failure is recorded on the identity's `last_delivery_error` instead.
+- `unknown` means the gateway knows no such turn for this identity: never
+  admitted there, another identity's ticket, aged out (settled turns are kept
+  for 10 minutes, at most 4096 tracked turns, the turn settled longest ago
+  going first), or the gateway restarted since. It is never a guess in either
+  direction.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | The identity the turn was delivered to |
+| `ticket` | `string` | yes | The `turn.ticket` of a delivery made with `track_turn` |
+</Accordion>
+
+The SDKs' `send_and_wait` / `sendAndWait` and `dispatch*_and_wait` send with
+`track_turn` and wait with `mobkit/wait_for_turn` (polling
+`mobkit/turn_result` only against a gateway that predates it). They warn, typed, when they return
+truncated text or a turn completed without output of its own. When a delivery
+returns no ticket they fall back to the identity-wide cursor with a typed
+warning naming the `turn_unavailable` code (so on `autonomous_host` members,
+the default mode, the wait is identity-wide), and raise instead when nothing
+was delivered. Do not mix ticket waits and cursor waits on one identity: a
+ticket can settle before the identity health monitor counts the same turn on
+`completion_cursor`, so a later cursor wait can be satisfied by that earlier
+turn.
+
+---
+
 ## WorkGraph methods
 
 The `mobkit/workgraph/*` group exposes meerkat's WorkGraph (the shared-work
@@ -1153,6 +1492,11 @@ The persistent `rpc_gateway` sends JSON-RPC notifications (no `id`) to the SDK
 alongside responses. Callback requests (`callback/*`) expect a reply; these do
 not.
 
+### `mobkit/init_progress` and `mobkit/init_settled`
+
+Sent only to an SDK that opted in to the accepted-then-settled init. See
+[Accepted then settled](#accepted-then-settled-opt-in).
+
 ### `mobkit/on_error`
 
 Every runtime `ErrorEvent`, serialized with its internal `category` tag in
@@ -1251,6 +1595,69 @@ audit note recorded on the rewrite reason).
 Result: `bounded`, `removed`, `kept`, `message_count`, `parent_revision`,
 `revision` (or `bounded: false` with `removed: 0` when the transcript is
 already within `keep_last`).
+
+### `mobkit/member_activate_instruction`
+
+Host-only: present on the gateway's JSON-RPC surface and the SDKs, never in an
+agent tool catalog. It changes a member's standing instructions after its
+session was minted (resume authors nothing, so a restored member otherwise keeps
+the prompt it was created with).
+
+Params: `identity` (resolved through the same identity-control gate as
+`mobkit/respawn` and `mobkit/compact_member`) and `activation`, Meerkat's
+`InstructionActivationRequest` verbatim: `revision` (`namespace`, `key`,
+`revision_id`, `content_sha256` = `sha256:<hex of body>`), `activation_id`,
+`expectation` (`{"kind": "absent"}` for the first activation of a key, then
+`{"kind": "effective", "activation_id": ...}`), optional `supersedes`, and
+`body`.
+
+The activation is appended forward to the member's CURRENT session through
+Meerkat's `MobHandle::activate_member_instruction`: it holds the session's
+turn-finalization boundary, applies the runtime admission, and adds one keyed
+transcript row that the member's next turn sees. History is never rewritten,
+and the activation survives resume.
+
+**A call made while the member is mid-turn blocks until that turn finalizes**,
+so it can wait for a whole turn. It then applies at that boundary, never inside
+the turn, or is refused as `session_busy` if more runtime work is already
+queued there. The gateway applies no read deadline to this verb. Give the
+client side a reply timeout that covers the member's longest turn (the SDKs'
+`transport_timeout` / `transportTimeoutMs`). If the client gives up first, the
+activation may still apply at the boundary: re-send the identical activation,
+which answers `applied`, `duplicate` or the typed refusal. The result is `{identity, receipt}`;
+`receipt.disposition` is `applied`, or `duplicate` when the exact activation is
+already effective.
+
+Errors keep Meerkat's classes distinct in `data.class`:
+
+- `admission`, with `data.instruction_activation_code`: `session_busy`,
+  `live_channel_open`, `target_not_materialized`, `external_write_fence_conflict`
+  and `external_write_fence_backoff` answer `-32015` (nothing was appended; retry
+  at your own next boundary); `unsupported_current_lowering` answers `-32602`;
+  `durability_unavailable` answers `-32603`.
+- `session`, with `data.session_error_code` (Meerkat's stable session error
+  code). When the session owner refused the request itself,
+  `data.instruction_activation_error_code` carries Meerkat's typed code and the
+  error is `-32602`: `invalid_request`, `digest_mismatch`,
+  `effective_activation_conflict` (a stale `expectation`; re-read `key_state`),
+  `activation_identity_conflict`, `immutable_revision_conflict`,
+  `recorded_but_not_effective`, or
+  `inherited_activation_requires_explicit_activation`.
+  `malformed_activation_history` answers `-32603`. A busy session answers
+  `-32015`; any other session error answers `-32603`.
+- `runtime` and `owner_task`: the runtime authority or the owning task failed.
+
+Nothing retries inside the gateway. An identity with no member session is
+refused as `admission` / `target_not_materialized`, with nothing appended.
+
+### `mobkit/member_instruction_activations`
+
+Host-only. Reads the durable instruction activation records of the member's
+current session. Params: `identity`, and optionally `namespace`, `key`,
+`offset` and `limit` (default 100). The result is `{identity, page}` with
+Meerkat's `InstructionActivationReadPage`; naming one exact `namespace` and
+`key` also returns its `key_state`, including the `next_expectation` for the
+next activation.
 
 ## Scheduling migration
 

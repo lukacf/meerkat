@@ -126,6 +126,9 @@ pub(crate) fn control_error_into_session_error(
 ) -> meerkat_core::service::SessionError {
     match err {
         meerkat_core::service::SessionControlError::Session(session_err) => session_err,
+        meerkat_core::service::SessionControlError::Authorization(error) => {
+            meerkat_core::SessionError::Agent(error.into())
+        }
         other => meerkat_core::service::SessionError::Unsupported(other.to_string()),
     }
 }

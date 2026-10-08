@@ -4,7 +4,7 @@ description: "Understand MobKit's lightweight roster projection, deep member sta
 icon: "users"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -107,8 +107,13 @@ policy and converges it with `mobkit/reconcile_edges` (Python
   `reconcile_edges` once after boot and after each `runtime.reconcile()`.
 - Without declared wiring there is no definition edge policy; the call returns
   an empty report. Edges from a host `TopologyProvider` converge on every
-  identity restore and reconcile on their own, and the reconciler never unwires
-  an edge it did not wire itself.
+  identity restore and reconcile on their own.
+- With a `TopologyProvider`, the provider (plus operator topology intent) owns
+  the identities' edges: reconcile unwires every live edge between two
+  identities that neither the provider nor the definition's wiring declares,
+  including one wired before a restart. Declare an edge in your provider to
+  keep it. Without a provider, reconcile unwires only the edges it wired
+  itself.
 
 ## Roster operations
 
@@ -225,6 +230,11 @@ fields are `status`, `output_preview`, `error`, `tokens_used`, `is_final`, and
 `current_session_id`. It can also include peer connectivity, kickoff,
 external-member observations, resolved model capabilities, execution progress,
 placement, reachability, freshness, and lifecycle-capability diagnostics.
+When Meerkat could not observe the member's session for the status (meerkat
+0.8.45+), `preview_unavailable` names why (`observation_deadline`,
+`read_failed`, `session_absent`, `not_observed_while_retiring`), and a missing
+`output_preview` then does not mean an empty member. `mobkit/inspect_identity`
+and the console's per-member progress carry the same marker.
 
 The snapshot's Rust `agent_identity` is bridge-internal and skipped during
 serialization. The requested member ID identifies the result on the MobKit RPC
@@ -295,6 +305,29 @@ before it reads the declaration at all, so a declaration left in place after the
 migration landed is inert rather than a repeated restamp. That is why an
 identical repeated declaration is accepted on purpose, while one identity
 declared twice with conflicting predecessor roles is refused.
+
+On a restart the mob restores every durable member under its stored role
+before the identity plane resumes it, so a declared migration first meets the
+member still on its old role. MobKit then applies it or refuses it, and never
+adopts the member as it is:
+
+- When the identity plane has repair custody (no Meerkat identity intent, or
+  an Absent one), MobKit retires the restored member to absence, after proving
+  the session it will resume exists and carrying its queued input, and resumes
+  the same session under the declared role. Meerkat re-verifies the
+  predecessor role, and MobKit checks that the member runs the declared role.
+- When the restored member's role is not the declared `from_role`, the
+  declaration does not describe it, and MobKit refuses before retiring
+  anything.
+- When a Present Meerkat identity intent (from
+  `mob/adopt_member_identity_declaration`) owns the member, the intent pins
+  its profile and MobMachine owns its materialization, so MobKit refuses
+  rather than retire it. Declare the new profile in the identity intent.
+
+A refusal parks the identity Broken with the typed kind
+`role_migration_not_applied`, and the `mobkit/init` result reports it under
+`identity_bootstrap` (the identity is `broken` with that restore kind, and
+`ready` is false), so a refused migration is visible at boot.
 
 <Warning>
 A malformed or self-contradicting `role_migrations` payload refuses the boot
@@ -449,7 +482,7 @@ under `context` (the same envelope the topology and customizer callbacks use):
 ```json
 {
   "context": {
-    "mob_definition": { "id": "household", "profiles": { "...": {} } },
+    "mob_definition": { "id": "team", "profiles": { "...": {} } },
     "previous_identities": ["identity:luka", "triage:main"]
   }
 }

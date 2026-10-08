@@ -438,6 +438,17 @@
                 "$ref": "#/components/schemas/RunInput",
                 "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
               },
+              "request_reasoning": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReasoningBatchDisposition"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The reasoning-effort preference this run's batch requested, when\nit carries one. This is the request only: what each provider\nattempt actually sent is reported per attempt by\n`request_reasoning_lowered`."
+              },
               "session_id": {
                 "$ref": "#/components/schemas/SessionId"
               },
@@ -1855,6 +1866,76 @@
               "hook_id",
               "point",
               "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One provider attempt of a turn that carries a reasoning-effort\npreference: what the batch requested, what the attempt's baseline\nrequest already said, and what the attempt actually sent. Emitted per\nprepared request (and again for a model-fallback attempt), so a turn\nwhose attempts differ reports each one; never a turn-level claim.",
+            "properties": {
+              "baseline": {
+                "$ref": "#/components/schemas/ReasoningLoweringBaseline",
+                "description": "What the baseline request said about effort."
+              },
+              "fallback_attempt": {
+                "description": "The failed attempt this model-fallback attempt replaces.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "model": {
+                "description": "The selected model, when the registry knows it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReasoningLoweringOutcome"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "What this attempt sent; absent when the batch applies no level."
+              },
+              "provider": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Provider"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The selected model's provider, when the registry knows it."
+              },
+              "requested": {
+                "$ref": "#/components/schemas/ReasoningBatchDisposition",
+                "description": "The batch's resolved preference."
+              },
+              "turn_number": {
+                "description": "The provider turn this attempt belongs to; absent for a\nmodel-fallback attempt (see `fallback_attempt`).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "request_reasoning_lowered",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "requested",
+              "baseline"
             ],
             "type": "object"
           }
@@ -9293,6 +9374,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "ErrorCategory": {
         "description": "Error category for grouping.",
         "enum": [
@@ -14614,6 +14735,67 @@
         ],
         "type": "string"
       },
+      "ReasoningBatchDisposition": {
+        "description": "How one runtime batch resolved its inputs' reasoning preferences. The\nfold is order-independent (set semantics over the batch); every outcome\nother than [`Self::Apply`] leaves the baseline request unchanged, and the\nbatch always runs.",
+        "oneOf": [
+          {
+            "description": "Every contributor that expressed one preferred this level, and no\ncontributor set reasoning explicitly or went without a preference.",
+            "properties": {
+              "disposition": {
+                "const": "apply",
+                "type": "string"
+              },
+              "level": {
+                "$ref": "#/components/schemas/EffortLevel"
+              }
+            },
+            "required": [
+              "disposition",
+              "level"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A contributor set a reasoning knob explicitly (or cleared its\nparams): that setting wins over any preference.",
+            "properties": {
+              "disposition": {
+                "const": "superseded_by_explicit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Contributors preferred different levels.",
+            "properties": {
+              "disposition": {
+                "const": "conflicting",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Some contributors preferred a level and others expressed none.",
+            "properties": {
+              "disposition": {
+                "const": "mixed_with_unpreferred",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ReasoningEffort": {
         "description": "Typed projection of OpenAI's reasoning-effort knob.",
         "enum": [
@@ -14625,6 +14807,80 @@
           "max"
         ],
         "type": "string"
+      },
+      "ReasoningLoweringBaseline": {
+        "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
+        "oneOf": [
+          {
+            "description": "The baseline carried this effort level explicitly.",
+            "properties": {
+              "kind": {
+                "const": "explicit",
+                "type": "string"
+              },
+              "level": {
+                "$ref": "#/components/schemas/EffortLevel"
+              }
+            },
+            "required": [
+              "kind",
+              "level"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The baseline carried none: the provider's own default applies.",
+            "properties": {
+              "kind": {
+                "const": "provider_default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReasoningLoweringOutcome": {
+        "description": "What one provider attempt did with the turn's reasoning preference.",
+        "oneOf": [
+          {
+            "description": "The request carries this level.",
+            "properties": {
+              "detail": {
+                "$ref": "#/components/schemas/EffortLevel"
+              },
+              "kind": {
+                "const": "applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The request is the baseline, unchanged.",
+            "properties": {
+              "detail": {
+                "$ref": "#/components/schemas/ReasoningNotAppliedReason"
+              },
+              "kind": {
+                "const": "not_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ReasoningMode": {
         "description": "Typed mode for generalized reasoning emission.",
@@ -14642,6 +14898,46 @@
           {
             "const": "off",
             "description": "Reasoning is disabled entirely for this turn.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningNotAppliedReason": {
+        "description": "Why a reasoning preference left one attempt's request unchanged.",
+        "oneOf": [
+          {
+            "const": "no_catalog_fact",
+            "description": "The selected model has no catalog row (custom, self-hosted or other).",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_level",
+            "description": "The catalog row does not accept this level.",
+            "type": "string"
+          },
+          {
+            "const": "unknown_supported_levels",
+            "description": "The catalog does not record which levels the model accepts.",
+            "type": "string"
+          },
+          {
+            "const": "budget_conflict",
+            "description": "The baseline sets a thinking budget, which the level cannot replace.",
+            "type": "string"
+          },
+          {
+            "const": "thinking_mode_conflict",
+            "description": "The baseline thinking mode does not admit this level.",
+            "type": "string"
+          },
+          {
+            "const": "opaque_reasoning_body",
+            "description": "The baseline forwards an opaque reasoning body.",
+            "type": "string"
+          },
+          {
+            "const": "reasoning_disabled_by_baseline",
+            "description": "The baseline turns reasoning off.",
             "type": "string"
           }
         ]
@@ -17740,6 +18036,17 @@
           },
           {
             "properties": {
+              "confinement_refusal": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ConfinementRefusal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Bounded setup diagnostic supplied by the accepted lifecycle result."
+              },
               "detail": {
                 "type": [
                   "string",
@@ -18636,6 +18943,17 @@
           },
           {
             "properties": {
+              "confinement_refusal": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ConfinementRefusal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Historical setup refusal, separate from the lifecycle phase."
+              },
               "detail": {
                 "type": [
                   "string",
@@ -18761,7 +19079,10 @@
           "callback_pending",
           "confinement_refused",
           "hook_denied",
-          "outcome_uncertain"
+          "outcome_uncertain",
+          "review_unsatisfied",
+          "review_unavailable",
+          "hook_launch_refused"
         ],
         "type": "string"
       },

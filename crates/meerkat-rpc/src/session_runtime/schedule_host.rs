@@ -386,6 +386,8 @@ impl SessionRuntime {
                 directed_interaction_ids: Vec::new(),
                 auth_binding: None,
                 transcript_identity: Default::default(),
+                request_reasoning: None,
+                request_reasoning_disposition: None,
             },
         );
         let mut prompt_input =
@@ -452,6 +454,7 @@ impl SessionRuntime {
             objective_id: None,
             header: meerkat_runtime::input::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

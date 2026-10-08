@@ -27,6 +27,7 @@ system_suite!(e2e_system_cli_mob_run_custody, "cli-mob-run-custody");
 system_suite!(e2e_system_cli_resume_tools, "cli-resume-tools");
 system_suite!(e2e_system_cli_export_atif, "cli-export-atif");
 system_suite!(e2e_system_cli_mcp_pending_resume, "cli-mcp-pending-resume");
+system_suite!(e2e_system_cli_realm_mcp_servers, "cli-realm-mcp-servers");
 system_suite!(e2e_system_rest_resume_metadata, "rest-resume-metadata");
 system_suite!(
     e2e_system_cli_capabilities_and_config,

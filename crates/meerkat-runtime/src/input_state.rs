@@ -1240,6 +1240,24 @@ impl PublishedDirectedTerminalBinding {
 }
 
 impl StoredInputState {
+    /// A freshly accepted row for `input` carrying the replay witnesses its
+    /// native admission records (idempotency key, exact prompt and event
+    /// identities, retained authority), for host test doubles that stand in
+    /// for a session's input ledger.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn accepted_for_test(input: &Input) -> Result<Self, crate::RuntimeDriverError> {
+        let mut stored = Self::new_accepted(input.id().clone());
+        stored.state.idempotency_key = input.header().idempotency_key.clone();
+        stored.state.prompt_replay_identity = PromptReplayIdentity::from_input(input)?;
+        stored.state.external_event_replay_identity =
+            ExternalEventReplayIdentity::from_input(input)?;
+        stored.state.authority_contributors =
+            crate::input_authority::RetainedInputAuthority::from_input(input)?
+                .into_iter()
+                .collect();
+        Ok(stored)
+    }
+
     /// Convenience: freshly-accepted bundle.
     pub fn new_accepted(input_id: InputId) -> Self {
         Self {
@@ -1512,6 +1530,7 @@ impl InputStatePersistenceRecord {
         bundle.state.controller_client = None;
         if let Some(input) = bundle.state.persisted_input.as_mut() {
             input.header_mut().ingress_context = None;
+            input.header_mut().retained_resume = None;
         }
         Ok(Self {
             bundle,
@@ -1655,6 +1674,7 @@ impl PromptReplayIdentity {
         } = prompt;
         let crate::input::InputHeader {
             ingress_context: _,
+            retained_resume: _,
             authority_association,
             id: _,
             timestamp: _,
@@ -1686,17 +1706,153 @@ impl PromptReplayIdentity {
     }
 
     /// Strict callers must prove exact original content and semantic slots.
-    /// Generic callers retain their existing key-only replay contract.
+    /// Generic callers retain their existing key-only replay contract, except
+    /// that an external event never dedupes against a recorded event with
+    /// other content (see [`ExternalEventReplayIdentity`]).
     pub(crate) fn verify_replay(
         state: &InputState,
         input: &Input,
         policy: crate::accept::InputReplayPolicy,
     ) -> Result<(), crate::RuntimeDriverError> {
+        ExternalEventReplayIdentity::verify_replay(state, input)?;
         if policy == crate::accept::InputReplayPolicy::KeyOnly {
             return Ok(());
         }
         let incoming = Self::from_input(input)?;
         if incoming.is_none() || state.prompt_replay_identity != incoming {
+            return Err(crate::RuntimeDriverError::InputIdempotencyConflict {
+                existing_id: state.input_id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Verify that the accepted row `stored` is an exact replay of the prompt
+/// `expected` resuming retained work `identity`: the same content and
+/// semantic header slots, and the same retained work. A row admitted
+/// without that identity never matches.
+///
+/// # Errors
+/// [`crate::RuntimeDriverError::InputIdempotencyConflict`] naming the row
+/// when it is not an exact replay.
+pub fn verify_exact_resume_replay(
+    stored: &InputState,
+    expected: &Input,
+    identity: &meerkat_core::retained_work::RetainedWorkIdentity,
+) -> Result<(), crate::RuntimeDriverError> {
+    PromptReplayIdentity::verify_replay(
+        stored,
+        expected,
+        crate::accept::InputReplayPolicy::ExactPrompt,
+    )?;
+    if stored
+        .retained_resume
+        .as_ref()
+        .map(|record| &record.identity)
+        != Some(identity)
+    {
+        return Err(crate::RuntimeDriverError::InputIdempotencyConflict {
+            existing_id: stored.input_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Verify that the accepted row `stored` is an exact replay of the prompt
+/// `expected`: the same content and semantic header slots (the exact prompt
+/// identity, which includes the authority association) and the same retained
+/// authority. Input id and timestamp are not part of either.
+///
+/// A row recorded without an exact prompt identity (an older admission, or a
+/// non-prompt) never matches, so a key alone never stands in for an
+/// admission.
+///
+/// # Errors
+/// [`crate::RuntimeDriverError::InputIdempotencyConflict`] naming the row
+/// when it is not an exact replay.
+pub fn verify_exact_replay(
+    stored: &InputState,
+    expected: &Input,
+) -> Result<(), crate::RuntimeDriverError> {
+    PromptReplayIdentity::verify_replay(
+        stored,
+        expected,
+        crate::accept::InputReplayPolicy::ExactPrompt,
+    )?;
+    crate::input_authority::verify_retained_replay(stored, expected)
+}
+
+/// Keyed external event admission identity: the event's content and
+/// semantic header slots, without its fresh input id and timestamp.
+///
+/// A same-key event whose identity differs from a recorded one is an
+/// idempotency conflict under every replay policy, never a silent dedupe that
+/// drops the new payload. Admissions recorded before this identity existed
+/// keep their key-only replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExternalEventReplayIdentity([u8; 32]);
+
+impl ExternalEventReplayIdentity {
+    pub(crate) fn from_input(input: &Input) -> Result<Option<Self>, crate::RuntimeDriverError> {
+        let Input::ExternalEvent(event) = input else {
+            return Ok(None);
+        };
+        if event.header.idempotency_key.is_none() {
+            return Ok(None);
+        }
+        let crate::input::ExternalEventInput {
+            header,
+            event_type,
+            payload,
+            blocks,
+            handling_mode,
+            render_metadata,
+            objective_id,
+        } = event;
+        let crate::input::InputHeader {
+            ingress_context: _,
+            retained_resume: _,
+            authority_association,
+            id: _,
+            timestamp: _,
+            source,
+            durability,
+            visibility,
+            idempotency_key: _,
+            supersession_key,
+            correlation_id,
+        } = header;
+        let bytes = serde_json::to_vec(&(
+            authority_association,
+            source,
+            durability,
+            visibility,
+            supersession_key,
+            correlation_id,
+            event_type,
+            payload,
+            blocks,
+            handling_mode,
+            render_metadata,
+            objective_id,
+        ))
+        .map_err(|error| {
+            crate::RuntimeDriverError::Internal(format!(
+                "failed to bind external event replay identity: {error}"
+            ))
+        })?;
+        Ok(Some(Self(Sha256::digest(bytes).into())))
+    }
+
+    fn verify_replay(state: &InputState, input: &Input) -> Result<(), crate::RuntimeDriverError> {
+        let Some(recorded) = state.external_event_replay_identity.as_ref() else {
+            return Ok(());
+        };
+        if !matches!(input, Input::ExternalEvent(_)) {
+            return Ok(());
+        }
+        if Self::from_input(input)?.as_ref() != Some(recorded) {
             return Err(crate::RuntimeDriverError::InputIdempotencyConflict {
                 existing_id: state.input_id.clone(),
             });
@@ -1713,6 +1869,9 @@ pub struct InputState {
     pub(crate) authorization_audit: crate::input_audit::InputAuthorizationAudit,
     /// Every original association retained on this row. No live permission.
     pub authority_contributors: Vec<crate::input_authority::RetainedInputAuthority>,
+    /// The retained work this row resumes, when it was admitted as a governed
+    /// resume (its contributors are then that work's originals, not its own).
+    pub retained_resume: Option<crate::retained_work::RetainedResumeRecord>,
     pub input_id: InputId,
     pub history: Vec<InputStateHistoryEntry>,
     pub updated_at: DateTime<Utc>,
@@ -1730,6 +1889,9 @@ pub struct InputState {
     /// Runtime-issued exact prompt witness; absent for non-prompt and older
     /// admissions. Absence never authorizes a new prompt's replay claim.
     pub prompt_replay_identity: Option<PromptReplayIdentity>,
+    /// Runtime-issued keyed external event witness; absent for other inputs
+    /// and older admissions.
+    pub(crate) external_event_replay_identity: Option<ExternalEventReplayIdentity>,
     pub recovery_count: u32,
     pub reconstruction_source: Option<ReconstructionSource>,
     /// Durable pre-finalization candidate or exact finalized public completion
@@ -1762,6 +1924,7 @@ impl InputState {
             controller_client: None,
             authorization_audit: crate::input_audit::InputAuthorizationAudit::default(),
             authority_contributors: Vec::new(),
+            retained_resume: None,
             input_id,
             history: Vec::new(),
             updated_at: now,
@@ -1771,6 +1934,7 @@ impl InputState {
             durability: None,
             idempotency_key: None,
             prompt_replay_identity: None,
+            external_event_replay_identity: None,
             recovery_count: 0,
             reconstruction_source: None,
             terminal_completion: None,
@@ -1815,6 +1979,8 @@ struct InputStateSerde {
     authorization_audit: crate::input_audit::InputAuthorizationAudit,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     authority_contributors: Vec<crate::input_authority::RetainedInputAuthority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retained_resume: Option<crate::retained_work::RetainedResumeRecord>,
     stored_input_state_version: u32,
     input_id: InputId,
     current_state: InputLifecycleState,
@@ -1832,6 +1998,8 @@ struct InputStateSerde {
     idempotency_key: Option<crate::identifiers::IdempotencyKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt_replay_identity: Option<PromptReplayIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_event_replay_identity: Option<ExternalEventReplayIdentity>,
     #[serde(default)]
     attempt_count: u32,
     #[serde(default)]
@@ -1872,6 +2040,7 @@ impl Serialize for StoredInputState {
         let helper = InputStateSerde {
             authorization_audit: self.state.authorization_audit.clone(),
             authority_contributors: self.state.authority_contributors.clone(),
+            retained_resume: self.state.retained_resume.clone(),
             stored_input_state_version:
                 meerkat_core::generated::session_persistence_version_authority::stored_input_state_version(
                 ),
@@ -1887,6 +2056,7 @@ impl Serialize for StoredInputState {
             durability: self.state.durability,
             idempotency_key: self.state.idempotency_key.clone(),
             prompt_replay_identity: self.state.prompt_replay_identity.clone(),
+            external_event_replay_identity: self.state.external_event_replay_identity.clone(),
             attempt_count: self.seed.attempt_count,
             recovery_count: self.state.recovery_count,
             history: self.state.history.clone(),
@@ -2000,6 +2170,7 @@ impl<'de> Deserialize<'de> for StoredInputState {
             controller_client: None,
             authorization_audit: helper.authorization_audit,
             authority_contributors: helper.authority_contributors,
+            retained_resume: helper.retained_resume,
             input_id: helper.input_id,
             history: helper.history,
             updated_at: helper.updated_at,
@@ -2009,6 +2180,7 @@ impl<'de> Deserialize<'de> for StoredInputState {
             durability: helper.durability,
             idempotency_key: helper.idempotency_key,
             prompt_replay_identity: helper.prompt_replay_identity,
+            external_event_replay_identity: helper.external_event_replay_identity,
             recovery_count: helper.recovery_count,
             reconstruction_source: helper.reconstruction_source,
             terminal_completion: helper.terminal_completion,
@@ -2087,6 +2259,77 @@ mod tests {
             Err(crate::RuntimeDriverError::InputIdempotencyConflict { .. }),
         ));
         PromptReplayIdentity::verify_replay(&legacy, &input, InputReplayPolicy::KeyOnly).unwrap();
+    }
+
+    #[test]
+    fn a_keyed_external_event_with_a_changed_payload_conflicts_under_every_policy() {
+        use crate::accept::InputReplayPolicy;
+        use crate::identifiers::IdempotencyKey;
+        use crate::input::{ExternalEventInput, InputHeader};
+
+        let event = |payload: serde_json::Value| {
+            Input::ExternalEvent(ExternalEventInput {
+                header: InputHeader {
+                    id: InputId::new(),
+                    timestamp: Utc::now(),
+                    source: crate::InputOrigin::External {
+                        source_name: "webhook".into(),
+                    },
+                    durability: crate::input::InputDurability::Durable,
+                    visibility: crate::input::InputVisibility::default(),
+                    idempotency_key: Some(IdempotencyKey::new("event-1")),
+                    supersession_key: None,
+                    correlation_id: None,
+                    ingress_context: None,
+                    retained_resume: None,
+                    authority_association: None,
+                },
+                event_type: "build".into(),
+                payload,
+                blocks: None,
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+                objective_id: None,
+            })
+        };
+        let original = event(serde_json::json!({"status": "green"}));
+        let mut state = InputState::new_accepted(original.id().clone());
+        state.external_event_replay_identity =
+            ExternalEventReplayIdentity::from_input(&original).unwrap();
+        assert!(state.external_event_replay_identity.is_some());
+        PromptReplayIdentity::verify_replay(
+            &state,
+            &event(serde_json::json!({"status": "green"})),
+            InputReplayPolicy::KeyOnly,
+        )
+        .expect("a fresh id and timestamp with the same content dedupe");
+        assert!(matches!(
+            PromptReplayIdentity::verify_replay(
+                &state,
+                &event(serde_json::json!({"status": "red"})),
+                InputReplayPolicy::KeyOnly,
+            ),
+            Err(crate::RuntimeDriverError::InputIdempotencyConflict { .. }),
+        ));
+
+        let stored = StoredInputState {
+            state: state.clone(),
+            seed: InputStateSeed::new_accepted(),
+        };
+        let decoded: StoredInputState =
+            serde_json::from_value(serde_json::to_value(&stored).unwrap()).unwrap();
+        assert_eq!(
+            decoded.state.external_event_replay_identity, state.external_event_replay_identity,
+            "the witness survives persistence"
+        );
+
+        let legacy = InputState::new_accepted(InputId::new());
+        PromptReplayIdentity::verify_replay(
+            &legacy,
+            &event(serde_json::json!({"status": "red"})),
+            InputReplayPolicy::KeyOnly,
+        )
+        .expect("an admission recorded without the witness keeps key-only replay");
     }
 
     fn terminal_outbox_batch_fixture() -> Vec<InteractionTerminalOutbox> {
@@ -2874,6 +3117,7 @@ mod tests {
                 persisted_input: Some(Input::Operation(crate::input::OperationInput {
                     header: crate::input::InputHeader {
                         ingress_context: None,
+                        retained_resume: None,
                         authority_association: None,
                         id: InputId::new(),
                         timestamp: Utc::now(),

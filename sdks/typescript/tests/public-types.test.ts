@@ -2101,7 +2101,7 @@ function narrowHookFailureReason(reason: NonNullable<import("../src/index.js").H
     }
     case "observe_only_violation": return "observe-only";
     case "confinement_refused": {
-      const refusal: import("../src/generated/event_types.js").ConfinementRefusal = reason.refusal;
+      const refusal: import("../src/generated/types.js").ConfinementRefusal = reason.refusal;
       return refusal;
     }
     case "unknown": {
@@ -2115,3 +2115,26 @@ function narrowHookFailureReason(reason: NonNullable<import("../src/index.js").H
   }
 }
 void narrowHookFailureReason;
+
+
+// Optional setup observations share the native closed reason vocabulary.
+const mcpSetupReason: import("../src/index.js").ConfinementRefusal = "backend_unavailable";
+const legacyMcpStatus: import("../src/index.js").ExternalToolDeltaToolConfigChangeStatus = {
+  kind: "external_tool_delta", phase: "failed",
+};
+const typedMcpStatus: import("../src/index.js").ExternalToolDeltaToolConfigChangeStatus = {
+  ...legacyMcpStatus, confinement_refusal: mcpSetupReason,
+};
+const generatedMcpStatus: import("../src/generated/types.js").ToolConfigChangeStatusExternalToolDelta = {
+  kind: "external_tool_delta", phase: "failed", confinement_refusal: mcpSetupReason,
+};
+const generatedMcpNotice: import("../src/generated/types.js").SystemNoticeBlockMcp = {
+  type: "mcp", phase: "failed", confinement_refusal: mcpSetupReason,
+};
+const legacyMcpNotice: import("../src/generated/types.js").SystemNoticeBlockMcp = { type: "mcp" };
+const invalidMcpNotice: import("../src/generated/types.js").SystemNoticeBlockMcp = {
+  type: "mcp",
+  // @ts-expect-error Native confinement causes are closed, not arbitrary text.
+  confinement_refusal: "invented_cause",
+};
+void [typedMcpStatus, generatedMcpStatus, generatedMcpNotice, legacyMcpNotice, invalidMcpNotice];

@@ -319,6 +319,7 @@ impl MobActor {
             super::super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles);
         Ok(Box::new(DeferredResumeProvision {
             definition: Arc::clone(&self.definition),
+            realm_profile_store: self.realm_profile_store.clone(),
             profile_name: entry.role.clone(),
             agent_identity: entry.agent_identity.clone(),
             profile,
@@ -341,8 +342,11 @@ impl MobActor {
             tool_access_policy: None,
             tool_dispatch_admission: None,
             web_search_override: Default::default(),
-            application_tool_policy: Default::default(),
-            tool_consequence_policy_registry: None,
+            // The restore spec's policy choice (the host customizer's, for an
+            // ordinary member) wins over the durable binding; no choice keeps
+            // it. The current registry realizes either.
+            application_tool_policy: work.rebuild.restore_spec.application_tool_policy.clone(),
+            tool_consequence_policy_registry: self.tool_consequence_policy_registry.clone(),
             system_prompt_override: None,
             resume_from_role: resume_from_role.clone(),
             resume_id: work.rebuild.bridge_session_id.clone(),

@@ -1211,6 +1211,85 @@ describe("Typed Events", () => {
     );
   });
 
+  it("preserves optional typed MCP setup refusals without deriving them from prose", () => {
+    for (const refusal of [undefined, null, "invalid_requirement", "invalid_launch",
+      "unsupported_requirement", "backend_unavailable", "preparation_failed"]) {
+      const status = { kind: "external_tool_delta", phase: "failed",
+        detail: "required execution confinement is unsupported by this backend",
+        ...(refusal !== undefined ? { confinement_refusal: refusal } : {}) };
+      const raw = { type: "tool_config_changed", payload: {
+        operation: "reload", target: "local-server", status_info: status, persisted: true,
+      } };
+      const event = parseEvent(raw);
+      assert.equal(event.type, "tool_config_changed");
+      assert.equal(event.payload.status_info.phase, "failed");
+      if (refusal == null) {
+        assert.equal(Object.hasOwn(event.payload.status_info, "confinement_refusal"), false);
+      } else {
+        assert.equal(event.payload.status_info.confinement_refusal, refusal);
+      }
+      for (const block of [
+        { type: "mcp", server_id: "local-server", phase: "failed", persisted: true,
+          ...(refusal !== undefined ? { confinement_refusal: refusal } : {}) },
+        { type: "tool_config", payload: raw.payload },
+      ]) {
+        const message = { role: "system_notice", kind: "mcp", body: "Continue with available tools.",
+          blocks: [block], created_at: "2026-05-26T10:00:00Z" };
+        const parsed = MeerkatClient.parseSessionMessage(message);
+        assert.deepEqual(MeerkatClient.serializeTranscriptRewriteMessage(parsed), message);
+      }
+    }
+  });
+
+  it("preserves malformed setup refusal events and rejects malformed typed transcript fields", () => {
+    for (const refusal of ["future_reason", "", 7, false, {}, []]) {
+      const payload = { operation: "add", target: "local-server", persisted: true,
+        status_info: { kind: "external_tool_delta", phase: "failed", confinement_refusal: refusal } };
+      const raw = { type: "tool_config_changed", payload };
+      const events = [raw, { type: "text_delta", delta: "permitted sibling" }].map(parseEvent);
+      assert.equal(events[0].type, "malformed_event");
+      assert.deepEqual(events[0].raw, raw);
+      assert.equal(events[1].type, "text_delta");
+      assert.equal(events[1].delta, "permitted sibling");
+      for (const block of [{ type: "mcp", confinement_refusal: refusal }, { type: "tool_config", payload }]) {
+        assert.throws(() => MeerkatClient.parseSessionMessage({
+          role: "system_notice", kind: "mcp", blocks: [block], created_at: "2026-05-26T10:00:00Z",
+        }), error => error instanceof MeerkatError && error.code === "INVALID_RESPONSE"
+          && error.message.includes("confinement_refusal"));
+      }
+    }
+  });
+
+  it("parses canonical system-notice blocks the refusal check does not cover", () => {
+    const interrupted = MeerkatClient.parseSessionMessage({
+      role: "system_notice", kind: "tool_process_recovery", created_at: "2026-05-26T10:00:00Z",
+      blocks: [{
+        type: "tool_process_interrupted",
+        run_id: "0192f1a2-7c3d-7e4f-8a5b-6c7d8e9f0a1b",
+        cessation: { kind: "already_exited" },
+        disposition: { kind: "unknown" },
+        spawner: { kind: "shell_call" },
+        tool_call_id: null,
+      }],
+    });
+    assert.equal(interrupted.role, "system_notice");
+    const mcp = MeerkatClient.parseSessionMessage({
+      role: "system_notice", kind: "mcp", created_at: "2026-05-26T10:00:00Z",
+      blocks: [{ type: "mcp", detail: null, server_id: "local-server", confinement_refusal: null }],
+    });
+    assert.equal(mcp.role, "system_notice");
+    for (const refusal of ["backend_unavailable", null, undefined]) {
+      const payload = { operation: "add", target: "local-server", persisted: true,
+        status_info: { kind: "external_tool_delta", phase: "failed",
+          ...(refusal === undefined ? {} : { confinement_refusal: refusal }) } };
+      const parsed = MeerkatClient.parseSessionMessage({
+        role: "system_notice", kind: "mcp", created_at: "2026-05-26T10:00:00Z",
+        blocks: [{ type: "tool_config", payload }],
+      });
+      assert.equal(parsed.role, "system_notice");
+    }
+  });
+
   it("should parse tool_config_changed payload", () => {
     const event = parseEvent({
       type: "tool_config_changed",
@@ -1706,8 +1785,8 @@ describe("WorkGraph parsers", () => {
   const timestamp = "2026-05-12T12:00:00Z";
   const claimedItem = {
     id: "prep-dentist-ride",
-    realm_id: "homecore",
-    namespace: "family/appointments",
+    realm_id: "example",
+    namespace: "team/appointments",
     title: "Prep A for non-preferred dentist car",
     status: "in_progress",
     priority: "high",
@@ -1716,11 +1795,11 @@ describe("WorkGraph parsers", () => {
     completion_policy: { kind: "host_confirmed" },
     labels: ["autism-support", "dentist"],
     owner: {
-      key: { kind: "agent", id: "homecore-kapellmeister" },
-      display_name: "Homecore Kapellmeister",
+      key: { kind: "agent", id: "example-coordinator" },
+      display_name: "Example Coordinator",
     },
     claim: {
-      owner: { key: { kind: "agent", id: "homecore-kapellmeister" } },
+      owner: { key: { kind: "agent", id: "example-coordinator" } },
       claimed_at: timestamp,
     },
     machine_state: { lifecycle_phase: "claimed", revision: 4 },
@@ -1734,9 +1813,9 @@ describe("WorkGraph parsers", () => {
   it("parses typed owners and claims", () => {
     const item = parseWorkItem(claimedItem);
 
-    assert.equal(item.realm_id, "homecore");
+    assert.equal(item.realm_id, "example");
     assert.equal(item.owner?.key.kind, "agent");
-    assert.equal(item.claim?.owner.key.id, "homecore-kapellmeister");
+    assert.equal(item.claim?.owner.key.id, "example-coordinator");
     assert.deepEqual(item.completion_policy, { kind: "host_confirmed" });
   });
 
@@ -1806,8 +1885,8 @@ describe("WorkGraph parsers", () => {
       binding_id: "attention-1",
       target: { kind: "session", session_id: "session-1" },
       work_ref: {
-        realm_id: "homecore",
-        namespace: "family/appointments",
+        realm_id: "example",
+        namespace: "team/appointments",
         item_id: "prep-dentist-ride",
       },
       mode: "pursue",
@@ -1848,17 +1927,17 @@ describe("WorkGraph parsers", () => {
       error instanceof MeerkatError && error.code === "INVALID_RESPONSE";
 
     await assert.rejects(
-      clientFor({ items: "oops" }).listWorkGraphItems({ realm_id: "homecore" }),
+      clientFor({ items: "oops" }).listWorkGraphItems({ realm_id: "example" }),
       invalidResponse,
     );
     await assert.rejects(
       clientFor({ items: { not: "a list" } }).listReadyWorkGraphItems({
-        realm_id: "homecore",
+        realm_id: "example",
       }),
       invalidResponse,
     );
     await assert.rejects(
-      clientFor({ events: 42 }).listWorkGraphEvents({ realm_id: "homecore" }),
+      clientFor({ events: 42 }).listWorkGraphEvents({ realm_id: "example" }),
       invalidResponse,
     );
   });
@@ -3388,8 +3467,8 @@ describe("Parity wrappers", () => {
     const timestamp = "2026-05-12T12:00:00Z";
     const item = {
       id: "prep-dentist-ride",
-      realm_id: "homecore",
-      namespace: "family/appointments",
+      realm_id: "example",
+      namespace: "team/appointments",
       title: "Prep A for non-preferred dentist car",
       status: "open",
       priority: "high",
@@ -3408,8 +3487,8 @@ describe("Parity wrappers", () => {
       binding_id: "attention-1",
       target: { kind: "session", session_id: "session-1" },
       work_ref: {
-        realm_id: "homecore",
-        namespace: "family/appointments",
+        realm_id: "example",
+        namespace: "team/appointments",
         item_id: "prep-dentist-ride",
       },
       mode: "pursue",
@@ -3430,8 +3509,8 @@ describe("Parity wrappers", () => {
       }
       if (method === "workgraph/snapshot") {
         return {
-          realm_id: "homecore",
-          namespace: "family/appointments",
+          realm_id: "example",
+          namespace: "team/appointments",
           all_namespaces: false,
           captured_at: timestamp,
           event_high_water_mark: 7,
@@ -3445,8 +3524,8 @@ describe("Parity wrappers", () => {
         return {
           events: [{
             seq: 7,
-            realm_id: "homecore",
-            namespace: "family/appointments",
+            realm_id: "example",
+            namespace: "team/appointments",
             item_id: "prep-dentist-ride",
             kind: "created",
             at: timestamp,
@@ -3464,26 +3543,26 @@ describe("Parity wrappers", () => {
     };
 
     const fetched = await client.getWorkGraphItem("prep-dentist-ride", {
-      realmId: "homecore",
-      namespace: "family/appointments",
+      realmId: "example",
+      namespace: "team/appointments",
     });
-    const listed = await client.listWorkGraphItems({ realm_id: "homecore", limit: 5 });
+    const listed = await client.listWorkGraphItems({ realm_id: "example", limit: 5 });
     const ready = await client.listReadyWorkGraphItems({
-      namespace: "family/appointments",
+      namespace: "team/appointments",
       limit: 3,
     });
     const snapshot = await client.getWorkGraphSnapshot({
-      realm_id: "homecore",
-      namespace: "family/appointments",
+      realm_id: "example",
+      namespace: "team/appointments",
     });
-    const events = await client.listWorkGraphEvents({ realm_id: "homecore", limit: 10 });
+    const events = await client.listWorkGraphEvents({ realm_id: "example", limit: 10 });
     const goal = await client.getWorkGraphGoalStatus({
       binding_id: "attention-1",
-      realm_id: "homecore",
-      namespace: "family/appointments",
+      realm_id: "example",
+      namespace: "team/appointments",
     });
     const attentionList = await client.listWorkGraphAttention({
-      realm_id: "homecore",
+      realm_id: "example",
       status: { state: "active" },
       target: { kind: "session", session_id: "session-1" },
     });
@@ -3514,18 +3593,18 @@ describe("Parity wrappers", () => {
     ]);
     assert.deepEqual(calls[0].params, {
       id: "prep-dentist-ride",
-      realm_id: "homecore",
-      namespace: "family/appointments",
+      realm_id: "example",
+      namespace: "team/appointments",
     });
-    assert.deepEqual(calls[1].params, { realm_id: "homecore", limit: 5 });
-    assert.deepEqual(calls[2].params, { namespace: "family/appointments", limit: 3 });
+    assert.deepEqual(calls[1].params, { realm_id: "example", limit: 5 });
+    assert.deepEqual(calls[2].params, { namespace: "team/appointments", limit: 3 });
     assert.deepEqual(calls[5].params, {
       binding_id: "attention-1",
-      realm_id: "homecore",
-      namespace: "family/appointments",
+      realm_id: "example",
+      namespace: "team/appointments",
     });
     assert.deepEqual(calls[6].params, {
-      realm_id: "homecore",
+      realm_id: "example",
       status: { state: "active" },
       target: { kind: "session", session_id: "session-1" },
     });
@@ -3535,7 +3614,7 @@ describe("Parity wrappers", () => {
     const client = new MeerkatClient();
     client.request = async () => ({ items: [{ id: "only-an-id" }] });
     await assert.rejects(
-      client.listWorkGraphItems({ realm_id: "homecore" }),
+      client.listWorkGraphItems({ realm_id: "example" }),
       (error) =>
         error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
     );

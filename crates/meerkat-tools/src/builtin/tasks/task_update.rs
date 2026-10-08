@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::{TaskId, TaskPriority, TaskStatus, TaskUpdate};
-use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
+use crate::builtin::{BuiltinTool, BuiltinToolError, LeafEntry, ToolOutput};
 
 /// Parameters for the task_update tool
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -114,6 +114,32 @@ impl BuiltinTool for TaskUpdateTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::none()).await
+    }
+
+    async fn call_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::for_call(context, call)?)
+            .await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
+    }
+}
+
+impl TaskUpdateTool {
+    /// The single native entry step runs immediately before the store call,
+    /// the tool's first effect.
+    async fn call_entering(
+        &self,
+        args: Value,
+        mut entry: LeafEntry,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let params: TaskUpdateParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
 
@@ -139,6 +165,7 @@ impl BuiltinTool for TaskUpdateTool {
                 .map(|ids| ids.into_iter().map(TaskId).collect()),
         };
 
+        entry.enter()?;
         let task = self
             .store
             .update(&TaskId(params.id), update, self.session_id.as_deref())

@@ -11,6 +11,11 @@ mod child_mcp_servers;
 mod child_tool_bundles;
 mod child_tool_policy;
 pub mod council_relink;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod detached_completion_sink;
+#[cfg(target_arch = "wasm32")]
+#[path = "detached_completion_sink_wasm.rs"]
+pub(crate) mod detached_completion_sink;
 pub mod detached_delivery;
 pub mod fork_relink;
 #[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
@@ -31,9 +36,7 @@ pub use child_tool_bundles::{ChildToolBundleAvailability, ChildToolBundles};
 pub use child_tool_policy::ChildToolPolicyRefused;
 pub use detached_delivery::{
     DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
-    DetachedOwnerError, DetachedOwnerHost, deliver_detached_completion,
-    deliver_detached_completion_to_member, deliver_detached_completion_to_member_when_revivable,
-    deliver_detached_completion_to_session, detached_completion_notice,
+    DetachedOwnerError, DetachedOwnerHost, detached_completion_notice,
 };
 pub use public_definition::{decode_public_mob_definition, decode_public_profile};
 pub use public_mcp::{
@@ -411,6 +414,19 @@ impl TemporaryCouncilStoreSelection {
     }
 }
 
+/// Why a mob state could not bind the host's continuation services.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum BindContinuationsError {
+    /// The state has no runtime to admit completions.
+    #[error("the mob state has no runtime")]
+    NoRuntime,
+    /// The host's binding slot refused this state.
+    #[error(transparent)]
+    Binding(meerkat::ContinuationBindError),
+}
+
 /// In-memory MCP state for multiple mobs.
 /// Whether a host can deliver a detached tool completion after the call
 /// returns.
@@ -451,6 +467,13 @@ pub struct MobMcpState {
     /// capability custody under a caller-requested durable root.
     persistent_storage_setup_error: Option<String>,
     mobs: Arc<RwLock<BTreeMap<MobId, ManagedMob>>>,
+    /// Mobs this state destroyed: their members never serve again.
+    retired_mobs: std::sync::Mutex<std::collections::BTreeSet<MobId>>,
+    /// Set once the managed set holds every mob this host will ever have
+    /// from before: persistent restore finished, or the host declared its
+    /// own restore done ([`MobMcpState::declare_mob_set_restored`]). A mob
+    /// outside the set is then gone for good.
+    mob_set_restored: std::sync::atomic::AtomicBool,
     /// Bumped whenever the managed-mob handle set gains or loses an entry.
     /// Interval-free observers (e.g. mobkit's agent-event stream reconcilers)
     /// await this instead of polling `mob_handles_snapshot` on a timer. The
@@ -510,16 +533,20 @@ pub struct MobMcpState {
     /// The host hook that makes a plain-session owner of a detached job live
     /// again (see [`DetachedOwnerHost`]). `None` when the host supplies none.
     detached_owner_host: std::sync::RwLock<Option<Arc<dyn DetachedOwnerHost>>>,
+    /// Where detached outcomes are submitted, once the host bound its
+    /// delivery inbox ([`MobMcpState::bind_continuations`]).
+    detached_completions:
+        std::sync::RwLock<Option<crate::detached_completion_sink::DetachedCompletionSink>>,
+    /// This state's binding of the host's continuation services, held for
+    /// the state's life (see [`MobMcpState::bind_continuations`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    continuation_binding: std::sync::Mutex<Option<meerkat::ContinuationBinding>>,
     /// When this state was built (Unix ms). Fork children whose job started
     /// earlier belonged to a previous process and are re-linked on restore.
     created_at_ms: u64,
     fork_relink_scheduled: std::sync::atomic::AtomicBool,
     /// Mobs whose fork children were already re-linked by this state.
     fork_relinked_mobs: std::sync::Mutex<std::collections::BTreeSet<MobId>>,
-    /// Deferred fork_off outcomes whose re-link is waiting on the owner's
-    /// mob right now (observability; see
-    /// [`Self::fork_relink_waiting_owners`]).
-    fork_relink_waiting_owners: Arc<std::sync::atomic::AtomicUsize>,
     /// Set once the realm-local capability expiry/cleanup driver is running.
     local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool,
     /// Driver cadence, configurable only through the explicit test seam.
@@ -602,6 +629,8 @@ impl MobMcpState {
             persistent_storage_root: None,
             persistent_storage_setup_error: None,
             mobs: Arc::new(RwLock::new(BTreeMap::new())),
+            retired_mobs: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            mob_set_restored: std::sync::atomic::AtomicBool::new(false),
             mob_set_epoch: tokio::sync::watch::Sender::new(0),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             workgraph_flow_custodies: Mutex::new(HashMap::new()),
@@ -633,6 +662,9 @@ impl MobMcpState {
             // is declared unable to deliver, never silently mismatched.
             detached_completion_delivery: std::sync::atomic::AtomicBool::new(can_deliver_detached),
             detached_owner_host: std::sync::RwLock::new(None),
+            detached_completions: std::sync::RwLock::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            continuation_binding: std::sync::Mutex::new(None),
             created_at_ms: u64::try_from(
                 SystemTime::now()
                     .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
@@ -642,7 +674,6 @@ impl MobMcpState {
             .unwrap_or(u64::MAX),
             fork_relink_scheduled: std::sync::atomic::AtomicBool::new(false),
             fork_relinked_mobs: std::sync::Mutex::new(std::collections::BTreeSet::new()),
-            fork_relink_waiting_owners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool::new(false),
             local_forked_participant_sweep_interval_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(LOCAL_FORKED_PARTICIPANT_SWEEP_INTERVAL.as_millis())
@@ -756,9 +787,9 @@ impl MobMcpState {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = host;
     }
 
-    /// The plain-session owner hook, if the host supplied one. Delivery
-    /// paths (the live custodian and the restart re-link) use it for owners
-    /// that are not mob members.
+    /// The plain-session owner hook, if the host supplied one. The host's
+    /// continuation resolver uses it to serve a completion to an owner that
+    /// is not a mob member.
     pub fn detached_owner_host(&self) -> Option<Arc<dyn DetachedOwnerHost>> {
         self.detached_owner_host
             .read()
@@ -766,9 +797,212 @@ impl MobMcpState {
             .clone()
     }
 
-    /// The runtime that admits detached completions for this host, or why
-    /// detached delivery is unavailable. A host that declares delivery but
-    /// has no runtime is reported, never silently treated as able to deliver.
+    /// Submit this host's detached outcomes through the durable continuation
+    /// owner over `inbox` (the host's one runtime delivery inbox), and bind
+    /// the mob address resolver and job owner into `bindings` for the host's
+    /// delivery owner. The binding lives as long as this state; binding the
+    /// same state again is a no-op.
+    ///
+    /// # Errors
+    /// The state has no runtime, or another live state holds `bindings`
+    /// (take it over with [`Self::rebind_continuations`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn bind_continuations(
+        self: &Arc<Self>,
+        inbox: meerkat_runtime::RuntimeDeliveryInbox,
+        bindings: &meerkat::ContinuationHostBindings,
+    ) -> Result<(), BindContinuationsError> {
+        self.bind_continuations_with(inbox, |resolver, owner| bindings.bind(resolver, owner))
+    }
+
+    /// [`Self::bind_continuations`], taking `bindings` over from the binding
+    /// of generation `replaced` (a state this one replaces, still live).
+    ///
+    /// # Errors
+    /// The state has no runtime, or `replaced` is not the current binding.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn rebind_continuations(
+        self: &Arc<Self>,
+        replaced: meerkat::ContinuationBindingGeneration,
+        inbox: meerkat_runtime::RuntimeDeliveryInbox,
+        bindings: &meerkat::ContinuationHostBindings,
+    ) -> Result<(), BindContinuationsError> {
+        self.bind_continuations_with(inbox, |resolver, owner| {
+            bindings.rebind(replaced, resolver, owner)
+        })
+    }
+
+    /// The generation of this state's continuation binding, once bound.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn continuation_binding_generation(
+        &self,
+    ) -> Option<meerkat::ContinuationBindingGeneration> {
+        self.continuation_binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(meerkat::ContinuationBinding::generation)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn bind_continuations_with(
+        self: &Arc<Self>,
+        inbox: meerkat_runtime::RuntimeDeliveryInbox,
+        bind: impl FnOnce(
+            Arc<dyn meerkat::ContinuationAddressResolver>,
+            Arc<dyn meerkat::RetainedJobSource>,
+        )
+            -> Result<meerkat::ContinuationBinding, meerkat::ContinuationBindError>,
+    ) -> Result<(), BindContinuationsError> {
+        let mut held = self
+            .continuation_binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.is_some() {
+            return Ok(());
+        }
+        let Some(runtime) = self.runtime_adapter.clone() else {
+            return Err(BindContinuationsError::NoRuntime);
+        };
+        let owner = Arc::new(crate::detached_completion_sink::MobJobOwner {
+            state: Arc::downgrade(self),
+        });
+        let resolver: Arc<dyn meerkat::ContinuationAddressResolver> =
+            Arc::new(crate::detached_completion_sink::HostContinuationResolver {
+                mobs: meerkat_mob::continuation::MobContinuationResolver::new(owner.clone()),
+                state: Arc::downgrade(self),
+            });
+        let binding =
+            bind(Arc::clone(&resolver), owner.clone()).map_err(BindContinuationsError::Binding)?;
+        let continuations = Arc::new(meerkat::ContinuationOwnerService::new(
+            inbox,
+            resolver,
+            Arc::clone(&runtime),
+        ));
+        *self
+            .detached_completions
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(crate::detached_completion_sink::DetachedCompletionSink {
+                continuations,
+                jobs: owner,
+                runtime,
+            });
+        *held = Some(binding);
+        Ok(())
+    }
+
+    /// Submit a detached job's outcome through this host's continuation
+    /// owner exactly as the live custodian and the re-link do. Tests only.
+    #[doc(hidden)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn submit_detached_completion_for_tests(
+        &self,
+        owner_member: Option<(MobHandle, meerkat_mob::AgentIdentity)>,
+        owner_session_id: &SessionId,
+        tool: &'static str,
+        job_id: &str,
+        status: meerkat_core::event::BackgroundJobTerminalStatus,
+        outcome: serde_json::Value,
+    ) -> Result<crate::detached_delivery::DetachedCompletionDelivered, String> {
+        let sink = self
+            .detached_delivery_route()
+            .map_err(|unavailable| format!("{unavailable:?}"))?;
+        let owner = match owner_member {
+            Some((handle, identity)) => {
+                crate::detached_delivery::DetachedCompletionOwner::Member(handle, identity)
+            }
+            None => crate::detached_delivery::DetachedCompletionOwner::Session,
+        };
+        let result_digest = meerkat_mob::detached_outcome_digest(&outcome);
+        sink.submit(
+            &owner,
+            owner_session_id,
+            tool,
+            job_id,
+            status,
+            &outcome,
+            &result_digest,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    /// Declare that this host has inserted every mob it restores
+    /// ([`Self::mob_insert_handle`]): from now on a mob it does not manage is
+    /// gone for good, and continuations owed to its members are stranded
+    /// instead of waiting. A host with a persistent mob root needs no
+    /// declaration; its restore finishing is the same fact.
+    ///
+    /// A host that inserts mob handles without a persistent root must call
+    /// this once its restore is done: until it does, continuations owed to
+    /// members of a mob it never inserts again (one destroyed by an earlier
+    /// process) stay unserved instead of stranding, and on a governed runtime
+    /// a fork_off completion whose job no managed mob holds stays pending
+    /// instead of being refused.
+    pub fn declare_mob_set_restored(&self) {
+        self.mob_set_restored
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether mob `mob_id` is gone for good: this state destroyed it, or it
+    /// is not managed although the managed set is complete.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) async fn mob_is_retired(&self, mob_id: &MobId) -> bool {
+        if self.mobs.read().await.contains_key(mob_id) {
+            return false;
+        }
+        self.mob_set_complete()
+            || self
+                .retired_mobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(mob_id)
+    }
+
+    /// Whether the managed set holds every mob this host will ever have
+    /// from before: the persistent restore finished, or the host declared
+    /// its own restore done ([`Self::declare_mob_set_restored`]). Until then
+    /// a mob this state does not manage may still come back.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn mob_set_complete(&self) -> bool {
+        self.mob_set_restored
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Every mob this state manages, with its raw handle, without console
+    /// authority gating: the job owner and the continuation resolver read
+    /// committed job records and rosters through it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn managed_mob_handles(&self) -> Vec<(MobId, MobHandle)> {
+        self.mobs
+            .read()
+            .await
+            .iter()
+            .map(|(id, managed)| (id.clone(), managed.handle.clone()))
+            .collect()
+    }
+
+    /// The custody binding of the council bound to `job_id`, if any.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn council_job_binding(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<meerkat_mob::temporary_council::TemporaryCouncilJobBinding>, String> {
+        Ok(self
+            .temporary_council_store()
+            .list_all()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter_map(|record| record.detached_job)
+            .find(|job| job.job_id == job_id))
+    }
+
+    /// Where this host submits detached outcomes, or why detached delivery is
+    /// unavailable. A host that declares delivery but has no runtime, or never
+    /// bound its delivery inbox, is reported, never silently treated as able
+    /// to deliver.
     pub(crate) fn detached_delivery_route(
         &self,
     ) -> crate::detached_delivery::DetachedDeliveryRoute {
@@ -777,9 +1011,14 @@ impl MobMcpState {
                 crate::detached_delivery::DetachedDeliveryUnavailable::HostDeclaredUnavailable,
             );
         }
-        self.runtime_adapter
+        if self.runtime_adapter.is_none() {
+            return Err(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter);
+        }
+        self.detached_completions
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-            .ok_or(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter)
+            .ok_or(crate::detached_delivery::DetachedDeliveryUnavailable::NoContinuationOwner)
     }
 
     /// [`Self::detached_delivery_route`] for a call whose result belongs to
@@ -795,7 +1034,7 @@ impl MobMcpState {
         owner_session_id: &SessionId,
     ) -> Result<
         (
-            Arc<meerkat_runtime::MeerkatMachine>,
+            crate::detached_completion_sink::DetachedCompletionSink,
             crate::detached_delivery::DetachedCompletionOwner,
         ),
         crate::detached_delivery::DetachedDeliveryUnavailable,
@@ -809,7 +1048,7 @@ impl MobMcpState {
                 crate::detached_delivery::DetachedCompletionOwner::Member(handle, identity)
             }
             Ok(None) | Err(_) => match self.detached_owner_host() {
-                Some(host) => crate::detached_delivery::DetachedCompletionOwner::Session(host),
+                Some(_) => crate::detached_delivery::DetachedCompletionOwner::Session,
                 None => {
                     return Err(
                         crate::detached_delivery::DetachedDeliveryUnavailable::NoOwnerRevivalHost,
@@ -1827,6 +2066,10 @@ impl MobMcpState {
                 })
                 .await?;
                 *restored = true;
+                if self.persistent_storage_root.is_some() {
+                    self.mob_set_restored
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
             }
         }
         // The restore lock is released BEFORE scheduling, and the sweep runs
@@ -2066,24 +2309,15 @@ impl MobMcpState {
             let delivery = crate::fork_relink::RelinkDelivery::from_state(self);
             let restored_before_ms = self.created_at_ms;
             tokio::spawn(async move {
-                let reports = crate::fork_relink::relink_mob_fork_children(
-                    Arc::clone(&service),
-                    delivery.clone(),
-                    &mob_id,
-                    &handle,
-                    restored_before_ms,
-                )
-                .await;
                 // A handle inserted before its mob runs (MobKit restores a
-                // stopped mob and activates it later) cannot revive a
-                // forker yet: those outcomes are delivered once it can.
-                let reports = crate::fork_relink::redeliver_when_owners_revivable(
+                // stopped mob and activates it later) cannot serve a forker
+                // yet: its outcome is durable and applied once it can.
+                let reports = crate::fork_relink::relink_mob_fork_children(
                     service,
                     delivery,
                     &mob_id,
                     &handle,
                     restored_before_ms,
-                    reports,
                 )
                 .await;
                 if !reports.is_empty() {
@@ -2095,19 +2329,6 @@ impl MobMcpState {
                 }
             });
         }
-    }
-
-    /// How many deferred fork_off outcomes the automatic re-link is waiting
-    /// on right now, each on its owner's mob. Observability for hosts and
-    /// tests.
-    #[doc(hidden)]
-    pub fn fork_relink_waiting_owners(&self) -> usize {
-        self.fork_relink_waiting_owners
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub(crate) fn fork_relink_waiting_owners_gauge(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        Arc::clone(&self.fork_relink_waiting_owners)
     }
 
     /// The mobs this state manages, as a live view the re-link reads afresh
@@ -2354,6 +2575,10 @@ impl MobMcpState {
         match destroy_result {
             Ok(report) => {
                 let removed = self.mobs.write().await.remove(mob_id);
+                self.retired_mobs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(mob_id.clone());
                 if removed.is_some() {
                     self.note_mob_set_changed();
                 }
@@ -4967,6 +5192,7 @@ impl SessionService for LocalSessionService {
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: id.clone(),
                     input: meerkat_core::types::RunInput::Content {
@@ -11813,7 +12039,7 @@ mod tests {
         let store = Arc::new(meerkat_mob::InMemoryRealmProfileStore::new())
             as Arc<dyn meerkat_mob::RealmProfileStore>;
         let mut profile = sample_realm_profile("gpt-5.5");
-        profile.skills = vec!["ob3-investigation-worker".to_string()];
+        profile.skills = vec!["ops-investigation-worker".to_string()];
         store
             .create("investigation-worker", &profile)
             .await
@@ -11821,7 +12047,7 @@ mod tests {
 
         let mut sources = BTreeMap::new();
         sources.insert(
-            "ob3-investigation-worker".to_string(),
+            "ops-investigation-worker".to_string(),
             SkillSource::Inline {
                 content: "investigation worker rules".to_string(),
             },
@@ -11846,7 +12072,7 @@ mod tests {
 
         let SkillSource::Inline { content } = definition
             .skills
-            .get("ob3-investigation-worker")
+            .get("ops-investigation-worker")
             .expect("seeded source copied")
         else {
             panic!("expected inline seeded skill source");
@@ -12010,7 +12236,8 @@ mod tests {
                     spec.identity.clone(),
                     view,
                 ));
-            spec.application_tool_policy = meerkat_core::ApplicationToolPolicyBinding::Unmanaged;
+            spec.application_tool_policy =
+                Some(meerkat_core::ApplicationToolPolicyBinding::Unmanaged);
         }
 
         fn calls(

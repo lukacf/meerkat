@@ -33,6 +33,20 @@ pub enum OperationObservedOutcome {
     HttpResponse { status: u16 },
     /// A send/receive failure does not prove that the remote request did not run.
     TransportError,
+    /// The Session owner returned an append disposition. Durability is still
+    /// established by that owner's existing session commit, not this value.
+    ContextAppendReturned {
+        status: crate::service::AppendSystemContextStatus,
+    },
+    /// The Session control call failed. This is not a permission verdict or
+    /// evidence that every attempted mutation was rolled back.
+    ContextAppendError,
+    /// A bounded original input was materialized inside its owner. This does
+    /// not claim it was returned or disclosed to a model; final checks can
+    /// still withhold the complete review context after this observation.
+    SourceReadMaterialized,
+    /// No complete source material was obtained. No source bytes are recorded.
+    SourceReadUnavailable,
 }
 
 impl OperationObservedOutcome {
@@ -61,6 +75,11 @@ impl std::fmt::Debug for OperationObservedOutcome {
 /// any run, grant, tool, or input lifecycle and cannot be replayed as commands.
 #[derive(Clone)]
 pub enum OperationObservation {
+    /// The actual review owner started this attempt on this exact candidate.
+    /// This is historical association, never a verdict or entry allowance.
+    ReviewAttemptStarted {
+        attempt_ref: crate::approval::review::ReviewAttemptRef,
+    },
     Entry,
     Outcome(OperationObservedOutcome),
     Refused(OperationRefusalKind),

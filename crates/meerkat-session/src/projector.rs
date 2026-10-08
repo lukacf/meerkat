@@ -862,6 +862,7 @@ mod tests {
             &sid,
             &[
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: sid.clone(),
                     input: meerkat_core::types::RunInput::Content {

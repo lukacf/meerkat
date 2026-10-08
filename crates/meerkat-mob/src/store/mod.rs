@@ -249,6 +249,74 @@ pub(crate) fn step_failed_event_identity(kind: &MobEventKind) -> Option<(&RunId,
     }
 }
 
+/// What a mob's stream already records, in the mob's current epoch, for the
+/// job of one fork job terminal: fed the stream in cursor order by every
+/// [`MobEventStore::append_fork_job_terminal_if_absent`], so the check and
+/// the append are one atomic step wherever the store makes them one.
+pub(crate) struct ForkJobTerminalScan<'a> {
+    mob_id: &'a crate::ids::MobId,
+    terminal: &'a crate::event::ForkJobTerminalEvent,
+    recorded: bool,
+    conflicting: bool,
+}
+
+impl<'a> ForkJobTerminalScan<'a> {
+    pub(crate) fn new(event: &'a NewMobEvent) -> Result<Self, MobStoreError> {
+        let MobEventKind::ForkJobTerminal(terminal) = &event.kind else {
+            return Err(MobStoreError::Internal(
+                "append_fork_job_terminal_if_absent requires a ForkJobTerminal event".to_string(),
+            ));
+        };
+        Ok(Self {
+            mob_id: &event.mob_id,
+            terminal,
+            recorded: false,
+            conflicting: false,
+        })
+    }
+
+    pub(crate) fn observe(&mut self, existing: &MobEvent) {
+        if &existing.mob_id != self.mob_id {
+            return;
+        }
+        match &existing.kind {
+            // A reset starts a new epoch: what an earlier one recorded is
+            // not this job's terminal.
+            MobEventKind::MobReset => {
+                self.recorded = false;
+                self.conflicting = false;
+            }
+            MobEventKind::ForkJobTerminal(recorded)
+                if recorded.job_id == self.terminal.job_id
+                    && recorded.child == self.terminal.child =>
+            {
+                if recorded == self.terminal {
+                    self.recorded = true;
+                } else {
+                    self.conflicting = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `true` when exactly this terminal is already recorded (an exact
+    /// replay, nothing to append).
+    ///
+    /// # Errors
+    /// [`MobStoreError::CasConflict`] when the job already has a different
+    /// terminal outcome.
+    pub(crate) fn finish(self) -> Result<bool, MobStoreError> {
+        if self.conflicting {
+            return Err(MobStoreError::CasConflict(format!(
+                "fork_off job {} of child {} already has a different terminal outcome",
+                self.terminal.job_id, self.terminal.child
+            )));
+        }
+        Ok(self.recorded)
+    }
+}
+
 /// Frame-aware atomic persistence operation required by the flow/frame store contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -4098,6 +4166,30 @@ pub trait MobEventStore: private::MobEventStoreSealed + Send + Sync {
             }
         }
         if exact_replay {
+            return Ok(None);
+        }
+        self.append(event).await.map(Some)
+    }
+
+    /// Record a fork job's terminal outcome once: append the
+    /// `ForkJobTerminal` event unless the mob's current epoch already holds
+    /// one for the same job and child. An exact replay returns `None`; a
+    /// different outcome under the same job fails closed as
+    /// [`MobStoreError::CasConflict`], so concurrent recorders can never both
+    /// commit.
+    ///
+    /// Durable implementations override this with an atomic check-and-append.
+    /// The default keeps crate-local test doubles source-compatible.
+    async fn append_fork_job_terminal_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        validate_mob_event_write_authority(&event.kind)?;
+        let mut scan = ForkJobTerminalScan::new(&event)?;
+        for existing in self.replay_all().await? {
+            scan.observe(&existing);
+        }
+        if scan.finish()? {
             return Ok(None);
         }
         self.append(event).await.map(Some)

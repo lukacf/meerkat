@@ -145,6 +145,8 @@ pub fn build_runtime_backed_service_with_capacities_and_default_reconfigure_host
     #[cfg(not(target_arch = "wasm32"))]
     let delivery_owner = persistence.runtime_delivery_owner();
     #[cfg(not(target_arch = "wasm32"))]
+    let continuation_bindings = persistence.continuation_bindings();
+    #[cfg(not(target_arch = "wasm32"))]
     let delivery_realm = persistence
         .manifest()
         .map(|manifest| manifest.realm.to_string());
@@ -163,6 +165,7 @@ pub fn build_runtime_backed_service_with_capacities_and_default_reconfigure_host
         &service,
         &adapter,
         delivery_realm,
+        continuation_bindings,
     );
     blueprint.install(
         &adapter,
@@ -1783,27 +1786,41 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutorPostStopCleanupHandle
             let Some(witness) = actor_witness_slot.witness() else {
                 return Ok(());
             };
-            let Some(lease) = self
+            // No lease means the exact actor is already gone from the
+            // registry, possibly removed by an earlier cancelled attempt whose
+            // join is still retained: join that exact incarnation either way,
+            // never a replacement.
+            if let Some(lease) = self
                 .service
                 .acquire_live_session_actor_turn_boundary_lease_exact(&witness)
                 .await
                 .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?
-            else {
-                return Ok(());
-            };
-            return self
-                .service
-                .discard_live_session_actor(&lease)
-                .await
-                .map(|_| ())
-                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()));
+            {
+                let discarded = self.service.discard_live_session_actor(&lease).await;
+                // The actor may still need its turn boundary to drain.
+                drop(lease);
+                discarded.map_err(|error| {
+                    CoreExecutorError::control_failed_runtime(error.to_string())
+                })?;
+            }
+            self.service.await_removed_actor_exit_exact(&witness).await;
+            return Ok(());
         }
         match self
             .service
             .discard_live_session_after_runtime_stop_terminalized(&self.session_id)
             .await
         {
-            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Ok(()) | Err(SessionError::NotFound { .. }) => {
+                // The session actor owns its hosting claim until it exits, so
+                // cleanup completes only once the removed actor has exited. A
+                // closed command receiver is not exit: it may still be
+                // draining a queued command.
+                self.service
+                    .await_removed_actor_exit(&self.session_id)
+                    .await;
+                Ok(())
+            }
             Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
         }
     }
@@ -1831,6 +1848,23 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutorPostStopCleanupHandle
         {
             Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
             Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
+        }
+    }
+
+    async fn await_removed_actor_exit(&self) {
+        match self
+            .actor_witness_slot
+            .as_ref()
+            .map(crate::LiveSessionActorWitnessSlot::witness)
+        {
+            Some(Some(witness)) => self.service.await_removed_actor_exit_exact(&witness).await,
+            // No actor was ever published for this executor incarnation.
+            Some(None) => {}
+            None => {
+                self.service
+                    .await_removed_actor_exit(&self.session_id)
+                    .await;
+            }
         }
     }
 }
@@ -2291,7 +2325,14 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
             .discard_live_session_after_runtime_stop_terminalized(&self.session_id)
             .await;
         match discard_result {
-            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Ok(()) | Err(SessionError::NotFound { .. }) => {
+                // Cleanup completes only once the removed actor has exited and
+                // released its hosting claim.
+                self.service
+                    .await_removed_actor_exit(&self.session_id)
+                    .await;
+                Ok(())
+            }
             Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
         }
     }
@@ -4647,6 +4688,852 @@ mod tests {
             _session_id: &SessionId,
         ) -> Result<(), RuntimeDriverError> {
             Ok(())
+        }
+    }
+    mod actor_exit_control {
+        use super::*;
+        use meerkat_core::SessionLlmIdentity;
+        use meerkat_core::lifecycle::core_executor::*;
+        use meerkat_core::service::TurnToolOverlay;
+        use meerkat_session::ephemeral::{
+            ObservedSessionTailKind, SessionTranscriptAuthoritySnapshot,
+        };
+        use meerkat_session::{SessionAgent, SessionSnapshot};
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+        use std::time::SystemTime;
+        use tokio::sync::Semaphore;
+
+        const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+        // Adapt the session crate's DrainProbeAgent to own the exact durable
+        // Session. These gates control scheduling only; the production actor
+        // task and runtime continue to own hosting and lifecycle authority.
+        struct DrainHooks {
+            entered_control: Notify,
+            release_control: Semaphore,
+            dropped: AtomicUsize,
+            runs: AtomicUsize,
+        }
+
+        struct DrainBuilder(Arc<DrainHooks>);
+
+        struct DrainAgent {
+            session: Session,
+            identity: SessionLlmIdentity,
+            hooks: Arc<DrainHooks>,
+            transient: meerkat_core::TransientTurnContextStateHandle,
+        }
+
+        impl Drop for DrainAgent {
+            fn drop(&mut self) {
+                self.hooks.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for DrainBuilder {
+            type Agent = DrainAgent;
+
+            async fn build_agent(
+                &self,
+                req: &CreateSessionRequest,
+                _event_tx: mpsc::Sender<AgentEvent>,
+            ) -> Result<DrainAgent, SessionError> {
+                let session = req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.resume_session.clone())
+                    .ok_or_else(|| {
+                        SessionError::Unsupported(
+                            "drain fixture requires the materialization owner's Session".into(),
+                        )
+                    })?;
+                Ok(DrainAgent {
+                    session,
+                    identity: SessionLlmIdentity {
+                        model: req.model.clone(),
+                        provider: meerkat_core::Provider::OpenAI,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding: None,
+                    },
+                    hooks: Arc::clone(&self.0),
+                    transient: meerkat_core::TransientTurnContextStateHandle::new(),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgent for DrainAgent {
+            async fn run_with_events(
+                &mut self,
+                _prompt: meerkat_core::ContentInput,
+                _event_tx: mpsc::Sender<AgentEvent>,
+            ) -> Result<RunResult, meerkat_core::AgentError> {
+                self.hooks.runs.fetch_add(1, Ordering::SeqCst);
+                Err(meerkat_core::AgentError::ConfigError(
+                    "the actor-exit fixture must not start a model turn".into(),
+                ))
+            }
+
+            async fn abort_uncommitted_compaction_projections(
+                &mut self,
+            ) -> Result<(), meerkat_core::AgentError> {
+                self.hooks.entered_control.notify_one();
+                self.hooks
+                    .release_control
+                    .acquire()
+                    .await
+                    .expect("control gate remains open")
+                    .forget();
+                Ok(())
+            }
+
+            fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+            }
+            fn set_turn_tool_overlay(
+                &mut self,
+                _overlay: Option<TurnToolOverlay>,
+            ) -> Result<(), meerkat_core::AgentError> {
+                Ok(())
+            }
+            fn hot_swap_llm_identity(
+                &mut self,
+                _client: Arc<dyn meerkat_core::AgentLlmClient>,
+                identity: SessionLlmIdentity,
+                _policy: meerkat_core::SessionLlmRequestPolicy,
+            ) -> Result<(), meerkat_core::AgentError> {
+                self.identity = identity;
+                Ok(())
+            }
+            fn cancel(&mut self) {}
+            fn session_id(&self) -> SessionId {
+                self.session.id().clone()
+            }
+            fn snapshot(&self) -> SessionSnapshot {
+                SessionSnapshot {
+                    created_at: SystemTime::now(),
+                    updated_at: SystemTime::now(),
+                    message_count: self.session.messages().len(),
+                    total_tokens: 0,
+                    usage: Default::default(),
+                    last_assistant_text: None,
+                }
+            }
+            fn session_clone(&self) -> Result<Session, meerkat_core::AgentError> {
+                Ok(self.session.clone())
+            }
+            fn session_transcript_authority(
+                &self,
+            ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::AgentError> {
+                SessionTranscriptAuthoritySnapshot::from_session(&self.session)
+            }
+            fn observed_session_tail(&self) -> ObservedSessionTailKind {
+                meerkat_core::pending_continuation::observe_session_tail(self.session.messages())
+            }
+            fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+                Some(self.identity.clone())
+            }
+            fn transient_turn_context_state(
+                &self,
+            ) -> meerkat_core::TransientTurnContextStateHandle {
+                self.transient.clone()
+            }
+            fn sync_session_from_durable_snapshot(
+                &mut self,
+                session: Session,
+            ) -> Result<(), meerkat_core::AgentError> {
+                self.session = session;
+                Ok(())
+            }
+        }
+
+        struct CleanupProbe {
+            inner: Arc<dyn CoreExecutorPostStopCleanupHandle>,
+            observed: mpsc::UnboundedSender<bool>,
+            inspect_drain: Semaphore,
+            finish: Semaphore,
+            claimed: AtomicBool,
+        }
+
+        impl CleanupProbe {
+            async fn observe<F>(&self, future: F) -> Result<(), CoreExecutorError>
+            where
+                F: Future<Output = Result<(), CoreExecutorError>> + Send,
+            {
+                if self.claimed.swap(true, Ordering::SeqCst) {
+                    return future.await;
+                }
+                tokio::pin!(future);
+                // Deliberately poll the REAL cleanup, reporting whether it
+                // returned. The probe's own gate is never an exit oracle.
+                // Only this intentional poll bypasses cooperative-budget yield;
+                // the cleanup future and task remain normally scheduled.
+                let mut result = match poll_fn(|cx| {
+                    Poll::Ready(
+                        std::pin::pin!(tokio::task::unconstrained(future.as_mut())).poll(cx),
+                    )
+                })
+                .await
+                {
+                    Poll::Ready(result) => Some(result),
+                    Poll::Pending => None,
+                };
+                let _ = self.observed.send(result.is_some());
+                self.inspect_drain
+                    .acquire()
+                    .await
+                    .expect("inspection gate remains open")
+                    .forget();
+                if result.is_none() {
+                    result = match poll_fn(|cx| {
+                        Poll::Ready(
+                            std::pin::pin!(tokio::task::unconstrained(future.as_mut())).poll(cx),
+                        )
+                    })
+                    .await
+                    {
+                        Poll::Ready(result) => Some(result),
+                        Poll::Pending => None,
+                    };
+                }
+                let _ = self.observed.send(result.is_some());
+                self.finish
+                    .acquire()
+                    .await
+                    .expect("cleanup gate remains open")
+                    .forget();
+                match result {
+                    Some(result) => result,
+                    None => future.await,
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutorPostStopCleanupHandle for CleanupProbe {
+            fn durability_reload_cleanup_capability(
+                &self,
+            ) -> CoreDurabilityReloadCleanupCapability {
+                self.inner.durability_reload_cleanup_capability()
+            }
+            async fn prepare_durability_reload_cleanup(&self) -> Result<(), CoreExecutorError> {
+                self.inner.prepare_durability_reload_cleanup().await
+            }
+            async fn cleanup_after_durability_reload_required(
+                &self,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner.cleanup_after_durability_reload_required().await
+            }
+            async fn cleanup_after_runtime_stop_terminalized(
+                &self,
+            ) -> Result<(), CoreExecutorError> {
+                self.observe(self.inner.cleanup_after_runtime_stop_terminalized())
+                    .await
+            }
+            async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+                &self,
+            ) -> Result<(), CoreExecutorError> {
+                self.observe(
+                    self.inner
+                        .cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(),
+                )
+                .await
+            }
+        }
+
+        // Forward the existing executor contract unchanged except for observing
+        // its real cloneable cleanup callback. No fixture decides terminality.
+        struct ObservedExecutor {
+            inner: Box<dyn CoreExecutor>,
+            cleanup: Arc<CleanupProbe>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for ObservedExecutor {
+            fn supports_work_authorization(&self) -> bool {
+                self.inner.supports_work_authorization()
+            }
+            fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+                self.inner.boundary_handle()
+            }
+            fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+                self.inner.interrupt_handle()
+            }
+            fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+                self.inner.publication_handle()
+            }
+            fn machine_managed_post_stop_unregister(&self) -> bool {
+                self.inner.machine_managed_post_stop_unregister()
+            }
+            fn post_stop_cleanup_handle(
+                &self,
+            ) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+                Some(self.cleanup.clone())
+            }
+            fn turn_finalization_boundary_handle(
+                &self,
+            ) -> Option<Arc<dyn CoreExecutorTurnFinalizationBoundaryHandle>> {
+                self.inner.turn_finalization_boundary_handle()
+            }
+            fn pre_dequeue_handle(&self) -> Option<Arc<dyn CoreExecutorPreDequeueHandle>> {
+                self.inner.pre_dequeue_handle()
+            }
+            fn transcript_notice_handle(
+                &self,
+            ) -> Option<Arc<dyn CoreExecutorTranscriptNoticeHandle>> {
+                self.inner.transcript_notice_handle()
+            }
+            async fn apply(
+                &mut self,
+                run_id: meerkat_core::lifecycle::RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                self.inner.apply(run_id, primitive).await
+            }
+            async fn checkpoint_committed_session_snapshot(
+                &mut self,
+                snapshot: Arc<Vec<u8>>,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner
+                    .checkpoint_committed_session_snapshot(snapshot)
+                    .await
+            }
+            async fn acknowledge_committed_session_boundary(
+                &mut self,
+                authority: &CommittedSessionBoundaryAuthority,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner
+                    .acknowledge_committed_session_boundary(authority)
+                    .await
+            }
+            async fn reconcile_committed_compaction_projections(
+                &mut self,
+                intents: &[meerkat_core::CompactionProjectionIntent],
+            ) -> Result<(), CoreExecutorError> {
+                self.inner
+                    .reconcile_committed_compaction_projections(intents)
+                    .await
+            }
+            async fn abort_uncommitted_compaction_projections(
+                &mut self,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner.abort_uncommitted_compaction_projections().await
+            }
+            async fn abort_rejected_run_projections(&mut self) -> Result<(), CoreExecutorError> {
+                self.inner.abort_rejected_run_projections().await
+            }
+            async fn publish_interaction_terminals(
+                &mut self,
+                events: &[AgentEvent],
+            ) -> Result<Vec<CoreInteractionTerminalPublicationReceipt>, CoreExecutorError>
+            {
+                self.inner.publish_interaction_terminals(events).await
+            }
+            async fn publish_boundary_appends_discarded(
+                &mut self,
+                discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner
+                    .publish_boundary_appends_discarded(discarded)
+                    .await
+            }
+            async fn cancel_after_boundary(
+                &mut self,
+                reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner.cancel_after_boundary(reason).await
+            }
+            async fn stop_runtime_executor(
+                &mut self,
+                reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner.stop_runtime_executor(reason).await
+            }
+            async fn cleanup_after_runtime_stop_terminalized(
+                &mut self,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner.cleanup_after_runtime_stop_terminalized().await
+            }
+        }
+
+        struct ReleaseGatesOnDrop {
+            actor: Arc<DrainHooks>,
+            cleanup: Option<Arc<CleanupProbe>>,
+        }
+
+        impl Drop for ReleaseGatesOnDrop {
+            fn drop(&mut self) {
+                self.actor.release_control.add_permits(2);
+                if let Some(cleanup) = self.cleanup.as_ref() {
+                    cleanup.inspect_drain.add_permits(1);
+                    cleanup.finish.add_permits(1);
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn external_unregister_waits_for_actor_exit_after_command_receiver_closes() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let paths = meerkat_core::session_hosting::HostingPaths {
+                hosting_lock_dir: temp.path().join("hosting"),
+                cold_delivery_lock: temp.path().join("cold-delivery.lock"),
+                database: None,
+            };
+            let database = temp.path().join("runtime.sqlite3");
+            let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+                meerkat_runtime::SqliteRuntimeStore::new(&database)
+                    .expect("open runtime store")
+                    .with_hosting_paths(paths.clone()),
+            );
+            assert!(runtime_store.hosting_capability().is_cross_process());
+            let store = Arc::new(JsonlStore::new(temp.path().join("sessions")));
+            store.init().await.expect("initialize session projection");
+            let blobs: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::new());
+            let adapter = Arc::new(
+                MeerkatMachine::persistent(runtime_store.clone(), blobs.clone())
+                    .expect("runtime owner"),
+            );
+            let hooks = Arc::new(DrainHooks {
+                entered_control: Notify::new(),
+                release_control: Semaphore::new(0),
+                dropped: AtomicUsize::new(0),
+                runs: AtomicUsize::new(0),
+            });
+            let service = Arc::new(
+                PersistentSessionService::new(
+                    DrainBuilder(hooks.clone()),
+                    1,
+                    store.clone(),
+                    runtime_store,
+                    blobs.clone(),
+                )
+                .with_canonical_runtime_adapter(adapter.clone()),
+            );
+            let retained_message =
+                meerkat_core::types::Message::System(meerkat_core::types::SystemMessage::new(
+                    "Retain this exact no-turn transcript across actor exit.",
+                ));
+            let mut session = Session::new();
+            session.push(retained_message.clone());
+            let session_id = session.id().clone();
+            let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+            let cleanup = Arc::new(CleanupProbe {
+                inner: persistent_runtime_post_stop_cleanup_handle(
+                    service.clone(),
+                    session_id.clone(),
+                ),
+                observed: observed_tx,
+                inspect_drain: Semaphore::new(0),
+                finish: Semaphore::new(0),
+                claimed: AtomicBool::new(false),
+            });
+            let _release_on_failure = ReleaseGatesOnDrop {
+                actor: hooks.clone(),
+                cleanup: Some(cleanup.clone()),
+            };
+            materialize_session(
+                &service,
+                &adapter,
+                session,
+                make_request(SessionBuildOptions::default()),
+                {
+                    let service = service.clone();
+                    let adapter = adapter.clone();
+                    let cleanup = cleanup.clone();
+                    move |id| {
+                        Box::new(ObservedExecutor {
+                            inner: default_persistent_executor(service, adapter, id),
+                            cleanup,
+                        }) as Box<dyn CoreExecutor>
+                    }
+                },
+            )
+            .await
+            .expect("materialize durable no-turn actor");
+            let durable_before = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("read initial durable session")
+                .expect("durable session exists");
+
+            let first = service.abort_uncommitted_compaction_projections(&session_id);
+            tokio::pin!(first);
+            assert!(futures::poll!(tokio::task::unconstrained(first.as_mut())).is_pending());
+            tokio::time::timeout(DRAIN_TIMEOUT, hooks.entered_control.notified())
+                .await
+                .expect("actor entered abort 1");
+            // One poll sends the second command through the public service
+            // before awaiting its reply. The actor is still held in abort 1.
+            let second = service.abort_uncommitted_compaction_projections(&session_id);
+            tokio::pin!(second);
+            assert!(futures::poll!(tokio::task::unconstrained(second.as_mut())).is_pending());
+            let unregister = tokio::spawn({
+                let adapter = adapter.clone();
+                let id = session_id.clone();
+                async move {
+                    adapter
+                        .unregister_current_session_registration_until_terminal(&id)
+                        .await
+                }
+            });
+            let returned_before_drain = tokio::time::timeout(DRAIN_TIMEOUT, observed_rx.recv())
+                .await
+                .expect("real external cleanup was polled")
+                .expect("first cleanup observation");
+            let removed_before_release = service
+                .live_session_actor_witness(&session_id)
+                .await
+                .is_none();
+            hooks.release_control.add_permits(1);
+            tokio::time::timeout(DRAIN_TIMEOUT, first.as_mut())
+                .await
+                .expect("abort 1 reply")
+                .expect("abort 1 succeeds");
+            tokio::time::timeout(DRAIN_TIMEOUT, hooks.entered_control.notified())
+                .await
+                .expect("queued abort 2 entered the shutdown drain");
+            // Shutdown has removed the actor and the drain closes its receiver
+            // before awaiting abort 2. Force a new poll here: merely not having
+            // scheduled a cleanup task cannot make this negative check pass.
+            cleanup.inspect_drain.add_permits(1);
+            let returned_while_draining = tokio::time::timeout(DRAIN_TIMEOUT, observed_rx.recv())
+                .await
+                .expect("cleanup polled during abort 2")
+                .expect("second cleanup observation");
+            let dropped_while_draining = hooks.dropped.load(Ordering::SeqCst);
+            let fresh_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+                meerkat_runtime::SqliteRuntimeStore::new(&database)
+                    .expect("reopen runtime store")
+                    .with_hosting_paths(paths),
+            );
+            let fresh_adapter = Arc::new(
+                MeerkatMachine::persistent(fresh_store.clone(), blobs.clone())
+                    .expect("fresh runtime owner"),
+            );
+            let fresh_service = Arc::new(
+                PersistentSessionService::new(
+                    DrainBuilder(hooks.clone()),
+                    1,
+                    store,
+                    fresh_store,
+                    blobs,
+                )
+                .with_canonical_runtime_adapter(fresh_adapter.clone()),
+            );
+            let early_admission = fresh_adapter
+                .ensure_session_with_executor(
+                    session_id.clone(),
+                    default_persistent_executor(
+                        fresh_service.clone(),
+                        fresh_adapter.clone(),
+                        session_id.clone(),
+                    ),
+                )
+                .await;
+
+            // Release all gates and join before assertions about the old
+            // implementation. Even an expected RED must not strand its actor.
+            hooks.release_control.add_permits(1);
+            cleanup.finish.add_permits(1);
+            tokio::time::timeout(DRAIN_TIMEOUT, second.as_mut())
+                .await
+                .expect("abort 2 reply")
+                .expect("abort 2 succeeds");
+            let unregistered = tokio::time::timeout(DRAIN_TIMEOUT, unregister)
+                .await
+                .expect("external unregister completes")
+                .expect("unregister task joins")
+                .expect("unregister succeeds");
+            let durable_after = fresh_service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("read retained session after exit")
+                .expect("session remains durable");
+            let reconstructed = materialize_session(
+                &fresh_service,
+                &fresh_adapter,
+                durable_after.clone(),
+                make_request(SessionBuildOptions::default()),
+                {
+                    let service = fresh_service.clone();
+                    let adapter = fresh_adapter.clone();
+                    move |id| default_persistent_executor(service, adapter, id)
+                },
+            )
+            .await;
+            let fresh_actor_is_live = fresh_service
+                .live_session_actor_witness(&session_id)
+                .await
+                .is_some_and(|actor| actor.session_id() == &session_id && actor.is_live());
+            fresh_adapter
+                .unregister_current_session_registration_until_terminal(&session_id)
+                .await
+                .expect("cleanup reconstructed actor");
+
+            assert!(
+                removed_before_release,
+                "external cleanup must reach actual actor discard before the first control is released"
+            );
+            assert!(
+                !returned_before_drain,
+                "cleanup returned while the original actor was still inside abort 1"
+            );
+            assert!(
+                !returned_while_draining,
+                "a closed command receiver is not actor exit: abort 2 still owns the actor and its hosting claim"
+            );
+            assert_eq!(dropped_while_draining, 0, "the held actor has not exited");
+            assert!(
+                matches!(&early_admission, Err(RuntimeDriverError::ServedElsewhere { session_id: refused }) if refused == &session_id),
+                "fresh hosting must refuse while the exact predecessor actor remains alive: {:?}",
+                early_admission.as_ref().err(),
+            );
+            assert!(unregistered);
+            assert_eq!(
+                reconstructed
+                    .expect("fresh reconstruction succeeds after exact cleanup")
+                    .session_id,
+                session_id
+            );
+            assert!(
+                fresh_actor_is_live,
+                "fresh reconstruction publishes a live same-session actor"
+            );
+            assert_eq!(
+                hooks.runs.load(Ordering::SeqCst),
+                0,
+                "neither no-turn materialization starts a model turn"
+            );
+            assert_eq!(
+                durable_before.messages(),
+                std::slice::from_ref(&retained_message),
+                "the durable baseline contains the exact nonempty seeded transcript"
+            );
+            assert_eq!(
+                serde_json::to_value(durable_before.messages()).expect("original messages"),
+                serde_json::to_value(durable_after.messages()).expect("retained messages")
+            );
+        }
+
+        #[tokio::test]
+        async fn cancelled_actor_slot_cleanup_retry_waits_for_exit_and_preserves_replacement() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let paths = meerkat_core::session_hosting::HostingPaths {
+                hosting_lock_dir: temp.path().join("hosting"),
+                cold_delivery_lock: temp.path().join("cold-delivery.lock"),
+                database: None,
+            };
+            let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+                meerkat_runtime::SqliteRuntimeStore::new(temp.path().join("runtime.sqlite3"))
+                    .expect("open runtime store")
+                    .with_hosting_paths(paths),
+            );
+            assert!(runtime_store.hosting_capability().is_cross_process());
+            let store = Arc::new(JsonlStore::new(temp.path().join("sessions")));
+            store.init().await.expect("initialize session projection");
+            let blobs: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::new());
+            let adapter = Arc::new(
+                MeerkatMachine::persistent(runtime_store.clone(), blobs.clone())
+                    .expect("runtime owner"),
+            );
+            let hooks = Arc::new(DrainHooks {
+                entered_control: Notify::new(),
+                release_control: Semaphore::new(0),
+                dropped: AtomicUsize::new(0),
+                runs: AtomicUsize::new(0),
+            });
+            let service = Arc::new(
+                PersistentSessionService::new(
+                    DrainBuilder(hooks.clone()),
+                    1,
+                    store,
+                    runtime_store,
+                    blobs,
+                )
+                .with_canonical_runtime_adapter(adapter.clone()),
+            );
+            let _release_on_failure = ReleaseGatesOnDrop {
+                actor: hooks.clone(),
+                cleanup: None,
+            };
+            let mut session = Session::new();
+            session.push(meerkat_core::types::Message::System(
+                meerkat_core::types::SystemMessage::new("Retain the actor-slot retry transcript."),
+            ));
+            let session_id = session.id().clone();
+            let (slot_tx, slot_rx) = tokio::sync::oneshot::channel();
+            let reserved_admission = service
+                .reserve_create_session_admission()
+                .await
+                .expect("reserve actor A admission");
+            materialize_session_with_reserved_admission_and_actor_slot(
+                &service,
+                &adapter,
+                session,
+                make_request(SessionBuildOptions::default()),
+                reserved_admission,
+                {
+                    let service = service.clone();
+                    let adapter = adapter.clone();
+                    move |id, _attachment, actor_slot| {
+                        // Retain the actual slot from materialization. The
+                        // service alone publishes its actor witness.
+                        assert!(slot_tx.send(actor_slot).is_ok());
+                        default_persistent_executor(service, adapter, id)
+                    }
+                },
+            )
+            .await
+            .expect("materialize durable no-turn actor A");
+            let actor_slot = slot_rx.await.expect("retain the service actor slot");
+            let actor_a = actor_slot.witness().expect("service published actor A");
+            assert_eq!(
+                service.live_session_actor_witness(&session_id).await,
+                Some(actor_a.clone())
+            );
+            let cleanup = persistent_runtime_post_stop_cleanup_handle_for_actor_slot(
+                service.clone(),
+                session_id.clone(),
+                actor_slot,
+            );
+            let durable_before = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("read actor A durable session")
+                .expect("durable session exists");
+
+            let first = service.abort_uncommitted_compaction_projections(&session_id);
+            tokio::pin!(first);
+            assert!(futures::poll!(tokio::task::unconstrained(first.as_mut())).is_pending());
+            tokio::time::timeout(DRAIN_TIMEOUT, hooks.entered_control.notified())
+                .await
+                .expect("actor entered abort 1");
+            let second = service.abort_uncommitted_compaction_projections(&session_id);
+            tokio::pin!(second);
+            assert!(futures::poll!(tokio::task::unconstrained(second.as_mut())).is_pending());
+
+            let mut cancelled = Box::pin(cleanup.cleanup_after_runtime_stop_terminalized());
+            assert!(futures::poll!(tokio::task::unconstrained(cancelled.as_mut())).is_pending());
+            let removed_before_cancel = service
+                .live_session_actor_witness(&session_id)
+                .await
+                .is_none();
+            let dropped_before_cancel = hooks.dropped.load(Ordering::SeqCst);
+            // Drop the owned future, not just a Pin<&mut _>. The actor has
+            // been removed, but its retained task join must survive this drop.
+            drop(cancelled);
+
+            let mut retry = Box::pin(cleanup.cleanup_after_runtime_stop_terminalized());
+            let mut retry_result = match futures::poll!(tokio::task::unconstrained(retry.as_mut()))
+            {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            };
+            let returned_before_drain = retry_result.is_some();
+            hooks.release_control.add_permits(1);
+            tokio::time::timeout(DRAIN_TIMEOUT, first.as_mut())
+                .await
+                .expect("abort 1 reply")
+                .expect("abort 1 succeeds");
+            tokio::time::timeout(DRAIN_TIMEOUT, hooks.entered_control.notified())
+                .await
+                .expect("queued abort 2 entered the shutdown drain");
+            if retry_result.is_none() {
+                retry_result = match futures::poll!(tokio::task::unconstrained(retry.as_mut())) {
+                    Poll::Ready(result) => Some(result),
+                    Poll::Pending => None,
+                };
+            }
+            let returned_while_draining = retry_result.is_some();
+            let dropped_while_draining = hooks.dropped.load(Ordering::SeqCst);
+
+            // Release both commands and consume the real join before making
+            // RED assertions or admitting a same-ID replacement.
+            hooks.release_control.add_permits(1);
+            tokio::time::timeout(DRAIN_TIMEOUT, second.as_mut())
+                .await
+                .expect("abort 2 reply")
+                .expect("abort 2 succeeds");
+            let retry_result = match retry_result {
+                Some(result) => result,
+                None => tokio::time::timeout(DRAIN_TIMEOUT, retry.as_mut())
+                    .await
+                    .expect("retry completes after actor A exits"),
+            };
+            drop(retry);
+            tokio::time::timeout(DRAIN_TIMEOUT, service.await_removed_actor_exit(&session_id))
+                .await
+                .expect("collect actor A even when the retry incorrectly returned early");
+            let dropped_after_exit = hooks.dropped.load(Ordering::SeqCst);
+            let durable_after = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("read retained session after actor A exit")
+                .expect("session remains durable");
+            // The cleanup above was invoked directly, so actor A's runtime
+            // registration is still current. Retire it so actor B is a fresh
+            // same-ID materialization, not a resume of A's registration.
+            assert!(
+                adapter
+                    .unregister_current_session_registration_until_terminal(&session_id)
+                    .await
+                    .expect("retire actor A's runtime registration")
+            );
+            materialize_session(
+                &service,
+                &adapter,
+                durable_after.clone(),
+                make_request(SessionBuildOptions::default()),
+                {
+                    let service = service.clone();
+                    let adapter = adapter.clone();
+                    move |id| default_persistent_executor(service, adapter, id)
+                },
+            )
+            .await
+            .expect("materialize same-ID actor B after actor A exited");
+            let actor_b = service
+                .live_session_actor_witness(&session_id)
+                .await
+                .expect("service published actor B");
+            let stale_result = tokio::time::timeout(
+                DRAIN_TIMEOUT,
+                cleanup.cleanup_after_runtime_stop_terminalized(),
+            )
+            .await
+            .expect("stale actor A cleanup must not wait for live actor B");
+            let actor_after_stale_cleanup = service.live_session_actor_witness(&session_id).await;
+            let actor_b_is_live = actor_b.is_live();
+            adapter
+                .unregister_current_session_registration_until_terminal(&session_id)
+                .await
+                .expect("clean actor B runtime registration");
+
+            retry_result.expect("actor A cleanup retry succeeds");
+            stale_result.expect("stale actor A cleanup is an idempotent no-op");
+            assert!(removed_before_cancel, "cancel after actual actor A removal");
+            assert_eq!(dropped_before_cancel, 0, "actor A still owns its task");
+            assert!(
+                !returned_before_drain,
+                "an absent exact actor slot does not mean its retained task has exited"
+            );
+            assert!(
+                !returned_while_draining,
+                "retry must still wait while actor A drains its queued second command"
+            );
+            assert_eq!(dropped_while_draining, 0);
+            assert_eq!(dropped_after_exit, 1);
+            assert_ne!(actor_a, actor_b);
+            assert_eq!(actor_b.session_id(), &session_id);
+            assert_eq!(actor_after_stale_cleanup, Some(actor_b));
+            assert!(actor_b_is_live, "stale actor A cleanup leaves actor B live");
+            assert_eq!(hooks.runs.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                serde_json::to_value(durable_before.messages()).expect("original messages"),
+                serde_json::to_value(durable_after.messages()).expect("retained messages")
+            );
         }
     }
 }

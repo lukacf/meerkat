@@ -17,8 +17,8 @@
 //! row that never committed must be invisible to reads and to revision-guard
 //! resolution, and must be pruned once a later write commits. A store that
 //! instead adopts the highest-version sibling as current lets one failed
-//! attempt make every subsequent guarded save permanently stale — the ob3
-//! zombie incident.
+//! attempt make every subsequent guarded save permanently stale - the
+//! zombie-member incident.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -124,7 +124,7 @@ fn encode(session: &Session) -> Result<Arc<[u8]>, SessionStoreError> {
 pub struct EmulatedCasSessionStore {
     state: Mutex<HashMap<SessionId, RowSet>>,
     /// When true, uncommitted orphan siblings are visible to current-row
-    /// resolution — the exact bug shape of the ob3 zombie incident. Only the
+    /// resolution - the exact bug shape of the zombie-member incident. Only the
     /// in-crate self-tests construct the store in this mode, to prove the
     /// append-only chapter detects the class.
     orphan_rows_visible: bool,

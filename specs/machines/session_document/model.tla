@@ -94,7 +94,7 @@ UnchangedFrame_ebde6f1647672faa == UNCHANGED << session_first_turn_phase, sessio
 
 MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
     /\ phase = "Ready"
-    /\ (IF ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive") THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending"))
+    /\ (((session_id \in DOMAIN session_first_turn_phase) /\ (IF ((session_first_turn_phase)[session_id] = "Inactive") THEN TRUE ELSE (session_id \in DOMAIN session_first_turn_phase))) /\ (IF ((session_first_turn_phase)[session_id] = "Inactive") THEN TRUE ELSE ((session_first_turn_phase)[session_id] = "Pending")))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Pending")
@@ -103,7 +103,7 @@ MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
 
 MarkSessionInitialTurnPendingConsumed(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Consumed"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_afcdf325669eb17c
@@ -111,7 +111,7 @@ MarkSessionInitialTurnPendingConsumed(session_id) ==
 
 StartSessionInitialTurnPending(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending")
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Pending"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Consumed")
@@ -120,7 +120,7 @@ StartSessionInitialTurnPending(session_id) ==
 
 StartSessionInitialTurnInactive(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive")
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Inactive"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_afcdf325669eb17c
@@ -128,7 +128,7 @@ StartSessionInitialTurnInactive(session_id) ==
 
 StartSessionInitialTurnConsumed(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Consumed"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_afcdf325669eb17c
@@ -136,7 +136,7 @@ StartSessionInitialTurnConsumed(session_id) ==
 
 ResolveSessionFirstTurnOverridesAllowed(session_id) ==
     /\ phase = "Ready"
-    /\ phase_allows_initial_turn_overrides((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None))
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ phase_allows_initial_turn_overrides((session_first_turn_phase)[session_id]))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_afcdf325669eb17c
@@ -144,7 +144,7 @@ ResolveSessionFirstTurnOverridesAllowed(session_id) ==
 
 ResolveSessionFirstTurnOverridesDenied(session_id) ==
     /\ phase = "Ready"
-    /\ (phase_allows_initial_turn_overrides((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None)) = FALSE)
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ (phase_allows_initial_turn_overrides((session_first_turn_phase)[session_id]) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_afcdf325669eb17c
@@ -152,7 +152,7 @@ ResolveSessionFirstTurnOverridesDenied(session_id) ==
 
 StageSessionInitialPromptStore(session_id, prompt_has_content) ==
     /\ phase = "Ready"
-    /\ should_store_initial_prompt((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None), prompt_has_content)
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ should_store_initial_prompt((session_first_turn_phase)[session_id], prompt_has_content))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, TRUE)
@@ -161,7 +161,7 @@ StageSessionInitialPromptStore(session_id, prompt_has_content) ==
 
 StageSessionInitialPromptClear(session_id, prompt_has_content) ==
     /\ phase = "Ready"
-    /\ (should_store_initial_prompt((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None), prompt_has_content) = FALSE)
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ (should_store_initial_prompt((session_first_turn_phase)[session_id], prompt_has_content) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
@@ -170,7 +170,7 @@ StageSessionInitialPromptClear(session_id, prompt_has_content) ==
 
 StageSessionToolResults(session_id, result_count) ==
     /\ phase = "Ready"
-    /\ (IF ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive") THEN TRUE ELSE (IF ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending") THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")))
+    /\ (((session_id \in DOMAIN session_first_turn_phase) /\ (IF ((session_first_turn_phase)[session_id] = "Inactive") THEN TRUE ELSE ((session_id \in DOMAIN session_first_turn_phase) /\ (IF ((session_first_turn_phase)[session_id] = "Pending") THEN TRUE ELSE (session_id \in DOMAIN session_first_turn_phase))))) /\ (IF ((session_first_turn_phase)[session_id] = "Inactive") THEN TRUE ELSE (IF ((session_first_turn_phase)[session_id] = "Pending") THEN TRUE ELSE ((session_first_turn_phase)[session_id] = "Consumed"))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, result_count)
@@ -179,7 +179,7 @@ StageSessionToolResults(session_id, result_count) ==
 
 ConsumeSessionDeferredInputsPending(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending")
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Pending"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Consumed")
@@ -190,7 +190,7 @@ ConsumeSessionDeferredInputsPending(session_id) ==
 
 ConsumeSessionDeferredInputsInactive(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive")
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Inactive"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
@@ -200,7 +200,7 @@ ConsumeSessionDeferredInputsInactive(session_id) ==
 
 ConsumeSessionDeferredInputsConsumed(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")
+    /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Consumed"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
@@ -1018,7 +1018,7 @@ ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinal
 
 ResolveRuntimeCheckpointProjectionActive(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Active")
+    /\ ((session_id \in DOMAIN session_lifecycle_terminal) /\ ((session_lifecycle_terminal)[session_id] = "Active"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_afcdf325669eb17c
@@ -1026,7 +1026,7 @@ ResolveRuntimeCheckpointProjectionActive(session_id) ==
 
 ResolveRuntimeCheckpointProjectionArchived(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Archived")
+    /\ ((session_id \in DOMAIN session_lifecycle_terminal) /\ ((session_lifecycle_terminal)[session_id] = "Archived"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_afcdf325669eb17c
@@ -1082,7 +1082,7 @@ RecoverSessionLifecycleTerminal(session_id, terminal) ==
 
 ReviveArchivedSessionDocument(session_id) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Archived")
+    /\ ((session_id \in DOMAIN session_lifecycle_terminal) /\ ((session_lifecycle_terminal)[session_id] = "Archived"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, "Active")
@@ -1091,7 +1091,7 @@ ReviveArchivedSessionDocument(session_id) ==
 
 ArchiveSessionDocumentActive(session_id, runtime_backed, durable_document_present, runtime_observation) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Active")
+    /\ ((session_id \in DOMAIN session_lifecycle_terminal) /\ ((session_lifecycle_terminal)[session_id] = "Active"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, "Archived")
@@ -1100,7 +1100,7 @@ ArchiveSessionDocumentActive(session_id, runtime_backed, durable_document_presen
 
 ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_document_present, runtime_observation) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Archived")
+    /\ ((session_id \in DOMAIN session_lifecycle_terminal) /\ ((session_lifecycle_terminal)[session_id] = "Archived"))
     /\ (runtime_observation # "RetirementRequired")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
@@ -1109,7 +1109,7 @@ ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_docume
 
 ArchiveSessionDocumentCompleteRetire(session_id, runtime_backed, durable_document_present, runtime_observation) ==
     /\ phase = "Ready"
-    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Archived")
+    /\ ((session_id \in DOMAIN session_lifecycle_terminal) /\ ((session_lifecycle_terminal)[session_id] = "Archived"))
     /\ (runtime_observation = "RetirementRequired")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1

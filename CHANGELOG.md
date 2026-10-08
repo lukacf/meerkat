@@ -532,6 +532,14 @@ them.
 
 ### Fixed
 
+- The in-memory mob session service (behind `MobMcpState::new_in_memory()`)
+  now reports a live session as belonging only to the mob it was built for.
+  It reported every session as belonging to every mob, so with several mobs
+  in one state an ownership check could claim another mob's member (for
+  example as mob-owned for owner routing, or as an orphan for a resuming
+  mob to archive). A session built without a mob member binding belongs to
+  no mob.
+
 - A run that exhausted its token budget no longer fails at its own
   commit. The generated machine ends such a turn as `Failed /
   BudgetExhausted` (an orderly stop whose surface class is success), but

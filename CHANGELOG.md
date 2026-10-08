@@ -1169,6 +1169,11 @@ them.
 
 ### Fixed
 
+- Loading a session's authoritative state no longer fails with a transcript
+  revision conflict when it races a concurrent head write. The load now
+  re-observes the current authority and retries a bounded number of times, and
+  surfaces the conflict only if it persists.
+
 - A member that mounts a host Rust tool bundle can again delegate or spawn
   with profile, minimal or inherit tooling. The inherited ceiling requires a
   source identity for each tool name it retains after the effective inherited

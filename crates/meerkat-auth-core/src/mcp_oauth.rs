@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::auth_oauth::{
-    LoopbackHandle, OAuthEndpoints, OAuthTokenRequestFormat, OAuthTokenResult, PkceChallenge,
-    PkcePair, bind_loopback_callback, exchange_authorization_code_with_state,
+    LoopbackClosed, LoopbackHandle, OAuthEndpoints, OAuthTokenRequestFormat, OAuthTokenResult,
+    PkceChallenge, PkcePair, bind_loopback_callback, exchange_authorization_code_with_state,
     exchange_refresh_token, oauth_refresh_observation,
 };
 use crate::auth_store::{
@@ -611,16 +611,77 @@ pub fn open_system_browser(url: &str) -> std::io::Result<()> {
 
 /// One admitted host loopback login: the attempt and its callback binding.
 ///
-/// It stays armed until the login completed or was explicitly cancelled:
-/// dropping an armed pending login, including the future of an unfinished
-/// [`complete`](Self::complete), retires the callback binding and the flow
-/// attempt through their owners. [`cancel`](Self::cancel) does the same and
-/// awaits the listener's drain.
+/// It keeps the exact attempt's cleanup custody until an owner result is
+/// observed: a completion that returned success consumed it; otherwise
+/// dropping this login, including the future of an unfinished
+/// [`complete`](Self::complete), retires the attempt through its flow owner
+/// (best effort, result unobserved) and signals the callback listener to
+/// terminate (no joined receipt). [`close`](Self::close) performs both
+/// cleanups and reports each outcome.
 pub struct McpOAuthPendingLogin {
     authority: McpOAuthAuthority,
     start: McpOAuthLoginStart,
+    /// The live listener, until the callback is taken or the login closes.
     callback: Option<LoopbackHandle>,
-    armed: bool,
+    /// The listener's cleanup outcome once the callback was taken from it.
+    listener: Option<McpOAuthListenerCleanup>,
+    completion: PendingCompletion,
+    /// What the completion's own retire guard observed, if it ran.
+    guard_retirement: RetireObserver,
+}
+
+/// Whether, and how, the code reached the canonical completion.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingCompletion {
+    /// No code was handed to the completion.
+    NotEntered,
+    /// Handed off; the completion's result was not observed (its future was
+    /// dropped). An already-owned credential commit may still settle.
+    Unobserved,
+    /// The completion returned a failure.
+    Failed,
+    /// The completion returned success: the owner consumed the attempt.
+    Consumed,
+}
+
+/// The attempt cleanup that [`McpOAuthPendingLogin::close`] observed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum McpOAuthAttemptCleanup {
+    /// The attempt was retired through its flow owner (by this close, or by
+    /// the completion's own retire guard, whose result was recorded).
+    Retired,
+    /// A completion returned success: the owner consumed the attempt.
+    Consumed,
+    /// The flow owner holds no such attempt. `Missing` does not say whether
+    /// it was consumed, retired or expired. When `completion_unobserved`,
+    /// the code was handed to a completion whose result was never observed,
+    /// so a credential may or may not have been published.
+    Absent { completion_unobserved: bool },
+    /// The flow owner did not retire the attempt.
+    RetirementFailed(McpOAuthError),
+}
+
+/// The callback listener cleanup that [`McpOAuthPendingLogin::close`]
+/// observed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum McpOAuthListenerCleanup {
+    /// The listener is closed and its accepted-connection drain was joined.
+    Joined(LoopbackClosed),
+    /// The listener's retirement failed; no receipt exists.
+    Failed(crate::auth_oauth::OAuthError),
+    /// A consuming wait retired the listener; it returned no receipt.
+    NotReported,
+}
+
+/// Both cleanup outcomes of [`McpOAuthPendingLogin::close`], reported
+/// independently. Neither carries a code or state.
+#[must_use]
+#[derive(Debug)]
+pub struct McpOAuthPendingClose {
+    pub attempt: McpOAuthAttemptCleanup,
+    pub listener: McpOAuthListenerCleanup,
 }
 
 impl McpOAuthPendingLogin {
@@ -652,66 +713,196 @@ impl McpOAuthPendingLogin {
     /// Wait for the loopback callback, bounded by both `timeout` and the
     /// admitted attempt's own expiry, then complete the login. Every failure
     /// retires the attempt; so does dropping this future before it finishes.
-    pub async fn complete(
-        mut self,
-        timeout: Duration,
-    ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
-        let server_name = self.start.target.server_name().to_owned();
-        let Some(callback) = self.callback.take() else {
+    ///
+    /// The wait keeps the listener's legacy tie: like `tokio::time::timeout`,
+    /// it polls the callback and drain once before the window is consulted.
+    pub async fn complete(self, timeout: Duration) -> Result<McpOAuthLoginComplete, McpOAuthError> {
+        let mut pending = self;
+        let server_name = pending.start.target.server_name().to_owned();
+        let Some(callback) = pending.callback.take() else {
             return Err(McpOAuthError::HumanAuthorizationRequired { server_name });
         };
-        // `self` stays armed across both awaits. If this future is dropped,
-        // the wait future drops the callback handle (retiring the binding)
-        // and `Drop` retires the attempt.
-        let window = timeout.min(self.start.remaining());
+        pending.listener = Some(McpOAuthListenerCleanup::NotReported);
+        let window = timeout.min(pending.start.remaining());
+        // A failed wait leaves the attempt admitted: dropping `pending`
+        // retires it.
         let outcome = callback
             .wait(window)
             .await
-            .map_err(|error| McpOAuthError::Callback {
-                server_name,
-                reason: match error {
-                    crate::auth_oauth::OAuthError::Timeout => {
-                        "timeout waiting for the authorization callback".into()
-                    }
-                    other => other.to_string(),
-                },
-            })?;
+            .map_err(|error| callback_wait_error(server_name, error))?;
+        pending.run_completion(outcome).await
+    }
+
+    /// Borrowed completion. The callback wait is bounded by `deadline` and
+    /// the admitted attempt's expiry, whichever is earlier: a deadline already
+    /// passed wins over a queued callback. The wait is safe to abandon: the
+    /// listener and the attempt stay with this login for an explicit
+    /// [`close`](Self::close).
+    ///
+    /// The deadline bounds only the callback wait. It neither extends the
+    /// attempt's validity nor bounds the completion after delivery (issuer
+    /// discovery, token exchange, account observation, credential commit),
+    /// which has no timeout of its own. Dropping this future while the token
+    /// exchange is outstanding prevents local publication by this completion;
+    /// once the credential commit was handed to its owner, that owner may
+    /// still finish after the drop. The authorization code is never replayed.
+    pub async fn complete_until(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
+        let server_name = self.start.target.server_name().to_owned();
+        let Some(callback) = self.callback.as_mut() else {
+            return Err(McpOAuthError::HumanAuthorizationRequired { server_name });
+        };
+        let expires = tokio::time::Instant::from_std(self.start.expires_at);
+        let outcome = callback
+            .wait_until(deadline.min(expires))
+            .await
+            .map_err(|error| callback_wait_error(server_name, error))?;
+        if let Some(callback) = self.callback.take() {
+            // The delivered wait already joined the drain, so this close
+            // returns its recorded result without suspending.
+            self.listener = Some(match callback.close().await {
+                Ok(closed) => McpOAuthListenerCleanup::Joined(closed),
+                Err(error) => McpOAuthListenerCleanup::Failed(error),
+            });
+        }
+        self.run_completion(outcome).await
+    }
+
+    /// Hand the delivered callback to the canonical completion, recording
+    /// what is observed of it.
+    async fn run_completion(
+        &mut self,
+        outcome: crate::auth_oauth::LoopbackOutcome,
+    ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
         let start = self.start.clone();
+        self.completion = PendingCompletion::Unobserved;
         let completed = self
             .authority
-            .login_complete(
+            .login_complete_observed(
                 &start.target,
                 McpOAuthCallback {
                     redirect_uri: start.redirect_uri.clone(),
                     state: outcome.state,
                     code: outcome.code,
                 },
+                Some(self.guard_retirement.clone()),
             )
             .await;
-        // `login_complete` consumed the attempt on success and retired it on
-        // every failure.
-        self.armed = false;
+        self.completion = if completed.is_ok() {
+            PendingCompletion::Consumed
+        } else {
+            PendingCompletion::Failed
+        };
         completed
     }
 
-    /// Typed cancel: retire the callback binding (awaiting its drain) and
-    /// the admitted attempt through its flow owner.
-    pub async fn cancel(mut self) -> Result<(), McpOAuthError> {
-        self.armed = false;
-        if let Some(callback) = self.callback.take() {
-            let _ = callback.cancel().await;
+    /// Retire the admitted attempt through its flow owner, then close the
+    /// callback listener and await its drain. Both cleanups are always
+    /// attempted and each outcome is reported. The retirement runs on the
+    /// first poll, before the first suspension; dropping the future during
+    /// the drain loses only the listener's receipt (the drain is signalled).
+    /// Dropping it before its first poll leaves this login's `Drop` to
+    /// retire the attempt, without any receipt.
+    pub async fn close(self) -> McpOAuthPendingClose {
+        let mut pending = self;
+        let completion = std::mem::replace(&mut pending.completion, PendingCompletion::Consumed);
+        let attempt = match completion {
+            PendingCompletion::Consumed => McpOAuthAttemptCleanup::Consumed,
+            completion => {
+                let guard = pending.guard_retirement.lock().take();
+                match guard {
+                    Some(Ok(())) => McpOAuthAttemptCleanup::Retired,
+                    // The guard failed or never ran: this close retires.
+                    Some(Err(_)) | None => attempt_cleanup(
+                        pending
+                            .authority
+                            .login_cancel(&pending.start.target, &pending.start),
+                        completion == PendingCompletion::Unobserved,
+                    ),
+                }
+            }
+        };
+        let listener = match pending.callback.take() {
+            Some(callback) => match callback.close().await {
+                Ok(closed) => McpOAuthListenerCleanup::Joined(closed),
+                Err(error) => McpOAuthListenerCleanup::Failed(error),
+            },
+            None => pending
+                .listener
+                .take()
+                .unwrap_or(McpOAuthListenerCleanup::NotReported),
+        };
+        McpOAuthPendingClose { attempt, listener }
+    }
+
+    /// [`close`](Self::close) projected onto the original return type: a
+    /// failed attempt retirement is returned first (an absent attempt is
+    /// `Flow(Missing)`, as before), then a failed listener retirement as
+    /// `Callback`. Both cleanups are still attempted.
+    pub async fn cancel(self) -> Result<(), McpOAuthError> {
+        let server_name = self.start.target.server_name().to_owned();
+        let closed = self.close().await;
+        match closed.attempt {
+            McpOAuthAttemptCleanup::RetirementFailed(error) => return Err(error),
+            McpOAuthAttemptCleanup::Absent { .. } => {
+                return Err(McpOAuthError::Flow(OAuthFlowError::Missing));
+            }
+            McpOAuthAttemptCleanup::Retired | McpOAuthAttemptCleanup::Consumed => {}
         }
-        self.authority.login_cancel(&self.start.target, &self.start)
+        match closed.listener {
+            McpOAuthListenerCleanup::Failed(_) => Err(McpOAuthError::Callback {
+                server_name,
+                reason: "callback listener retirement failed".into(),
+            }),
+            McpOAuthListenerCleanup::Joined(_) | McpOAuthListenerCleanup::NotReported => Ok(()),
+        }
+    }
+}
+
+/// The retire guard's own result, recorded for the pending login that
+/// handed the code over.
+type RetireObserver = Arc<parking_lot::Mutex<Option<Result<(), OAuthFlowError>>>>;
+
+fn callback_wait_error(server_name: String, error: crate::auth_oauth::OAuthError) -> McpOAuthError {
+    McpOAuthError::Callback {
+        server_name,
+        reason: match error {
+            crate::auth_oauth::OAuthError::Timeout => {
+                "timeout waiting for the authorization callback".into()
+            }
+            other => other.to_string(),
+        },
+    }
+}
+
+/// A close's own retirement result. `Missing` is absence, not proof of
+/// consumption or retirement.
+fn attempt_cleanup(
+    retired: Result<(), McpOAuthError>,
+    completion_unobserved: bool,
+) -> McpOAuthAttemptCleanup {
+    match retired {
+        Ok(()) => McpOAuthAttemptCleanup::Retired,
+        Err(McpOAuthError::Flow(OAuthFlowError::Missing)) => McpOAuthAttemptCleanup::Absent {
+            completion_unobserved,
+        },
+        Err(error) => McpOAuthAttemptCleanup::RetirementFailed(error),
     }
 }
 
 impl Drop for McpOAuthPendingLogin {
     fn drop(&mut self) {
-        if self.armed {
-            // Dropping the handle signals the listener to terminate.
-            drop(self.callback.take());
+        if self.completion != PendingCompletion::Consumed {
+            // Best effort, result unobserved: the exact attempt is retired
+            // unless a completion consumed it. Retiring one the completion's
+            // guard already retired is a harmless `Missing`.
             let _ = self.authority.login_cancel(&self.start.target, &self.start);
         }
+        // Dropping the handle signals the listener to terminate, without a
+        // joined receipt.
+        drop(self.callback.take());
     }
 }
 
@@ -797,17 +988,23 @@ struct AttemptRetireGuard {
     identity: OAuthBrowserFlowIdentity,
     redirect_uri: String,
     armed: bool,
+    /// Where a pending login that handed the code over reads this guard's
+    /// own retirement result.
+    observed: Option<RetireObserver>,
 }
 
 impl Drop for AttemptRetireGuard {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self.authority.expire(
+            let retired = self.authority.expire(
                 &self.state,
                 &self.target,
                 self.identity.clone(),
                 &self.redirect_uri,
             );
+            if let Some(observed) = &self.observed {
+                *observed.lock() = Some(retired);
+            }
         }
     }
 }
@@ -1379,7 +1576,9 @@ impl McpOAuthAuthority {
             authority: self.clone(),
             start,
             callback: Some(callback),
-            armed: true,
+            listener: None,
+            completion: PendingCompletion::NotEntered,
+            guard_retirement: RetireObserver::default(),
         }))
     }
 
@@ -1399,6 +1598,17 @@ impl McpOAuthAuthority {
         &self,
         target: &McpServerIdentity,
         callback: McpOAuthCallback,
+    ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
+        self.login_complete_observed(target, callback, None).await
+    }
+
+    /// [`login_complete`](Self::login_complete) that records its retire
+    /// guard's own result for the pending login that handed the code over.
+    async fn login_complete_observed(
+        &self,
+        target: &McpServerIdentity,
+        callback: McpOAuthCallback,
+        observed: Option<RetireObserver>,
     ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
         self.validate_interactive_selection(target)?;
         let (authority, strategy) = self
@@ -1423,6 +1633,7 @@ impl McpOAuthAuthority {
             identity: admitted.provider.clone(),
             redirect_uri: admitted.redirect_uri.clone(),
             armed: true,
+            observed,
         };
         let record = authority
             .verify(
@@ -4043,5 +4254,29 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn a_close_reports_its_own_retirement_result_without_inference() {
+        assert!(matches!(
+            attempt_cleanup(Ok(()), false),
+            McpOAuthAttemptCleanup::Retired
+        ));
+        // Missing is absence, never proof of consumption or retirement.
+        assert!(matches!(
+            attempt_cleanup(Err(McpOAuthError::Flow(OAuthFlowError::Missing)), true),
+            McpOAuthAttemptCleanup::Absent {
+                completion_unobserved: true
+            }
+        ));
+        assert!(matches!(
+            attempt_cleanup(
+                Err(McpOAuthError::Flow(OAuthFlowError::BrowserIdentityMismatch)),
+                false
+            ),
+            McpOAuthAttemptCleanup::RetirementFailed(McpOAuthError::Flow(
+                OAuthFlowError::BrowserIdentityMismatch
+            ))
+        ));
     }
 }

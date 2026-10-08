@@ -137,6 +137,25 @@ Use `config/set` when replacing the whole config intentionally, and `config/patc
 default), so a child realm can override a non-default parent value back **down to
 the default** - something a `!= default` heuristic could not express.
 
+## Agent turn limits
+
+Set `agent.max_turns` to bound the model-loop iterations in one agent run:
+
+```toml
+[agent]
+max_turns = 700
+```
+
+An omitted value inherits from the parent realm. If the entire chain omits
+it, agent construction uses the default of `100`. An explicit value always
+overrides the parent, including `100` and `0`.
+
+`max_turns = 0` terminates immediately with the `TurnLimitReached` cause,
+before the first model request; zero does not mean unlimited. The counter
+resets for each run, so this is not a limit on the number of user messages
+in a session. Direct Rust callers can set the same limit with
+`AgentBuilder::max_turns(u32)`.
+
 ## CLI behavior
 
 CLI config commands operate on the selected realm:

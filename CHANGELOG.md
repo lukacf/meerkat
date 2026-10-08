@@ -286,6 +286,9 @@ them.
 
 ### Added
 
+- `AgentBuilder::max_turns(u32)` configures the core agent-loop turn limit
+  for direct Rust construction.
+
 - INFO timing lines on the way from a live delegation worker's terminal to the
   provider's result acknowledgement (#1820). Each carries the delegation's
   `operation_id` and `elapsed_since_terminal_ms`: terminal observed, terminal
@@ -531,6 +534,11 @@ them.
     the web `loginCancel` accepts `{mcp, attempt_ref}`.
 
 ### Fixed
+
+- Explicit `agent.max_turns` values now survive realm config inheritance
+  and reach agents built through the shared factory. Unset values inherit;
+  explicit values, including `0` and the default `100`, override the parent.
+  A limit of `0` terminates the run before its first model request.
 
 - A run that exhausted its token budget no longer fails at its own
   commit. The generated machine ends such a turn as `Failed /

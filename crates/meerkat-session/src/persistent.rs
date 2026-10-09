@@ -86,7 +86,7 @@ use meerkat_runtime::{
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, mpsc, watch};
 
 use crate::SESSION_LABELS_KEY;
 #[cfg(test)]
@@ -2453,6 +2453,11 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// gets a machine of its own on first use, which lives and dies with this
     /// instance.
     runtime_adapter: std::sync::Mutex<Option<Arc<MeerkatMachine>>>,
+    /// Drains entered application work through its final durable commit before
+    /// service shutdown removes actors. Applications acquire this only after
+    /// the session mutation guard, so a queued application cannot prevent
+    /// shutdown from cancelling the model turn it is waiting behind.
+    tool_application_settlement_gate: RwLock<()>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
     /// Gates for active keep-alive checkpointers, keyed by session ID.
@@ -8969,6 +8974,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             runtime_store,
             blob_store,
             runtime_adapter: std::sync::Mutex::new(None),
+            tool_application_settlement_gate: RwLock::new(()),
             event_store: None,
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
@@ -14131,6 +14137,40 @@ impl crate::ephemeral::SessionEventTailSource for EventStoreStreamTail {
 
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
+    async fn tool_application(
+        self: Arc<Self>,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<serde_json::Value, SessionError> {
+        control
+            .claim()
+            .map_err(|error| SessionError::Agent(AgentError::InternalError(error.to_string())))?;
+        let owner = self
+            .acquire_canonical_runtime_adapter(None)
+            .map_err(|error| SessionError::Agent(AgentError::InternalError(error.to_string())))?;
+        let context = owner
+            .prepare_tool_application(Arc::clone(&control))
+            .map_err(|error| SessionError::Agent(AgentError::InternalError(error.to_string())))?;
+        // Native ownership lasts through settlement and persistence. Dropping
+        // the caller's delivery future cannot cancel an admitted side effect.
+        tokio::spawn(async move {
+            let id = control.session_id().clone();
+            let _mutation_guard = self.live_persist_mutation_guard(&id).await?;
+            let _settlement_guard = self.tool_application_settlement_gate.read().await;
+            let result = self.inner.dispatch_tool_application(control, context).await;
+            if let Err(error) = self.persist_full_session(&id).await {
+                let _ = self.discard_live_session_unfenced(&id).await;
+                return Err(error);
+            }
+            result
+        })
+        .await
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "tool application settlement task failed: {error}"
+            )))
+        })?
+    }
+
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         let actor_seed_authority = self.resolve_actor_session_seed_authority(&req).await?;
         self.create_session_with_admission(
@@ -15426,6 +15466,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Call [`Self::try_shutdown`] when the caller must observe a typed
     /// authorization failure.
     pub async fn shutdown(&self) {
+        let _settlement_guard = self.tool_application_settlement_gate.write().await;
         self.inner.shutdown().await;
     }
 
@@ -15451,6 +15492,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Shut down all sessions, returning the first typed authorization failure.
     pub async fn try_shutdown(&self) -> Result<(), SessionError> {
+        let _settlement_guard = self.tool_application_settlement_gate.write().await;
         self.inner.try_shutdown().await
     }
 
@@ -21876,6 +21918,25 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionAgent for BlockingRunAgent {
+        async fn tool_application(
+            &mut self,
+            _request: meerkat_core::ToolApplicationRequest,
+            _context: meerkat_core::ToolDispatchContext,
+        ) -> Result<serde_json::Value, meerkat_core::error::AgentError> {
+            self.entered_runs.fetch_add(1, Ordering::AcqRel);
+            self.entered_notify.notify_waiters();
+            self.release_notify
+                .acquire()
+                .await
+                .expect("application release semaphore should stay open")
+                .forget();
+            self.inner
+                .append_system_messages(vec!["application settlement retained".into()])?;
+            Err(AgentError::InternalError(
+                "application failed after native settlement".into(),
+            ))
+        }
+
         async fn run_with_events(
             &mut self,
             prompt: meerkat_core::types::ContentInput,
@@ -22662,6 +22723,219 @@ mod tests {
             build: None,
             labels: None,
         }
+    }
+
+    #[tokio::test]
+    async fn tool_application_settlement_persists_after_error_and_delivery_cancellation() {
+        struct ApplicationIngress;
+        impl meerkat_core::ToolApplicationIngress for ApplicationIngress {
+            fn revalidate(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
+            fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+                self
+            }
+        }
+
+        for cancel_delivery in [false, true] {
+            let builder = BlockingRunBuilder::new();
+            let service = Arc::new(PersistentSessionService::new(
+                builder.clone(),
+                1,
+                Arc::new(MemoryStore::new()),
+                Arc::new(InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            ));
+            let seed = service
+                .save_normalized_session(recoverable_store_row())
+                .await
+                .unwrap();
+            let id = seed.id().clone();
+            service.create_session(resume_request(seed)).await.unwrap();
+            let control = meerkat_core::ToolApplicationControlRequest::from_trusted_ingress(
+                id.clone(),
+                meerkat_core::ToolApplicationRequest {
+                    tool_call_id: "original-call".into(),
+                    extension: "io.modelcontextprotocol/ui".into(),
+                    operation: meerkat_core::ToolApplicationOperation::CallTool {
+                        name: "action".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                },
+                Arc::new(ApplicationIngress),
+            )
+            .unwrap();
+            let delivery = tokio::spawn(Arc::clone(&service).tool_application(control));
+            builder.wait_for_entered_runs(1).await;
+            if cancel_delivery {
+                delivery.abort();
+                assert!(delivery.await.unwrap_err().is_cancelled());
+            } else {
+                builder.release_notify.add_permits(1);
+                assert!(delivery.await.unwrap().is_err());
+            }
+            if cancel_delivery {
+                builder.release_notify.add_permits(1);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let committed = service
+                        .load_committed_runtime_session_with_authority(&id, "application test")
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .0;
+                    if committed.messages().iter().any(|message| {
+                        matches!(message, Message::System(message)
+                            if message.content == "application settlement retained")
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("native settlement must persist even when delivery fails or disappears");
+            service.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_application_settlement_drains_before_shutdown_or_discard() {
+        struct ApplicationIngress;
+        impl meerkat_core::ToolApplicationIngress for ApplicationIngress {
+            fn revalidate(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
+            fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+                self
+            }
+        }
+
+        for teardown_kind in ["shutdown", "try_shutdown", "discard"] {
+            let builder = BlockingRunBuilder::new();
+            let service = Arc::new(PersistentSessionService::new(
+                builder.clone(),
+                1,
+                Arc::new(MemoryStore::new()),
+                Arc::new(InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            ));
+            let seed = service
+                .save_normalized_session(recoverable_store_row())
+                .await
+                .unwrap();
+            let id = seed.id().clone();
+            service.create_session(resume_request(seed)).await.unwrap();
+            let control = meerkat_core::ToolApplicationControlRequest::from_trusted_ingress(
+                id.clone(),
+                meerkat_core::ToolApplicationRequest {
+                    tool_call_id: "original-call".into(),
+                    extension: "io.modelcontextprotocol/ui".into(),
+                    operation: meerkat_core::ToolApplicationOperation::CallTool {
+                        name: "action".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                },
+                Arc::new(ApplicationIngress),
+            )
+            .unwrap();
+            let delivery = tokio::spawn(Arc::clone(&service).tool_application(control));
+            builder.wait_for_entered_runs(1).await;
+            delivery.abort();
+            assert!(delivery.await.unwrap_err().is_cancelled());
+
+            let mut teardown = Box::pin(async {
+                match teardown_kind {
+                    "shutdown" => {
+                        service.shutdown().await;
+                        Ok(())
+                    }
+                    "try_shutdown" => service.try_shutdown().await,
+                    _ => service.discard_live_session(&id).await,
+                }
+            });
+            // Drive teardown to its first wait while native work is entered.
+            // Its actor must remain reachable by the eventual final persister.
+            assert!(futures::poll!(teardown.as_mut()).is_pending());
+            assert!(
+                service
+                    .inner
+                    .live_session_actor_witness(&id)
+                    .await
+                    .is_some()
+            );
+            builder.release_notify.add_permits(1);
+            tokio::time::timeout(std::time::Duration::from_secs(10), teardown)
+                .await
+                .expect("teardown must drain entered application work")
+                .unwrap();
+
+            let committed = service
+                .load_committed_runtime_session_with_authority(&id, "application teardown test")
+                .await
+                .unwrap()
+                .unwrap()
+                .0;
+            assert!(committed.messages().iter().any(|message| {
+                matches!(message, Message::System(message)
+                    if message.content == "application settlement retained")
+            }));
+            service.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_application_settlement_queued_behind_turn_does_not_block_shutdown() {
+        struct ApplicationIngress;
+        impl meerkat_core::ToolApplicationIngress for ApplicationIngress {
+            fn revalidate(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
+            fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+                self
+            }
+        }
+
+        let builder = BlockingRunBuilder::new();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            1,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let seed = service
+            .save_normalized_session(recoverable_store_row())
+            .await
+            .unwrap();
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let turn_guard = service.acquire_runtime_turn_finalization_guard(&id).await;
+        let control = meerkat_core::ToolApplicationControlRequest::from_trusted_ingress(
+            id.clone(),
+            meerkat_core::ToolApplicationRequest {
+                tool_call_id: "original-call".into(),
+                extension: "io.modelcontextprotocol/ui".into(),
+                operation: meerkat_core::ToolApplicationOperation::CallTool {
+                    name: "action".into(),
+                    arguments: serde_json::json!({}),
+                },
+            },
+            Arc::new(ApplicationIngress),
+        )
+        .unwrap();
+        let mut delivery = Box::pin(Arc::clone(&service).tool_application(control));
+        assert!(futures::poll!(delivery.as_mut()).is_pending());
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), service.try_shutdown())
+            .await
+            .expect("unentered application must not prevent model-turn shutdown")
+            .unwrap();
+        drop(turn_guard);
+        assert!(delivery.await.is_err());
+        assert_eq!(builder.entered_runs.load(Ordering::SeqCst), 0);
     }
 
     fn test_durable_llm_identity(session: &Session) -> meerkat_core::SessionLlmIdentity {
@@ -31697,6 +31971,7 @@ mod tests {
             ])));
             durable.push(Message::ToolResults {
                 results: vec![ToolResult {
+                    host_metadata: Default::default(),
                     tool_use_id: "tool-image".to_string(),
                     content: vec![ContentBlock::Image {
                         media_type: "image/png".to_string(),

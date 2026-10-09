@@ -45,6 +45,7 @@ impl BuiltinTool for BrowseSkillsTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: super::BROWSE_SKILLS_TOOL_NAME.into(),
             description:
                 "List available skills, optionally filtered by search query or source UUID.".into(),

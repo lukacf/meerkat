@@ -63,6 +63,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
         vec![
             // Calculator tool
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "calculate".into(),
                 description: "Perform arithmetic calculations. Supports +, -, *, / operations."
                     .to_string(),
@@ -71,6 +72,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
             }),
             // Note-taking tool
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "save_note".into(),
                 description: "Save a note for later reference".to_string(),
                 input_schema: meerkat_tools::schema_for::<SaveNoteArgs>(),
@@ -78,6 +80,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
             }),
             // Note retrieval tool
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "get_notes".into(),
                 description: "Retrieve all saved notes".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
@@ -85,6 +88,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
             }),
             // History tool
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "get_calculation_history".into(),
                 description: "Get the history of all calculations performed".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),

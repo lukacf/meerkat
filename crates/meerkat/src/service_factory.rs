@@ -515,6 +515,14 @@ impl SessionAgent for FactoryAgent {
         }
     }
 
+    async fn tool_application(
+        &mut self,
+        request: meerkat_core::ToolApplicationRequest,
+        context: meerkat_core::ToolDispatchContext,
+    ) -> Result<serde_json::Value, meerkat_core::error::AgentError> {
+        self.agent.tool_application(request, context).await
+    }
+
     async fn dispatch_external_tool_call(
         &mut self,
         call: meerkat_core::ToolCall,

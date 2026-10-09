@@ -2354,6 +2354,7 @@ fn recoverable_callback_tool_defs(tools: &[McpToolDef]) -> Vec<ToolDef> {
         .iter()
         .filter(|tool| tool.handler_kind() == "callback")
         .map(|tool| ToolDef {
+            audience: Default::default(),
             name: tool.name.clone().into(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
@@ -5182,6 +5183,7 @@ impl MpcToolDispatcher {
             .iter()
             .map(|t| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: t.name.clone().into(),
                     description: t.description.clone(),
                     input_schema: t.input_schema.clone(),
@@ -7955,6 +7957,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "late_mcp_tool".into(),
                 description: "Connected after agent construction".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),

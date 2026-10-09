@@ -10639,6 +10639,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 tools: Arc::from([Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "external_callback".into(),
                     description: "external callback fixture".to_string(),
                     input_schema: serde_json::json!({ "type": "object" }),
@@ -11590,6 +11591,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
+                        audience: Default::default(),
                         name: (*name).into(),
                         description: format!("{name} tool"),
                         input_schema: serde_json::json!({ "type": "object" }),
@@ -11611,6 +11613,7 @@ mod tests {
         /// while the transcript alone stays well inside it.
         fn with_wide_tool(name: &str, description_bytes: usize) -> Self {
             let tools = vec![Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: "d".repeat(description_bytes),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -11719,18 +11722,21 @@ mod tests {
     impl PlaneAwareToolDispatcher {
         fn new() -> Self {
             let visible = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "visible".into(),
                 description: "visible tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
             });
             let secret = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "secret".into(),
                 description: "secret tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
             });
             let control = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "tool_catalog_search".into(),
                 description: "control search tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -11804,6 +11810,7 @@ mod tests {
     impl DeferredLoadDispatcher {
         fn new() -> Self {
             let deferred = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "deferred_tool".into(),
                 description:
                     "deferred tool that must stay hidden until tool_catalog_load reaches the next boundary."
@@ -11815,6 +11822,7 @@ mod tests {
                 }),
             });
             let deferred_two = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "deferred_tool_two".into(),
                 description:
                     "second deferred tool used only to keep the test dispatcher above the adaptive catalog threshold."
@@ -11826,6 +11834,7 @@ mod tests {
                 }),
             });
             let control = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "tool_catalog_load".into(),
                 description: "control load tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -11917,6 +11926,7 @@ mod tests {
     impl DeferredWithoutControlDispatcher {
         fn new() -> Self {
             let secret = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "secret".into(),
                 description: "deferred secret tool that direct AgentBuilder users must still reach without a control plane."
                     .to_string(),
@@ -11927,6 +11937,7 @@ mod tests {
                 }),
             });
             let deferred_two = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "deferred_tool_two".into(),
                 description:
                     "second deferred tool used only to keep the direct builder dispatcher above the adaptive threshold."
@@ -14590,6 +14601,7 @@ mod tests {
         };
         let dispatcher = ProvenanceToolDispatcher {
             tools: vec![Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "lookup".into(),
                 description: "lookup tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -16175,6 +16187,7 @@ mod tests {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(HangingDispatcher {
             tools: Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "slow".into(),
                 description: "hangs until timeout".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -17326,6 +17339,7 @@ mod tests {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(ToolAuthoredTerminalCauseDispatcher {
             tools: Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "spoof_timeout".into(),
                 description: "returns timeout-shaped tool output".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -18889,6 +18903,7 @@ mod tests {
         let client = Arc::new(SingleToolCallClient);
         let tools = Arc::new(BarrierOpDispatcher {
             tools: Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "queue_op".into(),
                 description: "registers a barrier async op".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -19005,6 +19020,7 @@ mod tests {
         let client = Arc::new(SingleToolCallClient);
         let tools = Arc::new(VideoResultDispatcher {
             tools: Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "make_video".into(),
                 description: "returns an unsupported video block".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -19341,6 +19357,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 tools: vec![Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "image_effect".into(),
                     description: "returns an assistant image session effect".into(),
                     input_schema: serde_json::json!({ "type": "object" }),
@@ -20762,6 +20779,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
+                        audience: Default::default(),
                         name: (*name).into(),
                         description: format!("{name} tool"),
                         input_schema: serde_json::json!({ "type": "object" }),

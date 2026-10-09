@@ -2947,6 +2947,17 @@ impl TranscriptEditError {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionService: Send + Sync {
+    /// Execute a host UI request through this session's native owner. The
+    /// process-only ingress receipt is authenticated independently of old runs.
+    async fn tool_application(
+        self: Arc<Self>,
+        _control: Arc<crate::ToolApplicationControlRequest>,
+    ) -> Result<serde_json::Value, SessionError> {
+        Err(SessionError::Unsupported(
+            "tool applications are unavailable".into(),
+        ))
+    }
+
     /// Create a new session and run the first turn.
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError>;
 
@@ -3900,6 +3911,7 @@ mod tests {
     #[test]
     fn mob_tool_snapshot_context_parent_owned_returns_tools() {
         let tools = Arc::<[Arc<ToolDef>]>::from(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "a test".to_string(),
             input_schema: serde_json::json!({"type": "object"}),

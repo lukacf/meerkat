@@ -3,6 +3,7 @@
 //! Connect to MCP servers and route tool calls.
 
 mod adapter;
+pub mod apps;
 mod client_service;
 mod connection;
 mod context_provider;
@@ -20,6 +21,7 @@ pub use client_service::McpClientServiceFactory;
 pub use connection::{McpAuthResolver, McpConnection};
 pub use context_provider::{
     McpCallContext, McpCallContextError, McpCallContextProvider, McpCallTarget, McpConnectionId,
+    McpResourceTarget,
 };
 pub use error::{McpError, ToolDiscoveryLimit};
 pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};

@@ -138,6 +138,7 @@ pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
         .into_iter()
         .map(|t| {
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: t["name"].as_str().unwrap_or_default().into(),
                 description: t["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: t["inputSchema"].clone(),
@@ -153,6 +154,23 @@ pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatcher<T> {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        if is_comms_tool(source_tool) {
+            return Err(ToolError::access_denied(source_tool));
+        }
+        self.inner
+            .as_ref()
+            .ok_or_else(|| ToolError::not_found(source_tool))?
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         if let Some(inner) = &self.inner {
             let mut tools = self
@@ -427,6 +445,21 @@ impl DynCommsToolDispatcher {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for DynCommsToolDispatcher {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        if is_comms_tool(source_tool) {
+            return Err(ToolError::access_denied(source_tool));
+        }
+        self.inner
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         let mut tools = self
             .tool_defs
@@ -638,6 +671,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 tool: Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "secret_lookup".into(),
                     description: "Look up a secret".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
@@ -652,6 +686,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 tool: Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "inspect_context".into(),
                     description: "Inspect dispatch context".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
@@ -664,6 +699,7 @@ mod tests {
     impl HybridExecutionDispatcher {
         fn new() -> Self {
             let tool = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "hybrid_lookup".into(),
                 description: "Run inline or detach from typed arguments".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
@@ -698,6 +734,7 @@ mod tests {
     impl DuplicateCommsDispatcher {
         fn new() -> Self {
             let tool = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "peers".into(),
                 description: "Inner duplicate that must never win".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
@@ -1416,6 +1453,7 @@ mod tests {
                 .into_iter()
                 .map(|name| {
                     Arc::new(ToolDef {
+                        audience: Default::default(),
                         name: name.into(),
                         description: String::new(),
                         input_schema: serde_json::json!({"type": "object"}),

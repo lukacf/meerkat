@@ -522,6 +522,30 @@ impl DispatchAdmissionCustody {
 impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
     for ExecutionPolicyGatedDispatcher<T>
 {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &crate::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+        // Source inspection and resources/read do not invoke the original
+        // tool. A resolved target call still passes this execution gate later.
+        if !self
+            .policy
+            .permits_call(source_tool, ToolMutationClass::ReadOnly)
+        {
+            return Err(self.denial_error(source_tool));
+        }
+        let mut context = context.clone();
+        if self.policy.requires_mutation_declaration() {
+            context.require_read_only_execution();
+        }
+        self.inner
+            .resolve_tool_application(source_tool, request, invocation, &context)
+            .await
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.inner.tools()
     }

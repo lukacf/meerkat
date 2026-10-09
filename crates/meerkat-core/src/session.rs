@@ -6004,7 +6004,8 @@ impl Session {
     /// Ordinary System messages remain ordered durable rows. For an explicitly
     /// versioned prompt key, historical rows remain in transcript history but
     /// only the latest version is selected. No request-local System message is
-    /// synthesized or repositioned at this boundary.
+    /// synthesized or repositioned at this boundary. Protocol-owned tool-result
+    /// host metadata remains durable but is omitted from the model projection.
     pub fn messages_for_model_boundary(&self) -> Vec<Message> {
         Self::project_model_boundary(self.id(), self.messages())
     }
@@ -6031,10 +6032,12 @@ impl Session {
 
     fn project_model_boundary(id: &SessionId, messages: &[Message]) -> Vec<Message> {
         let prompts = crate::types::materialize_latest_system_prompt_versions(messages);
-        match materialize_instruction_activation_messages(id, &prompts) {
+        let mut projected = match materialize_instruction_activation_messages(id, &prompts) {
             Ok(messages) => messages,
             Err(_) => prompts,
-        }
+        };
+        crate::types::strip_tool_result_host_metadata(&mut projected);
+        projected
     }
 
     /// The text [`Session::last_assistant_text`] returns, paired with the
@@ -16759,6 +16762,54 @@ mod tests {
             session
                 .canonical_context_prefix_revision(count + 1)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn host_metadata_persists_with_results_but_never_enters_model_projection() {
+        let mut session = Session::new();
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::ToolUse {
+                id: "app-call".into(),
+                name: "example".into(),
+                args: serde_json::value::to_raw_value(&serde_json::json!({"query": "visible"}))
+                    .unwrap(),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        )));
+        let mut result = ToolResult::new("app-call".into(), "Visible tool content".into(), false);
+        result.host_metadata.insert("example.test/app".into(), serde_json::json!({
+            "private": "HOST_ONLY_SECRET", "original": {"content": ["raw"], "_meta": {"detail": 7}}
+        }));
+        session.push(Message::tool_results(vec![result.clone()]));
+        let persisted = session.to_persisted_bytes().unwrap();
+        let restored = Session::from_persisted_bytes(&persisted).unwrap();
+        assert_eq!(restored.messages(), session.messages());
+        let Message::ToolResults { results, .. } = &restored.messages()[1] else {
+            panic!("expected persisted result row");
+        };
+        assert_eq!(results[0], result);
+        let projected = restored.messages_for_model_boundary();
+        let Message::ToolResults { results, .. } = &projected[1] else {
+            panic!("expected model result row");
+        };
+        assert!(results[0].host_metadata.is_empty());
+        assert_eq!(results[0].tool_use_id, "app-call");
+        assert_eq!(results[0].text_content(), "Visible tool content");
+        assert!(
+            !serde_json::to_string(&projected)
+                .unwrap()
+                .contains("HOST_ONLY_SECRET")
+        );
+        assert_eq!(
+            restored.messages_for_model_boundary_prefix(2).unwrap(),
+            projected
+        );
+        assert_eq!(
+            restored.messages(),
+            session.messages(),
+            "model projection must not erase durable host data"
         );
     }
 

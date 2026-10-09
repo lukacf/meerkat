@@ -241,6 +241,7 @@ impl BuiltinTool for MonitorStartTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "monitor_start".into(),
             description: "Start a high-trust durable script monitor. Framed JSONL emits typed notify/checkpoint/progress/complete events; notifications do not complete the job.".into(),
             input_schema: crate::schema::schema_for::<MonitorStartInput>(),

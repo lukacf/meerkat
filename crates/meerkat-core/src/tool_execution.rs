@@ -403,6 +403,7 @@ pub struct EphemeralToolBindingFingerprint {
     description: String,
     input_schema: serde_json::Value,
     provenance: Option<crate::ToolProvenance>,
+    audience: crate::ToolAudience,
     plane: crate::ToolPlaneClass,
     callability: crate::ToolCallability,
     deferred_eligibility: crate::ToolCatalogDeferredEligibility,
@@ -426,6 +427,7 @@ impl PartialEq for EphemeralToolBindingFingerprint {
             && self.description == other.description
             && self.input_schema == other.input_schema
             && self.provenance == other.provenance
+            && self.audience == other.audience
             && self.plane == other.plane
             && self.callability == other.callability
             && self.deferred_eligibility == other.deferred_eligibility
@@ -444,6 +446,7 @@ pub fn ephemeral_tool_catalog_binding_fingerprint(
         description: entry.tool.description.clone(),
         input_schema: entry.tool.input_schema.clone(),
         provenance: entry.tool.provenance.clone(),
+        audience: entry.tool.audience,
         plane: entry.plane,
         callability: entry.callability,
         deferred_eligibility: entry.deferred_eligibility.clone(),
@@ -1946,6 +1949,19 @@ mod tests {
             ephemeral_tool_catalog_binding_fingerprint(&original),
             ephemeral_tool_catalog_binding_fingerprint(&changed),
             "name reuse with a different declaration must be fenced"
+        );
+    }
+
+    #[test]
+    fn tool_audience_changes_invalidate_execution_binding_fingerprints() {
+        let model =
+            crate::ToolDef::new("tool", "declaration", serde_json::json!({"type": "object"}));
+        let app = model.clone().with_audience(crate::ToolAudience::App);
+        let model = crate::ToolCatalogEntry::session_inline(std::sync::Arc::new(model), true);
+        let app = crate::ToolCatalogEntry::session_inline(std::sync::Arc::new(app), true);
+        assert_ne!(
+            ephemeral_tool_catalog_binding_fingerprint(&model),
+            ephemeral_tool_catalog_binding_fingerprint(&app)
         );
     }
 

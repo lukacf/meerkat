@@ -64,6 +64,7 @@ impl BuiltinTool for TaskListTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "task_list".into(),
             description: "List tasks in the project, optionally filtered by status or labels"
                 .into(),

@@ -114,6 +114,7 @@ struct RecordingDispatcher {
 impl AgentToolDispatcher for RecordingDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "echo".into(),
             description: "Echo tool".into(),
             input_schema: schema_for::<EchoInput>(),

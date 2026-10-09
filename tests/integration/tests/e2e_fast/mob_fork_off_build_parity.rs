@@ -217,6 +217,7 @@ impl meerkat_core::AgentToolDispatcher for NamedTools {
             .iter()
             .map(|name| {
                 Arc::new(meerkat_core::ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: format!("{name} host tool"),
                     input_schema: json!({"type": "object", "properties": {}}),

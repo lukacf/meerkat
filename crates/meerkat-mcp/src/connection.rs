@@ -43,6 +43,9 @@ pub struct McpConnection {
     session_expiry: SessionExpiryRecorder,
     /// The OAuth target whose bearer this connection resolves per request.
     oauth_target: Option<McpServerIdentity>,
+    /// Full standard discovery, for host replay. Model definitions are a
+    /// separate projection and do not carry private UI metadata.
+    standard_tools: std::sync::RwLock<Vec<rmcp::model::Tool>>,
 }
 
 /// After the process group is killed, how long [`StdioChildCustody::terminate`]
@@ -518,6 +521,7 @@ impl McpConnection {
             stdio_child,
             session_expiry: Default::default(),
             oauth_target: None,
+            standard_tools: Default::default(),
         })
     }
 
@@ -682,6 +686,7 @@ impl McpConnection {
             stdio_child: None,
             session_expiry,
             oauth_target,
+            standard_tools: Default::default(),
         })
     }
 
@@ -850,6 +855,10 @@ impl McpConnection {
         self.connection_id
     }
 
+    pub(crate) fn supports_mcp_apps(&self) -> bool {
+        self.service.supports_mcp_apps()
+    }
+
     /// Get server info
     pub fn server_info(&self) -> Option<Arc<rmcp::model::ServerInfo>> {
         self.service.peer_info()
@@ -857,11 +866,31 @@ impl McpConnection {
 
     /// List available tools
     pub async fn list_tools(&self, server_name: &str) -> Result<Vec<ToolDef>, McpError> {
-        crate::protocol::list_all_tools_with(&self.service, server_name, |error| {
-            self.authorization_required(error)
-                .unwrap_or_else(|| crate::protocol::list_tools_failed(error))
-        })
-        .await
+        let standard =
+            crate::protocol::list_all_standard_tools_with(&self.service, server_name, |error| {
+                self.authorization_required(error)
+                    .unwrap_or_else(|| crate::protocol::list_tools_failed(error))
+            })
+            .await?;
+        let projected = standard
+            .iter()
+            .map(|tool| crate::apps::project_tool(tool, server_name))
+            .collect::<Result<Vec<_>, _>>()?;
+        *self
+            .standard_tools
+            .write()
+            .map_err(|_| McpError::ProtocolError {
+                message: "MCP discovery owner is unavailable".into(),
+            })? = standard;
+        Ok(projected)
+    }
+
+    /// An ambiguous duplicate cannot select UI metadata for a result.
+    pub(crate) fn standard_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        let tools = self.standard_tools.read().ok()?;
+        let mut matches = tools.iter().filter(|tool| tool.name == name);
+        let first = matches.next()?;
+        matches.all(|tool| tool == first).then(|| first.clone())
     }
 
     /// The typed host status for a request that this OAuth connection's
@@ -894,6 +923,53 @@ impl McpConnection {
     ) -> Result<CallToolResult, McpError> {
         self.call_tool_result_entering(name, args, metadata, || Ok(()))
             .await
+    }
+
+    pub(crate) async fn read_resource_entering(
+        &self,
+        uri: &str,
+        metadata: Option<serde_json::Map<String, Value>>,
+        enter: impl FnOnce() -> Result<(), McpError>,
+    ) -> Result<rmcp::model::ReadResourceResult, McpError> {
+        if self.session_expiry.expired() {
+            return Err(session_dead(&self.config.name));
+        }
+        let dispatch = RequestDispatch::default();
+        let mut request =
+            rmcp::model::ReadResourceRequest::new(rmcp::model::ReadResourceRequestParams::new(uri));
+        request.extensions.insert(dispatch.clone());
+        if let Some(metadata) = metadata {
+            self.protected_metadata.register(&metadata)?;
+            request.extensions.insert(ProtectedMetadata(metadata));
+        }
+        let request = request.into();
+        enter()?;
+        let result = self.service.send_request(request).await.map_err(|error| {
+            let disposition = dispatch.disposition();
+            if matches!(disposition, Some(RequestDisposition::Sent) | None)
+                && let Some(refused) = self.authorization_required(&error)
+            {
+                return refused;
+            }
+            tool_call_failure(&self.config.name, "resources/read", disposition, &error)
+        })?;
+        match result {
+            ServerResult::ReadResourceResult(result) => {
+                if serde_json::to_vec(&result)
+                    .map_err(|_| McpError::Serialization("invalid resource response".into()))?
+                    .len()
+                    > 8 * 1024 * 1024
+                {
+                    return Err(McpError::ProtocolError {
+                        message: "MCP App resource exceeds host limit".into(),
+                    });
+                }
+                Ok(result)
+            }
+            _ => Err(McpError::ProtocolError {
+                message: "unexpected MCP resources/read response".into(),
+            }),
+        }
     }
 
     /// Like [`Self::call_tool_result`], running `enter` after every local

@@ -54,6 +54,21 @@ impl NameFilteredDispatcher {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AgentToolDispatcher for NameFilteredDispatcher {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        if self.excluded.contains(source_tool) {
+            return Err(ToolError::not_found(source_tool));
+        }
+        self.inner
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.inner
             .tools()
@@ -242,6 +257,18 @@ impl BundleProvenanceDispatcher {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AgentToolDispatcher for BundleProvenanceDispatcher {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        self.inner
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         let tools = self.inner.tools();
         if tools.iter().all(|tool| tool.provenance.is_some()) {
@@ -477,6 +504,21 @@ impl McpProvenanceFilter {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AgentToolDispatcher for McpProvenanceFilter {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        if self.visibility_for_name(source_tool) != Some(true) {
+            return Err(ToolError::not_found(source_tool));
+        }
+        self.inner
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.inner
             .tools()
@@ -1404,6 +1446,7 @@ fn tool_def(
     kind: ToolSourceKind,
 ) -> Arc<ToolDef> {
     Arc::new(ToolDef {
+        audience: Default::default(),
         name: name.into(),
         description: description.to_string(),
         input_schema,

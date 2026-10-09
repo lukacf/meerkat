@@ -39,12 +39,14 @@ impl AgentToolDispatcher for MathToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "add".into(),
                 description: "Add two numbers together".to_string(),
                 input_schema: meerkat_tools::schema_for::<BinaryMathArgs>(),
                 provenance: None,
             }),
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "multiply".into(),
                 description: "Multiply two numbers".to_string(),
                 input_schema: meerkat_tools::schema_for::<BinaryMathArgs>(),

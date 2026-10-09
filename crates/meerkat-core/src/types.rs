@@ -1783,6 +1783,21 @@ pub fn materialize_latest_system_prompt_versions(messages: &[Message]) -> Vec<Me
         .collect()
 }
 
+/// Remove protocol-owned host data from an already-cloned model projection.
+///
+/// Canonical transcript rows retain this data for authorized host inspection.
+/// Model request and realtime seed owners call this at their projection
+/// boundary, before handing messages to a provider implementation.
+pub fn strip_tool_result_host_metadata(messages: &mut [Message]) {
+    for message in messages {
+        if let Message::ToolResults { results, .. } = message {
+            for result in results {
+                result.host_metadata.clear();
+            }
+        }
+    }
+}
+
 /// Validate the per-key ordering carried by durable versioned System rows.
 ///
 /// Compaction may remove historical versions, so the first retained version
@@ -3434,6 +3449,14 @@ pub struct ToolResult {
     /// or authorize retry of a tool whose body already ran.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settlement_failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+    /// Protocol-owned host data persisted with this result, never model input.
+    ///
+    /// Keys name extension protocols; their owning integration defines and
+    /// validates each opaque value. Core does not interpret these values for
+    /// admission, identity, policy or tool execution. Model-boundary projection
+    /// removes this map while retaining the ordinary content above.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub host_metadata: std::collections::BTreeMap<String, Value>,
 }
 
 impl ToolResult {
@@ -3444,6 +3467,7 @@ impl ToolResult {
             content: ContentBlock::text_vec(content),
             is_error,
             settlement_failures: Vec::new(),
+            host_metadata: Default::default(),
         }
     }
 
@@ -3454,6 +3478,7 @@ impl ToolResult {
             content: ContentBlock::text_vec(content),
             is_error,
             settlement_failures: Vec::new(),
+            host_metadata: Default::default(),
         }
     }
 
@@ -3464,6 +3489,7 @@ impl ToolResult {
             content,
             is_error,
             settlement_failures: Vec::new(),
+            host_metadata: Default::default(),
         }
     }
 
@@ -4260,7 +4286,36 @@ pub struct ToolIdentity {
     pub provenance: Option<ToolProvenance>,
 }
 
-/// Tool definition for the LLM
+/// Audiences allowed to discover and invoke a tool.
+///
+/// This is independent of execution permission. Both audiences still pass
+/// through the member's policy and tool-execution authority.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAudience {
+    #[default]
+    Model,
+    App,
+    ModelAndApp,
+    /// Neither model nor app callers can discover or invoke this tool.
+    Hidden,
+}
+
+impl ToolAudience {
+    pub const fn allows_model(self) -> bool {
+        matches!(self, Self::Model | Self::ModelAndApp)
+    }
+
+    pub const fn allows_app(self) -> bool {
+        matches!(self, Self::App | Self::ModelAndApp)
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::Model
+    }
+}
+
+/// Tool definition projected for supported callers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolDef {
@@ -4270,6 +4325,8 @@ pub struct ToolDef {
     /// Optional provenance metadata tracking which subsystem materialized this tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ToolProvenance>,
+    #[serde(default, skip_serializing_if = "ToolAudience::is_default")]
+    pub audience: ToolAudience,
 }
 
 impl ToolDef {
@@ -4284,12 +4341,19 @@ impl ToolDef {
             description: description.into(),
             input_schema,
             provenance: None,
+            audience: ToolAudience::default(),
         }
     }
 
     /// Set provenance on this ToolDef (chainable builder).
     pub fn with_provenance(mut self, provenance: ToolProvenance) -> Self {
         self.provenance = Some(provenance);
+        self
+    }
+
+    /// Declare the supported caller audiences without granting execution access.
+    pub fn with_audience(mut self, audience: ToolAudience) -> Self {
+        self.audience = audience;
         self
     }
 

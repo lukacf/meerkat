@@ -39,6 +39,14 @@ pub struct McpCallTarget<'a> {
     pub origin: &'a meerkat_core::WireCallOrigin,
 }
 
+/// A resource read on the exact existing MCP connection. It is not a tool
+/// invocation and never borrows a tool's prepared metadata or approval.
+pub struct McpResourceTarget<'a> {
+    pub config: &'a McpServerConfig,
+    pub connection_id: McpConnectionId,
+    pub uri: &'a str,
+}
+
 /// Trusted process-local preparation, separate from serialized agent config.
 /// A provider must select the complete destination, not its display name.
 /// `None` leaves an unselected call's wire payload unchanged. An error refuses
@@ -46,6 +54,25 @@ pub struct McpCallTarget<'a> {
 /// never captured from the agent that first constructed a shared connection.
 #[async_trait]
 pub trait McpCallContextProvider: Send + Sync {
+    /// Hosts that install call preparation must explicitly opt resource reads
+    /// into their credential and member policy. No tool-shaped fallback exists.
+    async fn prepare_resource(
+        &self,
+        _target: McpResourceTarget<'_>,
+        _context: &ToolDispatchContext,
+    ) -> Result<Option<McpCallContext>, McpCallContextError> {
+        Err(McpCallContextError::Unavailable)
+    }
+
+    /// Actual native resource authority for governed reads. A server name is
+    /// not a principal; only the configured host can supply these coordinates.
+    fn resource_authorization_target(
+        &self,
+        _target: McpResourceTarget<'_>,
+    ) -> Option<meerkat_core::authorization::OwnerQualifiedTarget> {
+        None
+    }
+
     async fn prepare(
         &self,
         target: McpCallTarget<'_>,

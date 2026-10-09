@@ -851,6 +851,13 @@ impl RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl SessionService for RpcMobSessionService {
+    async fn tool_application(
+        self: Arc<Self>,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<serde_json::Value, SessionError> {
+        Arc::clone(&self.service).tool_application(control).await
+    }
+
     async fn create_session(
         &self,
         mut req: CreateSessionRequest,

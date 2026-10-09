@@ -97,6 +97,7 @@ mod tests {
 
     fn make_tool(name: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("{name} tool"),
             input_schema: serde_json::json!({"type": "object"}),
@@ -106,6 +107,7 @@ mod tests {
 
     fn make_provenanced_tool(name: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("{name} tool"),
             input_schema: serde_json::json!({"type": "object"}),

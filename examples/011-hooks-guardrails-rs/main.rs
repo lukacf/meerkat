@@ -51,6 +51,7 @@ impl AgentToolDispatcher for WeatherDispatcher {
             description: "Get current weather for a city (simulated data)".to_string(),
             input_schema: meerkat_tools::schema_for::<WeatherArgs>(),
             provenance: None,
+            audience: Default::default(),
         })]
         .into()
     }

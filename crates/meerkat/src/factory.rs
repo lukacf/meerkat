@@ -2389,6 +2389,8 @@ pub struct AgentFactory {
     command_hook_confinement: Option<Arc<crate::command_hook_confinement::CommandHookConfinement>>,
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile,
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    mcp_apps: bool,
     #[cfg(all(
         feature = "test-mcp-oauth-fixtures",
         feature = "mcp",
@@ -3597,6 +3599,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_apps: false,
             #[cfg(all(
                 feature = "test-mcp-oauth-fixtures",
                 feature = "mcp",
@@ -3765,6 +3769,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_apps: false,
             #[cfg(all(
                 feature = "test-mcp-oauth-fixtures",
                 feature = "mcp",
@@ -4064,6 +4070,14 @@ impl AgentFactory {
         F: Fn(Arc<meerkat_mcp::McpRouterAdapter>) + Send + Sync + 'static,
     {
         self.mcp_router_observer_for_test = Some(Arc::new(observer));
+        self
+    }
+
+    /// Advertise standard MCP Apps support when a UI host is attached.
+    /// Headless factories omit the UI capability by default.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    pub fn mcp_apps(mut self, enabled: bool) -> Self {
+        self.mcp_apps = enabled;
         self
     }
 
@@ -6936,6 +6950,11 @@ impl AgentFactory {
                     .clone()
                     .or_else(|| self.mcp_auth_resolver.clone()),
             );
+            if self.mcp_apps {
+                router = router.with_client_service_factory(Arc::new(
+                    meerkat_mcp::apps::McpAppsClientServiceFactory,
+                ));
+            }
             if let Some(provider) = &self.mcp_call_context_provider {
                 router = router.with_call_context_provider(Arc::clone(provider));
             }
@@ -18008,6 +18027,7 @@ mod prompt_tests {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: serde_json::json!({ "type": "object" }),
@@ -18038,6 +18058,7 @@ mod prompt_tests {
             .iter()
             .map(|(name, description)| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: (*description).to_string(),
                     input_schema: serde_json::json!({ "type": "object" }),
@@ -18480,12 +18501,14 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let secret = Arc::new(ToolDef {
+            audience: Default::default(),
             name: "secret_lookup".into(),
             description: "Look up a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
         });
         let secret_audit = Arc::new(ToolDef {
+            audience: Default::default(),
             name: "secret_audit".into(),
             description: "Audit a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
@@ -18526,6 +18549,7 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let visible = Arc::new(ToolDef {
+            audience: Default::default(),
             name: "visible".into(),
             description: "Always-inline tool".to_string(),
             input_schema: serde_json::json!({"type":"object"}),
@@ -18582,6 +18606,7 @@ mod prompt_tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let secret = Arc::new(ToolDef {
+            audience: Default::default(),
             name: "secret_lookup".into(),
             description: "Look up a secret value".to_string(),
             input_schema: serde_json::json!({"type":"object"}),

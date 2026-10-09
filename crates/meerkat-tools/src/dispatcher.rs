@@ -257,6 +257,23 @@ impl ToolDispatcher {
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl AgentToolDispatcher for ToolDispatcher {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        self.live_tool_def(source_tool)?;
+        tokio::time::timeout(
+            self.default_timeout,
+            self.router
+                .resolve_tool_application(source_tool, request, invocation, context),
+        )
+        .await
+        .map_err(|_| ToolError::timeout(source_tool, self.default_timeout.as_millis() as u64))?
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.tool_catalog()
             .iter()
@@ -480,6 +497,7 @@ mod tests {
         fn with_unavailable_reason(name: &str, reason: ToolUnavailableReason) -> Self {
             let catalog = vec![ToolCatalogEntry::session_inline_with_callability(
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: name.into(),
                     description: format!("{name} tool"),
                     input_schema: json!({"type": "object"}),
@@ -610,6 +628,7 @@ mod tests {
 
     fn tool_def(name: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("{name} tool"),
             input_schema: json!({"type": "object"}),

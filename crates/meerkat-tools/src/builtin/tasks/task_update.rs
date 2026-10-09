@@ -94,6 +94,7 @@ impl BuiltinTool for TaskUpdateTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "task_update".into(),
             description: "Update an existing task".into(),
             input_schema: crate::schema::schema_for::<TaskUpdateParams>(),

@@ -245,6 +245,7 @@ pub struct ToolCatalogCapabilities {
 pub fn deferred_session_entry_count(catalog: &[ToolCatalogEntry]) -> usize {
     catalog
         .iter()
+        .filter(|entry| entry.tool.audience.allows_model())
         .filter(|entry| entry.plane == ToolPlaneClass::Session)
         .filter(|entry| {
             matches!(
@@ -259,6 +260,7 @@ pub fn deferred_session_entry_count(catalog: &[ToolCatalogEntry]) -> usize {
 pub fn deferred_session_schema_volume(catalog: &[ToolCatalogEntry]) -> usize {
     catalog
         .iter()
+        .filter(|entry| entry.tool.audience.allows_model())
         .filter(|entry| entry.plane == ToolPlaneClass::Session)
         .filter(|entry| {
             matches!(
@@ -366,6 +368,36 @@ mod tests {
         assert_eq!(
             stable_owner_key_from_provenance(&stored),
             "callback:owner-a"
+        );
+    }
+
+    #[test]
+    fn app_only_catalog_entries_do_not_enable_model_discovery() {
+        let provenance = ToolProvenance {
+            kind: ToolSourceKind::Mcp,
+            source_id: "app-server".into(),
+        };
+        let entries = (0..3)
+            .map(|index| {
+                ToolCatalogEntry::session_deferred(
+                    Arc::new(
+                        ToolDef::new(
+                            format!("app_{index}"),
+                            "x".repeat(200),
+                            serde_json::json!({}),
+                        )
+                        .with_audience(crate::ToolAudience::App),
+                    ),
+                    true,
+                    provenance.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deferred_session_entry_count(&entries), 0);
+        assert_eq!(deferred_session_schema_volume(&entries), 0);
+        assert_eq!(
+            select_catalog_mode_from_snapshot(true, &entries, &[]),
+            ToolCatalogMode::Inline
         );
     }
 

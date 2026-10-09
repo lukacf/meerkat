@@ -70,6 +70,38 @@ rkat mcp add --transport http knowledge https://mcp.example.com/v1
 
 Config is stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user). Supports stdio, streamable HTTP, and SSE transports. OAuth-protected HTTP servers discover auth at connect time; use `rkat mcp login <name>` or `rkat run --mcp-auth interactive` when browser login is needed. See the [MCP reference](/api/mcp) for full details.
 
+## MCP Apps in UI hosts
+
+A host with an isolated MCP Apps renderer can opt in with
+`AgentFactory::mcp_apps(true)`. Its MCP connections advertise
+`io.modelcontextprotocol/ui` and capture the original tool definition,
+arguments, full `CallToolResult` and available UI resource before model
+projection. Headless factories leave this capability disabled.
+
+App authors use standard `_meta.ui.resourceUri`, `ui://` resources and
+`text/html;profile=mcp-app`. UI-only result `_meta` remains in native session
+persistence, outside model requests and public transcript projection. Resource
+reads do not require the resource to appear in `resources/list`.
+
+`ToolAudience` separates model and app visibility while retaining normal tool
+scope and policy checks. MCP tools default to both audiences; explicit
+`_meta.ui.visibility` narrows them. An app-only tool is unavailable to model
+selection and deferred catalog search/load. Visibility is not authorization:
+every app action still enters the current member's native tool policy.
+
+UI hosts submit `ToolApplicationControlRequest` through `SessionService` with a
+trusted, revalidatable ingress and an exact session/tool-call locator. Governed
+hosts must implement fresh tool-application authorization through their native
+work-policy owner. The prior agent run's authorization is never reused. Resource
+context providers implement `prepare_resource` separately from tool-call
+credential preparation.
+
+The runtime binds live operations to the originating physical MCP connection.
+Retained views can replay without re-executing the tool; retirement, replacement
+or process restart refuses new IO against the old binding. App code cannot pick
+another server by supplying a name. Developer panels and generated UI languages
+are host concerns, not additional MCP authoring contracts.
+
 ## Built-in tools
 
 Meerkat ships with tool categories resolved per agent. Factory category flags

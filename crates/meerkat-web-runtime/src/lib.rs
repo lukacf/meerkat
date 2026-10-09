@@ -1160,6 +1160,7 @@ pub fn register_tool_callback(
             .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
 
         let def = Arc::new(meerkat_core::ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description,
             input_schema: schema,
@@ -1222,6 +1223,7 @@ pub fn register_js_tool(
             .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
 
         let def = Arc::new(meerkat_core::ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description,
             input_schema: schema,

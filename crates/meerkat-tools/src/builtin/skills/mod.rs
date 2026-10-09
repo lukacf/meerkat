@@ -82,6 +82,7 @@ mod tests {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: String::new(),
                     input_schema: serde_json::json!({"type": "object"}),

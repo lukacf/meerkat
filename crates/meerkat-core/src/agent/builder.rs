@@ -1419,6 +1419,7 @@ mod tests {
 
     fn test_tool_with_provenance(name: &str, source_id: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("{name} tool"),
             input_schema: serde_json::json!({ "type": "object" }),

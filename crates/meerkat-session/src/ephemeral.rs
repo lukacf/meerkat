@@ -2171,6 +2171,11 @@ enum SessionCommand {
             Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::AgentError>,
         >,
     },
+    ToolApplication {
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+        context: meerkat_core::ToolDispatchContext,
+        reply_tx: oneshot::Sender<Result<serde_json::Value, meerkat_core::error::AgentError>>,
+    },
     UpdateMobToolAuthority {
         authority_context: Option<MobToolAuthorityContext>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -3132,6 +3137,17 @@ pub trait SessionAgent: Send {
     ) -> Result<(), meerkat_core::error::AgentError> {
         Err(meerkat_core::error::AgentError::ConfigError(
             "tool visibility updates are not supported by this session agent".to_string(),
+        ))
+    }
+
+    /// Handle a newly admitted application request without borrowing an old run.
+    async fn tool_application(
+        &mut self,
+        _request: meerkat_core::ToolApplicationRequest,
+        _context: meerkat_core::ToolDispatchContext,
+    ) -> Result<serde_json::Value, meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "tool applications are not supported by this session agent".into(),
         ))
     }
 
@@ -4985,6 +5001,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
+    }
+
+    pub(crate) async fn dispatch_tool_application(
+        &self,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+        context: meerkat_core::ToolDispatchContext,
+    ) -> Result<serde_json::Value, SessionError> {
+        let command_tx = self.session_command_tx(control.session_id()).await?.clone();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ToolApplication {
+                control,
+                context,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| SessionError::Agent(AgentError::Cancelled))?;
+        reply_rx
+            .await
+            .map_err(|_| SessionError::Agent(AgentError::Cancelled))?
+            .map_err(SessionError::Agent)
     }
 
     /// Dispatch an external tool call through the live session task.
@@ -7699,6 +7736,36 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
+    async fn tool_application(
+        self: Arc<Self>,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<serde_json::Value, SessionError> {
+        control
+            .claim()
+            .map_err(|error| SessionError::Agent(AgentError::InternalError(error.to_string())))?;
+        #[cfg(feature = "runtime-machine")]
+        let context = {
+            let owner = self
+                .runtime_adapter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            match owner {
+                Some(owner) => owner
+                    .prepare_tool_application(Arc::clone(&control))
+                    .map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(error.to_string()))
+                    })?,
+                None => meerkat_core::ToolDispatchContext::default()
+                    .with_tool_application_control(Arc::clone(&control)),
+            }
+        };
+        #[cfg(not(feature = "runtime-machine"))]
+        let context = meerkat_core::ToolDispatchContext::default()
+            .with_tool_application_control(Arc::clone(&control));
+        self.dispatch_tool_application(control, context).await
+    }
+
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         self.create_session_with_admission(req, None).await
     }
@@ -8980,6 +9047,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
             SessionCommand::DispatchExternalToolCall { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
+            SessionCommand::ToolApplication { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
             SessionCommand::UpdateMobToolAuthority { reply_tx, .. } => {
@@ -10405,6 +10475,44 @@ async fn session_task<A: SessionAgent>(
                         item_id,
                         content_index,
                     );
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::ToolApplication {
+                control: request_control,
+                context,
+                reply_tx,
+            } => {
+                if reply_tx.is_closed() {
+                    continue;
+                }
+                let result = match request_control.revalidate_async().await {
+                    Err(error) => Err(AgentError::InternalError(error.to_string())),
+                    Ok(()) if reply_tx.is_closed() => continue,
+                    // Once admitted, finish native settlement even if the
+                    // browser stops waiting. Dropping a dispatched future can
+                    // otherwise discard effects after transport handoff.
+                    Ok(()) => {
+                        agent
+                            .tool_application(request_control.request().clone(), context)
+                            .await
+                    }
+                };
+                let result = match result {
+                    Ok(value) => request_control
+                        .revalidate_async()
+                        .await
+                        .map(|_| value)
+                        .map_err(|error| AgentError::InternalError(error.to_string())),
+                    Err(error) => Err(error),
+                };
+                let snap = agent.snapshot();
+                control.publish_summary(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
+                });
                 let _ = reply_tx.send(result);
             }
             SessionCommand::DispatchExternalToolCall {

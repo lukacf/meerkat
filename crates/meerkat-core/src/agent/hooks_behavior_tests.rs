@@ -138,6 +138,7 @@ impl RecordingToolDispatcher {
 impl AgentToolDispatcher for RecordingToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::new([Arc::new(ToolDef {
+            audience: Default::default(),
             name: "echo".into(),
             description: "echo".to_string(),
             input_schema: empty_test_tool_schema(),

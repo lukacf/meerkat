@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use meerkat_core::ToolDef;
-use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
+use meerkat_core::types::ContentBlock;
 use rmcp::{
     model::{CallToolResult, Content, RawContent},
     service::{Peer, RoleClient, RunningService},
@@ -133,6 +133,20 @@ pub(crate) async fn list_all_tools_with(
     server_name: &str,
     request_failed: impl Fn(&rmcp::ServiceError) -> McpError,
 ) -> Result<Vec<ToolDef>, McpError> {
+    list_all_standard_tools_with(service, server_name, request_failed)
+        .await?
+        .iter()
+        .map(|tool| crate::apps::project_tool(tool, server_name))
+        .collect()
+}
+
+/// The complete standard observation is owned by the same connection that
+/// performs tools/list. Projection into model definitions never destroys it.
+pub(crate) async fn list_all_standard_tools_with(
+    service: &Peer<RoleClient>,
+    server_name: &str,
+    request_failed: impl Fn(&rmcp::ServiceError) -> McpError,
+) -> Result<Vec<rmcp::model::Tool>, McpError> {
     const MAX_PAGES: usize = crate::McpConnection::MAX_TOOL_DISCOVERY_PAGES;
     const MAX_TOOLS: usize = crate::McpConnection::MAX_DISCOVERED_TOOLS;
     let mut request = None;
@@ -151,18 +165,7 @@ pub(crate) async fn list_all_tools_with(
                 limit: ToolDiscoveryLimit::Tools { max: MAX_TOOLS },
             });
         }
-        tools.extend(response.tools.into_iter().map(|tool| {
-            let schema = Value::Object(Arc::unwrap_or_clone(tool.input_schema));
-            ToolDef {
-                name: tool.name.to_string().into(),
-                description: tool.description.unwrap_or_default().to_string(),
-                input_schema: schema,
-                provenance: Some(ToolProvenance {
-                    kind: ToolSourceKind::Mcp,
-                    source_id: server_name.into(),
-                }),
-            }
-        }));
+        tools.extend(response.tools);
         let Some(cursor) = response.next_cursor else {
             return Ok(tools);
         };

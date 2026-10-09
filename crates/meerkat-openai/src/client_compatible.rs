@@ -1644,6 +1644,7 @@ mod tests {
             ))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "workgraph_claim".into(),
             description: "Claim a ready WorkGraph item with CAS revision checking.".to_string(),
             input_schema: crate::tool_schema::test_fixtures::pre_fix_workgraph_claim_schema(),

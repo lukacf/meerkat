@@ -613,6 +613,53 @@ fn test_tool_result_serialization() {
 }
 
 #[test]
+fn host_metadata_is_optional_and_round_trips_opaque_protocol_data() {
+    let legacy = json!({"tool_use_id": "call", "content": "visible", "is_error": false});
+    let mut result: ToolResult = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(result.host_metadata.is_empty());
+    assert_eq!(serde_json::to_value(&result).unwrap(), legacy);
+    result.host_metadata.insert(
+        "example.test/app".into(),
+        json!({
+            "private": "HOST_ONLY_SECRET", "nested": {"result": [1, null, true]}
+        }),
+    );
+    let restored: ToolResult =
+        serde_json::from_value(serde_json::to_value(&result).unwrap()).unwrap();
+    assert_eq!(restored, result);
+    assert_eq!(restored.text_content(), "visible");
+}
+
+#[test]
+fn tool_audience_defaults_to_model_and_round_trips_explicit_callers() {
+    let plain = ToolDef::new("tool", "tool", json!({"type": "object"}));
+    let plain_wire = serde_json::to_value(&plain).unwrap();
+    assert!(plain_wire.get("audience").is_none());
+    let restored: ToolDef = serde_json::from_value(plain_wire).unwrap();
+    assert_eq!(restored.audience, ToolAudience::Model);
+    assert!(restored.audience.allows_model());
+    assert!(!restored.audience.allows_app());
+    for audience in [
+        ToolAudience::App,
+        ToolAudience::ModelAndApp,
+        ToolAudience::Hidden,
+    ] {
+        let tool = plain.clone().with_audience(audience);
+        let restored: ToolDef =
+            serde_json::from_value(serde_json::to_value(tool).unwrap()).unwrap();
+        assert_eq!(restored.audience, audience);
+        assert_eq!(
+            restored.audience.allows_app(),
+            audience != ToolAudience::Hidden
+        );
+        assert_eq!(
+            restored.audience.allows_model(),
+            audience == ToolAudience::ModelAndApp
+        );
+    }
+}
+
+#[test]
 fn content_blocks_text_only_serializes_as_plain_string() {
     // TRIPWIRE (KEEP_FUNCTIONAL): `content_blocks_serde` keeps its
     // string-accepting deserialize arm ONLY because the serializer still emits
@@ -884,6 +931,7 @@ fn test_tool_def_serialization() {
     }
 
     let tool_def = ToolDef {
+        audience: Default::default(),
         name: "test_tool".into(),
         description: "A test tool".to_string(),
         input_schema: schema_for::<TestToolDefInput>(),
@@ -921,6 +969,7 @@ fn test_tool_def_empty_schema_serialization() {
     struct EmptyObject {}
 
     let tool_def = ToolDef {
+        audience: Default::default(),
         name: "empty_tool".into(),
         description: "An empty tool".to_string(),
         input_schema: schema_for::<EmptyObject>(),

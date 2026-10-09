@@ -383,6 +383,25 @@ impl ToolGatewayBuilder {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for ToolGateway {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &crate::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &crate::ToolDispatchContext,
+    ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+        match self.resolve_routing(source_tool)? {
+            GatewayRouting::Dispatch(_, owner) => {
+                owner
+                    .dispatcher
+                    .resolve_tool_application(source_tool, request, invocation, context)
+                    .await
+            }
+            GatewayRouting::Unavailable(reason) => Err(ToolError::unavailable(source_tool, reason)),
+            GatewayRouting::NotFound => Err(ToolError::not_found(source_tool)),
+        }
+    }
+
     /// Returns only tools whose owning catalog says they are currently callable.
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.tool_catalog()
@@ -836,6 +855,24 @@ impl DynamicToolComposite {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for DynamicToolComposite {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &crate::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &crate::ToolDispatchContext,
+    ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+        match self.resolve_live_routing(source_tool)? {
+            DynamicRouting::Dispatch(_, owner) => {
+                owner
+                    .resolve_tool_application(source_tool, request, invocation, context)
+                    .await
+            }
+            DynamicRouting::Unavailable(reason) => Err(ToolError::unavailable(source_tool, reason)),
+            DynamicRouting::NotFound => Err(ToolError::not_found(source_tool)),
+        }
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.catalog_entries()
             .into_iter()
@@ -1138,6 +1175,189 @@ mod tests {
         Value::Object(obj)
     }
 
+    struct ApplicationProbe {
+        catalog: std::sync::Mutex<Vec<ToolCatalogEntry>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ApplicationProbe {
+        fn new(names: &[&str]) -> Self {
+            Self {
+                catalog: std::sync::Mutex::new(
+                    names
+                        .iter()
+                        .map(|name| {
+                            ToolCatalogEntry::session_inline(
+                                Arc::new(ToolDef::new(*name, "app source", empty_object_schema())),
+                                true,
+                            )
+                        })
+                        .collect(),
+                ),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for ApplicationProbe {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            self.catalog.lock().unwrap().clone().into()
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::access_denied(call.name))
+        }
+
+        async fn resolve_tool_application(
+            &self,
+            source_tool: &str,
+            request: &crate::ToolApplicationRequest,
+            invocation: &Value,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::tool_application::ToolApplicationResolution::Value(
+                json!({
+                    "source": source_tool,
+                    "extension": request.extension,
+                    "invocation": invocation,
+                    "read_only": context.read_only_execution_required(),
+                }),
+            ))
+        }
+    }
+
+    fn application_request() -> crate::ToolApplicationRequest {
+        crate::ToolApplicationRequest {
+            tool_call_id: "committed-call".into(),
+            extension: "example.test/app".into(),
+            operation: crate::ToolApplicationOperation::ReadResource {
+                uri: "ui://test/view".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_application_wrappers_preserve_source_filters_and_read_only_context() {
+        let source = Arc::new(ApplicationProbe::new(&["source"]));
+        let other = Arc::new(ApplicationProbe::new(&["other"]));
+        let dynamic = Arc::new(DynamicToolComposite::new(vec![
+            source.clone(),
+            other.clone(),
+        ]));
+        let gateway = Arc::new(ToolGateway::new(dynamic, None).unwrap());
+        let filtered = Arc::new(crate::agent::FilteredToolDispatcher::new(
+            gateway,
+            ["source"],
+        ));
+        let gate = crate::ExecutionPolicyGatedDispatcher::new(
+            filtered.clone(),
+            crate::ToolExecutionPolicy::resolve(crate::ops::ToolAccessPolicy::ReadOnly).unwrap(),
+        );
+        let request = application_request();
+        let invocation = json!({"host": "retained"});
+        let context = crate::ToolDispatchContext::default();
+        let crate::tool_application::ToolApplicationResolution::Value(value) = gate
+            .resolve_tool_application("source", &request, &invocation, &context)
+            .await
+            .unwrap()
+        else {
+            panic!("expected source data");
+        };
+        assert_eq!(
+            value,
+            json!({"source": "source", "extension": request.extension,
+            "invocation": invocation, "read_only": true})
+        );
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            gate.resolve_tool_application("other", &request, &invocation, &context)
+                .await
+                .is_err()
+        );
+        assert_eq!(other.calls.load(Ordering::SeqCst), 0);
+        let denied = crate::ExecutionPolicyGatedDispatcher::new(
+            filtered,
+            crate::ToolExecutionPolicy::resolve(crate::ops::ToolAccessPolicy::AllowList(
+                Default::default(),
+            ))
+            .unwrap(),
+        );
+        assert!(
+            denied
+                .resolve_tool_application("source", &request, &invocation, &context)
+                .await
+                .is_err()
+        );
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_application_routing_rejects_collisions_retirement_and_uncallable_sources() {
+        let original = Arc::new(ApplicationProbe::new(&["source"]));
+        let replacement = Arc::new(ApplicationProbe::new(&[]));
+        let gateway = ToolGateway::new(original.clone(), Some(replacement.clone())).unwrap();
+        let request = application_request();
+        let context = crate::ToolDispatchContext::default();
+        original.catalog.lock().unwrap()[0].callability =
+            ToolCallability::Unavailable(crate::ToolUnavailableReason::NotCurrentlyCallable);
+        assert!(
+            gateway
+                .resolve_tool_application("source", &request, &Value::Null, &context)
+                .await
+                .is_err()
+        );
+        original.catalog.lock().unwrap().clear();
+        replacement
+            .catalog
+            .lock()
+            .unwrap()
+            .push(ToolCatalogEntry::session_inline(
+                Arc::new(ToolDef::new("source", "replacement", empty_object_schema())),
+                true,
+            ));
+        assert!(
+            gateway
+                .resolve_tool_application("source", &request, &Value::Null, &context)
+                .await
+                .is_err()
+        );
+        assert_eq!(original.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(replacement.calls.load(Ordering::SeqCst), 0);
+        let duplicate = Arc::new(ApplicationProbe::new(&["source"]));
+        let dynamic = DynamicToolComposite::new(vec![replacement.clone(), duplicate.clone()]);
+        assert!(
+            dynamic
+                .resolve_tool_application("source", &request, &Value::Null, &context)
+                .await
+                .is_err()
+        );
+        assert_eq!(replacement.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(duplicate.calls.load(Ordering::SeqCst), 0);
+    }
+
     /// A simple mock dispatcher for testing
     struct MockDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
@@ -1150,6 +1370,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
+                        audience: Default::default(),
                         name: (*name).into(),
                         description: format!("{prefix} tool: {name}"),
                         input_schema: empty_object_schema(),
@@ -1178,6 +1399,7 @@ mod tests {
                 .map(|(name, currently_callable)| {
                     crate::ToolCatalogEntry::session_inline(
                         Arc::new(ToolDef {
+                            audience: Default::default(),
                             name: (*name).into(),
                             description: format!("{prefix} tool: {name}"),
                             input_schema: empty_object_schema(),
@@ -1206,6 +1428,7 @@ mod tests {
             reason: ToolUnavailableReason,
         ) -> Self {
             let tool = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: format!("{prefix} tool: {name}"),
                 input_schema: empty_object_schema(),
@@ -1259,6 +1482,7 @@ mod tests {
         fn new(tool_name: &str, exact_catalog: bool) -> Self {
             Self {
                 tool: Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: tool_name.into(),
                     description: "context aware tool".into(),
                     input_schema: empty_object_schema(),
@@ -1312,6 +1536,7 @@ mod tests {
             .unwrap();
             Self {
                 tool: Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: tool_name.into(),
                     description: format!("{owner} catalog"),
                     input_schema: empty_object_schema(),
@@ -1327,6 +1552,7 @@ mod tests {
         fn new(prefix: &str, tool_name: &str, callable: Arc<AtomicBool>) -> Self {
             Self {
                 tool: Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: tool_name.into(),
                     description: format!("{prefix} tool: {tool_name}"),
                     input_schema: empty_object_schema(),
@@ -1353,6 +1579,7 @@ mod tests {
                         .iter()
                         .map(|name| {
                             Arc::new(ToolDef {
+                                audience: Default::default(),
                                 name: (*name).into(),
                                 description: format!("{prefix} tool: {name}"),
                                 input_schema: empty_object_schema(),
@@ -1371,6 +1598,7 @@ mod tests {
 
         fn add_tool_with_description(&self, name: &str, description: impl Into<String>) {
             self.tools.lock().unwrap().push(Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: description.into(),
                 input_schema: empty_object_schema(),
@@ -1387,6 +1615,7 @@ mod tests {
         fn new(name: &str) -> Self {
             Self {
                 tool: Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: name.into(),
                     description: format!("{name} tool"),
                     input_schema: empty_object_schema(),
@@ -2816,6 +3045,7 @@ mod tests {
         ) -> Self {
             Self {
                 tool: Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: tool_name.into(),
                     description: format!("declaring tool: {tool_name}"),
                     input_schema: empty_object_schema(),

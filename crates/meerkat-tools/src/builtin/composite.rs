@@ -544,7 +544,11 @@ impl CompositeDispatcher {
         }
         if let Some(ref ext) = self.external {
             let mut wrote_external_header = false;
-            for tool in ext.tools().iter() {
+            for tool in ext
+                .tools()
+                .iter()
+                .filter(|tool| tool.audience.allows_model())
+            {
                 if !matches!(
                     self.resolve_tool_owner(&tool.name),
                     ResolvedToolOwner::External
@@ -724,6 +728,38 @@ enum ResolvedToolOwner<'a> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CompositeDispatcher {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        match self.resolve_tool_owner(source_tool) {
+            ResolvedToolOwner::External => {
+                let external = self
+                    .external
+                    .as_ref()
+                    .ok_or_else(|| ToolError::not_found(source_tool))?;
+                if external.tool_catalog_capabilities().exact_catalog {
+                    let catalog = external.tool_catalog();
+                    let entry = catalog
+                        .iter()
+                        .find(|entry| entry.tool.name == source_tool)
+                        .ok_or_else(|| ToolError::not_found(source_tool))?;
+                    if let Some(reason) = entry.callability.unavailable_reason() {
+                        return Err(ToolError::unavailable(source_tool, reason));
+                    }
+                }
+                external
+                    .resolve_tool_application(source_tool, request, invocation, context)
+                    .await
+            }
+            ResolvedToolOwner::NotFound => Err(ToolError::not_found(source_tool)),
+            _ => Err(ToolError::access_denied(source_tool)),
+        }
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         let mut tools = Vec::new();
 
@@ -1590,6 +1626,7 @@ mod tests {
     impl MockExternalDispatcher {
         fn new(name: &str, description: &str) -> Self {
             let tools: Arc<[Arc<ToolDef>]> = Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: description.to_string(),
                 input_schema: json!({
@@ -1622,6 +1659,7 @@ mod tests {
                 .map(|(name, currently_callable)| {
                     meerkat_core::ToolCatalogEntry::session_inline(
                         Arc::new(ToolDef {
+                            audience: Default::default(),
                             name: (*name).into(),
                             description: format!("external tool: {name}"),
                             input_schema: json!({
@@ -1646,6 +1684,7 @@ mod tests {
             Self {
                 catalog: Arc::from([meerkat_core::ToolCatalogEntry::session_inline(
                     Arc::new(ToolDef {
+                        audience: Default::default(),
                         name: "inspect_context".into(),
                         description: "inspect context".to_string(),
                         input_schema: json!({
@@ -2076,6 +2115,33 @@ mod tests {
         assert!(usage.contains("External tools"));
         assert!(usage.contains("mob_list"));
         assert!(usage.contains("List active mobs"));
+    }
+
+    #[test]
+    fn usage_instructions_omit_app_only_tool_names_and_descriptions() {
+        let external = MockExternalDispatcher {
+            tools: vec![Arc::new(
+                ToolDef::new(
+                    "private_app_action",
+                    "private app description",
+                    json!({"type": "object"}),
+                )
+                .with_audience(meerkat_core::ToolAudience::App),
+            )]
+            .into(),
+        };
+        let dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(test_project_root()),
+            None,
+            Some(Arc::new(external)),
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let usage = dispatcher.usage_instructions();
+        assert!(!usage.contains("private_app_action"));
+        assert!(!usage.contains("private app description"));
     }
 
     #[test]

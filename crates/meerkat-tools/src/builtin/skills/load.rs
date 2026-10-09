@@ -52,6 +52,7 @@ impl BuiltinTool for LoadSkillTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: super::LOAD_SKILL_TOOL_NAME.into(),
             description:
                 "Load a skill's full instructions by (source_uuid, skill_name) into the conversation."

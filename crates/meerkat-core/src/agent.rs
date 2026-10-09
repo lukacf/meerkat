@@ -795,6 +795,8 @@ pub type CancelAfterBoundarySender = tokio::sync::mpsc::UnboundedSender<CancelAf
 /// metadata into canonical transcript history.
 #[derive(Clone, Default)]
 pub struct ToolDispatchContext {
+    application_binding: Option<crate::tool_application::ToolApplicationBinding>,
+    application_control: Option<Arc<crate::ToolApplicationControlRequest>>,
     current_turn: Option<CurrentTurnContent>,
     turn_metadata: BTreeMap<String, serde_json::Value>,
     origin_session_id: Option<crate::types::SessionId>,
@@ -1126,7 +1128,13 @@ impl std::fmt::Debug for ToolDispatchContext {
 
 impl PartialEq for ToolDispatchContext {
     fn eq(&self, other: &Self) -> bool {
-        self.current_turn == other.current_turn
+        self.application_binding == other.application_binding
+            && match (&self.application_control, &other.application_control) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && self.current_turn == other.current_turn
             && self.turn_metadata == other.turn_metadata
             && self.origin_session_id == other.origin_session_id
             && self.interaction_lineage_id == other.interaction_lineage_id
@@ -1163,6 +1171,28 @@ impl Eq for ToolDispatchContext {}
 pub const TOOL_DISPATCH_OBJECTIVE_ID_KEY: &str = "meerkat.objective_id";
 
 impl ToolDispatchContext {
+    pub fn tool_application_control(&self) -> Option<&Arc<crate::ToolApplicationControlRequest>> {
+        self.application_control.as_ref()
+    }
+
+    pub fn with_tool_application_control(
+        mut self,
+        control: Arc<crate::ToolApplicationControlRequest>,
+    ) -> Self {
+        self.application_control = Some(control);
+        self
+    }
+    pub fn application_binding(&self) -> Option<&crate::tool_application::ToolApplicationBinding> {
+        self.application_binding.as_ref()
+    }
+
+    pub(crate) fn with_application_binding(
+        mut self,
+        binding: crate::tool_application::ToolApplicationBinding,
+    ) -> Self {
+        self.application_binding = Some(binding);
+        self
+    }
     /// Whether an enclosing execution policy requires a positive read-only
     /// declaration at the actual tool binding. This restriction is monotonic.
     pub const fn read_only_execution_required(&self) -> bool {
@@ -1179,6 +1209,8 @@ impl ToolDispatchContext {
             crate::types::ContentInput::Blocks(blocks) => Some(blocks.clone()),
         };
         Self {
+            application_binding: None,
+            application_control: None,
             current_turn: blocks.map(CurrentTurnContent::new),
             turn_metadata: BTreeMap::new(),
             origin_session_id: None,
@@ -1666,6 +1698,20 @@ impl BindOutcome {
 pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
+
+    /// Resolve a host UI request against the leaf that owns the original tool.
+    /// `invocation` is read from the committed result by the session owner.
+    /// A leaf may serve protocol data or select a tool call; it cannot bypass
+    /// core's normal app scope and execution path for that call.
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        _request: &crate::ToolApplicationRequest,
+        _invocation: &serde_json::Value,
+        _context: &ToolDispatchContext,
+    ) -> Result<crate::tool_application::ToolApplicationResolution, crate::ToolError> {
+        Err(crate::ToolError::access_denied(source_tool))
+    }
 
     /// Query exact catalog support for this dispatcher.
     ///
@@ -2200,6 +2246,21 @@ impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for FilteredToolDispatcher<T> {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &crate::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<crate::tool_application::ToolApplicationResolution, crate::ToolError> {
+        if !self.allowed_tools.contains(source_tool) {
+            return Err(crate::ToolError::access_denied(source_tool));
+        }
+        self.inner
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         if self.inner.tool_catalog_capabilities().exact_catalog {
             return self
@@ -3508,6 +3569,7 @@ mod tests {
     impl AgentToolDispatcher for ContextAwareToolDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "inspect_context".into(),
                 description: "inspect context".to_string(),
                 input_schema: json!({"type": "object"}),

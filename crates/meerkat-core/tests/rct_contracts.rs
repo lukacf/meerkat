@@ -557,6 +557,7 @@ impl MockDispatcher {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: format!("Mock tool {name}"),
                     input_schema: json!({"type": "object"}),

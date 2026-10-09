@@ -396,6 +396,7 @@ impl AgentToolDispatcher for RetainedPolicyBundle {
             .into_iter()
             .map(|name| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: name.into(),
                     description: "Native policy parity probe".into(),
                     input_schema: serde_json::json!({"type": "object"}),

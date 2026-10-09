@@ -76,6 +76,7 @@ impl MemorySearchDispatcher {
 
     pub fn new(store: Arc<dyn MemoryStore>, scope: MemorySearchScope) -> Self {
         let tool_def = Arc::new(ToolDef {
+            audience: Default::default(),
             name: TOOL_NAME.into(),
             description: "Search semantic memory for past conversation content. \
                 Memory contains text from earlier turns in this session that \

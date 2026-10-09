@@ -10681,6 +10681,13 @@ impl RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl SessionService for RunMobSessionService {
+    async fn tool_application(
+        self: Arc<Self>,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<serde_json::Value, meerkat_core::service::SessionError> {
+        Arc::clone(&self.inner).tool_application(control).await
+    }
+
     async fn create_session(
         &self,
         req: CreateSessionRequest,
@@ -14235,6 +14242,13 @@ impl MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl SessionService for MobCliSessionService {
+    async fn tool_application(
+        self: Arc<Self>,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<serde_json::Value, meerkat_core::service::SessionError> {
+        Arc::clone(&self.inner).tool_application(control).await
+    }
+
     async fn create_session(
         &self,
         req: CreateSessionRequest,
@@ -22494,6 +22508,7 @@ default_model = "gemma"
     impl StaticDispatcher {
         fn new(name: &str) -> Self {
             let tool = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: format!("tool {name}"),
                 input_schema: serde_json::json!({
@@ -22528,6 +22543,7 @@ default_model = "gemma"
     impl EchoDispatcher {
         fn new(name: &str, content: &str) -> Self {
             let tool = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: format!("tool {name}"),
                 input_schema: serde_json::json!({

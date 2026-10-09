@@ -244,9 +244,18 @@ fn invalid_frame() -> io::Error {
 
 /// Identify the opaque extension before the final serializer restores it.
 pub(crate) fn has_protected_metadata(message: &ClientJsonRpcMessage) -> bool {
-    matches!(message, ClientJsonRpcMessage::Request(request)
-        if matches!(&request.request, ClientRequest::CallToolRequest(call)
-            if call.extensions.get::<ProtectedMetadata>().is_some()))
+    match message {
+        ClientJsonRpcMessage::Request(request) => match &request.request {
+            ClientRequest::CallToolRequest(call) => {
+                call.extensions.get::<ProtectedMetadata>().is_some()
+            }
+            ClientRequest::ReadResourceRequest(read) => {
+                read.extensions.get::<ProtectedMetadata>().is_some()
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// A protected body may only reach the exact configured destination: no
@@ -268,16 +277,19 @@ pub(crate) fn protected_http_client() -> io::Result<&'static reqwest::Client> {
 
 /// Call only at the final serializer, after all rmcp queues and diagnostics.
 pub(crate) fn restore_metadata(message: &mut ClientJsonRpcMessage) {
-    if let ClientJsonRpcMessage::Request(message) = message
-        && let ClientRequest::CallToolRequest(request) = &mut message.request
-        && let Some(metadata) = request.extensions.get::<ProtectedMetadata>()
-    {
-        request
-            .params
-            .meta
-            .get_or_insert_default()
-            .0
-            .extend(metadata.0.clone());
+    if let ClientJsonRpcMessage::Request(message) = message {
+        let (extensions, meta) = match &mut message.request {
+            ClientRequest::CallToolRequest(request) => {
+                (&request.extensions, &mut request.params.meta)
+            }
+            ClientRequest::ReadResourceRequest(request) => {
+                (&request.extensions, &mut request.params.meta)
+            }
+            _ => return,
+        };
+        if let Some(metadata) = extensions.get::<ProtectedMetadata>() {
+            meta.get_or_insert_default().0.extend(metadata.0.clone());
+        }
     }
 }
 

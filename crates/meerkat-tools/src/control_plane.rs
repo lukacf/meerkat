@@ -197,7 +197,15 @@ impl CatalogControlDispatcher {
         {
             return None;
         }
-        Some(self.session_dispatcher.tool_catalog())
+        Some(
+            self.session_dispatcher
+                .tool_catalog()
+                .iter()
+                .filter(|entry| entry.tool.audience.allows_model())
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
+        )
     }
 
     fn request_witness_matches_entry(
@@ -674,6 +682,7 @@ fn control_provenance() -> Option<ToolProvenance> {
 
 fn search_tool_def() -> ToolDef {
     ToolDef {
+        audience: Default::default(),
         name: SEARCH_TOOL_NAME.into(),
         description:
             "Search the deferred session tool catalog by name or description. Returns deferred-eligible session tools without loading them."
@@ -685,6 +694,7 @@ fn search_tool_def() -> ToolDef {
 
 fn load_tool_def() -> ToolDef {
     ToolDef {
+        audience: Default::default(),
         name: LOAD_TOOL_NAME.into(),
         description:
             "Load one or more deferred session tools by canonical tool name so they become part of the staged session tool surface on the next boundary."
@@ -890,6 +900,7 @@ mod tests {
 
     fn session_tool(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: description.to_string(),
             input_schema: json!({ "type": "object" }),
@@ -902,6 +913,7 @@ mod tests {
 
     fn session_tool_without_provenance(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: description.to_string(),
             input_schema: json!({ "type": "object" }),
@@ -1139,6 +1151,75 @@ mod tests {
         assert_eq!(response.total_matches, 1);
         assert_eq!(response.results[0].name, "deferred_mcp_tool");
         assert!(!response.results[0].currently_callable);
+    }
+
+    #[tokio::test]
+    async fn app_only_tools_cannot_be_searched_or_loaded_into_model_catalog() {
+        let model = session_tool("model_tool", "Visible model tool");
+        let app = Arc::new(
+            session_tool("app_secret", "Private app operation")
+                .as_ref()
+                .clone()
+                .with_audience(meerkat_core::ToolAudience::App),
+        );
+        let tools: Arc<[Arc<ToolDef>]> = vec![Arc::clone(&model), Arc::clone(&app)].into();
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: Arc::clone(&tools),
+            catalog: tools
+                .iter()
+                .map(|tool| {
+                    ToolCatalogEntry::session_deferred(
+                        Arc::clone(tool),
+                        true,
+                        callback_provenance("test"),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility = Arc::new(CatalogControlVisibilityProvider::new());
+        let scope = generated_visibility_scope(
+            tools,
+            ["model_tool".into(), "app_secret".into()]
+                .into_iter()
+                .collect(),
+        );
+        visibility.set_scope(scope.clone());
+        let control = CatalogControlDispatcher::new(dispatcher, visibility);
+        let searched = control
+            .dispatch(search_call(SEARCH_TOOL_NAME, json!({})))
+            .await
+            .unwrap();
+        let searched: SearchResponse =
+            serde_json::from_str(&searched.result.text_content()).unwrap();
+        assert_eq!(
+            searched
+                .results
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model_tool"]
+        );
+        let loaded = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({"names": ["app_secret"]}),
+            ))
+            .await
+            .unwrap();
+        assert!(loaded.session_effects.is_empty());
+        let loaded: LoadResponse = serde_json::from_str(&loaded.result.text_content()).unwrap();
+        assert_eq!(
+            loaded.resolutions[0].rejected_reason,
+            Some(ToolCatalogLoadRejectedReason::UnknownKey)
+        );
+        assert!(scope.visible_tool_names().unwrap().is_empty());
+        assert_eq!(
+            scope.app_visible_tool_names().unwrap(),
+            vec![meerkat_core::ToolName::from("app_secret")]
+        );
     }
 
     #[test]

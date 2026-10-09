@@ -19,6 +19,7 @@ const FORCEABLE: &str = "claude-opus-4-8";
 
 fn tool(name: &str) -> Arc<ToolDef> {
     Arc::new(ToolDef {
+        audience: Default::default(),
         name: name.into(),
         description: format!("{name} tool"),
         input_schema: json!({"type": "object", "properties": {}}),

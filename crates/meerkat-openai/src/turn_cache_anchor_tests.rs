@@ -47,6 +47,7 @@ fn tools() -> Vec<Arc<ToolDef>> {
         .into_iter()
         .map(|name| {
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: format!("{name} tool"),
                 input_schema: json!({"type": "object", "properties": {}}),

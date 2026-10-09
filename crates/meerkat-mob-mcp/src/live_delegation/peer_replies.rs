@@ -170,6 +170,7 @@ mod tests {
         });
         Message::ToolResults {
             results: vec![ToolResult {
+                host_metadata: Default::default(),
                 tool_use_id: call_id.to_string(),
                 content: vec![ContentBlock::Text {
                     text: output.to_string(),
@@ -238,6 +239,7 @@ mod tests {
         assert!(awaiting_peer_replies(&failed, &turn()).is_empty());
         let unrelated = Message::ToolResults {
             results: vec![ToolResult {
+                host_metadata: Default::default(),
                 tool_use_id: "call_2".to_string(),
                 content: vec![ContentBlock::Text {
                     text: "{\"status\":\"sent\",\"kind\":\"peer_request\"}".to_string(),

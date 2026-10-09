@@ -2697,6 +2697,30 @@ impl MeerkatMachine {
         self.native_work_authorization_host.get().is_some()
     }
 
+    /// Reauthenticate a fresh UI request through the installed member work
+    /// owner. An ungoverned runtime starts with an empty dispatch context;
+    /// neither path retains the last agent run's authorization or review.
+    pub fn prepare_tool_application(
+        &self,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<meerkat_core::ToolDispatchContext, meerkat_core::OperationAuthorizationError> {
+        control.revalidate()?;
+        let Some(attachment) = self.native_work_authorization_host.get() else {
+            return Ok(
+                meerkat_core::ToolDispatchContext::default().with_tool_application_control(control)
+            );
+        };
+        self.shared
+            .require_governed_execution_custody()
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        let authorization = attachment
+            .host()
+            .tool_application_authorization(Arc::clone(&control))?;
+        Ok(meerkat_core::ToolDispatchContext::default()
+            .with_work_authorization(Some(authorization))
+            .with_tool_application_control(control))
+    }
+
     /// Prepare through the actual installed native owner. The immutable
     /// process ingress must already carry authentic original/service evidence.
     pub fn prepare_context_append(

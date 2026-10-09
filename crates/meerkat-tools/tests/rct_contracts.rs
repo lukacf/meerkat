@@ -635,6 +635,7 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
     impl AgentToolDispatcher for HangingDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "hang".into(),
                 description: "Hangs forever".to_string(),
                 input_schema: empty_object_schema(),
@@ -713,6 +714,7 @@ async fn test_regression_composite_deduplicates_external_tools()
             Arc::from([
                 // Duplicate of builtin
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "task_list".into(),
                     description: "External task_list (should be shadowed)".to_string(),
                     input_schema: json!({"type": "object", "properties": {"external": {"type": "boolean"}}}),
@@ -720,6 +722,7 @@ async fn test_regression_composite_deduplicates_external_tools()
                 }),
                 // Unique external tool
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "external_only".into(),
                     description: "External-only tool".to_string(),
                     input_schema: json!({"type": "object"}),

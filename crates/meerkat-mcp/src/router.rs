@@ -2314,6 +2314,7 @@ impl McpRouter {
         left.description == right.description
             && left.input_schema == right.input_schema
             && left.provenance == right.provenance
+            && left.audience == right.audience
     }
 
     fn publish_projection_snapshot(&mut self) -> bool {
@@ -2599,6 +2600,202 @@ impl McpRouter {
         .await
     }
 
+    fn app_connection<'a>(
+        &'a self,
+        source: &str,
+        invocation: &crate::apps::McpAppInvocation,
+    ) -> Result<&'a McpConnection, McpError> {
+        let route = self
+            .projection
+            .tool_routes
+            .get(source)
+            .ok_or_else(|| McpError::ToolNotFound(source.into()))?;
+        let connection = self
+            .servers
+            .get(&route.server_name)
+            .and_then(|entry| entry.connection.as_ref())
+            .ok_or_else(|| McpError::ServerNotFound(route.server_name.clone()))?;
+        if route.raw_operation != invocation.tool.name.as_ref()
+            || crate::apps::McpAppRegistration::from_connection(connection)
+                != invocation.registration
+            || !matches!(
+                self.server_lifecycle_state(&route.server_name),
+                Some(McpServerLifecycleState::Active)
+            )
+        {
+            return Err(McpError::CallContext(crate::McpCallContextError::Denied));
+        }
+        Ok(connection)
+    }
+
+    fn validate_app_call(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<(), McpError> {
+        let Some(binding) = context.application_binding() else {
+            return Ok(());
+        };
+        if binding.extension != crate::apps::MCP_APPS_EXTENSION {
+            return Err(McpError::CallContext(crate::McpCallContextError::Denied));
+        }
+        let binding: crate::apps::McpAppCallBinding =
+            serde_json::from_value(binding.payload.clone())
+                .map_err(|_| crate::McpCallContextError::Denied)?;
+        let connection = self.app_connection(&binding.source_tool, &binding.invocation)?;
+        let route = self
+            .projection
+            .tool_routes
+            .get(call.name)
+            .ok_or_else(|| McpError::ToolNotFound(call.name.into()))?;
+        let target = connection
+            .standard_tool(&route.raw_operation)
+            .ok_or(crate::McpCallContextError::Denied)?;
+        if route.server_name != binding.invocation.registration.server
+            || route.raw_operation != binding.target
+            || !crate::apps::tool_audience(&target)?.allows_app()
+        {
+            return Err(McpError::CallContext(crate::McpCallContextError::Denied));
+        }
+        Ok(())
+    }
+
+    async fn read_app_resource(
+        &self,
+        source: &str,
+        invocation: &crate::apps::McpAppInvocation,
+        uri: &str,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<rmcp::model::ReadResourceResult, McpError> {
+        use meerkat_core::authorization::{
+            AuthorizationOperation, OperationAuthorizationFacts, OperationObservedOutcome,
+            PreparedAuthorizationBinding, PreparedOperationCheck, SourceAuthorizationFacts,
+            SourceAuthorizationTarget, SourceAuthorizationUse,
+        };
+        let connection = self.app_connection(source, invocation)?;
+        let entry = self
+            .servers
+            .get(&invocation.registration.server)
+            .ok_or(crate::McpCallContextError::Unavailable)?;
+        let sid = SurfaceId::from(invocation.registration.server.as_str());
+        let transition = self
+            .surface_owner
+            .apply(ExternalToolSurfaceInput::CallStarted {
+                surface_id: sid.clone(),
+            })
+            .map_err(|_| crate::McpCallContextError::Unavailable)?;
+        if transition
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, ExternalToolSurfaceEffect::RejectSurfaceCall { .. }))
+        {
+            return Err(McpError::CallContext(crate::McpCallContextError::Denied));
+        }
+        let lifetime = InflightCallGuard::new(
+            &entry.active_calls,
+            &self.surface_owner,
+            sid,
+            &self.progress,
+        );
+        let result = async {
+            let target = || crate::McpResourceTarget {
+                config: connection.config(),
+                connection_id: connection.connection_id(),
+                uri,
+            };
+            let prepared = if let Some(work) = context.work_authorization() {
+                let target = self
+                    .call_context_provider
+                    .as_ref()
+                    .and_then(|provider| provider.resource_authorization_target(target()))
+                    .ok_or(crate::McpCallContextError::Unavailable)?;
+                let facts = OperationAuthorizationFacts {
+                    operation_id: meerkat_core::OperationId::new(),
+                    execution_scope: work.execution_scope().clone(),
+                    run_id: None,
+                    context_revision: None,
+                    operation: AuthorizationOperation::Source(SourceAuthorizationFacts {
+                        target: SourceAuthorizationTarget::External(target),
+                        usage: SourceAuthorizationUse::Read,
+                    }),
+                };
+                Some(
+                    PreparedOperationCheck::prepare(
+                        work.clone(),
+                        PreparedAuthorizationBinding::new(facts),
+                    )
+                    .and_then(|check| check.current())
+                    .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?,
+                )
+            } else {
+                None
+            };
+            let preparation = match &self.call_context_provider {
+                Some(provider) => provider.prepare_resource(target(), context).await?,
+                None => None,
+            };
+            let (metadata, _lease) = match preparation {
+                Some(prepared) => (Some(prepared.metadata), Some(prepared.guard)),
+                None => (None, None),
+            };
+            if let Some(control) = context.tool_application_control() {
+                control
+                    .revalidate_async()
+                    .await
+                    .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+            }
+            let prepared = prepared
+                .map(|check| check.current())
+                .transpose()
+                .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+            let result = connection
+                .read_resource_entering(uri, metadata, || {
+                    self.app_connection(source, invocation)?;
+                    if let Some(control) = context.tool_application_control() {
+                        control
+                            .revalidate()
+                            .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+                    }
+                    if let Some(check) = &prepared {
+                        let current = check
+                            .current()
+                            .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+                        current
+                            .require_unreviewed_entry()
+                            .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+                        current
+                            .observe_entry()
+                            .map_err(|_| crate::McpCallContextError::Unavailable)?;
+                    }
+                    Ok(())
+                })
+                .await;
+            if let Some(check) = &prepared {
+                check
+                    .observe_outcome(if result.is_ok() {
+                        OperationObservedOutcome::SourceReadMaterialized
+                    } else {
+                        OperationObservedOutcome::SourceReadUnavailable
+                    })
+                    .map_err(|_| crate::McpCallContextError::Unavailable)?;
+                check
+                    .current()
+                    .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+            }
+            if let Some(control) = context.tool_application_control() {
+                control
+                    .revalidate_async()
+                    .await
+                    .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+            }
+            self.app_connection(source, invocation)?;
+            result
+        }
+        .await;
+        lifetime.finish()?;
+        result
+    }
+
     async fn call_tool_with_context<T>(
         &self,
         call: ToolCallView<'_>,
@@ -2687,12 +2884,25 @@ impl McpRouter {
                 }
                 None => (None, None),
             };
+            if let Some(control) = context.tool_application_control() {
+                control
+                    .revalidate_async()
+                    .await
+                    .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+            }
+            self.validate_app_call(call, context)?;
             // The native entry step runs inside the connection, after its
             // final request preparation and immediately before the local
             // transport handoff. The preparation lease (`_lease`) stays held
             // until the call completes.
             let result = conn
                 .call_tool_result_entering(&route.raw_operation, args, metadata, || {
+                    self.validate_app_call(call, context)?;
+                    if let Some(control) = context.tool_application_control() {
+                        control
+                            .revalidate()
+                            .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+                    }
                     context
                         .enter_reviewed_effect(call, None)
                         .map(drop)
@@ -2823,6 +3033,89 @@ impl McpRouter {
 
 #[async_trait]
 impl AgentToolDispatcher for McpRouter {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        use meerkat_core::ToolApplicationOperation;
+        use meerkat_core::tool_application::{ToolApplicationBinding, ToolApplicationResolution};
+        if request.extension != crate::apps::MCP_APPS_EXTENSION {
+            return Err(ToolError::access_denied(source_tool));
+        }
+        let invocation: crate::apps::McpAppInvocation = serde_json::from_value(invocation.clone())
+            .map_err(|_| ToolError::access_denied(source_tool))?;
+        let uri = crate::apps::tool_ui_resource_uri(&invocation.tool)
+            .ok_or_else(|| ToolError::access_denied(source_tool))?;
+        match &request.operation {
+            ToolApplicationOperation::Resolve => {
+                let can_call_tools = self.app_connection(source_tool, &invocation).is_ok();
+                Ok(ToolApplicationResolution::Value(serde_json::json!({
+                    "tool": invocation.tool, "arguments": invocation.arguments,
+                    "result": invocation.result, "resource": invocation.resource,
+                    "canCallTools": can_call_tools,
+                })))
+            }
+            ToolApplicationOperation::ReadResource { uri: requested } => {
+                if requested == uri
+                    && let Some(resource) = &invocation.resource
+                {
+                    return serde_json::to_value(resource)
+                        .map(ToolApplicationResolution::Value)
+                        .map_err(|_| ToolError::execution_failed("invalid cached MCP resource"));
+                }
+                self.read_app_resource(source_tool, &invocation, requested, context)
+                    .await
+                    .map_err(|error| tool_call_error(source_tool, error))
+                    .and_then(|value| {
+                        serde_json::to_value(value)
+                            .map(ToolApplicationResolution::Value)
+                            .map_err(|_| ToolError::execution_failed("invalid MCP resource"))
+                    })
+            }
+            ToolApplicationOperation::CallTool { name, .. } => {
+                let connection = self
+                    .app_connection(source_tool, &invocation)
+                    .map_err(|error| tool_call_error(source_tool, error))?;
+                let target = connection
+                    .standard_tool(name)
+                    .ok_or_else(|| ToolError::access_denied(name))?;
+                if !crate::apps::tool_audience(&target)
+                    .map_err(|error| tool_call_error(name, error))?
+                    .allows_app()
+                {
+                    return Err(ToolError::access_denied(name));
+                }
+                let mut routes = self.projection.tool_routes.iter().filter(|(_, route)| {
+                    route.server_name == invocation.registration.server
+                        && route.raw_operation == *name
+                });
+                let (canonical_name, _) = routes
+                    .next()
+                    .ok_or_else(|| ToolError::access_denied(name))?;
+                if routes.next().is_some() {
+                    return Err(ToolError::access_denied(name));
+                }
+                let payload = serde_json::to_value(crate::apps::McpAppCallBinding {
+                    source_tool: source_tool.into(),
+                    invocation,
+                    target: name.clone(),
+                })
+                .map_err(|_| ToolError::access_denied(name))?;
+                Ok(ToolApplicationResolution::Call {
+                    name: canonical_name.clone(),
+                    binding: ToolApplicationBinding {
+                        extension: crate::apps::MCP_APPS_EXTENSION.into(),
+                        payload,
+                    },
+                    project_result: crate::apps::project_app_result,
+                })
+            }
+        }
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.projection_tools()
     }
@@ -2896,17 +3189,84 @@ impl AgentToolDispatcher for McpRouter {
         }
         let args = meerkat_core::ToolCallArguments::from_raw_json(call.args)
             .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
-        let result = self
+        let app_action = context
+            .application_binding()
+            .is_some_and(|binding| binding.extension == crate::apps::MCP_APPS_EXTENSION);
+        let host_source = self
+            .projection
+            .tool_routes
+            .get(call.name)
+            .and_then(|route| {
+                let connection = self.servers.get(&route.server_name)?.connection.as_ref()?;
+                let tool = connection.standard_tool(&route.raw_operation)?;
+                if crate::apps::tool_ui_resource_uri(&tool).is_none() && !app_action {
+                    return None;
+                }
+                Some((connection, tool))
+            });
+        let prefetch_ui = !app_action
+            && host_source
+                .as_ref()
+                .is_some_and(|(connection, _)| connection.supports_mcp_apps());
+        let host_source = host_source.map(|(connection, tool)| {
+            (
+                crate::apps::McpAppRegistration::from_connection(connection),
+                tool,
+            )
+        });
+        let mut result = self
             .call_tool_with_context(call, args.as_value(), context, |result| {
+                let host_invocation = host_source
+                    .map(|(registration, tool)| {
+                        serde_json::to_value(crate::apps::McpAppInvocation {
+                            registration,
+                            tool,
+                            arguments: args.as_value().clone(),
+                            result: result.clone(),
+                            resource: None,
+                        })
+                        .map_err(|_| McpError::Serialization("invalid MCP host result".into()))
+                    })
+                    .transpose()?;
                 let (blocks, is_error) = crate::protocol::project_tool_result(result, call.name)?;
-                Ok(ToolResult::with_blocks(
-                    call.id.to_string(),
-                    blocks,
-                    is_error,
-                ))
+                let mut result = ToolResult::with_blocks(call.id.to_string(), blocks, is_error);
+                if let Some(invocation) = host_invocation {
+                    result
+                        .host_metadata
+                        .insert(crate::apps::MCP_APPS_EXTENSION.into(), invocation);
+                }
+                Ok(result)
             })
             .await
             .map_err(|error| tool_call_error(call.name, error))?;
+        // Capture the declared resource alongside the committed invocation.
+        // Resource failure leaves the ordinary tool result intact; a host can
+        // still show its textual fallback and report a later read failure.
+        if prefetch_ui
+            && let Some(value) = result.host_metadata.get(crate::apps::MCP_APPS_EXTENSION)
+            && let Ok(mut invocation) =
+                serde_json::from_value::<crate::apps::McpAppInvocation>(value.clone())
+            && let Some(uri) =
+                crate::apps::tool_ui_resource_uri(&invocation.tool).map(str::to_owned)
+        {
+            if let Ok(resource) = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                self.read_app_resource(call.name, &invocation, &uri, context),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(McpError::ProtocolError {
+                    message: "MCP App resource timed out".into(),
+                })
+            }) {
+                invocation.resource = Some(resource);
+                if let Ok(value) = serde_json::to_value(invocation) {
+                    result
+                        .host_metadata
+                        .insert(crate::apps::MCP_APPS_EXTENSION.into(), value);
+                }
+            }
+        }
         Ok(result.into())
     }
 
@@ -4764,3 +5124,7 @@ mod tests {
 #[cfg(test)]
 #[path = "call_context_tests.rs"]
 mod call_context_tests;
+
+#[cfg(test)]
+#[path = "apps_tests.rs"]
+mod apps_tests;

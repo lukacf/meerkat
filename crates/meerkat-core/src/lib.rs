@@ -121,6 +121,7 @@ pub mod streaming_tool;
 pub mod structured_output;
 pub mod surface_metadata;
 pub mod time_compat;
+pub mod tool_application;
 pub mod tool_catalog;
 pub mod tool_consequence_policy;
 pub mod tool_execution;
@@ -535,6 +536,10 @@ pub use surface_metadata::{
     SurfaceMetadata, SurfaceMetadataError, is_reserved_meerkat_label_key,
     is_reserved_meerkat_metadata_key, validate_public_app_context, validate_public_labels,
 };
+pub use tool_application::{
+    ToolApplicationControlRequest, ToolApplicationIngress, ToolApplicationOperation,
+    ToolApplicationRequest,
+};
 pub use tool_catalog::{
     ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
     ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
@@ -604,10 +609,10 @@ pub use types::{
     RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
     SystemMessage, SystemMessageIdentity, SystemNoticeBlock, SystemNoticeDirection,
     SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, SystemNoticeRecord, SystemPromptKey,
-    SystemPromptVersion, SystemPromptVersionIdentity, ToolCall, ToolCallIter, ToolCallView,
-    ToolDef, ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId,
-    ToolSourceKind, TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
-    TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
+    SystemPromptVersion, SystemPromptVersionIdentity, ToolAudience, ToolCall, ToolCallIter,
+    ToolCallView, ToolDef, ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult,
+    ToolSourceId, ToolSourceKind, TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole,
+    TurnUsage, TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,
     superseded_system_prompt_offsets, validate_inline_video_blocks,

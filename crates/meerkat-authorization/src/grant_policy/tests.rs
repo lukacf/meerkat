@@ -4,6 +4,7 @@
 #![allow(clippy::expect_used)]
 
 mod audit;
+mod tool_application;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

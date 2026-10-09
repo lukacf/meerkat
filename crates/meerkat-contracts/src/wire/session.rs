@@ -1330,6 +1330,7 @@ impl TranscriptRewriteMessage {
                                 })?,
                         };
                         Ok(ToolResult {
+                            host_metadata: Default::default(),
                             tool_use_id: result.tool_use_id,
                             content,
                             is_error: result.is_error,
@@ -3359,6 +3360,36 @@ mod tests {
             ),
             "expected WireConversionError::AssistantBlock, got {err:?}"
         );
+    }
+
+    #[test]
+    fn host_metadata_is_not_a_transcript_wire_input_or_output() {
+        let forged: WireToolResult = serde_json::from_value(serde_json::json!({
+            "tool_use_id": "call", "content": "Visible result", "is_error": false,
+            "host_metadata": {"example.test/app": {"private": "HOST_ONLY_SECRET"}}
+        }))
+        .unwrap();
+        let message = TranscriptRewriteMessage::ToolResults {
+            results: vec![forged],
+            created_at: None,
+        }
+        .into_core()
+        .unwrap();
+        let Message::ToolResults { results, .. } = message else {
+            panic!("tool results");
+        };
+        assert!(results[0].host_metadata.is_empty());
+
+        let mut native = results[0].clone();
+        native.host_metadata.insert(
+            "example.test/app".into(),
+            serde_json::json!({"private": "HOST_ONLY_SECRET"}),
+        );
+        let wire = WireSessionMessage::from(Message::tool_results(vec![native]));
+        let encoded = serde_json::to_string(&wire).unwrap();
+        assert!(encoded.contains("Visible result"));
+        assert!(!encoded.contains("host_metadata"));
+        assert!(!encoded.contains("HOST_ONLY_SECRET"));
     }
 
     #[test]

@@ -60,6 +60,7 @@ impl BuiltinTool for WebSearchTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: self.name().into(),
             description: WEB_SEARCH_TOOL_DOCUMENTATION.to_string(),
             input_schema: crate::schema::schema_for::<WebSearchToolArgs>(),

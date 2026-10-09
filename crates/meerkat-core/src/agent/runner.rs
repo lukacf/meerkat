@@ -1223,6 +1223,149 @@ where
         {
             return Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error));
         }
+        let context = self
+            .tool_dispatch_context
+            .clone()
+            .with_operation_review(self.operation_review.clone());
+        self.dispatch_host_tool_call(call, timeout_policy, context)
+            .await
+    }
+
+    /// An app request is a fresh native submission. Never borrow the prior
+    /// model turn's dispatch context, even when the original result is recent.
+    pub async fn tool_application(
+        &mut self,
+        request: crate::ToolApplicationRequest,
+        fresh_context: crate::ToolDispatchContext,
+    ) -> Result<serde_json::Value, AgentError> {
+        request
+            .validate()
+            .map_err(|error| AgentError::tool(error.into()))?;
+        let control = fresh_context
+            .tool_application_control()
+            .ok_or_else(|| AgentError::tool(ToolError::access_denied(&request.tool_call_id)))?;
+        if control.request() != &request || control.session_id() != self.session.id() {
+            return Err(AgentError::tool(ToolError::access_denied(
+                &request.tool_call_id,
+            )));
+        }
+        control
+            .revalidate_async()
+            .await
+            .map_err(|error| AgentError::tool(error.into()))?;
+        control
+            .claim_execution()
+            .map_err(|error| AgentError::tool(error.into()))?;
+        let mut source_tool = None;
+        let mut invocation = None;
+        for message in self.session.messages() {
+            match message {
+                Message::BlockAssistant(message) => {
+                    for block in &message.blocks {
+                        if let crate::types::AssistantBlock::ToolUse { id, name, .. } = block
+                            && id == &request.tool_call_id
+                        {
+                            if source_tool.replace(name.clone()).is_some() {
+                                return Err(AgentError::tool(ToolError::access_denied(id)));
+                            }
+                        }
+                    }
+                }
+                Message::ToolResults { results, .. } => {
+                    for result in results {
+                        if result.tool_use_id == request.tool_call_id {
+                            let value =
+                                result
+                                    .host_metadata
+                                    .get(&request.extension)
+                                    .ok_or_else(|| {
+                                        AgentError::tool(ToolError::access_denied(
+                                            &request.tool_call_id,
+                                        ))
+                                    })?;
+                            if invocation.replace(value.clone()).is_some() {
+                                return Err(AgentError::tool(ToolError::access_denied(
+                                    &request.tool_call_id,
+                                )));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let source = source_tool
+            .ok_or_else(|| AgentError::tool(ToolError::access_denied(&request.tool_call_id)))?;
+        let invocation =
+            invocation.ok_or_else(|| AgentError::tool(ToolError::access_denied(&source)))?;
+        let allowed = self
+            .tool_scope
+            .host_visible_tool_names()
+            .map_err(|error| AgentError::InternalError(error.to_string()))?;
+        if !allowed.iter().any(|name| name.as_str() == source) {
+            return Err(AgentError::tool(ToolError::access_denied(&source)));
+        }
+        let context = fresh_context.with_operation_review(self.operation_review.clone());
+        let resolution = self
+            .tools
+            .resolve_tool_application(&source, &request, &invocation, &context)
+            .await
+            .map_err(AgentError::tool)?;
+        match resolution {
+            crate::tool_application::ToolApplicationResolution::Value(value) => Ok(value),
+            crate::tool_application::ToolApplicationResolution::Call {
+                name,
+                binding,
+                project_result,
+            } => {
+                if !self
+                    .tool_scope
+                    .app_visible_tool_names()
+                    .map_err(|error| AgentError::InternalError(error.to_string()))?
+                    .iter()
+                    .any(|candidate| candidate.as_str() == name)
+                {
+                    return Err(AgentError::tool(ToolError::access_denied(name)));
+                }
+                let crate::ToolApplicationOperation::CallTool { arguments, .. } = request.operation
+                else {
+                    return Err(AgentError::tool(ToolError::access_denied(name)));
+                };
+                let call = crate::types::ToolCall {
+                    id: format!("app-{}", uuid::Uuid::new_v4()),
+                    name,
+                    args: arguments,
+                };
+                let outcome = self
+                    .dispatch_host_tool_call(
+                        call,
+                        ToolDispatchTimeoutPolicy::Disabled,
+                        context.with_application_binding(binding),
+                    )
+                    .await?;
+                if let Some(crate::ops::ToolDispatchTerminalCause::RuntimeToolError { error }) =
+                    outcome.terminal_cause()
+                {
+                    return Err(AgentError::tool(
+                        error
+                            .clone()
+                            .with_settlement_failures(outcome.settlement_failures().to_vec()),
+                    ));
+                }
+                // The leaf's protocol result is the app response. Internal tool
+                // errors retain their native typed failure instead of inventing
+                // a successful protocol result.
+                project_result(&outcome.result).map_err(AgentError::tool)
+            }
+        }
+    }
+
+    async fn dispatch_host_tool_call(
+        &mut self,
+        call: crate::types::ToolCall,
+        timeout_policy: ToolDispatchTimeoutPolicy,
+        dispatch_context: crate::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, AgentError> {
         let args = to_raw_value(&call.args).map_err(|err| {
             AgentError::InternalError(format!(
                 "failed to serialize external tool-call arguments: {err}"
@@ -1233,10 +1376,6 @@ where
             name: &call.name,
             args: args.as_ref(),
         };
-        let dispatch_context = self
-            .tool_dispatch_context
-            .clone()
-            .with_operation_review(self.operation_review.clone());
         let resolution_started = crate::time_compat::Instant::now();
         let caller_deadline = timeout_policy.timeout().map_or_else(
             || ToolDeadlineContributor::unbounded(ToolDeadlineOwner::DirectCaller),
@@ -4284,6 +4423,170 @@ mod skill_activation_effect_tests {
                 );
             }
         }
+    }
+
+    struct AppTestIngress;
+    impl crate::ToolApplicationIngress for AppTestIngress {
+        fn revalidate(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
+    }
+
+    struct AppTestTools {
+        entered: Arc<AtomicBool>,
+    }
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for AppTestTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([
+                Arc::new(ToolDef::new(
+                    "show",
+                    "model source",
+                    serde_json::json!({"type":"object"}),
+                )),
+                Arc::new(
+                    ToolDef::new("action", "app action", serde_json::json!({"type":"object"}))
+                        .with_audience(crate::ToolAudience::App),
+                ),
+            ])
+        }
+        async fn resolve_tool_application(
+            &self,
+            source: &str,
+            _: &crate::ToolApplicationRequest,
+            invocation: &serde_json::Value,
+            _: &crate::ToolDispatchContext,
+        ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+            assert_eq!(source, "show");
+            assert_eq!(invocation, &serde_json::json!({"original":true}));
+            Ok(crate::tool_application::ToolApplicationResolution::Call {
+                name: "action".into(),
+                binding: crate::tool_application::ToolApplicationBinding {
+                    extension: "test.app".into(),
+                    payload: serde_json::json!({"bound":true}),
+                },
+                project_result: |result| Ok(serde_json::json!({"text":result.text_content()})),
+            })
+        }
+        async fn dispatch(&self, _: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            panic!("app dispatch must retain its context")
+        }
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            assert_eq!(call.name, "action");
+            assert!(
+                context.work_authorization().is_none(),
+                "must not borrow previous run authority"
+            );
+            assert_eq!(context.application_binding().unwrap().extension, "test.app");
+            assert!(context.tool_application_control().is_some());
+            self.entered.store(true, Ordering::SeqCst);
+            Ok(crate::ToolResult::new(call.id.into(), "clicked".into(), false).into())
+        }
+    }
+
+    #[tokio::test]
+    async fn app_action_uses_committed_invocation_and_fresh_context_separate_from_model_visibility()
+    {
+        let entered = Arc::new(AtomicBool::new(false));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(AppTestTools {
+                    entered: entered.clone(),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent
+            .session
+            .push(Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "original".into(),
+                    name: "show".into(),
+                    args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )));
+        let mut original = crate::ToolResult::new("original".into(), "text fallback".into(), false);
+        original
+            .host_metadata
+            .insert("test.app".into(), serde_json::json!({"original":true}));
+        agent.session.push(Message::ToolResults {
+            results: vec![original],
+            created_at: crate::types::message_timestamp_now(),
+        });
+        agent.tool_dispatch_context = crate::ToolDispatchContext::default()
+            .with_work_authorization(Some(attachment_context()));
+        let request = crate::ToolApplicationRequest {
+            tool_call_id: "original".into(),
+            extension: "test.app".into(),
+            operation: crate::ToolApplicationOperation::CallTool {
+                name: "raw-action".into(),
+                arguments: serde_json::json!({}),
+            },
+        };
+        let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+            agent.session.id().clone(),
+            request.clone(),
+            Arc::new(AppTestIngress),
+        )
+        .unwrap();
+        let context = crate::ToolDispatchContext::default().with_tool_application_control(control);
+        let result = agent
+            .tool_application(request.clone(), context.clone())
+            .await
+            .unwrap();
+        assert_eq!(result, serde_json::json!({"text":"clicked"}));
+        assert!(entered.load(Ordering::SeqCst));
+        entered.store(false, Ordering::SeqCst);
+        assert!(
+            agent
+                .tool_application(request.clone(), context)
+                .await
+                .is_err(),
+            "direct Agent entry must consume the execution receipt once"
+        );
+        assert!(!entered.load(Ordering::SeqCst));
+        let model = agent
+            .dispatch_external_tool_call(crate::ToolCall::new(
+                "model".into(),
+                "action".into(),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            model.result.is_error,
+            "app-only action must remain hidden from model callers"
+        );
+        assert!(!entered.load(Ordering::SeqCst));
+        let mut forged = request;
+        forged.tool_call_id = "unknown".into();
+        let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+            agent.session.id().clone(),
+            forged.clone(),
+            Arc::new(AppTestIngress),
+        )
+        .unwrap();
+        assert!(
+            agent
+                .tool_application(
+                    forged,
+                    crate::ToolDispatchContext::default().with_tool_application_control(control)
+                )
+                .await
+                .is_err()
+        );
+        assert!(!entered.load(Ordering::SeqCst));
     }
 
     struct AttachmentOnlyAuthorization;

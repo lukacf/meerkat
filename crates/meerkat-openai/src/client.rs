@@ -6160,6 +6160,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "get_weather".into(),
             description: "Get weather info".to_string(),
             input_schema: serde_json::json!({
@@ -6199,6 +6200,7 @@ mod tests {
             "additionalProperties": false
         });
         let tool = Arc::new(ToolDef {
+            audience: Default::default(),
             name: "workgraph_create".into(),
             description: "Create an item, optionally with a schedule.".to_string(),
             input_schema: schema.clone(),
@@ -6263,6 +6265,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "workgraph_claim".into(),
             description: "Claim a ready WorkGraph item with CAS revision checking.".to_string(),
             input_schema: crate::tool_schema::test_fixtures::pre_fix_workgraph_claim_schema(),

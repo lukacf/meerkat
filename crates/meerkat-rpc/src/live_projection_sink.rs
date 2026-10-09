@@ -1525,6 +1525,7 @@ mod tests {
                 .unwrap()
                 .push((call.id.clone(), call.name.clone()));
             Ok(ToolDispatchOutcome::sync_result(ToolResult {
+                host_metadata: Default::default(),
                 tool_use_id: call.id,
                 is_error: false,
                 content: ContentBlock::text_vec("ok".to_string()),

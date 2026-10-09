@@ -64,9 +64,17 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         if self.excluded.contains(source_tool) {
             return Err(ToolError::not_found(source_tool));
         }
-        self.inner
+        let resolution = self
+            .inner
             .resolve_tool_application(source_tool, request, invocation, context)
-            .await
+            .await?;
+        if let meerkat_core::tool_application::ToolApplicationResolution::Call { name, .. } =
+            &resolution
+            && self.excluded.contains(name)
+        {
+            return Err(ToolError::access_denied(name));
+        }
+        Ok(resolution)
     }
 
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -514,9 +522,17 @@ impl AgentToolDispatcher for McpProvenanceFilter {
         if self.visibility_for_name(source_tool) != Some(true) {
             return Err(ToolError::not_found(source_tool));
         }
-        self.inner
+        let resolution = self
+            .inner
             .resolve_tool_application(source_tool, request, invocation, context)
-            .await
+            .await?;
+        if let meerkat_core::tool_application::ToolApplicationResolution::Call { name, .. } =
+            &resolution
+            && self.visibility_for_name(name) != Some(true)
+        {
+            return Err(ToolError::access_denied(name));
+        }
+        Ok(resolution)
     }
 
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -1983,5 +1999,107 @@ mod structured_error_tests {
         assert_eq!(data["provider"], "openai");
         assert_eq!(data["realm_id"], "project");
         assert_eq!(data["binding_id"], "openai");
+    }
+}
+
+#[cfg(test)]
+mod application_target_tests {
+    use super::*;
+
+    struct AppSource;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl AgentToolDispatcher for AppSource {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            [
+                ("source", "allowed"),
+                ("refresh", "allowed"),
+                ("hidden", "blocked"),
+            ]
+            .into_iter()
+            .map(|(name, source)| {
+                Arc::new(
+                    ToolDef::new(name, "app tool", serde_json::json!({"type": "object"}))
+                        .with_provenance(meerkat_core::ToolProvenance {
+                            kind: ToolSourceKind::Mcp,
+                            source_id: source.into(),
+                        }),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into()
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::access_denied(call.name))
+        }
+
+        async fn resolve_tool_application(
+            &self,
+            source: &str,
+            request: &meerkat_core::ToolApplicationRequest,
+            _invocation: &serde_json::Value,
+            _context: &ToolDispatchContext,
+        ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+            let meerkat_core::ToolApplicationOperation::CallTool { name, .. } = &request.operation
+            else {
+                return Err(ToolError::access_denied(source));
+            };
+            Ok(
+                meerkat_core::tool_application::ToolApplicationResolution::Call {
+                    name: name.clone(),
+                    binding: meerkat_core::tool_application::ToolApplicationBinding::new(
+                        "test/app",
+                        serde_json::Value::Null,
+                    ),
+                    project_result: |_| Ok(serde_json::Value::Null),
+                },
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn application_target_obeys_name_and_provenance_filters() {
+        let source: Arc<dyn AgentToolDispatcher> = Arc::new(AppSource);
+        let names: Arc<dyn AgentToolDispatcher> = Arc::new(NameFilteredDispatcher::new(
+            source.clone(),
+            ["hidden".into()].into_iter().collect(),
+        ));
+        let provenance: Arc<dyn AgentToolDispatcher> = Arc::new(McpProvenanceFilter::new(
+            source,
+            ["allowed".into()].into_iter().collect(),
+        ));
+        for filtered in [names, provenance] {
+            for target in ["refresh", "hidden"] {
+                let request = meerkat_core::ToolApplicationRequest {
+                    tool_call_id: "committed".into(),
+                    extension: "test/app".into(),
+                    operation: meerkat_core::ToolApplicationOperation::CallTool {
+                        name: target.into(),
+                        arguments: serde_json::json!({}),
+                    },
+                };
+                let result = filtered
+                    .resolve_tool_application(
+                        "source",
+                        &request,
+                        &serde_json::Value::Null,
+                        &ToolDispatchContext::default(),
+                    )
+                    .await;
+                if target == "hidden" {
+                    assert!(matches!(result, Err(ToolError::AccessDenied { .. })));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Ok(meerkat_core::tool_application::ToolApplicationResolution::Call { .. })
+                    ));
+                }
+            }
+        }
     }
 }

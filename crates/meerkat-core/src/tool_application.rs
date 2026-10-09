@@ -12,7 +12,10 @@ use std::sync::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{OperationAuthorizationError, SessionId};
+use crate::{
+    OperationAuthorizationError, ResolvedToolExecutionPlan, SessionId, ToolExecutionOwnerWitness,
+    ToolExecutionResolutionError, ToolUnavailableReason,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +39,63 @@ pub enum ToolApplicationOperation {
 pub struct ToolApplicationBinding {
     pub extension: String,
     pub payload: Value,
+    owner_witnesses: Vec<ToolExecutionOwnerWitness>,
+}
+
+impl ToolApplicationBinding {
+    pub fn new(extension: impl Into<String>, payload: Value) -> Self {
+        Self {
+            extension: extension.into(),
+            payload,
+            owner_witnesses: Vec::new(),
+        }
+    }
+
+    /// Retain the action target selected by a routing owner during app
+    /// resolution. This evidence stays outside the leaf's protocol payload.
+    /// Nested routing owners each contribute their own authority key.
+    pub fn with_owner_witness(
+        mut self,
+        witness: ToolExecutionOwnerWitness,
+    ) -> Result<Self, ToolExecutionResolutionError> {
+        if let Some(existing) = self
+            .owner_witnesses
+            .iter()
+            .find(|existing| existing.authority_key() == witness.authority_key())
+        {
+            return Err(ToolExecutionResolutionError::OwnerWitnessAlreadyAssigned {
+                existing: Box::new(existing.clone()),
+                attempted: Box::new(witness),
+            });
+        }
+        self.owner_witnesses.push(witness);
+        Ok(self)
+    }
+
+    pub fn owner_witnesses(&self) -> &[ToolExecutionOwnerWitness] {
+        &self.owner_witnesses
+    }
+
+    /// A fresh execution plan must retain every owner selected before app
+    /// resolution completed. A newly published tool cannot capture the action
+    /// between protocol resolution and ordinary native plan resolution.
+    pub fn validate_execution_plan(
+        &self,
+        tool_name: &str,
+        plan: &ResolvedToolExecutionPlan,
+    ) -> Result<(), ToolExecutionResolutionError> {
+        if self
+            .owner_witnesses
+            .iter()
+            .any(|expected| plan.owner_witness(expected.authority_key()) != Some(expected))
+        {
+            return Err(ToolExecutionResolutionError::Unavailable {
+                tool_name: tool_name.into(),
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Resolving an app action selects a canonical tool name. Core then runs that

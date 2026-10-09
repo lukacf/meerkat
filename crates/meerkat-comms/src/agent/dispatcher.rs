@@ -164,11 +164,19 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         if is_comms_tool(source_tool) {
             return Err(ToolError::access_denied(source_tool));
         }
-        self.inner
+        let resolution = self
+            .inner
             .as_ref()
             .ok_or_else(|| ToolError::not_found(source_tool))?
             .resolve_tool_application(source_tool, request, invocation, context)
-            .await
+            .await?;
+        if let meerkat_core::tool_application::ToolApplicationResolution::Call { name, .. } =
+            &resolution
+            && is_comms_tool(name)
+        {
+            return Err(ToolError::access_denied(name));
+        }
+        Ok(resolution)
     }
 
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -455,9 +463,17 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         if is_comms_tool(source_tool) {
             return Err(ToolError::access_denied(source_tool));
         }
-        self.inner
+        let resolution = self
+            .inner
             .resolve_tool_application(source_tool, request, invocation, context)
-            .await
+            .await?;
+        if let meerkat_core::tool_application::ToolApplicationResolution::Call { name, .. } =
+            &resolution
+            && is_comms_tool(name)
+        {
+            return Err(ToolError::access_denied(name));
+        }
+        Ok(resolution)
     }
 
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -804,6 +820,29 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for ContextAwareDispatcher {
+        async fn resolve_tool_application(
+            &self,
+            source: &str,
+            request: &meerkat_core::ToolApplicationRequest,
+            _invocation: &serde_json::Value,
+            _context: &ToolDispatchContext,
+        ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+            let meerkat_core::ToolApplicationOperation::CallTool { name, .. } = &request.operation
+            else {
+                return Err(ToolError::access_denied(source));
+            };
+            Ok(
+                meerkat_core::tool_application::ToolApplicationResolution::Call {
+                    name: name.clone(),
+                    binding: meerkat_core::tool_application::ToolApplicationBinding::new(
+                        "test/app",
+                        serde_json::Value::Null,
+                    ),
+                    project_result: |_| Ok(serde_json::Value::Null),
+                },
+            )
+        }
+
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             vec![Arc::clone(&self.tool)].into()
         }
@@ -1063,6 +1102,52 @@ mod tests {
 
         dispatcher.poll_external_updates().await;
         assert!(inner.polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn application_target_cannot_capture_comms_owner() {
+        let (router, peers) = test_router();
+        let generic: Arc<dyn AgentToolDispatcher> = Arc::new(CommsToolDispatcher::with_inner(
+            router.clone(),
+            peers.clone(),
+            Arc::new(ContextAwareDispatcher::new()),
+        ));
+        let dynamic: Arc<dyn AgentToolDispatcher> = Arc::new(DynCommsToolDispatcher::new(
+            router,
+            peers,
+            Arc::new(ContextAwareDispatcher::new()),
+        ));
+        for dispatcher in [generic, dynamic] {
+            for target in ["send_message", "inspect_context"] {
+                let request = meerkat_core::ToolApplicationRequest {
+                    tool_call_id: "committed".into(),
+                    extension: "test/app".into(),
+                    operation: meerkat_core::ToolApplicationOperation::CallTool {
+                        name: target.into(),
+                        arguments: serde_json::json!({}),
+                    },
+                };
+                let result = dispatcher
+                    .resolve_tool_application(
+                        "inspect_context",
+                        &request,
+                        &serde_json::Value::Null,
+                        &ToolDispatchContext::default(),
+                    )
+                    .await;
+                if target == "send_message" {
+                    assert!(
+                        matches!(result, Err(ToolError::AccessDenied { .. })),
+                        "the comms wrapper owns this target, not the app source"
+                    );
+                } else {
+                    assert!(matches!(
+                        result,
+                        Ok(meerkat_core::tool_application::ToolApplicationResolution::Call { .. })
+                    ));
+                }
+            }
+        }
     }
 
     #[tokio::test]

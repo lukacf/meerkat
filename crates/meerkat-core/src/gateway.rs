@@ -391,11 +391,53 @@ impl AgentToolDispatcher for ToolGateway {
         context: &crate::ToolDispatchContext,
     ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
         match self.resolve_routing(source_tool)? {
-            GatewayRouting::Dispatch(_, owner) => {
-                owner
+            GatewayRouting::Dispatch(source_index, owner) => {
+                let changed = || {
+                    ToolError::unavailable(
+                        source_tool,
+                        ToolUnavailableReason::ExecutionOwnerChanged,
+                    )
+                };
+                let before = Self::binding_fingerprint(owner.dispatcher.as_ref(), source_tool)
+                    .ok_or_else(changed)?;
+                let resolution = owner
                     .dispatcher
                     .resolve_tool_application(source_tool, request, invocation, context)
-                    .await
+                    .await?;
+                if !matches!(self.resolve_routing(source_tool), Ok(GatewayRouting::Dispatch(index, _)) if index == source_index)
+                    || Self::binding_fingerprint(owner.dispatcher.as_ref(), source_tool).as_ref()
+                        != Some(&before)
+                {
+                    return Err(changed());
+                }
+                match resolution {
+                    crate::tool_application::ToolApplicationResolution::Call {
+                        name,
+                        binding,
+                        project_result,
+                    } => {
+                        let GatewayRouting::Dispatch(target_index, target) =
+                            self.resolve_routing(&name)?
+                        else {
+                            return Err(ToolError::access_denied(name));
+                        };
+                        if target_index != source_index {
+                            return Err(ToolError::access_denied(name));
+                        }
+                        let fingerprint =
+                            Self::binding_fingerprint(target.dispatcher.as_ref(), &name)
+                                .ok_or_else(changed)?;
+                        let witness = self
+                            .owner_witness(target_index, fingerprint)
+                            .map_err(|_| changed())?;
+                        Ok(crate::tool_application::ToolApplicationResolution::Call {
+                            name,
+                            binding: binding.with_owner_witness(witness).map_err(|_| changed())?,
+                            project_result,
+                        })
+                    }
+                    other => Ok(other),
+                }
             }
             GatewayRouting::Unavailable(reason) => Err(ToolError::unavailable(source_tool, reason)),
             GatewayRouting::NotFound => Err(ToolError::not_found(source_tool)),
@@ -863,10 +905,51 @@ impl AgentToolDispatcher for DynamicToolComposite {
         context: &crate::ToolDispatchContext,
     ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
         match self.resolve_live_routing(source_tool)? {
-            DynamicRouting::Dispatch(_, owner) => {
-                owner
+            DynamicRouting::Dispatch(source_index, owner) => {
+                let changed = || {
+                    ToolError::unavailable(
+                        source_tool,
+                        ToolUnavailableReason::ExecutionOwnerChanged,
+                    )
+                };
+                let before =
+                    ToolGateway::binding_fingerprint(owner, source_tool).ok_or_else(changed)?;
+                let resolution = owner
                     .resolve_tool_application(source_tool, request, invocation, context)
-                    .await
+                    .await?;
+                if !matches!(self.resolve_live_routing(source_tool), Ok(DynamicRouting::Dispatch(index, _)) if index == source_index)
+                    || ToolGateway::binding_fingerprint(owner, source_tool).as_ref()
+                        != Some(&before)
+                {
+                    return Err(changed());
+                }
+                match resolution {
+                    crate::tool_application::ToolApplicationResolution::Call {
+                        name,
+                        binding,
+                        project_result,
+                    } => {
+                        let DynamicRouting::Dispatch(target_index, target) =
+                            self.resolve_live_routing(&name)?
+                        else {
+                            return Err(ToolError::access_denied(name));
+                        };
+                        if target_index != source_index {
+                            return Err(ToolError::access_denied(name));
+                        }
+                        let fingerprint =
+                            ToolGateway::binding_fingerprint(target, &name).ok_or_else(changed)?;
+                        let witness = self
+                            .owner_witness(target_index, fingerprint)
+                            .map_err(|_| changed())?;
+                        Ok(crate::tool_application::ToolApplicationResolution::Call {
+                            name,
+                            binding: binding.with_owner_witness(witness).map_err(|_| changed())?,
+                            project_result,
+                        })
+                    }
+                    other => Ok(other),
+                }
             }
             DynamicRouting::Unavailable(reason) => Err(ToolError::unavailable(source_tool, reason)),
             DynamicRouting::NotFound => Err(ToolError::not_found(source_tool)),
@@ -1238,6 +1321,16 @@ mod tests {
             context: &crate::ToolDispatchContext,
         ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let crate::ToolApplicationOperation::CallTool { name, .. } = &request.operation {
+                return Ok(crate::tool_application::ToolApplicationResolution::Call {
+                    name: name.clone(),
+                    binding: crate::tool_application::ToolApplicationBinding::new(
+                        "example.test/app",
+                        Value::Null,
+                    ),
+                    project_result: |_| Ok(Value::Null),
+                });
+            }
             Ok(crate::tool_application::ToolApplicationResolution::Value(
                 json!({
                     "source": source_tool,
@@ -1256,6 +1349,140 @@ mod tests {
             operation: crate::ToolApplicationOperation::ReadResource {
                 uri: "ui://test/view".into(),
             },
+        }
+    }
+
+    #[tokio::test]
+    async fn application_target_retains_owner_before_execution_plan_resolution() {
+        for dynamic in [false, true] {
+            let source = Arc::new(ApplicationProbe::new(&["source"]));
+            let other = Arc::new(ApplicationProbe::new(&["other"]));
+            let outer: Arc<dyn AgentToolDispatcher> = if dynamic {
+                Arc::new(DynamicToolComposite::new(vec![
+                    source.clone(),
+                    other.clone(),
+                ]))
+            } else {
+                Arc::new(
+                    ToolGatewayBuilder::new()
+                        .add_dispatcher(source.clone())
+                        .add_dispatcher(other.clone())
+                        .build()
+                        .unwrap(),
+                )
+            };
+            let mut request = crate::ToolApplicationRequest {
+                tool_call_id: "committed".into(),
+                extension: "example.test/app".into(),
+                operation: crate::ToolApplicationOperation::CallTool {
+                    name: "other".into(),
+                    arguments: json!({}),
+                },
+            };
+            let context = crate::ToolDispatchContext::default();
+            assert!(
+                matches!(
+                    outer
+                        .resolve_tool_application("source", &request, &Value::Null, &context,)
+                        .await,
+                    Err(ToolError::AccessDenied { .. })
+                ),
+                "an app cannot select a target owned by another child"
+            );
+
+            // The target appears after gateway construction, so it has a live
+            // route rather than a frozen build-time owner.
+            let entry = ToolCatalogEntry::session_inline(
+                Arc::new(ToolDef::new(
+                    "refresh",
+                    "app refresh",
+                    empty_object_schema(),
+                )),
+                true,
+            );
+            source.catalog.lock().unwrap().push(entry.clone());
+            request.operation = crate::ToolApplicationOperation::CallTool {
+                name: "refresh".into(),
+                arguments: json!({}),
+            };
+            let crate::tool_application::ToolApplicationResolution::Call { binding, .. } = outer
+                .resolve_tool_application("source", &request, &Value::Null, &context)
+                .await
+                .unwrap()
+            else {
+                panic!("app action");
+            };
+            let args = serde_json::value::RawValue::from_string("{}".into()).unwrap();
+            let call = ToolCallView {
+                id: "app-action",
+                name: "refresh",
+                args: &args,
+            };
+            let resolution = crate::ToolExecutionResolutionContext::new(
+                crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
+                    crate::ToolDeadlineOwner::CoreToolDispatch,
+                    std::time::Duration::from_secs(600),
+                )])
+                .unwrap(),
+            );
+            let original = outer
+                .resolve_execution_plan(call, &context, &resolution)
+                .unwrap();
+            binding
+                .validate_execution_plan(call.name, &original)
+                .unwrap();
+
+            source
+                .catalog
+                .lock()
+                .unwrap()
+                .retain(|entry| entry.tool.name != "refresh");
+            other.catalog.lock().unwrap().push(entry);
+            let replacement = outer
+                .resolve_execution_plan(call, &context, &resolution)
+                .unwrap();
+            assert!(
+                matches!(
+                    binding.validate_execution_plan(call.name, &replacement),
+                    Err(crate::ToolExecutionResolutionError::Unavailable {
+                        reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                        ..
+                    })
+                ),
+                "a target moving after app resolution cannot capture the action"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn application_target_obeys_name_filter() {
+        let source = Arc::new(ApplicationProbe::new(&["source", "hidden"]));
+        let filtered = crate::agent::FilteredToolDispatcher::new(source, ["source"]);
+        for target in ["source", "hidden"] {
+            let request = crate::ToolApplicationRequest {
+                tool_call_id: "committed".into(),
+                extension: "example.test/app".into(),
+                operation: crate::ToolApplicationOperation::CallTool {
+                    name: target.into(),
+                    arguments: json!({}),
+                },
+            };
+            let result = filtered
+                .resolve_tool_application(
+                    "source",
+                    &request,
+                    &Value::Null,
+                    &crate::ToolDispatchContext::default(),
+                )
+                .await;
+            if target == "hidden" {
+                assert!(matches!(result, Err(ToolError::AccessDenied { .. })));
+            } else {
+                assert!(matches!(
+                    result,
+                    Ok(crate::tool_application::ToolApplicationResolution::Call { .. })
+                ));
+            }
         }
     }
 

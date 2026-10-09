@@ -4464,10 +4464,10 @@ mod skill_activation_effect_tests {
             assert_eq!(invocation, &serde_json::json!({"original":true}));
             Ok(crate::tool_application::ToolApplicationResolution::Call {
                 name: "action".into(),
-                binding: crate::tool_application::ToolApplicationBinding {
-                    extension: "test.app".into(),
-                    payload: serde_json::json!({"bound":true}),
-                },
+                binding: crate::tool_application::ToolApplicationBinding::new(
+                    "test.app",
+                    serde_json::json!({"bound":true}),
+                ),
                 project_result: |result| Ok(serde_json::json!({"text":result.text_content()})),
             })
         }

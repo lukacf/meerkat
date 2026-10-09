@@ -3147,10 +3147,7 @@ impl AgentToolDispatcher for McpRouter {
                 .map_err(|_| ToolError::access_denied(name))?;
                 Ok(ToolApplicationResolution::Call {
                     name: canonical_name.clone(),
-                    binding: ToolApplicationBinding {
-                        extension: crate::apps::MCP_APPS_EXTENSION.into(),
-                        payload,
-                    },
+                    binding: ToolApplicationBinding::new(crate::apps::MCP_APPS_EXTENSION, payload),
                     project_result: crate::apps::project_app_result,
                 })
             }

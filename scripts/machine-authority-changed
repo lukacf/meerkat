@@ -71,7 +71,7 @@ if [[ -n "${base}" || -n "${head}" ]]; then
   if [[ -n "${diff_output}" ]]; then
     while IFS= read -r path; do
       paths+=("${path}")
-    done <<<"${diff_output}"
+    done < <(printf '%s\n' "${diff_output}")
   fi
 fi
 

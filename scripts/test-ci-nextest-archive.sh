@@ -97,7 +97,7 @@ while IFS= read -r command; do
   }
 done < <(grep '^nextest ' "$LOG")
 
-unit_run="$(grep '^nextest ' "$LOG" | head -n 1)"
+unit_run="$(grep -m 1 '^nextest ' "$LOG")"
 [[ "$unit_run" == *' <--profile> <ci-unit>'* ]] || {
   echo "unit archive run omitted the bounded ci-unit profile" >&2
   exit 1

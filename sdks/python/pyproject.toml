@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meerkat-sdk"
-version = "0.8.51"
+version = "0.8.52"
 description = "Python SDK for Meerkat agent runtime"
 readme = "README.md"
 requires-python = ">=3.10"

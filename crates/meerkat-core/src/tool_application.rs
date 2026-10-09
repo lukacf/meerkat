@@ -161,7 +161,7 @@ impl ToolApplicationObservationReader {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.as_mut() {
             Some(ToolApplicationObservationState::ActiveRun(_, observations)) => {
-                observations.clear()
+                observations.clear();
             }
             _ => *state = None,
         }

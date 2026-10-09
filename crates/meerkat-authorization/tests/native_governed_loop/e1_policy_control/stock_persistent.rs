@@ -1177,6 +1177,18 @@ async fn exercise_stock_persistent(
     )
     .expect("reopened backend acquires fresh actual governed execution custody");
     let configured_adapter = bundle.runtime_adapter();
+    if !matches!(controller_probe, Some(ControllerProbe::TerminalRevocation)) {
+        // Probe before the service is built: building it arms the detached
+        // runtime delivery owner, whose reconcile pass opens store
+        // connections concurrently. Controller custody is a no-wait try that
+        // refuses under any concurrent SQLite lock by contract, so probing
+        // after that point races the owner's pass.
+        drop(
+            configured_adapter
+                .try_controller_grant_mutation()
+                .expect("reopened persistent store supports controller custody acquisition"),
+        );
+    }
     let mut builder = FactoryAgentBuilder::new(AgentFactory::minimal(), Config::default());
     builder.default_llm_client = Some(client);
     builder.default_tool_dispatcher = Some(tools.clone());
@@ -1288,11 +1300,6 @@ async fn exercise_stock_persistent(
         return;
     }
 
-    drop(
-        machine
-            .try_controller_grant_mutation()
-            .expect("reopened persistent store supports controller custody acquisition"),
-    );
     let persisted = service
         .load_authoritative_session(&session_id)
         .await

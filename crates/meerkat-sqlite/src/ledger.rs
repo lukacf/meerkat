@@ -575,8 +575,13 @@ pub fn try_preflight_current_schema(
         ))
     };
     let cache = EXPECTED_CURRENT_CATALOGS.get().ok_or_else(unavailable)?;
+    // The cache is a process-global leaf lock held only for one map lookup
+    // or insert (the expected catalog is built outside it), never while any
+    // other lock is taken. Waiting for it cannot invert a lock order, while
+    // refusing on contention made online administration fail whenever any
+    // other store in the process was opening.
     let expected = cache
-        .try_lock()
+        .lock()
         .map_err(|_| unavailable())?
         .get(&current_catalog_cache_key(domain))
         .cloned()

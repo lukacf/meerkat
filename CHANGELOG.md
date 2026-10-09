@@ -1169,6 +1169,14 @@ them.
 
 ### Fixed
 
+- Online controller administration (`try_controller_grant_mutation` and
+  the controller credential lifecycle custody) no longer refuses as
+  Unavailable whenever another store in the same process is opening a
+  SQLite connection. Its schema preflight `try_lock`ed the process-global
+  expected-catalog cache, a leaf lock held only for one map lookup or
+  insert by every store open; it now takes that lock normally. Contention
+  on the database itself and on native session gates still refuses
+  without waiting.
 - Loading a session's authoritative state no longer fails with a transcript
   revision conflict when it races a concurrent head write. The load now
   re-observes the current authority and retries a bounded number of times, and

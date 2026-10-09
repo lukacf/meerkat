@@ -5302,12 +5302,13 @@ fn create_session_error_to_api(err: SessionError) -> ApiError {
     match &err {
         SessionError::NotFound { .. } => ApiError::NotFound(message),
         SessionError::Busy { .. } => ApiError::BadRequest(message),
-        SessionError::Agent(meerkat_core::error::AgentError::Cancelled) => {
-            ApiError::RequestCancelled { details: None }
-        }
-        SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
-            ApiError::BadRequest(message)
-        }
+        SessionError::Agent(error) => match error.primary_error() {
+            meerkat_core::error::AgentError::Cancelled => {
+                ApiError::RequestCancelled { details: None }
+            }
+            meerkat_core::error::AgentError::ConfigError(_) => ApiError::BadRequest(message),
+            _ => ApiError::Agent(message),
+        },
         _ => ApiError::Agent(message),
     }
 }

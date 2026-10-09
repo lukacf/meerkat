@@ -811,17 +811,82 @@ async fn ordinary_mcp_tools_do_not_retain_ui_carriers_or_private_metadata() {
 }
 
 #[tokio::test]
-async fn headless_tool_calls_do_not_prefetch_unnegotiated_app_resources() {
+async fn headless_tool_calls_do_not_capture_or_prefetch_unnegotiated_apps() {
     let fixture = Fixture::start().await;
     let router = fixture.router(false).await;
     let result = AssertUnwindSafe(async {
         let result = dispatch(&router, "workspace_display", json!({})).await;
         assert!(result.text_content().contains("Visible display"));
-        let invocation = &result.host_metadata[MCP_APPS_EXTENSION];
-        assert_eq!(invocation["result"], wire_result("display"));
-        assert!(invocation.get("resource").is_none());
+        assert!(result.host_metadata.is_empty());
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("host-only-secret")
+        );
         assert!(fixture.server.reads.lock().unwrap().is_empty());
         assert_eq!(fixture.server.calls.lock().unwrap().len(), 1);
+    })
+    .catch_unwind()
+    .await;
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+#[tokio::test]
+async fn unnegotiated_connection_rejects_live_apps_even_with_an_exact_host_record() {
+    let fixture = Fixture::start().await;
+    let router = fixture.router(false).await;
+    let result = AssertUnwindSafe(async {
+        // Simulate an older retained record. Even exact physical registration
+        // and standard UI metadata cannot opt this headless connection in.
+        let connection = router
+            .servers
+            .get("apps-fixture")
+            .unwrap()
+            .connection
+            .as_ref()
+            .unwrap();
+        let invocation = serde_json::to_value(McpAppInvocation {
+            registration: crate::apps::McpAppRegistration::from_connection(connection),
+            tool: connection.standard_tool("display").unwrap(),
+            arguments: json!({}),
+            result: serde_json::from_value(wire_result("display")).unwrap(),
+            resource: Some(serde_json::from_value(wire_resource(APP_URI)).unwrap()),
+        })
+        .unwrap();
+        let value = resolved_value(
+            resolve(&router, &invocation, ToolApplicationOperation::Resolve)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(value["canCallTools"], false);
+        assert!(resolve(&router, &invocation, refresh()).await.is_err());
+        assert!(
+            resolve(
+                &router,
+                &invocation,
+                ToolApplicationOperation::ReadResource {
+                    uri: OTHER_URI.into()
+                }
+            )
+            .await
+            .is_err()
+        );
+        // Historical cached display remains a read of already retained data.
+        let cached = resolved_value(
+            resolve(
+                &router,
+                &invocation,
+                ToolApplicationOperation::ReadResource {
+                    uri: APP_URI.into(),
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(cached, wire_resource(APP_URI));
+        assert!(fixture.server.calls.lock().unwrap().is_empty());
+        assert!(fixture.server.reads.lock().unwrap().is_empty());
     })
     .catch_unwind()
     .await;

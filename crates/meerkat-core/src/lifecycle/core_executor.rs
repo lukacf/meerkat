@@ -153,7 +153,7 @@ impl CoreApplyFailureCause {
     }
 
     pub fn from_agent_error(error: &AgentError) -> Self {
-        match error {
+        match error.primary_error() {
             AgentError::HookDenied { .. } => Self::hook_denied(error.to_string()),
             AgentError::HookTimeout { .. }
             | AgentError::HookExecutionFailed { .. }
@@ -384,26 +384,33 @@ impl CoreExecutorError {
         if error.requests_runtime_executor_stop() {
             return Self::Stopped;
         }
-        match error {
-            SessionError::Agent(AgentError::Cancelled) => Self::Cancelled,
-            SessionError::Agent(AgentError::StickyModelFallbackAuthorityUnknown { message }) => {
-                Self::session_unavailable_requires_teardown(message)
+        if let SessionError::Agent(agent_error) = &error {
+            match agent_error.primary_error() {
+                AgentError::Cancelled => return Self::Cancelled,
+                AgentError::StickyModelFallbackAuthorityUnknown { message } => {
+                    return Self::session_unavailable_requires_teardown(message.clone());
+                }
+                AgentError::SessionDurableProjectionAuthorityUnknown { message } => {
+                    return Self::durable_projection_authority_unknown_requires_teardown(
+                        message.clone(),
+                    );
+                }
+                AgentError::TerminalFailure {
+                    outcome,
+                    cause_kind,
+                    message,
+                } if cause_kind.is_specific_failure_cause() => {
+                    return Self::terminal_failure(*outcome, *cause_kind, message.clone());
+                }
+                AgentError::TerminalFailure { cause_kind, .. } => {
+                    return Self::Internal(format!(
+                        "runtime turn returned unknown machine terminal cause: {cause_kind:?}"
+                    ));
+                }
+                _ => {}
             }
-            SessionError::Agent(AgentError::SessionDurableProjectionAuthorityUnknown {
-                message,
-            }) => Self::durable_projection_authority_unknown_requires_teardown(message),
-            SessionError::Agent(AgentError::TerminalFailure {
-                outcome,
-                cause_kind,
-                message,
-            }) if cause_kind.is_specific_failure_cause() => {
-                Self::terminal_failure(outcome, cause_kind, message)
-            }
-            SessionError::Agent(AgentError::TerminalFailure { cause_kind, .. }) => Self::Internal(
-                format!("runtime turn returned unknown machine terminal cause: {cause_kind:?}"),
-            ),
-            error => Self::apply_failed(CoreApplyFailureCause::from_session_error(&error)),
         }
+        Self::apply_failed(CoreApplyFailureCause::from_session_error(&error))
     }
 
     pub fn apply_failed_unknown(message: impl Into<String>) -> Self {

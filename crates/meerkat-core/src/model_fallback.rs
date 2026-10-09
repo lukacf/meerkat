@@ -67,7 +67,7 @@ impl ModelFallbackSkippedTarget {
 
 /// Classify policy triggers only after generated recovery permits retry.
 pub fn model_fallback_trigger(error: &AgentError) -> Option<ModelFallbackTrigger> {
-    let AgentError::Llm { reason, .. } = error else {
+    let AgentError::Llm { reason, .. } = error.primary_error() else {
         return None;
     };
     match reason {

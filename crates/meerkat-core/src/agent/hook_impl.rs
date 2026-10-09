@@ -105,6 +105,32 @@ where
         &self,
         mut invocation: HookInvocation,
     ) -> CollectedHookExecution {
+        if invocation.run_id.is_none() {
+            invocation.run_id = self.tool_dispatch_context.run_id().cloned();
+        }
+        self.collect_hook_execution_with_overrides(invocation, Some(&self.hook_run_overrides))
+            .await
+    }
+
+    /// A fresh host submission has no model run or run-scoped overrides. In
+    /// particular, an earlier run cannot disable the configured guardrails.
+    pub(super) async fn execute_tool_application_hooks(
+        &mut self,
+        invocation: HookInvocation,
+    ) -> Result<HookExecutionReport, AgentError> {
+        let mut collected = self
+            .collect_hook_execution_with_overrides(invocation, None)
+            .await;
+        self.append_collected_hook_notices(&mut collected);
+        self.emit_collected_hook_events(&mut collected, None).await;
+        collected.into_result()
+    }
+
+    async fn collect_hook_execution_with_overrides(
+        &self,
+        invocation: HookInvocation,
+        overrides: Option<&crate::config::HookRunOverrides>,
+    ) -> CollectedHookExecution {
         let mut collected = CollectedHookExecution {
             result: Ok(HookExecutionReport::empty()),
             notices: Vec::new(),
@@ -113,13 +139,7 @@ where
         let Some(hook_engine) = &self.hook_engine else {
             return collected;
         };
-        if invocation.run_id.is_none() {
-            invocation.run_id = self.tool_dispatch_context.run_id().cloned();
-        }
-        collected.result = match hook_engine
-            .execute(invocation.clone(), Some(&self.hook_run_overrides))
-            .await
-        {
+        collected.result = match hook_engine.execute(invocation.clone(), overrides).await {
             Ok(report) => {
                 Self::project_hook_report(
                     &invocation,

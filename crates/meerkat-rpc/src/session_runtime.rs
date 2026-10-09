@@ -12331,7 +12331,7 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         | SessionError::DurableTailRecoveryRefused { .. }
         | SessionError::DurableEvidenceQuarantined { .. }
         | SessionError::WholeBlobAuditedEndpointDivergence { .. } => error::SESSION_NOT_RUNNING,
-        SessionError::Agent(agent_err) => match agent_err {
+        SessionError::Agent(agent_err) => match agent_err.primary_error() {
             meerkat_core::AgentError::TokenBudgetExceeded { .. }
             | meerkat_core::AgentError::TimeBudgetExceeded { .. }
             | meerkat_core::AgentError::ToolCallBudgetExceeded { .. } => error::BUDGET_EXHAUSTED,
@@ -12364,16 +12364,15 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         _ => None,
     };
     let core_executor_teardown_reason = match &err {
-        SessionError::Agent(meerkat_core::AgentError::StickyModelFallbackAuthorityUnknown {
-            ..
-        }) => Some(
-            meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable,
-        ),
-        SessionError::Agent(
-            meerkat_core::AgentError::SessionDurableProjectionAuthorityUnknown { .. },
-        ) => Some(
-            meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown,
-        ),
+        SessionError::Agent(error) => match error.primary_error() {
+            meerkat_core::AgentError::StickyModelFallbackAuthorityUnknown { .. } => Some(
+                meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable,
+            ),
+            meerkat_core::AgentError::SessionDurableProjectionAuthorityUnknown { .. } => Some(
+                meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown,
+            ),
+            _ => None,
+        },
         _ => None,
     };
     RpcError {

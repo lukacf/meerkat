@@ -3673,7 +3673,7 @@ impl DeferredHookInfrastructureFailure {
     /// hook infrastructure failure.
     pub(crate) fn from_agent_error(error: &crate::error::AgentError) -> Option<Self> {
         use crate::error::AgentError;
-        match error {
+        match error.primary_error() {
             AgentError::HookLaunchRefused { hook_id, reason } => Some(Self::LaunchRefused {
                 hook_id: hook_id.clone(),
                 reason: reason.clone(),

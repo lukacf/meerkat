@@ -2624,7 +2624,8 @@ impl McpRouter {
             .get(&route.server_name)
             .and_then(|entry| entry.connection.as_ref())
             .ok_or_else(|| McpError::ServerNotFound(route.server_name.clone()))?;
-        if route.raw_operation != tool.name.as_ref()
+        if !connection.supports_mcp_apps()
+            || route.raw_operation != tool.name.as_ref()
             || crate::apps::McpAppRegistration::from_connection(connection) != *registration
             || !matches!(
                 self.server_lifecycle_state(&route.server_name),
@@ -3236,16 +3237,16 @@ impl AgentToolDispatcher for McpRouter {
             .get(call.name)
             .and_then(|route| {
                 let connection = self.servers.get(&route.server_name)?.connection.as_ref()?;
+                if !connection.supports_mcp_apps() {
+                    return None;
+                }
                 let tool = connection.standard_tool(&route.raw_operation)?;
                 if crate::apps::tool_ui_resource_uri(&tool).is_none() && !app_action {
                     return None;
                 }
                 Some((connection, tool))
             });
-        let prefetch_ui = !app_action
-            && host_source
-                .as_ref()
-                .is_some_and(|(connection, _)| connection.supports_mcp_apps());
+        let prefetch_ui = !app_action && host_source.is_some();
         let host_source = host_source.map(|(connection, tool)| {
             (
                 crate::apps::McpAppRegistration::from_connection(connection),

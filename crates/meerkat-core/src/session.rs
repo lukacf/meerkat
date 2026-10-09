@@ -17456,10 +17456,7 @@ mod deferred_tool_failure_tests {
     // The text fixture is historical input, not current codegen output.
     #[allow(dead_code)]
     mod released_v0_8_50_version_authority {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/v0_8_50_session_persistence_version_authority.rs.txt"
-        ));
+        include!("../tests/fixtures/v0_8_50_session_persistence_version_authority.rs.txt");
     }
 
     fn released_v3_reader_accepts_version(bytes: &[u8]) -> bool {

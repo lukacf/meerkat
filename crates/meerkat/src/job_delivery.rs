@@ -968,6 +968,11 @@ impl PreparedJobDelivery {
     }
 }
 
+enum RevalidatedJobDelivery {
+    Pending(PreparedJobDelivery),
+    AlreadyAcknowledged,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectedJobDelivery {
     pub job_id: JobId,
@@ -1144,6 +1149,21 @@ impl JobOutboxProjector {
         &self,
         entry: &JobOutboxEntry,
     ) -> Result<PreparedJobDelivery, JobOutboxProjectionError> {
+        match self.prepare_revalidated(entry).await? {
+            RevalidatedJobDelivery::Pending(prepared) => Ok(prepared),
+            RevalidatedJobDelivery::AlreadyAcknowledged => {
+                Err(JobOutboxProjectionError::Corrupt(format!(
+                    "job {} delivery {} is already acknowledged",
+                    entry.job_id, entry.delivery_sequence
+                )))
+            }
+        }
+    }
+
+    async fn prepare_revalidated(
+        &self,
+        entry: &JobOutboxEntry,
+    ) -> Result<RevalidatedJobDelivery, JobOutboxProjectionError> {
         let job = self.job_store.get(&entry.job_id).await?.ok_or_else(|| {
             JobOutboxProjectionError::Corrupt(format!(
                 "outbox entry points to missing job {}",
@@ -1168,7 +1188,11 @@ impl JobOutboxProjector {
                     entry.job_id, entry.delivery_sequence
                 ))
             })?;
-        if persisted != entry {
+        // Another projector may acknowledge an unchanged pending snapshot.
+        // Every other field remains part of the exact delivery identity.
+        let mut revalidated = entry.clone();
+        revalidated.applied = persisted.applied;
+        if persisted != &revalidated {
             return Err(JobOutboxProjectionError::Corrupt(format!(
                 "job {} delivery {} disagrees with the pending outbox projection",
                 entry.job_id, entry.delivery_sequence
@@ -1216,14 +1240,24 @@ impl JobOutboxProjector {
             job.spec.interaction_lineage_id.as_str(),
             payload,
         )?;
-        Ok(PreparedJobDelivery {
+        let prepared = PreparedJobDelivery {
             runtime_id: LogicalRuntimeId::for_session(&job.spec.origin_session_id),
             submission,
             // Interim routing choice until the generated driver declares it
             // (#1762): reads only immutable admission data (the job spec).
             producer_applied: matches!(entry.payload, JobOutboxPayload::Terminal(_))
                 && job.spec.terminal_application == meerkat_jobs::JobTerminalApplication::Producer,
-        })
+        };
+        if persisted.applied {
+            // The job acknowledgement alone is insufficient: the canonical
+            // runtime must retain exactly the submission the winner accepted.
+            self.runtime_inbox
+                .verify_committed_submission(&prepared.runtime_id, &prepared.submission)
+                .await?;
+            Ok(RevalidatedJobDelivery::AlreadyAcknowledged)
+        } else {
+            Ok(RevalidatedJobDelivery::Pending(prepared))
+        }
     }
 
     /// Project pending outbox entries, failing SAFE per job.
@@ -1266,7 +1300,8 @@ impl JobOutboxProjector {
     }
 
     /// Project one pending entry; `Ok(None)` means the entry belongs to a
-    /// realm outside this projector's authority.
+    /// realm outside this projector's authority or another projector already
+    /// committed and acknowledged this exact delivery.
     async fn project_entry(
         &self,
         entry: &JobOutboxEntry,
@@ -1282,7 +1317,10 @@ impl JobOutboxProjector {
                 return Ok(None);
             }
         }
-        let prepared = self.prepare(entry).await?;
+        let RevalidatedJobDelivery::Pending(prepared) = self.prepare_revalidated(entry).await?
+        else {
+            return Ok(None);
+        };
         let runtime = prepared.submit(&self.runtime_inbox).await?;
         self.job_service
             .mark_delivery_applied(&entry.job_id, entry.delivery_sequence)
@@ -1313,10 +1351,13 @@ impl meerkat_tools::builtin::shell::ShellJobDeliveryProjector for JobOutboxProje
             let Some(entry) = job.outbox.iter().find(|entry| !entry.applied).cloned() else {
                 return Ok(());
             };
-            let prepared = self
-                .prepare(&entry)
+            let RevalidatedJobDelivery::Pending(prepared) = self
+                .prepare_revalidated(&entry)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
             // A producer-applied terminal (the shell's) is committed already
             // acknowledged, whichever of the shell and the delivery owner
             // projects it first. Monitor notifications are applied by the

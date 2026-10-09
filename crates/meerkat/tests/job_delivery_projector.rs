@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used)]
 
+#[path = "job_delivery_projector/concurrent_projection.rs"]
+mod concurrent_projection;
 #[path = "job_delivery_projector/local_settlement.rs"]
 mod local_settlement;
 #[path = "job_delivery_projector/recipient_routing.rs"]

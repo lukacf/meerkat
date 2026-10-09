@@ -4784,6 +4784,7 @@ rust_test(
     ],
     srcs = [
         "tests/job_delivery_projector.rs",
+        "tests/job_delivery_projector/concurrent_projection.rs",
         "tests/job_delivery_projector/local_settlement.rs",
         "tests/job_delivery_projector/recipient_routing.rs",
     ],

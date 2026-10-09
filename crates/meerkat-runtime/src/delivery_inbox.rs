@@ -878,33 +878,13 @@ impl RuntimeDeliveryInbox {
                 submission.source_sequence,
             )?;
             if deduplicated {
-                let stored = self
-                    .store
-                    .load_runtime_delivery_record(runtime_id, delivery_id.as_str())
-                    .await?
-                    .ok_or_else(|| {
-                        RuntimeDeliveryError::Corrupt(format!(
-                            "generated authority remembers {delivery_id}, but its inbox row is missing"
-                        ))
-                    })?;
-                let persisted = decode_submission(&stored)?;
-                if persisted != submission {
-                    return Err(RuntimeDeliveryError::IdempotencyConflict(delivery_id));
-                }
-                if stored.sequence() != sequence {
-                    return Err(RuntimeDeliveryError::Corrupt(format!(
-                        "delivery {delivery_id} row sequence {} disagrees with generated sequence {sequence}",
-                        stored.sequence()
-                    )));
-                }
+                let receipt = self
+                    .read_retained_receipt(runtime_id, &submission, sequence)
+                    .await?;
                 if acknowledge {
                     self.acknowledge(runtime_id, &delivery_id, sequence).await?;
                 }
-                return Ok(RuntimeDeliveryReceipt {
-                    delivery_id,
-                    sequence,
-                    deduplicated: true,
-                });
+                return Ok(receipt);
             }
 
             if acknowledge {
@@ -957,6 +937,96 @@ impl RuntimeDeliveryInbox {
         Err(RuntimeDeliveryError::Store(RuntimeStoreError::WriteFailed(
             format!("runtime delivery CAS did not converge after {MAX_CAS_ATTEMPTS} attempts"),
         )))
+    }
+
+    /// Verify that this exact submission is already committed to this runtime.
+    ///
+    /// The generated authority must retain the delivery, and its sequence and
+    /// full inbox row must agree. This read-only check neither submits a missing
+    /// row nor changes its application status.
+    pub async fn verify_committed_submission(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        submission: &RuntimeDeliverySubmission,
+    ) -> Result<RuntimeDeliveryReceipt, RuntimeDeliveryError> {
+        let observed = self
+            .store
+            .load_runtime_delivery_authority(runtime_id)
+            .await?;
+        let mut authority = decode_or_new_authority(observed.as_ref())?;
+        let sequence =
+            match Self::classify_delivery_status(&mut authority, submission.delivery_id())? {
+                RuntimeDeliveryStatus::NotCommitted => {
+                    return Err(RuntimeDeliveryError::Corrupt(format!(
+                        "delivery {} is not committed in generated authority",
+                        submission.delivery_id()
+                    )));
+                }
+                RuntimeDeliveryStatus::Pending { delivery_sequence }
+                | RuntimeDeliveryStatus::AcknowledgedAhead { delivery_sequence }
+                | RuntimeDeliveryStatus::Applied { delivery_sequence }
+                | RuntimeDeliveryStatus::Mixed {
+                    delivery_sequence, ..
+                }
+                | RuntimeDeliveryStatus::Refused {
+                    delivery_sequence, ..
+                } => delivery_sequence,
+            };
+        let expected_source_sequence = authority
+            .state()
+            .delivery_source_sequences
+            .get(submission.delivery_id().as_str())
+            .copied()
+            .ok_or_else(|| {
+                RuntimeDeliveryError::Corrupt(format!(
+                    "delivery {} has no generated source-sequence authority",
+                    submission.delivery_id()
+                ))
+            })?;
+        if expected_source_sequence != submission.source_sequence() {
+            return Err(RuntimeDeliveryError::Corrupt(format!(
+                "delivery {} source sequence {} disagrees with generated source sequence {expected_source_sequence}",
+                submission.delivery_id(),
+                submission.source_sequence()
+            )));
+        }
+        self.read_retained_receipt(runtime_id, submission, sequence)
+            .await
+    }
+
+    async fn read_retained_receipt(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        submission: &RuntimeDeliverySubmission,
+        sequence: u64,
+    ) -> Result<RuntimeDeliveryReceipt, RuntimeDeliveryError> {
+        let delivery_id = submission.delivery_id();
+        let stored = self
+            .store
+            .load_runtime_delivery_record(runtime_id, delivery_id.as_str())
+            .await?
+            .ok_or_else(|| {
+                RuntimeDeliveryError::Corrupt(format!(
+                    "generated authority remembers {delivery_id}, but its inbox row is missing"
+                ))
+            })?;
+        let persisted = decode_submission(&stored)?;
+        if &persisted != submission {
+            return Err(RuntimeDeliveryError::IdempotencyConflict(
+                delivery_id.clone(),
+            ));
+        }
+        if stored.sequence() != sequence {
+            return Err(RuntimeDeliveryError::Corrupt(format!(
+                "delivery {delivery_id} row sequence {} disagrees with generated sequence {sequence}",
+                stored.sequence()
+            )));
+        }
+        Ok(RuntimeDeliveryReceipt {
+            delivery_id: delivery_id.clone(),
+            sequence,
+            deduplicated: true,
+        })
     }
 
     pub async fn list_pending(
@@ -1711,8 +1781,15 @@ impl RuntimeDeliveryInbox {
             .load_runtime_delivery_authority(runtime_id)
             .await?;
         let mut authority = decode_or_new_authority(observed.as_ref())?;
+        Self::classify_delivery_status(&mut authority, delivery_id)
+    }
+
+    fn classify_delivery_status(
+        authority: &mut dsl::RuntimeDeliveryMachineAuthority,
+        delivery_id: &RuntimeDeliveryId,
+    ) -> Result<RuntimeDeliveryStatus, RuntimeDeliveryError> {
         let transition = dsl::RuntimeDeliveryMachineMutator::apply(
-            &mut authority,
+            authority,
             dsl::RuntimeDeliveryInput::ClassifyDeliveryStatus {
                 delivery_id: delivery_id.as_str().to_string(),
             },

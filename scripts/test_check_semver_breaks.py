@@ -348,6 +348,20 @@ Failed in:
                 "crates/meerkat-contracts/src/wire/connection.rs:346",
                 ("LoginCancelParams",),
             ),
+            "enum_missing": (
+                "enum meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral, previously "
+                "in file crates/meerkat-mob-mcp/src/detached_delivery.rs:68",
+                ("OwnerRevivalDeferral",),
+            ),
+            "struct_pub_field_now_doc_hidden": (
+                "field RelinkDelivery.runtime in file crates/meerkat-mob-mcp/src/fork_relink.rs:105",
+                ("RelinkDelivery", "runtime"),
+            ),
+            "trait_method_missing": (
+                "method runtime_adapter of trait MobSessionService, previously in file "
+                "crates/meerkat-mob/src/runtime/session_service.rs:1433",
+                ("MobSessionService", "runtime_adapter"),
+            ),
         }
         for lint_id, (item, expected) in cases.items():
             with self.subTest(lint_id=lint_id):

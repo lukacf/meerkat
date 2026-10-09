@@ -577,6 +577,340 @@ them.
   reference. Neither is a caller refusal (`is_refusal()` is false), so RPC
   answers INTERNAL_ERROR and REST 500, like an unreadable MCP config.
 
+- Measured public API changes against 0.8.51, as reported by
+  cargo-semver-checks and grouped by crate. Most are generated state machine
+  types; exact-pin the crate family and rebuild against 0.8.52.
+- meerkat: no longer RefUnwindSafe and UnwindSafe: `RuntimeBackedInitialTurn`;
+  enum variants added: `BuildAgentError::ControllerUnavailable`,
+  `PendingPromotionCleanupMode::RetainUnresolved`,
+  `PersistenceError::RuntimeAuthority`.
+- meerkat-contracts: fields added to constructible structs:
+  `WirePendingToolCall.settlement_failures`,
+  `WireToolResult.settlement_failures`; enum variants added:
+  `ErrorCode::InputRefused`, `ErrorCode::InputNotReady`,
+  `ErrorCode::SessionRuntimeUnavailable`.
+- meerkat-core: generated machine and error enums renumber or reorder variants,
+  so matching on discriminants or variant order changes
+  (`AgentBuildPolicyError::*`, `AgentErrorClass::*`, `LlmProviderErrorKind::*`,
+  `ToolDispatchTerminalErrorKind::*`); no longer RefUnwindSafe and UnwindSafe:
+  `PostCommitHookDispatcher`, `RunPrimitive`, `StagedRunInput`,
+  `StartTurnRequest`, `StartTurnRuntimeSemantics`; fields added to constructible
+  structs: `StartTurnRuntimeSemantics.work_authorization`,
+  `ExternalToolDelta.confinement_refusal`, `ToolResult.settlement_failures`,
+  `HookExecutionReport.launch_refusals`, `HookExecutionReport.background_skips`,
+  `StorageConfig.hosting`, `PendingCallbackToolCall.settlement_failures`,
+  `SessionBuildOptions.initial_work_authorization`,
+  `RuntimeTurnMetadata.work_authorization`, `PrincipalRef.qualification`,
+  `LiveToolResult.settlement_failures`; fields added to enum struct variants:
+  `field confinement_refusal of variant SystemNoticeBlock::Mcp`, `field
+  settlement_failures of variant AgentError::PolicyIndeterminate`, `field
+  confinement_refusal of variant ToolConfigChangeStatus::ExternalToolDelta`;
+  enum variants added: `LlmProviderErrorKind::OperationRefused`,
+  `LlmProviderErrorKind::OperationObservationUnavailable`,
+  `LlmProviderErrorKind::OperationAuthorizationUnavailable`,
+  `AgentBuildPolicyError::HookConfiguration`,
+  `TokenLifecycleClearError::LeaseGuardMismatch`,
+  `AgentErrorClass::OperationRefused`,
+  `ToolError::OperationObservationUnavailable`,
+  `ToolError::OperationAuthorizationUnavailable`,
+  `ToolError::WithSettlementFailures`, `ToolError::ConfinementRefused`,
+  `ToolError::HookDenied`, `ToolError::HookLaunchRefused`,
+  `ApprovalLifecycleInput::BeginReview`,
+  `ApprovalLifecycleInput::RecordReviewVerdict`,
+  `ApprovalLifecycleInput::RecordReviewUnavailable`,
+  `ApprovalLifecycleInput::RetireReview`,
+  `ApprovalLifecycleInput::ConsumeReviewForEntry`,
+  `ApprovalLifecycleInput::ReleaseReview`, `HookEngineError::WithReport`,
+  `HookEngineError::LaunchRefused`, `AgentErrorReason::HookLaunchRefused`,
+  `SessionError::RuntimeUnavailable`,
+  `AuthStatusRehydrateError::LeaseGuardMismatch`,
+  `ToolDispatchTerminalErrorKind::OperationObservationUnavailable`,
+  `ToolDispatchTerminalErrorKind::OperationAuthorizationUnavailable`,
+  `ToolDispatchTerminalErrorKind::ConfinementRefused`,
+  `ToolDispatchTerminalErrorKind::HookDenied`,
+  `ToolDispatchTerminalErrorKind::HookLaunchRefused`,
+  `ApprovalLifecycleEffect::ReviewStatusResolved`,
+  `ApprovalLifecycleEffect::ReviewLifecycleRejected`,
+  `PrincipalContractError::EmptyTrustDomainId`,
+  `PrincipalContractError::InvalidTrustDomainId`,
+  `PrincipalContractError::UnqualifiedPrincipal`; functions removed: `function
+  meerkat_core::auth::lifecycle::clear_tokens_and_publish_lifecycle_released_for_identity`,
+  `function
+  meerkat_core::auth::clear_tokens_and_publish_lifecycle_released_for_identity`,
+  `function
+  meerkat_core::clear_tokens_and_publish_lifecycle_released_for_identity`,
+  `function
+  meerkat_core::auth::lifecycle::clear_tokens_and_publish_lifecycle_released`,
+  `function meerkat_core::auth::clear_tokens_and_publish_lifecycle_released`,
+  `function meerkat_core::clear_tokens_and_publish_lifecycle_released`; function
+  parameter counts changed:
+  `meerkat_core::auth::lifecycle::rehydrate_durable_predecessor_for_mutation now
+  takes 5 parameters instead of 4`,
+  `meerkat_core::auth::rehydrate_durable_predecessor_for_mutation now takes 5
+  parameters instead of 4`,
+  `meerkat_core::rehydrate_durable_predecessor_for_mutation now takes 5
+  parameters instead of 4`,
+  `meerkat_core::auth::lifecycle::rehydrate_durable_predecessor_for_mutation_for_identity
+  now takes 5 parameters instead of 4`,
+  `meerkat_core::auth::rehydrate_durable_predecessor_for_mutation_for_identity
+  now takes 5 parameters instead of 4`,
+  `meerkat_core::rehydrate_durable_predecessor_for_mutation_for_identity now
+  takes 5 parameters instead of 4`.
+- meerkat-hooks: derived trait impls removed: `type BackgroundDispatchSignal no
+  longer derives Eq`; enum variants added:
+  `BackgroundDispatchSignal::Completed`.
+- meerkat-llm-core: generated machine and error enums renumber or reorder
+  variants, so matching on discriminants or variant order changes
+  (`LlmError::*`, `LlmEvent::*`); enum variants added:
+  `LlmEvent::OperationObservationFailed`,
+  `LlmError::OperationObservationUnavailable`,
+  `LlmError::OperationAuthorizationUnavailable`.
+- meerkat-machine-kernels: generated machine and error enums renumber or reorder
+  variants, so matching on discriminants or variant order changes
+  (`EffectKind::*`, `InputKind::*`, `TransitionId::*`); fields added to
+  constructible structs: `State.review_ids`, `State.review_statuses`,
+  `State.review_retirements`, `State.refused_deliveries`,
+  `State.delivery_recipient_bindings`, `State.recipient_outcomes`,
+  `State.recipient_group_outcomes`, `ResolveAdmissionPlan.authority_binding`,
+  `ResolveAdmissionPlan.authority_batch_key`,
+  `AdmitLiveBridgeOperation.original_work`, `State.input_authority_bindings`,
+  `State.input_authority_batch_keys`, `State.authority_staged_run`,
+  `State.authority_staged_batch`, `State.live_member_turn_reasoning_by_channel`,
+  `State.live_bridge_original_work_by_operation`; enum variants added:
+  `TransitionId::BindInputAuthorityIdle`,
+  `TransitionId::BindInputAuthorityAttached`,
+  `TransitionId::BindInputAuthorityRunning`,
+  `TransitionId::BindInputAuthorityRetired`,
+  `TransitionId::BindInputAuthorityStopped`, `Effect::DeliveryRecipientsBound`,
+  `Effect::DeliveryRecipientSettled`, `Effect::DeliveryRecipientsSettled`,
+  `Effect::DeliveryStatusMixed`, `Effect::DeliveryRefused`,
+  `Effect::CommitRejectedSourceSequenceConflict`,
+  `Effect::DeliveryStatusNotCommitted`, `Effect::DeliveryStatusApplied`,
+  `Effect::DeliveryStatusAcknowledgedAhead`, `Effect::DeliveryStatusPending`,
+  `Effect::DeliveryStatusRefused`, `Input::BeginReview`,
+  `Input::RecordReviewVerdict`, `Input::RecordReviewUnavailable`,
+  `Input::RetireReview`, `Input::ConsumeReviewForEntry`, `Input::ReleaseReview`,
+  `EffectKind::ReviewStatusResolved`, `EffectKind::ReviewLifecycleRejected`,
+  `Input::BindInputAuthority`, `TransitionId::BeginReviewRejectedDuplicate`,
+  `TransitionId::BeginReviewPending`,
+  `TransitionId::RecordReviewVerdictRejectedMissing`,
+  `TransitionId::RecordReviewVerdictRejectedRetired`,
+  `TransitionId::RecordReviewVerdictRejectedSettled`,
+  `TransitionId::RecordReviewVerdictAllowed`,
+  `TransitionId::RecordReviewVerdictDenied`,
+  `TransitionId::RecordReviewVerdictEscalated`,
+  `TransitionId::RecordReviewUnavailableRejectedMissing`,
+  `TransitionId::RecordReviewUnavailableRejectedRetired`,
+  `TransitionId::RecordReviewUnavailableRejectedSettled`,
+  `TransitionId::RecordReviewUnavailable`,
+  `TransitionId::RetireReviewRejectedMissing`,
+  `TransitionId::RetireReviewRejectedRetired`,
+  `TransitionId::RetireReviewRejectedSettled`, `TransitionId::RetireReview`,
+  `TransitionId::ConsumeReviewRejectedMissing`,
+  `TransitionId::ConsumeReviewRejectedRetired`,
+  `TransitionId::ConsumeReviewRejectedUsed`,
+  `TransitionId::ConsumeReviewRejectedNotSatisfied`,
+  `TransitionId::ConsumeReviewForEntry`,
+  `TransitionId::ReleaseReviewRejectedMissing`,
+  `TransitionId::ReleaseReviewRejectedPending`,
+  `TransitionId::ReleaseReviewAllowed`, `TransitionId::ReleaseReviewDenied`,
+  `TransitionId::ReleaseReviewEscalated`,
+  `TransitionId::ReleaseReviewUnavailable`,
+  `TransitionId::ReleaseReviewRetired`, `TransitionId::ReleaseReviewUsed`,
+  `TransitionId::RejectSourceSequenceConflict`,
+  `TransitionId::SettleRefusedDeliveryAtCursor`,
+  `TransitionId::ObserveAlreadyRefusedDelivery`,
+  `TransitionId::ClassifyNotCommitted`, `TransitionId::ClassifyRefused`,
+  `TransitionId::ClassifyApplied`, `TransitionId::ClassifyAcknowledgedAhead`,
+  `TransitionId::ClassifyPending`, `TransitionId::ClassifyMixed`,
+  `TransitionId::BindNewDeliveryRecipients`,
+  `TransitionId::ObserveBoundDeliveryRecipients`,
+  `TransitionId::SettlePendingDeliveryRecipient`,
+  `TransitionId::ObserveSettledDeliveryRecipient`,
+  `TransitionId::FinishSettledDeliveryRecipients`,
+  `TransitionId::ObserveFinishedDeliveryRecipients`,
+  `EffectKind::DeliveryRecipientsBound`, `EffectKind::DeliveryRecipientSettled`,
+  `EffectKind::DeliveryRecipientsSettled`, `EffectKind::DeliveryStatusMixed`,
+  `EffectKind::DeliveryRefused`,
+  `EffectKind::CommitRejectedSourceSequenceConflict`,
+  `EffectKind::DeliveryStatusNotCommitted`, `EffectKind::DeliveryStatusApplied`,
+  `EffectKind::DeliveryStatusAcknowledgedAhead`,
+  `EffectKind::DeliveryStatusPending`, `EffectKind::DeliveryStatusRefused`,
+  `Input::BindDeliveryRecipients`, `Input::SettleDeliveryRecipient`,
+  `Input::FinishDeliveryRecipients`, `Input::SettleRefusedDelivery`,
+  `Input::ClassifyDeliveryStatus`, `InputKind::BeginReview`,
+  `InputKind::RecordReviewVerdict`, `InputKind::RecordReviewUnavailable`,
+  `InputKind::RetireReview`, `InputKind::ConsumeReviewForEntry`,
+  `InputKind::ReleaseReview`, `InputKind::BindInputAuthority`,
+  `InputKind::BindDeliveryRecipients`, `InputKind::SettleDeliveryRecipient`,
+  `InputKind::FinishDeliveryRecipients`, `InputKind::SettleRefusedDelivery`,
+  `InputKind::ClassifyDeliveryStatus`, `Effect::ReviewStatusResolved`,
+  `Effect::ReviewLifecycleRejected`.
+- meerkat-machine-schema: generated machine and error enums renumber or reorder
+  variants, so matching on discriminants or variant order changes
+  (`ApprovalLifecycleMachineTransitionError::*`,
+  `AuthMachineTransitionError::*`, `DetachedJobMachineTransitionError::*`,
+  `ForkedParticipantLifecycleMachineTransitionError::*`,
+  `MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`,
+  `MeerkatMachineTransitionError::*`,
+  `MobHostBindingAuthorityTransitionError::*`, `MobMachineTransitionError::*`,
+  `OccurrenceLifecycleMachineTransitionError::*`, `RuntimeDeliveryEffect::*`,
+  `RuntimeDeliveryEffectVariant::*`, `RuntimeDeliveryInput::*`,
+  `RuntimeDeliveryInputVariant::*`, `RuntimeDeliveryMachineTransitionError::*`,
+  `ScheduleLifecycleMachineTransitionError::*`,
+  `SessionDocumentMachineTransitionError::*`,
+  `SessionPersistenceVersionAuthorityMachineTransitionError::*`,
+  `SessionTurnAdmissionMachineTransitionError::*`,
+  `TemporaryCouncilLifecycleMachineTransitionError::*`,
+  `WorkAttentionLifecycleMachineTransitionError::*`,
+  `WorkExecutionLifecycleMachineTransitionError::*`,
+  `WorkGraphLifecycleMachineTransitionError::*`,
+  `WorkItemAdmissionMachineTransitionError::*`); fields added to constructible
+  structs:
+  `SessionPersistenceVersionAuthorityMachineState.session_envelope_released_v3`,
+  `MachineSchema.tlc_model`, `RuntimeDeliveryMachineState.refused_deliveries`,
+  `RuntimeDeliveryMachineState.delivery_recipient_bindings`,
+  `RuntimeDeliveryMachineState.recipient_outcomes`,
+  `RuntimeDeliveryMachineState.recipient_group_outcomes`,
+  `MachineSchemaMetadata.tlc_model`,
+  `MeerkatMachineState.input_authority_bindings`,
+  `MeerkatMachineState.input_authority_batch_keys`,
+  `MeerkatMachineState.authority_staged_run`,
+  `MeerkatMachineState.authority_staged_batch`,
+  `MeerkatMachineState.live_member_turn_reasoning_by_channel`,
+  `MeerkatMachineState.live_bridge_original_work_by_operation`,
+  `ApprovalLifecycleMachineState.review_ids`,
+  `ApprovalLifecycleMachineState.review_statuses`,
+  `ApprovalLifecycleMachineState.review_retirements`; fields added to enum
+  struct variants: `field authority_binding of variant
+  MeerkatMachineInput::ResolveAdmissionPlan`, `field authority_batch_key of
+  variant MeerkatMachineInput::ResolveAdmissionPlan`, `field original_work of
+  variant MeerkatMachineInput::AdmitLiveBridgeOperation`; enum variants added:
+  `ScheduleLifecycleMachineTransitionError::AbsentMapKey`,
+  `DetachedJobMachineTransitionError::AbsentMapKey`,
+  `ApprovalLifecycleEffect::ReviewStatusResolved`,
+  `ApprovalLifecycleEffect::ReviewLifecycleRejected`,
+  `WorkAttentionLifecycleMachineTransitionError::AbsentMapKey`,
+  `MeerkatMachineInputVariant::BindInputAuthority`,
+  `SessionTurnAdmissionMachineTransitionError::AbsentMapKey`,
+  `RuntimeDeliveryInput::BindDeliveryRecipients`,
+  `RuntimeDeliveryInput::SettleDeliveryRecipient`,
+  `RuntimeDeliveryInput::FinishDeliveryRecipients`,
+  `RuntimeDeliveryInput::SettleRefusedDelivery`,
+  `RuntimeDeliveryInput::ClassifyDeliveryStatus`,
+  `MobHostBindingAuthorityTransitionError::AbsentMapKey`,
+  `SessionPersistenceVersionAuthorityMachineTransitionError::AbsentMapKey`,
+  `ApprovalLifecycleInput::BeginReview`,
+  `ApprovalLifecycleInput::RecordReviewVerdict`,
+  `ApprovalLifecycleInput::RecordReviewUnavailable`,
+  `ApprovalLifecycleInput::RetireReview`,
+  `ApprovalLifecycleInput::ConsumeReviewForEntry`,
+  `ApprovalLifecycleInput::ReleaseReview`,
+  `MachineSchemaError::InvalidTlcModel`,
+  `OccurrenceLifecycleMachineTransitionError::AbsentMapKey`,
+  `RuntimeDeliveryEffect::DeliveryRecipientsBound`,
+  `RuntimeDeliveryEffect::DeliveryRecipientSettled`,
+  `RuntimeDeliveryEffect::DeliveryRecipientsSettled`,
+  `RuntimeDeliveryEffect::DeliveryStatusMixed`,
+  `RuntimeDeliveryEffect::DeliveryRefused`,
+  `RuntimeDeliveryEffect::CommitRejectedSourceSequenceConflict`,
+  `RuntimeDeliveryEffect::DeliveryStatusNotCommitted`,
+  `RuntimeDeliveryEffect::DeliveryStatusApplied`,
+  `RuntimeDeliveryEffect::DeliveryStatusAcknowledgedAhead`,
+  `RuntimeDeliveryEffect::DeliveryStatusPending`,
+  `RuntimeDeliveryEffect::DeliveryStatusRefused`,
+  `TemporaryCouncilLifecycleMachineTransitionError::AbsentMapKey`,
+  `WorkItemAdmissionMachineTransitionError::AbsentMapKey`,
+  `MobMachineTransitionError::AbsentMapKey`,
+  `WorkExecutionLifecycleMachineTransitionError::AbsentMapKey`,
+  `RuntimeDeliveryMachineTransitionError::AbsentMapKey`,
+  `ApprovalLifecycleEffectVariant::ReviewStatusResolved`,
+  `ApprovalLifecycleEffectVariant::ReviewLifecycleRejected`,
+  `ApprovalLifecycleMachineTransitionError::AbsentMapKey`,
+  `RuntimeDeliveryInputVariant::BindDeliveryRecipients`,
+  `RuntimeDeliveryInputVariant::SettleDeliveryRecipient`,
+  `RuntimeDeliveryInputVariant::FinishDeliveryRecipients`,
+  `RuntimeDeliveryInputVariant::SettleRefusedDelivery`,
+  `RuntimeDeliveryInputVariant::ClassifyDeliveryStatus`,
+  `AuthMachineTransitionError::AbsentMapKey`,
+  `MeerkatMachineTransitionError::AbsentMapKey`,
+  `WorkGraphLifecycleMachineTransitionError::AbsentMapKey`,
+  `SessionDocumentMachineTransitionError::AbsentMapKey`,
+  `ForkedParticipantLifecycleMachineTransitionError::AbsentMapKey`,
+  `ApprovalLifecycleInputVariant::BeginReview`,
+  `ApprovalLifecycleInputVariant::RecordReviewVerdict`,
+  `ApprovalLifecycleInputVariant::RecordReviewUnavailable`,
+  `ApprovalLifecycleInputVariant::RetireReview`,
+  `ApprovalLifecycleInputVariant::ConsumeReviewForEntry`,
+  `ApprovalLifecycleInputVariant::ReleaseReview`,
+  `MeerkatMachineInput::BindInputAuthority`,
+  `RuntimeDeliveryEffectVariant::DeliveryRecipientsBound`,
+  `RuntimeDeliveryEffectVariant::DeliveryRecipientSettled`,
+  `RuntimeDeliveryEffectVariant::DeliveryRecipientsSettled`,
+  `RuntimeDeliveryEffectVariant::DeliveryStatusMixed`,
+  `RuntimeDeliveryEffectVariant::DeliveryRefused`,
+  `RuntimeDeliveryEffectVariant::CommitRejectedSourceSequenceConflict`,
+  `RuntimeDeliveryEffectVariant::DeliveryStatusNotCommitted`,
+  `RuntimeDeliveryEffectVariant::DeliveryStatusApplied`,
+  `RuntimeDeliveryEffectVariant::DeliveryStatusAcknowledgedAhead`,
+  `RuntimeDeliveryEffectVariant::DeliveryStatusPending`,
+  `RuntimeDeliveryEffectVariant::DeliveryStatusRefused`.
+- meerkat-mcp: enum variants added: `McpError::Confinement`,
+  `McpError::EntryRefused`.
+- meerkat-mob: private fields added to constructible structs:
+  `WorkSpec.request_reasoning`; trait methods removed: `method runtime_adapter
+  of trait MobSessionService`.
+- meerkat-rest: enum variants added: `ApiError::OperationAuthorization`,
+  `ApiError::SessionRuntimeUnavailable`.
+- meerkat-rpc: enum variants added: `ServerError::RuntimeAuthority`.
+- meerkat-runtime: generated machine and error enums renumber or reorder
+  variants, so matching on discriminants or variant order changes
+  (`AuthMachineTransitionError::*`, `MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*`, `MeerkatMachineTransitionError::*`); no
+  longer RefUnwindSafe and UnwindSafe: `AcceptOutcome`,
+  `CommittedRecoveryBoundary`, `ContinuationInput`,
+  `ExactInputStateObservation`, `ExternalEventInput`, `FlowStepInput`, `Input`,
+  `InputLedger`, `InputState`, `InputStatePersistenceRecord`, `InputStateRow`,
+  `OperationInput`, `PeerInput`, `PreparedRecoveryEvidence`,
+  `PreparedRecoveryInputSnapshot`, `PreparedRuntimeSessionCommit`,
+  `PromptInput`, `RecoveryInputStateMutation`, `StoredInputState`,
+  `UnregisterFinalizationCommit`; fields added to constructible structs:
+  `MeerkatMachineState.input_authority_bindings`,
+  `MeerkatMachineState.input_authority_batch_keys`,
+  `MeerkatMachineState.authority_staged_run`,
+  `MeerkatMachineState.authority_staged_batch`,
+  `MeerkatMachineState.live_member_turn_reasoning_by_channel`,
+  `MeerkatMachineState.live_bridge_original_work_by_operation`,
+  `InputHeader.ingress_context`, `InputHeader.authority_association`; fields
+  added to enum struct variants: `field authority_binding of variant
+  MeerkatMachineInput::ResolveAdmissionPlan`, `field authority_batch_key of
+  variant MeerkatMachineInput::ResolveAdmissionPlan`, `field original_work of
+  variant MeerkatMachineInput::AdmitLiveBridgeOperation`; enum variants added:
+  `MeerkatMachineInput::BindInputAuthority`,
+  `MeerkatMachineInputVariant::BindInputAuthority`,
+  `MeerkatMachineTransitionError::AbsentMapKey`,
+  `AuthMachineTransitionError::AbsentMapKey`; method parameter counts changed:
+  `meerkat_runtime::meerkat_machine::MeerkatMachine::admit_live_bridge_operation
+  takes 5 parameters in
+  crates/meerkat-runtime/src/meerkat_machine/runtime_control.rs:7982, but now
+  takes 6 parameters`,
+  `meerkat_runtime::MeerkatMachine::admit_live_bridge_operation takes 5
+  parameters in
+  crates/meerkat-runtime/src/meerkat_machine/runtime_control.rs:7982, but now
+  takes 6 parameters`.
+- meerkat-session: no longer RefUnwindSafe and UnwindSafe:
+  `SessionAgentTurnInput`; fields added to constructible structs:
+  `SessionAgentTurnInput.work_authorization`; trait method parameter counts
+  changed: `SessionAgent::run_pending_with_events now takes 5 instead of 4
+  parameters`.
+- meerkat-sqlite: enum variants added: `JournalPolicy::RequireExistingWal`,
+  `ConnectionProfile::OnlineExistingWriter`.
+- meerkat-tools: fields added to constructible structs:
+  `ShellConfig.confinement`; enum variants added:
+  `BuiltinToolError::OperationObservationUnavailable`,
+  `BuiltinToolError::OperationAuthorizationUnavailable`,
+  `BuiltinToolError::EntryRefused`, `BuiltinToolError::ConfinementRefused`.
+
 ### Added
 
 - INFO timing lines on the way from a live delegation worker's terminal to the

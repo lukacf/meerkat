@@ -295,6 +295,31 @@ def _symbols_partial_ord_struct_field_reordered(text: str) -> tuple[str, ...] | 
     return _path_symbols(match.group(1)) + (match.group(2),)
 
 
+def _symbols_enum_missing(text: str) -> tuple[str, ...] | None:
+    # enum meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral
+    match = re.fullmatch(r"enum\s+([A-Za-z0-9_:]+)", text)
+    return _path_symbols(match.group(1)) if match else None
+
+
+def _symbols_struct_pub_field_now_doc_hidden(text: str) -> tuple[str, ...] | None:
+    # field RelinkDelivery.runtime
+    match = re.fullmatch(r"field\s+([A-Za-z0-9_:]+)\.([A-Za-z0-9_]+)", text)
+    if not match:
+        return None
+    return _path_symbols(match.group(1)) + (match.group(2),)
+
+
+def _symbols_trait_method_missing(text: str) -> tuple[str, ...] | None:
+    # method runtime_adapter of trait MobSessionService
+    match = re.fullmatch(
+        r"method\s+([A-Za-z0-9_]+)\s+of\s+trait\s+([A-Za-z0-9_:]+)",
+        text,
+    )
+    if not match:
+        return None
+    return _path_symbols(match.group(2)) + (match.group(1),)
+
+
 STRUCTURAL_EXTRACTORS = {
     "auto_trait_impl_removed": _symbols_auto_trait_impl_removed,
     "constructible_struct_adds_field": _symbols_constructible_struct_adds_field,
@@ -307,6 +332,9 @@ STRUCTURAL_EXTRACTORS = {
     "enum_unit_variant_changed_kind": _symbols_enum_variant_missing,
     # Same message shape as the added case, read off the 0.8.38 report.
     "enum_struct_variant_field_missing": _symbols_enum_struct_variant_field_added,
+    # "enum <path>, previously in file <file>:<line>" (v0.51.0 template;
+    # first seen on the 0.8.52 main-push report).
+    "enum_missing": _symbols_enum_missing,
     "enum_variant_added": _symbols_enum_variant_added,
     "enum_variant_missing": _symbols_enum_variant_missing,
     "derive_trait_impl_removed": _symbols_derive_trait_impl_removed,
@@ -322,12 +350,18 @@ STRUCTURAL_EXTRACTORS = {
     "pub_module_level_const_missing": _symbols_module_level_const_missing,
     "struct_missing": _symbols_struct_missing,
     "struct_pub_field_missing": _symbols_struct_pub_field_missing,
+    # "field <Struct>.<field> in file <file>:<line>" (v0.51.0 template;
+    # first seen on the 0.8.52 main-push report for RelinkDelivery).
+    "struct_pub_field_now_doc_hidden": _symbols_struct_pub_field_now_doc_hidden,
     # "struct <path> became enum in file <file>:<line>" (v0.50.0 template;
     # first seen on the 0.8.52 report for LoginCancelParams).
     "struct_with_pub_fields_changed_type": _symbols_struct_with_pub_fields_changed_type,
     # "trait <path>, previously in file <file>:<line>" (v0.50.0 template).
     "trait_missing": _symbols_trait_missing,
     "trait_method_added": _symbols_trait_method_added,
+    # "method <name> of trait <path>, previously in file <file>:<line>"
+    # (v0.51.0 template; first seen on the 0.8.52 main-push report).
+    "trait_method_missing": _symbols_trait_method_missing,
     "trait_method_parameter_count_changed": _symbols_callable_parameter_count_changed,
     # "method <path>::<method> in <file>:<line>" (v0.50.0 template; first
     # seen on the 0.8.51 report for SessionRuntime::set_callback_channel).

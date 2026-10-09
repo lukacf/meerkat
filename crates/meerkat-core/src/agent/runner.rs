@@ -1264,10 +1264,9 @@ where
                     for block in &message.blocks {
                         if let crate::types::AssistantBlock::ToolUse { id, name, .. } = block
                             && id == &request.tool_call_id
+                            && source_tool.replace(name.clone()).is_some()
                         {
-                            if source_tool.replace(name.clone()).is_some() {
-                                return Err(AgentError::tool(ToolError::access_denied(id)));
-                            }
+                            return Err(AgentError::tool(ToolError::access_denied(id)));
                         }
                     }
                 }

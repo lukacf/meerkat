@@ -52,6 +52,7 @@ struct Server {
     reads: Arc<Mutex<Vec<String>>>,
     resource_lists: Arc<AtomicUsize>,
     block_reads: Arc<AtomicBool>,
+    block_reads_after_call: Arc<AtomicBool>,
     read_entered: Arc<Semaphore>,
     read_release: Arc<Semaphore>,
 }
@@ -64,6 +65,7 @@ impl Default for Server {
             reads: Default::default(),
             resource_lists: Default::default(),
             block_reads: Default::default(),
+            block_reads_after_call: Default::default(),
             read_entered: Arc::new(Semaphore::new(0)),
             read_release: Arc::new(Semaphore::new(0)),
         }
@@ -145,6 +147,9 @@ impl ServerHandler for Server {
             .lock()
             .unwrap()
             .push(json!({"name":request.name,"arguments":request.arguments}));
+        if self.block_reads_after_call.load(Ordering::SeqCst) {
+            self.block_reads.store(true, Ordering::SeqCst);
+        }
         Ok(serde_json::from_value(wire_result(&request.name)).unwrap())
     }
 }
@@ -225,6 +230,402 @@ impl Fixture {
 }
 
 struct Ingress(AtomicBool);
+
+#[derive(Default)]
+struct ResourceAudit {
+    observations: Arc<Mutex<Vec<meerkat_core::authorization::OperationObservation>>>,
+    lease_drops: Arc<AtomicUsize>,
+    lease_observation_counts: Arc<Mutex<Vec<usize>>>,
+    oversized_metadata: bool,
+    preparation_entered: Option<Arc<Semaphore>>,
+    preparation_release: Option<Arc<Semaphore>>,
+}
+
+struct ResourceDecision {
+    audit: Arc<Mutex<Vec<meerkat_core::authorization::OperationObservation>>>,
+    binding: meerkat_core::authorization::PreparedAuthorizationBinding,
+}
+
+impl meerkat_core::authorization::WorkAuthorization for ResourceAudit {
+    fn prepare(
+        &self,
+        binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
+    ) -> Result<
+        Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
+        meerkat_core::OperationAuthorizationError,
+    > {
+        assert!(matches!(
+            binding.facts().operation,
+            meerkat_core::authorization::AuthorizationOperation::Source(_)
+        ));
+        Ok(Arc::new(ResourceDecision {
+            audit: self.observations.clone(),
+            binding: binding.clone(),
+        }))
+    }
+}
+
+impl meerkat_core::authorization::PreparedOperationAuthorization for ResourceDecision {
+    fn review_tier(&self) -> meerkat_core::OperationReviewTier {
+        meerkat_core::OperationReviewTier::R1
+    }
+
+    fn check_current(
+        &self,
+        binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
+    ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        assert!(self.binding.same_operation(binding));
+        Ok(())
+    }
+
+    fn observe(
+        &self,
+        binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
+        observation: meerkat_core::authorization::OperationObservation,
+    ) -> Result<(), meerkat_core::authorization::OperationObservationError> {
+        assert!(self.binding.same_operation(binding));
+        self.audit.lock().unwrap().push(observation);
+        Ok(())
+    }
+}
+
+struct ResourceLease {
+    drops: Arc<AtomicUsize>,
+    observations: Arc<Mutex<Vec<meerkat_core::authorization::OperationObservation>>>,
+    counts: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Drop for ResourceLease {
+    fn drop(&mut self) {
+        self.counts
+            .lock()
+            .unwrap()
+            .push(self.observations.lock().unwrap().len());
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl crate::McpCallContextProvider for ResourceAudit {
+    async fn prepare(
+        &self,
+        _: crate::McpCallTarget<'_>,
+        _: ToolCallView<'_>,
+        _: &ToolDispatchContext,
+    ) -> Result<Option<crate::McpCallContext>, crate::McpCallContextError> {
+        Ok(None)
+    }
+
+    async fn prepare_resource(
+        &self,
+        _: crate::McpResourceTarget<'_>,
+        _: &ToolDispatchContext,
+    ) -> Result<Option<crate::McpCallContext>, crate::McpCallContextError> {
+        if let Some(entered) = &self.preparation_entered {
+            entered.add_permits(1);
+        }
+        if let Some(release) = &self.preparation_release {
+            release.acquire().await.unwrap().forget();
+        }
+        let metadata = if self.oversized_metadata {
+            json!({"io.example/resource": "x".repeat(65536)})
+        } else {
+            json!({"io.example/resource": "resource-lease"})
+        };
+        Ok(Some(crate::McpCallContext::new(
+            metadata.as_object().unwrap().clone(),
+            ResourceLease {
+                drops: self.lease_drops.clone(),
+                observations: self.observations.clone(),
+                counts: self.lease_observation_counts.clone(),
+            },
+        )))
+    }
+
+    fn resource_authorization_target(
+        &self,
+        target: crate::McpResourceTarget<'_>,
+    ) -> Option<meerkat_core::OwnerQualifiedTarget> {
+        Some(meerkat_core::OwnerQualifiedTarget {
+            authority: meerkat_core::PrincipalRef::in_domain(
+                meerkat_core::PrincipalKind::ServiceAccount,
+                "resource-owner",
+                meerkat_core::TrustDomainId::new("apps-test").unwrap(),
+            )
+            .unwrap(),
+            namespace: Arc::from("mcp-resource"),
+            id: Arc::from(target.uri),
+        })
+    }
+}
+
+fn resource_context(audit: &Arc<ResourceAudit>) -> ToolDispatchContext {
+    context().with_work_authorization(Some(
+        meerkat_core::authorization::WorkAuthorizationContext::new(
+            audit.clone(),
+            meerkat_core::exact_operation::OperationExecutionScope::Domain,
+        ),
+    ))
+}
+
+#[tokio::test]
+async fn app_preload_cannot_discard_successful_tool_result_at_an_outer_deadline() {
+    let fixture = Fixture::start().await;
+    let router = fixture.router(true).await;
+    let result = AssertUnwindSafe(async {
+        // Any UI read after the effect starts will remain pending. The same
+        // declared resource is available for standard preloading before entry.
+        fixture
+            .server
+            .block_reads_after_call
+            .store(true, Ordering::SeqCst);
+        let arguments = serde_json::value::to_raw_value(&json!({})).unwrap();
+        let returned = tokio::time::timeout(
+            Duration::from_secs(2),
+            router.dispatch_with_context(
+                ToolCallView {
+                    id: "original-call",
+                    name: "workspace_display",
+                    args: &arguments,
+                },
+                &context(),
+            ),
+        )
+        .await
+        .expect("optional UI IO must not discard the known successful tool result")
+        .unwrap()
+        .result;
+        let invocation: McpAppInvocation =
+            serde_json::from_value(returned.host_metadata[MCP_APPS_EXTENSION].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(invocation.result).unwrap(),
+            wire_result("display")
+        );
+        assert_eq!(
+            serde_json::to_value(invocation.resource.unwrap()).unwrap(),
+            wire_resource(APP_URI)
+        );
+        assert_eq!(fixture.server.calls.lock().unwrap().len(), 1);
+        assert_eq!(*fixture.server.reads.lock().unwrap(), [APP_URI]);
+        assert_eq!(
+            router.external_tool_surface_snapshot().entries[0].inflight_call_count,
+            0
+        );
+    })
+    .catch_unwind()
+    .await;
+    fixture.server.read_release.add_permits(1);
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+#[tokio::test]
+async fn app_resource_timeout_returns_through_native_outcome_and_releases_lease() {
+    use meerkat_core::authorization::{OperationObservation, OperationObservedOutcome};
+    let fixture = Fixture::start().await;
+    let router = fixture.router(true).await;
+    let original = dispatch(&router, "workspace_display", json!({})).await;
+    let invocation: McpAppInvocation =
+        serde_json::from_value(original.host_metadata[MCP_APPS_EXTENSION].clone()).unwrap();
+    let audit = Arc::new(ResourceAudit::default());
+    let router = router.with_call_context_provider(audit.clone());
+    let result = AssertUnwindSafe(async {
+        fixture.server.block_reads.store(true, Ordering::SeqCst);
+        let context = resource_context(&audit);
+        let mut read = Box::pin(router.read_app_resource(
+            "workspace_display",
+            &invocation.registration,
+            &invocation.tool,
+            OTHER_URI,
+            &context,
+        ));
+        tokio::select! {
+            _ = &mut read => panic!("read completed before server admission"),
+            permit = fixture.server.read_entered.acquire() => permit.unwrap().forget(),
+            () = tokio::time::sleep(LIMIT) => panic!("read never reached server"),
+        }
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            router.external_tool_surface_snapshot().entries[0].inflight_call_count,
+            1
+        );
+        assert!(matches!(
+            audit.observations.lock().unwrap().as_slice(),
+            [OperationObservation::Entry]
+        ));
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(16)).await;
+        tokio::time::resume();
+        let failure = tokio::time::timeout(LIMIT, read)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(failure, McpError::ToolCallFailed { .. }));
+        assert!(matches!(
+            audit.observations.lock().unwrap().as_slice(),
+            [
+                OperationObservation::Entry,
+                OperationObservation::Outcome(OperationObservedOutcome::SourceReadUnavailable),
+            ]
+        ));
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            router.external_tool_surface_snapshot().entries[0].inflight_call_count,
+            0
+        );
+        // The local timeout does not claim the remote finished. Let its actual
+        // server handler settle only after checking local failure and cleanup.
+        fixture.server.read_release.add_permits(1);
+    })
+    .catch_unwind()
+    .await;
+    fixture.server.read_release.add_permits(1);
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+#[tokio::test]
+async fn app_resource_outer_cancellation_observes_unavailable_before_lease_release() {
+    use meerkat_core::authorization::{OperationObservation, OperationObservedOutcome};
+    let fixture = Fixture::start().await;
+    let router = fixture.router(true).await;
+    let original = dispatch(&router, "workspace_display", json!({})).await;
+    let invocation: McpAppInvocation =
+        serde_json::from_value(original.host_metadata[MCP_APPS_EXTENSION].clone()).unwrap();
+    let audit = Arc::new(ResourceAudit::default());
+    let router = router.with_call_context_provider(audit.clone());
+    let result = AssertUnwindSafe(async {
+        fixture.server.block_reads.store(true, Ordering::SeqCst);
+        let context = resource_context(&audit);
+        let mut read = Box::pin(router.read_app_resource(
+            "workspace_display",
+            &invocation.registration,
+            &invocation.tool,
+            OTHER_URI,
+            &context,
+        ));
+        tokio::select! {
+            _ = &mut read => panic!("read completed before server admission"),
+            permit = fixture.server.read_entered.acquire() => permit.unwrap().forget(),
+            () = tokio::time::sleep(LIMIT) => panic!("read never reached server"),
+        }
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 0);
+        drop(read);
+        assert!(matches!(
+            audit.observations.lock().unwrap().as_slice(),
+            [
+                OperationObservation::Entry,
+                OperationObservation::Outcome(OperationObservedOutcome::SourceReadUnavailable),
+            ]
+        ));
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(*audit.lease_observation_counts.lock().unwrap(), [2]);
+        assert_eq!(
+            router.external_tool_surface_snapshot().entries[0].inflight_call_count,
+            0
+        );
+        fixture.server.read_release.add_permits(1);
+    })
+    .catch_unwind()
+    .await;
+    fixture.server.read_release.add_permits(1);
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+#[tokio::test]
+async fn app_resource_preparation_deadline_refuses_without_entry() {
+    let fixture = Fixture::start().await;
+    let router = fixture.router(true).await;
+    let original = dispatch(&router, "workspace_display", json!({})).await;
+    let invocation: McpAppInvocation =
+        serde_json::from_value(original.host_metadata[MCP_APPS_EXTENSION].clone()).unwrap();
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let audit = Arc::new(ResourceAudit {
+        preparation_entered: Some(entered.clone()),
+        preparation_release: Some(release),
+        ..ResourceAudit::default()
+    });
+    let router = router.with_call_context_provider(audit.clone());
+    let result = AssertUnwindSafe(async {
+        let context = resource_context(&audit);
+        let mut read = Box::pin(router.read_app_resource(
+            "workspace_display",
+            &invocation.registration,
+            &invocation.tool,
+            OTHER_URI,
+            &context,
+        ));
+        tokio::select! {
+            _ = &mut read => panic!("read skipped preparation"),
+            permit = entered.acquire() => permit.unwrap().forget(),
+            () = tokio::time::sleep(LIMIT) => panic!("preparation never started"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(16)).await;
+        tokio::time::resume();
+        let failure = tokio::time::timeout(LIMIT, read)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            McpError::CallContext(crate::McpCallContextError::Unavailable)
+        ));
+        assert!(audit.observations.lock().unwrap().is_empty());
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(*fixture.server.reads.lock().unwrap(), [APP_URI]);
+        assert_eq!(
+            router.external_tool_surface_snapshot().entries[0].inflight_call_count,
+            0
+        );
+    })
+    .catch_unwind()
+    .await;
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+#[tokio::test]
+async fn app_resource_pre_entry_refusal_does_not_fabricate_outcome() {
+    let fixture = Fixture::start().await;
+    let router = fixture.router(true).await;
+    let original = dispatch(&router, "workspace_display", json!({})).await;
+    let invocation: McpAppInvocation =
+        serde_json::from_value(original.host_metadata[MCP_APPS_EXTENSION].clone()).unwrap();
+    let audit = Arc::new(ResourceAudit {
+        oversized_metadata: true,
+        ..ResourceAudit::default()
+    });
+    let router = router.with_call_context_provider(audit.clone());
+    let result = AssertUnwindSafe(async {
+        let result = router
+            .read_app_resource(
+                "workspace_display",
+                &invocation.registration,
+                &invocation.tool,
+                OTHER_URI,
+                &resource_context(&audit),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(McpError::CallContext(crate::McpCallContextError::Denied))
+        ));
+        assert!(audit.observations.lock().unwrap().is_empty());
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(*fixture.server.reads.lock().unwrap(), [APP_URI]);
+        assert_eq!(
+            router.external_tool_surface_snapshot().entries[0].inflight_call_count,
+            0
+        );
+    })
+    .catch_unwind()
+    .await;
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
 
 impl meerkat_core::ToolApplicationIngress for Ingress {
     fn revalidate(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {

@@ -166,48 +166,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn projects_standard_ui_visibility_without_model_metadata() {
+    fn projects_standard_ui_visibility_without_model_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
         let tool: Tool = serde_json::from_value(json!({
             "name": "refresh", "inputSchema": {"type": "object"},
             "_meta": {"ui": {"visibility": ["app"], "resourceUri": "ui://test/view"},
                       "private": "host only"}
-        }))
-        .unwrap();
-        let projected = project_tool(&tool, "test").unwrap();
+        }))?;
+        let projected = project_tool(&tool, "test")?;
         assert_eq!(projected.audience, ToolAudience::App);
-        assert!(
-            !serde_json::to_string(&projected)
-                .unwrap()
-                .contains("host only")
-        );
+        assert!(!serde_json::to_string(&projected)?.contains("host only"));
         assert_eq!(tool_ui_resource_uri(&tool), Some("ui://test/view"));
+        Ok(())
     }
 
     #[test]
-    fn rejects_invalid_explicit_visibility() {
+    fn rejects_invalid_explicit_visibility() -> Result<(), serde_json::Error> {
         for visibility in [json!(["unknown"]), json!("app"), json!(["app", 1])] {
             let tool: Tool = serde_json::from_value(json!({
                 "name": "test", "inputSchema": {}, "_meta": {"ui": {"visibility": visibility}}
-            }))
-            .unwrap();
+            }))?;
             assert!(tool_audience(&tool).is_err());
         }
+        Ok(())
     }
 
     #[test]
-    fn empty_visibility_hides_only_that_tool_from_both_audiences() {
+    fn empty_visibility_hides_only_that_tool_from_both_audiences()
+    -> Result<(), Box<dyn std::error::Error>> {
         let tool: Tool = serde_json::from_value(json!({
             "name": "hidden", "inputSchema": {}, "_meta": {"ui": {"visibility": []}}
-        }))
-        .unwrap();
-        let projected = project_tool(&tool, "test").unwrap();
+        }))?;
+        let projected = project_tool(&tool, "test")?;
         assert_eq!(projected.audience, ToolAudience::Hidden);
         assert!(!projected.audience.allows_model());
         assert!(!projected.audience.allows_app());
+        Ok(())
     }
 
     #[test]
-    fn supports_deprecated_flat_resource_uri_but_prefers_canonical_metadata() {
+    fn supports_deprecated_flat_resource_uri_but_prefers_canonical_metadata()
+    -> Result<(), serde_json::Error> {
         for (meta, expected) in [
             (
                 json!({"ui/resourceUri":"ui://test/legacy"}),
@@ -232,9 +231,9 @@ mod tests {
             (json!({"ui/resourceUri":"ui://"}), None),
         ] {
             let tool: Tool =
-                serde_json::from_value(json!({"name":"test","inputSchema":{},"_meta":meta}))
-                    .unwrap();
+                serde_json::from_value(json!({"name":"test","inputSchema":{},"_meta":meta}))?;
             assert_eq!(tool_ui_resource_uri(&tool), expected);
         }
+        Ok(())
     }
 }

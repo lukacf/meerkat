@@ -2605,6 +2605,15 @@ impl McpRouter {
         source: &str,
         invocation: &crate::apps::McpAppInvocation,
     ) -> Result<&'a McpConnection, McpError> {
+        self.app_source_connection(source, &invocation.registration, &invocation.tool)
+    }
+
+    fn app_source_connection<'a>(
+        &'a self,
+        source: &str,
+        registration: &crate::apps::McpAppRegistration,
+        tool: &rmcp::model::Tool,
+    ) -> Result<&'a McpConnection, McpError> {
         let route = self
             .projection
             .tool_routes
@@ -2615,9 +2624,8 @@ impl McpRouter {
             .get(&route.server_name)
             .and_then(|entry| entry.connection.as_ref())
             .ok_or_else(|| McpError::ServerNotFound(route.server_name.clone()))?;
-        if route.raw_operation != invocation.tool.name.as_ref()
-            || crate::apps::McpAppRegistration::from_connection(connection)
-                != invocation.registration
+        if route.raw_operation != tool.name.as_ref()
+            || crate::apps::McpAppRegistration::from_connection(connection) != *registration
             || !matches!(
                 self.server_lifecycle_state(&route.server_name),
                 Some(McpServerLifecycleState::Active)
@@ -2663,7 +2671,8 @@ impl McpRouter {
     async fn read_app_resource(
         &self,
         source: &str,
-        invocation: &crate::apps::McpAppInvocation,
+        registration: &crate::apps::McpAppRegistration,
+        tool: &rmcp::model::Tool,
         uri: &str,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<rmcp::model::ReadResourceResult, McpError> {
@@ -2672,12 +2681,13 @@ impl McpRouter {
             PreparedAuthorizationBinding, PreparedOperationCheck, SourceAuthorizationFacts,
             SourceAuthorizationTarget, SourceAuthorizationUse,
         };
-        let connection = self.app_connection(source, invocation)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let connection = self.app_source_connection(source, registration, tool)?;
         let entry = self
             .servers
-            .get(&invocation.registration.server)
+            .get(&registration.server)
             .ok_or(crate::McpCallContextError::Unavailable)?;
-        let sid = SurfaceId::from(invocation.registration.server.as_str());
+        let sid = SurfaceId::from(registration.server.as_str());
         let transition = self
             .surface_owner
             .apply(ExternalToolSurfaceInput::CallStarted {
@@ -2731,7 +2741,11 @@ impl McpRouter {
                 None
             };
             let preparation = match &self.call_context_provider {
-                Some(provider) => provider.prepare_resource(target(), context).await?,
+                Some(provider) => {
+                    tokio::time::timeout_at(deadline, provider.prepare_resource(target(), context))
+                        .await
+                        .map_err(|_| crate::McpCallContextError::Unavailable)??
+                }
                 None => None,
             };
             let (metadata, _lease) = match preparation {
@@ -2739,18 +2753,36 @@ impl McpRouter {
                 None => (None, None),
             };
             if let Some(control) = context.tool_application_control() {
-                control
-                    .revalidate_async()
+                tokio::time::timeout_at(deadline, control.revalidate_async())
                     .await
+                    .map_err(|_| crate::McpCallContextError::Unavailable)?
                     .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
             }
             let prepared = prepared
                 .map(|check| check.current())
                 .transpose()
                 .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+            // This guard is created after the credential lease so cancellation
+            // records the local unavailable outcome before releasing the lease.
+            // Callers can have a deadline shorter than this read's own deadline.
+            struct EnteredRead(Option<PreparedOperationCheck>);
+            impl Drop for EnteredRead {
+                fn drop(&mut self) {
+                    if let Some(check) = self.0.take()
+                        && check
+                            .observe_outcome(OperationObservedOutcome::SourceReadUnavailable)
+                            .is_err()
+                    {
+                        tracing::error!(
+                            "MCP resource cancellation outcome observation unavailable"
+                        );
+                    }
+                }
+            }
+            let mut entered = EnteredRead(None);
             let result = connection
-                .read_resource_entering(uri, metadata, || {
-                    self.app_connection(source, invocation)?;
+                .read_resource_entering(uri, metadata, deadline, || {
+                    self.app_source_connection(source, registration, tool)?;
                     if let Some(control) = context.tool_application_control() {
                         control
                             .revalidate()
@@ -2766,11 +2798,14 @@ impl McpRouter {
                         current
                             .observe_entry()
                             .map_err(|_| crate::McpCallContextError::Unavailable)?;
+                        entered.0 = Some(current);
                     }
                     Ok(())
                 })
                 .await;
-            if let Some(check) = &prepared {
+            // Taking the exact entered check prevents Drop from recording a
+            // second or different outcome, including if observation itself fails.
+            if let Some(check) = entered.0.take() {
                 check
                     .observe_outcome(if result.is_ok() {
                         OperationObservedOutcome::SourceReadMaterialized
@@ -2783,12 +2818,12 @@ impl McpRouter {
                     .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
             }
             if let Some(control) = context.tool_application_control() {
-                control
-                    .revalidate_async()
+                tokio::time::timeout_at(deadline, control.revalidate_async())
                     .await
+                    .map_err(|_| crate::McpCallContextError::Unavailable)?
                     .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
             }
-            self.app_connection(source, invocation)?;
+            self.app_source_connection(source, registration, tool)?;
             result
         }
         .await;
@@ -3066,14 +3101,20 @@ impl AgentToolDispatcher for McpRouter {
                         .map(ToolApplicationResolution::Value)
                         .map_err(|_| ToolError::execution_failed("invalid cached MCP resource"));
                 }
-                self.read_app_resource(source_tool, &invocation, requested, context)
-                    .await
-                    .map_err(|error| tool_call_error(source_tool, error))
-                    .and_then(|value| {
-                        serde_json::to_value(value)
-                            .map(ToolApplicationResolution::Value)
-                            .map_err(|_| ToolError::execution_failed("invalid MCP resource"))
-                    })
+                self.read_app_resource(
+                    source_tool,
+                    &invocation.registration,
+                    &invocation.tool,
+                    requested,
+                    context,
+                )
+                .await
+                .map_err(|error| tool_call_error(source_tool, error))
+                .and_then(|value| {
+                    serde_json::to_value(value)
+                        .map(ToolApplicationResolution::Value)
+                        .map_err(|_| ToolError::execution_failed("invalid MCP resource"))
+                })
             }
             ToolApplicationOperation::CallTool { name, .. } => {
                 let connection = self
@@ -3214,7 +3255,21 @@ impl AgentToolDispatcher for McpRouter {
                 tool,
             )
         });
-        let mut result = self
+        // Load the declared view before the effectful tool call. Optional UI IO
+        // after a successful call could otherwise consume an outer deadline and
+        // discard a known tool result. These are exact native source facts, not
+        // a fabricated invocation; resource reads retain their own authorization.
+        let resource = if prefetch_ui
+            && let Some((registration, tool)) = &host_source
+            && let Some(uri) = crate::apps::tool_ui_resource_uri(tool)
+        {
+            self.read_app_resource(call.name, registration, tool, uri, context)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let result = self
             .call_tool_with_context(call, args.as_value(), context, |result| {
                 let host_invocation = host_source
                     .map(|(registration, tool)| {
@@ -3223,7 +3278,7 @@ impl AgentToolDispatcher for McpRouter {
                             tool,
                             arguments: args.as_value().clone(),
                             result: result.clone(),
-                            resource: None,
+                            resource,
                         })
                         .map_err(|_| McpError::Serialization("invalid MCP host result".into()))
                     })
@@ -3239,34 +3294,6 @@ impl AgentToolDispatcher for McpRouter {
             })
             .await
             .map_err(|error| tool_call_error(call.name, error))?;
-        // Capture the declared resource alongside the committed invocation.
-        // Resource failure leaves the ordinary tool result intact; a host can
-        // still show its textual fallback and report a later read failure.
-        if prefetch_ui
-            && let Some(value) = result.host_metadata.get(crate::apps::MCP_APPS_EXTENSION)
-            && let Ok(mut invocation) =
-                serde_json::from_value::<crate::apps::McpAppInvocation>(value.clone())
-            && let Some(uri) =
-                crate::apps::tool_ui_resource_uri(&invocation.tool).map(str::to_owned)
-        {
-            if let Ok(resource) = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                self.read_app_resource(call.name, &invocation, &uri, context),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(McpError::ProtocolError {
-                    message: "MCP App resource timed out".into(),
-                })
-            }) {
-                invocation.resource = Some(resource);
-                if let Ok(value) = serde_json::to_value(invocation) {
-                    result
-                        .host_metadata
-                        .insert(crate::apps::MCP_APPS_EXTENSION.into(), value);
-                }
-            }
-        }
         Ok(result.into())
     }
 

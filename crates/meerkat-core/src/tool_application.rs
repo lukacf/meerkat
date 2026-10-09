@@ -194,14 +194,14 @@ mod tests {
     }
 
     #[test]
-    fn receipt_is_one_attempt_and_rechecks_ingress_after_creation() {
+    fn receipt_is_one_attempt_and_rechecks_ingress_after_creation()
+    -> Result<(), OperationAuthorizationError> {
         let ingress = Arc::new(RevocableIngress(AtomicBool::new(true)));
         let control = ToolApplicationControlRequest::from_trusted_ingress(
             SessionId::new(),
             request(),
             ingress.clone(),
-        )
-        .unwrap();
+        )?;
         assert!(control.claim().is_ok());
         assert!(control.claim().is_err());
         ingress.0.store(false, Ordering::Release);
@@ -214,11 +214,13 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn serialized_request_cannot_supply_ingress_or_a_previous_work_context() {
-        let mut value = serde_json::to_value(request()).unwrap();
+    fn serialized_request_cannot_supply_ingress_or_a_previous_work_context()
+    -> Result<(), serde_json::Error> {
+        let mut value = serde_json::to_value(request())?;
         value["work_authorization"] = serde_json::json!({ "trusted": true });
         assert!(serde_json::from_value::<ToolApplicationRequest>(value).is_err());
         let mut invalid = request();
@@ -227,5 +229,6 @@ mod tests {
             arguments: serde_json::json!([]),
         };
         assert!(invalid.validate().is_err());
+        Ok(())
     }
 }

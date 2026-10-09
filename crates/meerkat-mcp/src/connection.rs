@@ -929,6 +929,7 @@ impl McpConnection {
         &self,
         uri: &str,
         metadata: Option<serde_json::Map<String, Value>>,
+        deadline: tokio::time::Instant,
         enter: impl FnOnce() -> Result<(), McpError>,
     ) -> Result<rmcp::model::ReadResourceResult, McpError> {
         if self.session_expiry.expired() {
@@ -943,8 +944,28 @@ impl McpConnection {
             request.extensions.insert(ProtectedMetadata(metadata));
         }
         let request = request.into();
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(crate::McpCallContextError::Unavailable.into());
+        }
         enter()?;
-        let result = self.service.send_request(request).await.map_err(|error| {
+        // Let the request owner report its timeout through the ordinary
+        // transport result. Dropping the router's admitted read future would
+        // skip its outcome observation and release its credential lease early.
+        // A timeout is local unavailability, never proof the remote did no work.
+        let result = tokio::time::timeout_at(deadline, async {
+            self.service
+                .send_request_with_option(
+                    request,
+                    rmcp::service::PeerRequestOptions::with_timeout(remaining),
+                )
+                .await?
+                .await_response()
+                .await
+        })
+        .await
+        .unwrap_or(Err(rmcp::ServiceError::Timeout { timeout: remaining }))
+        .map_err(|error| {
             let disposition = dispatch.disposition();
             if matches!(disposition, Some(RequestDisposition::Sent) | None)
                 && let Some(refused) = self.authorization_required(&error)

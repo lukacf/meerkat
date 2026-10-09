@@ -10501,7 +10501,7 @@ async fn session_task<A: SessionAgent>(
                     Ok(value) => request_control
                         .revalidate_async()
                         .await
-                        .map(|_| value)
+                        .map(|()| value)
                         .map_err(|error| AgentError::InternalError(error.to_string())),
                     Err(error) => Err(error),
                 };

@@ -14137,6 +14137,62 @@ impl crate::ephemeral::SessionEventTailSource for EventStoreStreamTail {
 
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
+    async fn read_tool_application_observations(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<meerkat_core::ToolApplicationObservation>, SessionError> {
+        // Display observes accepted, possibly uncommitted live results. Its
+        // owner is the exact hosted actor and run, not a transcript boundary.
+        // Use only body-free lifecycle reads here: a transcript export would
+        // queue behind the running LLM, including during the first run.
+        for _ in 0..OBSERVATION_LOAD_ATTEMPTS {
+            match self.inner.observe_live_tool_applications(id).await {
+                Ok(Some((actor, run_id, observations))) => {
+                    if matches!(
+                        self.observe_live_durable_source(id).await?,
+                        crate::LiveDurableSourceObservation::Archived
+                    ) {
+                        return Err(SessionError::NotFound { id: id.clone() });
+                    }
+                    if self
+                        .inner
+                        .live_tool_application_run_is_current(id, &actor, &run_id)
+                        .await
+                    {
+                        return Ok(observations);
+                    }
+                    continue;
+                }
+                Ok(None) | Err(SessionError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            // No running actor: resolve retained views from the runtime's
+            // committed body, never from the physical latest checkpoint.
+            let loaded = self.load_authoritative_session_base(id).await;
+            if Self::is_transcript_revision_conflict(&loaded) {
+                continue;
+            }
+            let session = loaded?.ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            self.reject_if_archived_session(id, &session)
+                .await
+                .map_err(crate::control_error_into_session_error)?;
+            // A successor run may have started during the committed read.
+            // Resample its native publication instead of returning stale rows
+            // or waiting for that run's finalization boundary.
+            match self.inner.observe_live_tool_applications(id).await {
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(SessionError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            return Ok(meerkat_core::ToolApplicationObservation::from_messages(
+                session.messages(),
+            ));
+        }
+        Err(SessionError::Unsupported(
+            "tool application observation owner changed".into(),
+        ))
+    }
+
     async fn tool_application(
         self: Arc<Self>,
         control: Arc<meerkat_core::ToolApplicationControlRequest>,

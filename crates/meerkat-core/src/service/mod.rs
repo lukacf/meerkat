@@ -2958,6 +2958,18 @@ pub trait SessionService: Send + Sync {
         ))
     }
 
+    /// Observe host-only tool result data from the current native actor, or
+    /// committed replay when no run is active. This process-only display
+    /// projection is not a transcript commit or authority to execute tools.
+    async fn read_tool_application_observations(
+        &self,
+        _id: &SessionId,
+    ) -> Result<Vec<crate::ToolApplicationObservation>, SessionError> {
+        Err(SessionError::Unsupported(
+            "tool application observations are unavailable".into(),
+        ))
+    }
+
     /// Create a new session and run the first turn.
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError>;
 

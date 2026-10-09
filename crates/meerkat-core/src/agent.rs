@@ -3320,6 +3320,8 @@ where
     /// actor removes it before each checkpoint await and installs only the
     /// exact returned successor.
     pub(crate) latest_run_checkpoint_receipt: Option<crate::RunCheckpointReceipt>,
+    pub(crate) tool_application_observations:
+        crate::tool_application::ToolApplicationObservationReader,
     /// Rows `[0, floor)` are committed in the durable store exactly as they
     /// stand in memory (the document loaded at build, the rows a compaction
     /// rewrite installed, or a committed successor the runtime handed over).

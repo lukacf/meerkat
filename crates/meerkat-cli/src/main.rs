@@ -10681,6 +10681,14 @@ impl RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl SessionService for RunMobSessionService {
+    async fn read_tool_application_observations(
+        &self,
+        id: &meerkat_core::SessionId,
+    ) -> Result<Vec<meerkat_core::ToolApplicationObservation>, meerkat_core::service::SessionError>
+    {
+        self.inner.read_tool_application_observations(id).await
+    }
+
     async fn tool_application(
         self: Arc<Self>,
         control: Arc<meerkat_core::ToolApplicationControlRequest>,
@@ -14242,6 +14250,14 @@ impl MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl SessionService for MobCliSessionService {
+    async fn read_tool_application_observations(
+        &self,
+        id: &meerkat_core::SessionId,
+    ) -> Result<Vec<meerkat_core::ToolApplicationObservation>, meerkat_core::service::SessionError>
+    {
+        self.inner.read_tool_application_observations(id).await
+    }
+
     async fn tool_application(
         self: Arc<Self>,
         control: Arc<meerkat_core::ToolApplicationControlRequest>,

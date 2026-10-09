@@ -152,6 +152,16 @@ impl FactoryAgent {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionAgent for FactoryAgent {
+    fn publish_idle_tool_application_observations(&self) {
+        self.agent.publish_idle_tool_application_observations();
+    }
+
+    fn tool_application_observation_reader(
+        &self,
+    ) -> Option<meerkat_core::tool_application::ToolApplicationObservationReader> {
+        Some(self.agent.tool_application_observation_reader())
+    }
+
     fn validate_live_bridge_member_eligibility(
         &self,
     ) -> Result<(), meerkat_core::error::AgentError> {

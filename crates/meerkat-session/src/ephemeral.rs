@@ -2400,6 +2400,9 @@ struct SessionHandle {
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     /// Mechanical gate closed when an archive snapshot is taken.
     archive_snapshot_gate: Arc<ArchiveSnapshotGate>,
+    /// Native Agent publication retained by this exact actor registry entry.
+    /// It can be read during a turn without sending an actor command.
+    tool_application_observation_reader: Option<meerkat_core::ToolApplicationObservationReader>,
     /// Runtime-owned turn phase handle for active-boundary probes.
     turn_state_handle: Option<Arc<dyn TurnStateHandle>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
@@ -2679,6 +2682,7 @@ impl SessionTaskControl {
     }
 
     fn publish_transcript_authority<A: SessionAgent>(&self, agent: &A, generation: u64) {
+        agent.publish_idle_tool_application_observations();
         let current: PublishedTranscriptAuthority = agent
             .session_transcript_authority()
             .map(|snapshot| snapshot.bind_actor_generation(generation))
@@ -2873,6 +2877,16 @@ pub type LiveBridgePreparedSessionOperation = meerkat_core::LiveBridgePreparedOp
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionAgent: Send {
+    /// Publish canonical host observations between native actor commands.
+    fn publish_idle_tool_application_observations(&self) {}
+
+    /// Process-only host observations published by this exact live Agent.
+    fn tool_application_observation_reader(
+        &self,
+    ) -> Option<meerkat_core::tool_application::ToolApplicationObservationReader> {
+        None
+    }
+
     /// Validate that this exact live member supports the experimental bridge
     /// before any live channel or provider transport is opened.
     fn validate_live_bridge_member_eligibility(
@@ -4369,6 +4383,97 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             })
             .await
             .flatten()
+    }
+
+    /// Read the native Agent's complete display projection only while its
+    /// exact actor and run remain current. Registry custody and the published
+    /// turn handle provide the fence; no command waits behind the running LLM.
+    pub(crate) async fn observe_live_tool_applications(
+        &self,
+        id: &SessionId,
+    ) -> Result<
+        Option<(
+            LiveSessionActorWitness,
+            meerkat_core::RunId,
+            Vec<meerkat_core::ToolApplicationObservation>,
+        )>,
+        SessionError,
+    > {
+        self.sessions
+            .with_handle(id, |handle| {
+                if handle.command_tx.is_closed()
+                    || !handle.actor_witness.is_live()
+                    || handle.archive_snapshot_gate.closed.load(Ordering::Acquire)
+                {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+                let admission = lock_turn_admission(&handle.turn_admission);
+                if admission.phase() == TurnAdmissionPhase::ShuttingDown {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+                let active_run = handle
+                    .turn_state_handle
+                    .as_ref()
+                    .and_then(|turn| turn.snapshot().active_run_id);
+                let Some(active_run) = active_run else {
+                    return if admission.projection().is_active {
+                        Err(SessionError::Unsupported(
+                            "tool application run is not published yet".into(),
+                        ))
+                    } else {
+                        Ok(None)
+                    };
+                };
+                let Some(turn) = handle.turn_state_handle.as_ref() else {
+                    return Err(SessionError::Unsupported(
+                        "tool application turn handle is unavailable".into(),
+                    ));
+                };
+                let Some(reader) = handle.tool_application_observation_reader.as_ref() else {
+                    return Err(SessionError::Unsupported(
+                        "live tool application observations are unavailable".into(),
+                    ));
+                };
+                let Some((run_id, observations)) = reader.snapshot() else {
+                    return Err(SessionError::Unsupported(
+                        "live tool application observations are not published yet".into(),
+                    ));
+                };
+                if run_id != active_run || turn.snapshot().active_run_id.as_ref() != Some(&run_id) {
+                    return Err(SessionError::Unsupported(
+                        "tool application observation run changed".into(),
+                    ));
+                }
+                Ok(Some((handle.actor_witness.clone(), run_id, observations)))
+            })
+            .await
+            .unwrap_or(Err(SessionError::NotFound { id: id.clone() }))
+    }
+
+    /// Revalidate the same actor/run after a caller's asynchronous native
+    /// lifecycle read. Observations never outlive their original live owner.
+    #[cfg(feature = "session-store")]
+    pub(crate) async fn live_tool_application_run_is_current(
+        &self,
+        id: &SessionId,
+        actor: &LiveSessionActorWitness,
+        run_id: &meerkat_core::RunId,
+    ) -> bool {
+        self.sessions
+            .with_handle(id, |handle| {
+                let admission = lock_turn_admission(&handle.turn_admission);
+                actor.is_handle(handle)
+                    && admission.phase() != TurnAdmissionPhase::ShuttingDown
+                    && !handle.archive_snapshot_gate.closed.load(Ordering::Acquire)
+                    && actor.is_live()
+                    && !handle.command_tx.is_closed()
+                    && handle
+                        .turn_state_handle
+                        .as_ref()
+                        .is_some_and(|turn| turn.snapshot().active_run_id.as_ref() == Some(run_id))
+            })
+            .await
+            .unwrap_or(false)
     }
 
     /// Validate the exact current member bridge policy and isolated-client
@@ -7407,6 +7512,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let observed_comms_sender = agent.observed_comms_sender();
         let cancel_after_boundary_handle = agent.cancel_after_boundary_handle();
         let turn_state_handle = agent.turn_state_handle();
+        agent.publish_idle_tool_application_observations();
+        let tool_application_observation_reader = agent.tool_application_observation_reader();
         // W2-E: capture the session-context DSL handle so the session task
         // can fire `AdvanceSessionContext` on every summary-publish site.
         let session_context = agent.session_context_handle();
@@ -7524,6 +7631,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             observed_comms_sender,
             transient_turn_context_state,
             archive_snapshot_gate,
+            tool_application_observation_reader,
             turn_state_handle,
             deferred_turn_state,
             active_capacity_lease,
@@ -7764,6 +7872,49 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let context = meerkat_core::ToolDispatchContext::default()
             .with_tool_application_control(Arc::clone(&control));
         self.dispatch_tool_application(control, context).await
+    }
+
+    async fn read_tool_application_observations(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<meerkat_core::ToolApplicationObservation>, SessionError> {
+        if let Some((_, _, observations)) = self.observe_live_tool_applications(id).await? {
+            return Ok(observations);
+        }
+        // Read the actor's between-command publication under turn admission.
+        // An export command could queue behind a newly admitted model turn.
+        self.sessions
+            .with_handle(id, |handle| {
+                let admission = lock_turn_admission(&handle.turn_admission);
+                if !handle.actor_witness.is_live()
+                    || handle.command_tx.is_closed()
+                    || handle.archive_snapshot_gate.closed.load(Ordering::Acquire)
+                    || admission.phase() == TurnAdmissionPhase::ShuttingDown
+                {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+                if admission.projection().is_active
+                    || handle
+                        .turn_state_handle
+                        .as_ref()
+                        .is_some_and(|turn| turn.snapshot().active_run_id.is_some())
+                {
+                    return Err(SessionError::Unsupported(
+                        "tool application observation run changed".into(),
+                    ));
+                }
+                handle
+                    .tool_application_observation_reader
+                    .as_ref()
+                    .and_then(|reader| reader.idle_snapshot())
+                    .ok_or_else(|| {
+                        SessionError::Unsupported(
+                            "idle tool application observations are unavailable".into(),
+                        )
+                    })
+            })
+            .await
+            .unwrap_or(Err(SessionError::NotFound { id: id.clone() }))
     }
 
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {

@@ -1034,6 +1034,8 @@ where
         self.config.provider_native_tools = next_provider_native_tools;
         self.auth_credential_identity = next_auth_credential_identity;
         self.session = next_session;
+        self.tool_application_observations
+            .refresh(self.session.messages());
         self.active_model_profile = Some(target_profile);
         Ok(())
     }
@@ -1528,7 +1530,21 @@ where
 
     /// Get mutable access to the session (for setting metadata)
     pub fn session_mut(&mut self) -> &mut Session {
+        self.tool_application_observations.invalidate();
         &mut self.session
+    }
+
+    /// Read host-only tool observations without borrowing the running Agent.
+    pub fn tool_application_observation_reader(
+        &self,
+    ) -> crate::tool_application::ToolApplicationObservationReader {
+        self.tool_application_observations.clone()
+    }
+
+    /// Publish the canonical transcript between native actor commands.
+    pub fn publish_idle_tool_application_observations(&self) {
+        self.tool_application_observations
+            .publish_idle(self.session.messages());
     }
 
     /// Consume the latest successful provisional write for `run_id`.
@@ -2307,6 +2323,8 @@ where
             .map_err(|error| AgentError::ConfigError(error.to_string()))?;
 
         let canonical_session = std::mem::replace(&mut self.session, snapshot);
+        let saved_tool_application_observations =
+            std::mem::take(&mut self.tool_application_observations);
         let saved_checkpointer = self.checkpointer.take();
         let saved_comms_runtime = self.comms_runtime.take();
         let saved_hook_engine = self.hook_engine.take();
@@ -2414,6 +2432,7 @@ where
         }
 
         self.session = canonical_session;
+        self.tool_application_observations = saved_tool_application_observations;
         self.checkpointer = saved_checkpointer;
         self.comms_runtime = saved_comms_runtime;
         self.hook_engine = saved_hook_engine;
@@ -3330,6 +3349,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             // stage a permanent routing handoff nor commit one.
             model_routing_handoff_staging: None,
             latest_run_checkpoint_receipt: None,
+            tool_application_observations: Default::default(),
             durable_row_floor,
             blob_store: self.blob_store.clone(),
             terminal_error_detail: None,
@@ -4421,6 +4441,149 @@ mod skill_activation_effect_tests {
                     crate::ToolDispatchTerminalErrorKind::AccessDenied
                 );
             }
+        }
+    }
+
+    struct ObservationLlmClient {
+        first: AtomicBool,
+        final_entered: tokio::sync::Semaphore,
+        final_release: tokio::sync::Semaphore,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for ObservationLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _: &[Arc<ToolDef>],
+            _: u32,
+            _: Option<f32>,
+            _: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            let (blocks, reason) = if self.first.swap(false, Ordering::SeqCst) {
+                (
+                    vec![AssistantBlock::ToolUse {
+                        id: "live-result".into(),
+                        name: "show".into(),
+                        args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )
+            } else {
+                let results: Vec<_> = messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::ToolResults { results, .. } => Some(results),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                assert_eq!(results.len(), 1);
+                assert!(
+                    results[0].host_metadata.is_empty(),
+                    "host data cannot enter the model request"
+                );
+                self.final_entered.add_permits(1);
+                self.final_release.acquire().await.unwrap().forget();
+                (
+                    vec![AssistantBlock::Text {
+                        text: "done".into(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                )
+            };
+            Ok(super::super::LlmStreamResult::new(
+                blocks,
+                reason,
+                normalized_test_usage(self, Usage::default()),
+            ))
+        }
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+        fn model(&self) -> &'static str {
+            "observation-mock"
+        }
+    }
+
+    struct ObservationTools;
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for ObservationTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::new(ToolDef::new(
+                "show",
+                "show a widget",
+                serde_json::json!({"type":"object"}),
+            ))])
+        }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            let mut result = crate::ToolResult::new(call.id.into(), "text fallback".into(), false);
+            result.host_metadata.insert(
+                "test.app".into(),
+                serde_json::json!({"private":"private-ui"}),
+            );
+            Ok(result.into())
+        }
+    }
+
+    #[tokio::test]
+    async fn application_observation_is_visible_while_final_model_is_pending_and_clears_on_exit() {
+        for cancel in [false, true] {
+            let client = Arc::new(ObservationLlmClient {
+                first: AtomicBool::new(true),
+                final_entered: tokio::sync::Semaphore::new(0),
+                final_release: tokio::sync::Semaphore::new(0),
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    client.clone(),
+                    Arc::new(ObservationTools),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            let reader = agent.tool_application_observation_reader();
+            agent.publish_idle_tool_application_observations();
+            assert_eq!(reader.idle_snapshot(), Some(Vec::new()));
+            let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(100);
+            let mut run = Box::pin(agent.run_with_events("show a widget".into(), events_tx));
+            tokio::select! {
+                _ = client.final_entered.acquire() => {}
+                result = &mut run => panic!("run ended before final request: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("final request did not enter"),
+            }
+            let (_, observations) = reader.snapshot().expect("native active observation");
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].tool_call_id, "live-result");
+            assert_eq!(observations[0].tool_name, "show");
+            assert_eq!(
+                observations[0].host_metadata["test.app"]["private"],
+                "private-ui"
+            );
+            assert!(reader.idle_snapshot().is_none());
+            while let Ok(event) = events_rx.try_recv() {
+                assert!(
+                    !serde_json::to_string(&event)
+                        .unwrap()
+                        .contains("private-ui")
+                );
+            }
+            if cancel {
+                drop(run);
+            } else {
+                client.final_release.add_permits(1);
+                run.await.expect("completed native run");
+            }
+            assert!(reader.snapshot().is_none());
+            assert!(
+                reader.idle_snapshot().is_none(),
+                "idle publication must be explicit after run settlement"
+            );
+            agent.publish_idle_tool_application_observations();
+            assert_eq!(reader.idle_snapshot().map(|rows| rows.len()), Some(1));
         }
     }
 

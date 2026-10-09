@@ -1,11 +1,12 @@
-//! Host UI requests bound to one committed tool invocation.
+//! Host UI requests and observations bound to native tool invocations.
 //!
 //! These are runtime integration types. App authors use their protocol's
 //! standard tools and resources; no application manifest is defined here.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::sync::{
-    Arc,
+    Arc, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -13,9 +14,190 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    OperationAuthorizationError, ResolvedToolExecutionPlan, SessionId, ToolExecutionOwnerWitness,
-    ToolExecutionResolutionError, ToolUnavailableReason,
+    Message, OperationAuthorizationError, ResolvedToolExecutionPlan, RunId, SessionId,
+    ToolExecutionOwnerWitness, ToolExecutionResolutionError, ToolUnavailableReason,
 };
+
+/// Read-only host projection of one tool result accepted by the live Agent.
+/// This process-only value is neither committed history nor IO authority.
+#[derive(Clone, PartialEq)]
+pub struct ToolApplicationObservation {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub host_metadata: BTreeMap<String, Value>,
+}
+
+impl ToolApplicationObservation {
+    /// Project only unambiguous tool-use/result pairs from one complete
+    /// canonical transcript. Duplicate ids are omitted, never last-wins.
+    pub fn from_messages(messages: &[Message]) -> Vec<Self> {
+        let mut calls = BTreeMap::<&str, Vec<(usize, &str)>>::new();
+        let mut results = BTreeMap::<&str, Vec<(usize, &crate::ToolResult)>>::new();
+        for (index, message) in messages.iter().enumerate() {
+            match message {
+                Message::BlockAssistant(assistant) => {
+                    for call in assistant.tool_calls() {
+                        calls.entry(call.id).or_default().push((index, call.name));
+                    }
+                }
+                Message::ToolResults { results: batch, .. } => {
+                    for result in batch {
+                        results
+                            .entry(&result.tool_use_id)
+                            .or_default()
+                            .push((index, result));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut observations = Vec::new();
+        for (index, message) in messages.iter().enumerate() {
+            let Message::ToolResults { results: batch, .. } = message else {
+                continue;
+            };
+            for result in batch {
+                let id = result.tool_use_id.as_str();
+                let Some([(call_index, name)]) = calls.get(id).map(Vec::as_slice) else {
+                    continue;
+                };
+                if *call_index >= index
+                    || results.get(id).is_none_or(|matches| matches.len() != 1)
+                    || result.host_metadata.is_empty()
+                {
+                    continue;
+                }
+                observations.push(Self {
+                    tool_call_id: id.to_string(),
+                    tool_name: (*name).to_string(),
+                    host_metadata: result.host_metadata.clone(),
+                });
+            }
+        }
+        observations
+    }
+}
+
+impl std::fmt::Debug for ToolApplicationObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolApplicationObservation")
+            .field("tool_call_id", &self.tool_call_id)
+            .field("tool_name", &self.tool_name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An Agent-owned read handle. Callers cannot publish or authorize actions
+/// through this handle, and must bind it to the exact live actor and run.
+#[derive(Clone, Default)]
+pub struct ToolApplicationObservationReader {
+    state: Arc<RwLock<Option<ToolApplicationObservationState>>>,
+}
+
+enum ToolApplicationObservationState {
+    Idle(Vec<ToolApplicationObservation>),
+    ActiveRun(RunId, Vec<ToolApplicationObservation>),
+}
+
+impl ToolApplicationObservationReader {
+    pub fn snapshot(&self) -> Option<(RunId, Vec<ToolApplicationObservation>)> {
+        let state = self.state.read().ok()?;
+        match state.as_ref()? {
+            ToolApplicationObservationState::ActiveRun(run_id, observations) => {
+                Some((run_id.clone(), observations.clone()))
+            }
+            ToolApplicationObservationState::Idle(_) => None,
+        }
+    }
+
+    /// A between-commands snapshot published by the native actor. An active
+    /// run never falls back to an earlier idle snapshot.
+    pub fn idle_snapshot(&self) -> Option<Vec<ToolApplicationObservation>> {
+        let state = self.state.read().ok()?;
+        match state.as_ref()? {
+            ToolApplicationObservationState::Idle(observations) => Some(observations.clone()),
+            ToolApplicationObservationState::ActiveRun(_, _) => None,
+        }
+    }
+
+    pub(crate) fn publish_idle(&self, messages: &[Message]) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(
+            state.as_ref(),
+            Some(ToolApplicationObservationState::ActiveRun(_, _))
+        ) {
+            *state = Some(ToolApplicationObservationState::Idle(
+                ToolApplicationObservation::from_messages(messages),
+            ));
+        }
+    }
+
+    pub(crate) fn begin_run(
+        &self,
+        run_id: RunId,
+        messages: &[Message],
+    ) -> ToolApplicationObservationRun {
+        *self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(ToolApplicationObservationState::ActiveRun(
+                run_id.clone(),
+                ToolApplicationObservation::from_messages(messages),
+            ));
+        ToolApplicationObservationRun {
+            reader: self.clone(),
+            run_id,
+        }
+    }
+
+    pub(crate) fn invalidate(&self) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.as_mut() {
+            Some(ToolApplicationObservationState::ActiveRun(_, observations)) => {
+                observations.clear()
+            }
+            _ => *state = None,
+        }
+    }
+
+    pub(crate) fn refresh(&self, messages: &[Message]) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(ToolApplicationObservationState::ActiveRun(_, observations)) = state.as_mut() {
+            *observations = ToolApplicationObservation::from_messages(messages);
+        }
+    }
+}
+
+pub(crate) struct ToolApplicationObservationRun {
+    reader: ToolApplicationObservationReader,
+    run_id: RunId,
+}
+
+impl Drop for ToolApplicationObservationRun {
+    fn drop(&mut self) {
+        let mut state = self
+            .reader
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .as_ref()
+            .is_some_and(|state| matches!(state, ToolApplicationObservationState::ActiveRun(run_id, _) if run_id == &self.run_id))
+        {
+            *state = None;
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -228,6 +410,83 @@ impl ToolApplicationControlRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn observed_messages() -> Result<Vec<Message>, serde_json::Error> {
+        let call = Message::BlockAssistant(crate::types::BlockAssistantMessage::snapshot(vec![
+            crate::types::AssistantBlock::ToolUse {
+                id: "result-id".into(),
+                name: "canonical-tool".into(),
+                args: serde_json::value::to_raw_value(&serde_json::json!({}))?,
+                meta: None,
+            },
+        ]));
+        let mut result = crate::ToolResult::new("result-id".into(), "text".into(), false);
+        result
+            .host_metadata
+            .insert("test".into(), serde_json::json!({"private":"private-ui"}));
+        Ok(vec![call, Message::tool_results(vec![result])])
+    }
+
+    #[test]
+    fn application_observation_requires_unique_ordered_canonical_pair()
+    -> Result<(), serde_json::Error> {
+        let messages = observed_messages()?;
+        let observations = ToolApplicationObservation::from_messages(&messages);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].tool_name, "canonical-tool");
+        assert!(!format!("{:?}", observations[0]).contains("private-ui"));
+        assert!(
+            ToolApplicationObservation::from_messages(&[messages[1].clone(), messages[0].clone()])
+                .is_empty()
+        );
+        assert!(ToolApplicationObservation::from_messages(&messages[1..]).is_empty());
+        for duplicate in &messages {
+            let mut ambiguous = messages.clone();
+            ambiguous.push(duplicate.clone());
+            assert!(ToolApplicationObservation::from_messages(&ambiguous).is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn application_observation_reader_rebuilds_and_clears_at_run_lifecycle()
+    -> Result<(), serde_json::Error> {
+        let reader = ToolApplicationObservationReader::default();
+        let messages = observed_messages()?;
+        reader.publish_idle(&messages);
+        assert_eq!(reader.idle_snapshot().map(|rows| rows.len()), Some(1));
+        assert!(reader.snapshot().is_none());
+        let first_run = RunId::new();
+        let first = reader.begin_run(first_run.clone(), &messages);
+        assert!(reader.idle_snapshot().is_none());
+        reader.publish_idle(&messages);
+        assert!(
+            reader.idle_snapshot().is_none(),
+            "idle publication cannot replace an active run"
+        );
+        assert_eq!(
+            reader.snapshot().map(|(run, rows)| (run, rows.len())),
+            Some((first_run.clone(), 1))
+        );
+        reader.invalidate();
+        assert_eq!(reader.snapshot(), Some((first_run, Vec::new())));
+        reader.refresh(&messages);
+        assert_eq!(reader.snapshot().map(|(_, rows)| rows.len()), Some(1));
+        reader.refresh(&[]);
+        assert_eq!(reader.snapshot().map(|(_, rows)| rows.len()), Some(0));
+        let second_run = RunId::new();
+        let second = reader.begin_run(second_run.clone(), &[]);
+        drop(first);
+        assert_eq!(reader.snapshot(), Some((second_run, Vec::new())));
+        drop(second);
+        assert!(reader.snapshot().is_none());
+        assert!(reader.idle_snapshot().is_none());
+        reader.publish_idle(&messages);
+        assert_eq!(reader.idle_snapshot().map(|rows| rows.len()), Some(1));
+        reader.invalidate();
+        assert!(reader.idle_snapshot().is_none());
+        Ok(())
+    }
 
     struct RevocableIngress(AtomicBool);
     impl ToolApplicationIngress for RevocableIngress {

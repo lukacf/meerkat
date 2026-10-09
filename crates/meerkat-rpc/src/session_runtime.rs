@@ -851,6 +851,14 @@ impl RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl SessionService for RpcMobSessionService {
+    async fn read_tool_application_observations(
+        &self,
+        id: &meerkat_core::SessionId,
+    ) -> Result<Vec<meerkat_core::ToolApplicationObservation>, meerkat_core::service::SessionError>
+    {
+        self.service.read_tool_application_observations(id).await
+    }
+
     async fn tool_application(
         self: Arc<Self>,
         control: Arc<meerkat_core::ToolApplicationControlRequest>,

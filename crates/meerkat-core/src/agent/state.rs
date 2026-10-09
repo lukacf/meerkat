@@ -1169,6 +1169,8 @@ where
         self.apply_llm_request_policy(pending.request_policy);
         self.active_model_profile = Some(pending.target_profile);
         self.session = pending.next_session;
+        self.tool_application_observations
+            .refresh(self.session.messages());
         self.durable_row_floor = self.session.messages().len();
         tracing::warn!(model = %self.client.model(), provider = %self.client.provider().as_str(), "model fallback committed");
         let _ = crate::event_tap::tap_emit(
@@ -1747,6 +1749,8 @@ where
             self.apply_llm_request_policy(switch.request_policy);
             self.active_model_profile = Some(switch.target_profile);
             self.session = next_session;
+            self.tool_application_observations
+                .refresh(self.session.messages());
             self.durable_row_floor = self.session.messages().len();
             let _ = crate::event_tap::tap_emit(
                 &self.event_tap,
@@ -3198,6 +3202,7 @@ where
                         current_boundary_index,
                     );
                     if compactor.should_compact(&ctx) {
+                        self.tool_application_observations.invalidate();
                         let rollback_state = crate::agent::CompactionRollbackState {
                             rollback_session: self.session.clone(),
                             rollback_last_input_tokens: self.last_input_tokens,
@@ -3464,6 +3469,8 @@ where
                                 match self.memory_store.clone() {
                                         None => {
                                             self.session = compacted_session;
+                                            self.tool_application_observations
+                                                .refresh(self.session.messages());
                                             self.durable_row_floor = self.session.messages().len();
                                             (true, true)
                                         }
@@ -3572,6 +3579,8 @@ where
                                                                 };
                                                                 if adopted {
                                                                     self.session = compacted_session;
+                                                                    self.tool_application_observations
+                                                                        .refresh(self.session.messages());
                                                                     self.durable_row_floor = self.session.messages().len();
                                                                     if self
                                                                         .in_flight_compaction_stage
@@ -3713,6 +3722,8 @@ where
                                     ),
                                 );
                             }
+                            self.tool_application_observations
+                                .refresh(self.session.messages());
                             if rewrite_committed {
                                 self.last_input_tokens = 0;
                                 self.post_compaction_pressure_check = provider_request_pressure
@@ -4118,6 +4129,8 @@ where
             }
         }
         self.session = next_session;
+        self.tool_application_observations
+            .refresh(self.session.messages());
         self.durable_row_floor = self.session.messages().len();
         if let Some(transaction) = self.compaction_transaction.as_mut() {
             transaction.phase = crate::agent::CompactionTransactionPhase::RuntimeCommitted {
@@ -4316,6 +4329,8 @@ where
             restored_cadence.last_compaction_attempt_boundary_index =
                 attempted_cadence.last_compaction_attempt_boundary_index;
             self.session = restored_session;
+            self.tool_application_observations
+                .refresh(self.session.messages());
             // Durable boundary appends applied after the capture are gone
             // from the restored image.
             self.transient_turn_context_state
@@ -4777,6 +4792,14 @@ where
         self.latest_run_checkpoint_receipt = None;
         self.runtime_started_run_id = Some(run_id.clone());
         self.tool_dispatch_context.bind_run_id(run_id.clone());
+        let _tool_application_observation_run = if self.noncommitting_live_bridge_run {
+            None
+        } else {
+            Some(
+                self.tool_application_observations
+                    .begin_run(run_id.clone(), self.session.messages()),
+            )
+        };
         // Open the first actor-local boundary generation before the first
         // suspension point, and retain a run-scope guard so normal errors,
         // natural completion, hard-interrupt future drops, and task abort all
@@ -5665,6 +5688,8 @@ where
             .reserved_assistant_message
             .get_or_insert_with(crate::types::AssistantMessageId::mint);
 
+        self.tool_application_observations
+            .refresh(self.session.messages());
         if !in_extraction {
             emit_phase_event!(
                 self,
@@ -7512,6 +7537,8 @@ where
                 return Err(error);
             }
             self.session = staged_session;
+            self.tool_application_observations
+                .refresh(self.session.messages());
         } else {
             self.session
                 .push(Message::BlockAssistant(assistant_msg.clone()));
@@ -7547,6 +7574,8 @@ where
         if !callback_batch_pending && !tool_results.is_empty() {
             self.session
                 .push(Message::tool_results(tool_results.clone()));
+            self.tool_application_observations
+                .refresh(self.session.messages());
         }
 
         // Each effect-appended assistant message has its own occurrence id,

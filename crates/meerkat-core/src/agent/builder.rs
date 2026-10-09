@@ -756,6 +756,7 @@ impl AgentBuilder {
             checkpointer: self.checkpointer,
             model_routing_handoff_staging: self.model_routing_handoff_staging,
             latest_run_checkpoint_receipt: None,
+            tool_application_observations: Default::default(),
             durable_row_floor,
             blob_store: self.blob_store,
             event_tap: self

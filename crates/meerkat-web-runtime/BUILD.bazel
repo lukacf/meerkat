@@ -58,7 +58,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
     },
     proc_macro_deps = all_crate_deps(
@@ -102,7 +102,7 @@ rust_library(
         "//crates/meerkat-web-runtime:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
     },
     proc_macro_deps = all_crate_deps(
@@ -150,7 +150,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
     },
     tags = [
@@ -215,7 +215,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "browser_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
     },
@@ -278,7 +278,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "release_targets",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
     },
@@ -341,7 +341,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "wasm_external_resolver",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
     },
@@ -405,7 +405,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "wasm_timers",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
     },
@@ -469,7 +469,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "wasm_timers_node",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
     },

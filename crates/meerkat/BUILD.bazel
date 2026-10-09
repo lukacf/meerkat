@@ -2141,7 +2141,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
         "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
     },
@@ -2242,7 +2242,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
         "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
     },
@@ -2336,7 +2336,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
         "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
     },
@@ -2463,7 +2463,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "agent_builder_policy_canary",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -2613,7 +2613,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "agent_factory_auth_binding",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -2727,7 +2727,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "anthropic_structured_output_bounds",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -2840,7 +2840,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "atif_reexport",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -2953,7 +2953,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "brain_swap_history_read_classification",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3066,7 +3066,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "brain_swap_pre_dequeue_loop",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3180,7 +3180,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "brain_swap_realization_saga",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3293,7 +3293,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "brain_swap_surface_parity",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3425,7 +3425,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "callback_resume_ordinary_continuation",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3538,7 +3538,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "catalog_control_agent_boundary",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3651,7 +3651,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "cold_restart_resume",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3765,7 +3765,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "cold_restart_resume_after_compaction",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3879,7 +3879,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "command_hook_confinement",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -3993,7 +3993,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "continuation_delivery",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -4106,7 +4106,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "continuation_submit",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -4219,7 +4219,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "e2e_shell",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -4335,7 +4335,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "embedded_skill_registration",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -4448,7 +4448,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "factory_build_agent",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -4562,7 +4562,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "integration",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -4674,7 +4674,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "job_composition",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -4789,7 +4789,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "job_delivery_projector",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -4902,7 +4902,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "job_surface",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5016,7 +5016,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "live_meerkat_regression",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5131,7 +5131,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "live_meerkat_user_flows",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5245,7 +5245,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "live_pipeline_unit",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5358,7 +5358,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "live_video_uri_surface_smoke",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5470,7 +5470,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "mcp_confinement_feedback",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5583,7 +5583,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "mcp_oauth_host_canary",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5696,7 +5696,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "persistence_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5809,7 +5809,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "predicate_schedule",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -5922,7 +5922,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "runtime_delivery_callback_hold",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6035,7 +6035,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "runtime_delivery_hosting",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6148,7 +6148,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "runtime_delivery_owner",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6261,7 +6261,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "runtime_delivery_surface",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6374,7 +6374,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "schedule_host_typed_mapping",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6489,7 +6489,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "sdk_agentfactory",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6604,7 +6604,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "sdk_config_ephemeral",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6718,7 +6718,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "sdk_structured_output",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6831,7 +6831,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "session_runtime_admission",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -6944,7 +6944,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "session_runtime_builder",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7057,7 +7057,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "session_runtime_live_orchestration",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7171,7 +7171,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "session_runtime_llm_reconfigure",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7284,7 +7284,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "session_runtime_recovery",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7397,7 +7397,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "session_runtime_runtime_state",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7510,7 +7510,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "session_runtime_staged_promotion",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7623,7 +7623,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "smoke_meerkat_sdk",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7739,7 +7739,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "standalone_turn_lifecycle",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7853,7 +7853,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "storage_provider_seam",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },
@@ -7967,7 +7967,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_PKG_VERSION": "0.8.52",
         "CARGO_BIN_NAME": "tool_process_custody_restart",
         "CARGO_MANIFEST_DIR": "./crates/meerkat",
     },

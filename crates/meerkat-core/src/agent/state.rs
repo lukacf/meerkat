@@ -3173,7 +3173,7 @@ where
                         .session_boundary_index
                         .saturating_add(1);
                     let cadence = self.compaction_cadence.clone();
-                    crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                    crate::agent::compact::persist_compaction_cadence(&mut self.session, &cadence)
                         .map_err(|error| {
                             AgentError::InternalError(format!(
                                 "failed to persist session compaction cadence metadata: {error}"
@@ -3756,7 +3756,7 @@ where
                     }
                 }
                 let cadence = self.compaction_cadence.clone();
-                crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                crate::agent::compact::persist_compaction_cadence(&mut self.session, &cadence)
                     .map_err(|error| {
                         AgentError::InternalError(format!(
                             "failed to persist session compaction cadence metadata: {error}"
@@ -4377,7 +4377,7 @@ where
                 });
         if cadence_persist_pending {
             let cadence = self.compaction_cadence.clone();
-            match crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence) {
+            match crate::agent::compact::persist_compaction_cadence(&mut self.session, &cadence) {
                 Ok(()) => {
                     if let Some(transaction) = self.compaction_transaction.as_mut() {
                         transaction.phase =

@@ -4482,6 +4482,12 @@ mod skill_activation_effect_tests {
                     .collect();
                 assert_eq!(results.len(), 1);
                 assert!(
+                    !results[0].is_error,
+                    "native tool was refused: {}",
+                    results[0].text_content()
+                );
+                assert_eq!(results[0].text_content(), "text fallback");
+                assert!(
                     results[0].host_metadata.is_empty(),
                     "host data cannot enter the model request"
                 );

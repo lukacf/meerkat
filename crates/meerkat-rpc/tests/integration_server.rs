@@ -1691,15 +1691,19 @@ mod tcp_callback_ownership {
         async fn disconnected(&mut self, index: usize) {
             let mut server = self.servers[index].take().unwrap();
             match tokio::time::timeout(LIMIT, &mut server).await {
-                // The owner closes either on EOF (Ok) or on its first write to
-                // the socket the client already closed (observed: BrokenPipe,
-                // surfaced as Transport(Io)). Every other error (parse, size,
-                // write timeout, other I/O) fails with its real details.
+                // Abrupt client closure can surface as EOF, a reset while
+                // reading, or a broken pipe while writing. Accept only those
+                // peer-close outcomes; parse, size, timeout, and other I/O
+                // errors still fail with their real details.
                 Ok(result) => match result.unwrap() {
                     Ok(()) => {}
-                    Err(ServerError::Transport(meerkat_rpc::transport::TransportError::Io(
-                        error,
-                    ))) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    Err(
+                        ServerError::Io(error)
+                        | ServerError::Transport(meerkat_rpc::transport::TransportError::Io(error)),
+                    ) if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    ) => {}
                     Err(other) => panic!("TCP owner failed: {other:?}"),
                 },
                 Err(_) => {

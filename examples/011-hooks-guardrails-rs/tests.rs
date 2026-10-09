@@ -54,6 +54,7 @@ async fn documented_cost_tracker_runs_through_hook_engine() {
             HookInvocation {
                 point: HookPoint::PostLlmResponse,
                 session_id: id.clone(),
+                run_id: None,
                 turn_number: Some(2),
                 prompt_input: None,
                 error_report: None,

@@ -8,6 +8,7 @@ use indexmap::{IndexMap, IndexSet};
 use std::fmt;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+    "runtime_delivery_recipient_outcomes_after_set",
     "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",
@@ -1289,6 +1290,13 @@ pub enum Quantifier {
     All,
 }
 
+/// Deliberately exhaustive (not `#[non_exhaustive]`): every renderer of this
+/// enum (the TLA+ emitter, the kernel interpreter, the DSL mutator lowering,
+/// protocol codegen) lives in another crate and matches it exhaustively, so a
+/// new variant fails to compile at each site until it is given real
+/// semantics there. A wildcard arm would let a new variant fall silently into
+/// a default and reopen the Rust/TLA divergence class #1811 closed. Adding a
+/// variant is therefore a declared breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Bool(bool),
@@ -1363,6 +1371,24 @@ pub enum Expr {
         map: Box<Expr>,
         key: Box<Expr>,
     },
+    /// Strict map read: the value stored under `key`, which must be present.
+    /// Reading an absent key is an evaluation error in every executor (TLA+
+    /// function application outside `DOMAIN`, a kernel evaluation error, a
+    /// refused input in generated mutators and authorities), never a default.
+    /// The DSL lowers a guard's value-projected read
+    /// (`m.get_cloned(k).get("value")`) to this, so TLC proves no reachable
+    /// guard depends on a value the map does not hold (#1811).
+    MapValue {
+        map: Box<Expr>,
+        key: Box<Expr>,
+    },
+    /// A populated map literal, `key -> value` entries in order. It exists
+    /// for catalog-built composition witness fields and inputs (a manifest
+    /// such as `Map<String, String>`); the `machine!` DSL has no syntax for
+    /// it. Composition validation requires at least one entry (an empty map
+    /// is `EmptyMap`), distinct keys, and entries matching the field's map
+    /// type.
+    MapLiteral(Vec<(Expr, Expr)>),
     Some(Box<Expr>),
     Call {
         helper: String,
@@ -1632,7 +1658,7 @@ impl Expr {
                     bindings,
                 )?;
             }
-            Self::MapGet { map, key } => {
+            Self::MapGet { map, key } | Self::MapValue { map, key } => {
                 map.validate(
                     phase_names,
                     field_names,
@@ -1651,6 +1677,21 @@ impl Expr {
                     helper_names,
                     bindings,
                 )?;
+            }
+            Self::MapLiteral(entries) => {
+                for (key, value) in entries {
+                    for item in [key, value] {
+                        item.validate(
+                            phase_names,
+                            field_names,
+                            input_variants,
+                            signal_variants,
+                            effect_variants,
+                            helper_names,
+                            bindings,
+                        )?;
+                    }
+                }
             }
             Self::Call { helper, args } => {
                 if !helper_names.contains(helper.as_str())
@@ -2103,9 +2144,17 @@ fn validate_string_enum_named_variants_expr(
             validate_string_enum_named_variants_expr(schema, collection)?;
             validate_string_enum_named_variants_expr(schema, value)?;
         }
-        Expr::MapContainsKey { map, key } | Expr::MapGet { map, key } => {
+        Expr::MapContainsKey { map, key }
+        | Expr::MapGet { map, key }
+        | Expr::MapValue { map, key } => {
             validate_string_enum_named_variants_expr(schema, map)?;
             validate_string_enum_named_variants_expr(schema, key)?;
+        }
+        Expr::MapLiteral(entries) => {
+            for (key, value) in entries {
+                validate_string_enum_named_variants_expr(schema, key)?;
+                validate_string_enum_named_variants_expr(schema, value)?;
+            }
         }
         Expr::SeqStartsWith { seq, prefix } => {
             validate_string_enum_named_variants_expr(schema, seq)?;

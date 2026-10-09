@@ -2265,6 +2265,18 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         expires_at: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
+    /// Publish an explicitly supplied credential at the administrative login
+    /// boundary. Native owners retain controller custody through this mutation.
+    /// Ordinary credential preparation and refresh use their existing methods
+    /// and do not enter this potentially store-scanning administrative path.
+    fn acquire_lease_for_credential_publication(
+        &self,
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        self.acquire_lease(lease_key, expires_at)
+    }
+
     /// Fire `MarkAuthExpiring { lease_key }` — only legal from `valid`.
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 

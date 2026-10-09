@@ -39,6 +39,11 @@ pub struct InputHeader {
     /// association data and accepted native custody.
     #[serde(skip)]
     pub ingress_context: Option<std::sync::Arc<crate::input_authority::NativeIngressContext>>,
+    /// Process-only custody for a governed resume of retained work, minted by
+    /// the runtime from the committed delivery that carries the resume. Wire
+    /// decoding never constructs it, and nothing outside the runtime can.
+    #[serde(skip)]
+    pub retained_resume: Option<std::sync::Arc<crate::retained_work::RetainedResumeGrant>>,
     /// Untrusted native attribution claims. Only the installed host ingress
     /// authenticator can bind them to actual accepted work. Absence never
     /// inherits another input's requester or an external account owner's rights.
@@ -357,6 +362,7 @@ impl PromptInput {
         Self {
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -393,6 +399,7 @@ impl PromptInput {
         Self {
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -419,6 +426,42 @@ impl PromptInput {
         }
     }
 
+    /// An original-task continuation admitted to its owner: a durable,
+    /// system-originated content input under an exact admission key, with an
+    /// explicit input id so a crash between admission and the delivery
+    /// acknowledgement can be recovered by key.
+    ///
+    /// It carries no authority association and no ingress context: the
+    /// System origin creates no mandate, and a continuation holds no retained
+    /// native work binding yet. Only a host without a native work
+    /// authorization host admits it; a governed host refuses it.
+    pub fn continuation(
+        input_id: meerkat_core::lifecycle::InputId,
+        admission_key: impl Into<String>,
+        content: ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+    ) -> Self {
+        Self {
+            header: InputHeader {
+                id: input_id,
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: Some(IdempotencyKey::new(admission_key)),
+                supersession_key: None,
+                correlation_id: None,
+                ingress_context: None,
+                retained_resume: None,
+                authority_association: None,
+            },
+            content,
+            typed_turn_appends: Vec::new(),
+            injected_context: Vec::new(),
+            turn_metadata: Some(crate::runtime_loop::for_continuation(handling_mode)),
+        }
+    }
+
     /// Create a prompt from `ContentInput` (text or multimodal blocks).
     pub fn from_content_input(
         input: ContentInput,
@@ -427,6 +470,7 @@ impl PromptInput {
         Self {
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -589,6 +633,7 @@ pub fn peer_response_terminal_input(
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -835,6 +880,7 @@ impl ContinuationInput {
         Self {
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -1592,6 +1638,7 @@ mod tests {
     fn make_header() -> InputHeader {
         InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -2510,6 +2557,7 @@ mod tests {
             phase: None,
             persisted,
             detail: None,
+            confinement_refusal: None,
             pending_sources: Vec::new(),
         }
     }
@@ -2871,6 +2919,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::from_uuid(stable),
                 timestamp: Utc::now(),

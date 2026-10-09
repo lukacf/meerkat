@@ -19,21 +19,20 @@
 //!    real result when it finished before the restart;
 //! 3. if a record was skipped because the previous process's claim lease had
 //!    not been observed expired (a restart inside the lease is the common
-//!    case), waits until that lease expires and runs another pass;
-//! 4. if a convener could not be revived yet, because its mob is not running
-//!    (a host that restores a stopped mob and activates it later) or the
-//!    mob's resume of it is still in progress, waits until that clears and
-//!    runs another pass.
+//!    case), waits until that lease expires and runs another pass.
 //!
 //! The waiting is bounded: a record whose lease keeps being renewed belongs
-//! to a live coordinator and stops being waited for, a mob that ends for good
-//! stops being waited for, and the sweep stops after a fixed number of
-//! passes. It holds the state weakly, so a dropped state ends it.
+//! to a live coordinator and stops being waited for, and the sweep stops
+//! after a fixed number of passes. It holds the state weakly, so a dropped
+//! state ends it.
 //!
-//! Delivery is the same durable completion record the live custodian admits
-//! ([`crate::detached_delivery`]), under the same per-job idempotency key, so
-//! the convener sees each job's outcome exactly once. The binding is then
-//! marked settled, so later restarts skip it.
+//! Delivery is what the live custodian does: the outcome is committed once on
+//! the council's custody record (its job binding's terminal) and submitted to
+//! the convener as a continuation under the job's key (`council:{job_id}`),
+//! so the convener sees each job's outcome exactly once. The continuation is
+//! durable from submission: a convener that cannot be served yet receives it
+//! when it is, from the host's delivery owner. The binding is then marked
+//! settled, so later restarts skip it.
 //!
 //! [`TemporaryCouncilCoordinator::sweep_unfinished`]: crate::TemporaryCouncilCoordinator::sweep_unfinished
 
@@ -43,14 +42,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use meerkat_mob::store::TemporaryCouncilRecord;
-use meerkat_mob::temporary_council::TemporaryCouncilId;
+use meerkat_mob::temporary_council::{TemporaryCouncilId, TemporaryCouncilJobTerminal};
 
 use crate::MobMcpState;
-use crate::agent_tools::{TOOL_COUNCIL, council_outcome_json};
+use crate::agent_tools::{TOOL_COUNCIL, council_outcome_json, council_terminal_status};
 use crate::detached_delivery::{
-    DetachedCompletionDelivered, DetachedCompletionError, OwnerRevivalDeferral,
-    deliver_detached_completion, deliver_detached_completion_to_member,
-    deliver_detached_completion_to_session,
+    DetachedCompletionDelivered, DetachedCompletionError, DetachedCompletionOwner,
 };
 use crate::temporary_council::replay_outcome;
 #[cfg(target_arch = "wasm32")]
@@ -84,13 +81,6 @@ pub enum CouncilRelinkAction {
     /// The convener is gone (retired, or its session archived or deleted):
     /// the outcome can never be delivered, so the job is settled.
     OwnerGone,
-    /// The convener is a member of mob `mob_id` and cannot be revived to
-    /// receive the outcome yet, for a reason that clears on its own. The
-    /// post-restore sweep delivers again once it has.
-    AwaitingConvener {
-        mob_id: meerkat_mob::MobId,
-        reason: OwnerRevivalDeferral,
-    },
     /// Delivery failed; a later re-link retries it.
     Failed(String),
 }
@@ -144,27 +134,13 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
         };
         // After recovery, so councils it sealed deliver at once.
         let reports = relink_detached_councils(&strong, strong.created_at_ms).await;
-        // Conveners that cannot be revived yet: the next pass runs once
-        // one of them may be.
-        let mut awaited_conveners: Vec<(meerkat_mob::MobHandle, OwnerRevivalDeferral)> = Vec::new();
-        // A convener the re-link could not resolve yet: its mob may not be
-        // registered with this host yet (a host that restores mob handles
-        // after constructing the state, as MobKit does). A failed re-link is
-        // retried by definition. Either is retried when the managed-mob set
+        // A failed re-link (for example a convener whose mob is not
+        // registered with this host yet, as when a host restores mob handles
+        // after constructing the state) is retried when the managed-mob set
         // changes, instead of ending the sweep with the outcome owed.
-        let mut awaiting_mob_set = false;
-        for report in &reports {
-            match &report.action {
-                CouncilRelinkAction::AwaitingConvener { mob_id, reason } => {
-                    match strong.handle_for(mob_id).await {
-                        Ok(handle) => awaited_conveners.push((handle, reason.clone())),
-                        Err(_) => awaiting_mob_set = true,
-                    }
-                }
-                CouncilRelinkAction::Failed(_) => awaiting_mob_set = true,
-                _ => {}
-            }
-        }
+        let awaiting_mob_set = reports
+            .iter()
+            .any(|report| matches!(report.action, CouncilRelinkAction::Failed(_)));
         let delivered = reports
             .iter()
             .filter(|report| report.action == CouncilRelinkAction::Delivered)
@@ -195,7 +171,7 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
             }));
         }
         strong.note_temporary_council_sweep_pass();
-        if next_expiry.is_none() && awaited_conveners.is_empty() && !awaiting_mob_set {
+        if next_expiry.is_none() && !awaiting_mob_set {
             return;
         }
         let lease_wait = next_expiry.map(|next_expiry| {
@@ -218,37 +194,12 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
             // re-link could not resolve. A dropped state closes the channel,
             // and the next pass then ends the sweep.
             _ = mob_set.changed(), if awaiting_mob_set => {}
-            // An awaited convener may be revivable, or none can be any
-            // more (the next pass then settles them as gone).
-            _ = any_convener_revivable(awaited_conveners) => {}
         }
     }
     tracing::warn!(
         passes = MAX_SWEEP_PASSES,
         "temporary council recovery sweep stopped waiting for held records"
     );
-}
-
-/// Wait until one of `conveners` may be revivable. `true` then; `false` at
-/// once when none of them can be any more (each one's mob completed, was
-/// destroyed or lost its actor), and never when `conveners` is empty.
-async fn any_convener_revivable(
-    conveners: Vec<(meerkat_mob::MobHandle, OwnerRevivalDeferral)>,
-) -> bool {
-    if conveners.is_empty() {
-        return std::future::pending().await;
-    }
-    let mut waits: futures::stream::FuturesUnordered<_> = conveners
-        .into_iter()
-        .map(|(handle, reason)| async move { reason.cleared(&handle).await })
-        .collect();
-    use futures::StreamExt as _;
-    while let Some(revivable) = waits.next().await {
-        if revivable {
-            return true;
-        }
-    }
-    false
 }
 
 /// Deliver the sealed outcome of every detached council created before
@@ -303,28 +254,35 @@ pub async fn relink_council(
         job_id: job.job_id.clone(),
         action,
     };
-    if record.result.is_none() {
-        return report(CouncilRelinkAction::AwaitingSeal {
-            claim_lease_expires_at: record.claim_lease_expires_at,
-        });
-    }
-    let outcome = match replay_outcome(record) {
-        Ok(outcome) => outcome,
-        Err(error) => return report(CouncilRelinkAction::Failed(error.to_string())),
+    let terminal = match job.terminal.clone() {
+        // The live custodian (or an earlier re-link) committed the outcome:
+        // it is delivered as recorded.
+        Some(terminal) => terminal,
+        None => {
+            if record.result.is_none() {
+                return report(CouncilRelinkAction::AwaitingSeal {
+                    claim_lease_expires_at: record.claim_lease_expires_at,
+                });
+            }
+            let outcome = match replay_outcome(record) {
+                Ok(outcome) => outcome,
+                Err(error) => return report(CouncilRelinkAction::Failed(error.to_string())),
+            };
+            match record_terminal(
+                state,
+                &council_id,
+                &job.job_id,
+                council_terminal_status(&outcome),
+                council_outcome_json(&outcome),
+            )
+            .await
+            {
+                Ok(terminal) => terminal,
+                Err(error) => return report(CouncilRelinkAction::Failed(error)),
+            }
+        }
     };
-    let status = if outcome.result.exit_reason.is_failure() {
-        meerkat_core::event::BackgroundJobTerminalStatus::Failed
-    } else {
-        meerkat_core::event::BackgroundJobTerminalStatus::Completed
-    };
-    let action = deliver(
-        state,
-        &job.owner_session_id,
-        &job.job_id,
-        status,
-        council_outcome_json(&outcome),
-    )
-    .await;
+    let action = deliver(state, &job.owner_session_id, &job.job_id, &terminal).await;
     if matches!(
         action,
         CouncilRelinkAction::Delivered
@@ -336,98 +294,109 @@ pub async fn relink_council(
     report(action)
 }
 
-/// Deliver a council outcome to its convener through the live custodian's
-/// delivery. When the runtime no longer has the convener live (a restart),
-/// a convener that is a mob member is revived through its mob, and one that
-/// is a plain session through the host's owner hook
-/// ([`crate::DetachedOwnerHost`]), and the delivery is retried.
+/// Submit a council's committed outcome to its convener: a member through
+/// its mob, anything else as a plain session. A convener whose session no
+/// longer reads (archived, deleted, or never persisted) is gone for good,
+/// member or not.
 async fn deliver(
     state: &Arc<MobMcpState>,
     owner_session_id: &meerkat_core::SessionId,
     job_id: &str,
-    status: meerkat_core::event::BackgroundJobTerminalStatus,
-    outcome: serde_json::Value,
+    terminal: &TemporaryCouncilJobTerminal,
 ) -> CouncilRelinkAction {
-    let Some(runtime) = state.runtime_adapter_for_relink() else {
-        return CouncilRelinkAction::Failed(
-            "no runtime to admit the completion on this host".to_string(),
-        );
-    };
-    let delivered = match deliver_detached_completion(
-        &runtime,
-        owner_session_id,
-        TOOL_COUNCIL,
-        job_id,
-        status,
-        outcome.clone(),
-    )
-    .await
-    {
-        Err(error @ DetachedCompletionError::Runtime { .. }) => {
-            // A convener whose session no longer reads (archived, deleted,
-            // or never persisted) is gone for good, member or not.
-            if let Err(meerkat_core::service::SessionError::NotFound { .. }) =
-                state.session_service().read(owner_session_id).await
-            {
-                Err(DetachedCompletionError::OwnerGone {
-                    tool: TOOL_COUNCIL,
-                    detail: format!("the convener session {owner_session_id} no longer exists"),
-                })
-            } else {
-                match state.member_for_bridge_session(owner_session_id).await {
-                    Ok(Some((mob_id, identity))) => match state.handle_for(&mob_id).await {
-                        Ok(handle) => {
-                            deliver_detached_completion_to_member(
-                                &runtime,
-                                &handle,
-                                &identity,
-                                owner_session_id,
-                                TOOL_COUNCIL,
-                                job_id,
-                                status,
-                                outcome,
-                            )
-                            .await
-                        }
-                        Err(_) => Err(error),
-                    },
-                    // Not a member of any mob here: a plain session (a
-                    // top-level RPC, REST or CLI convener). The host's owner
-                    // hook makes it live; without one the runtime's refusal
-                    // stands and the job stays owed.
-                    Ok(None) => {
-                        deliver_detached_completion_to_session(
-                            &runtime,
-                            state.detached_owner_host().as_deref(),
-                            owner_session_id,
-                            TOOL_COUNCIL,
-                            job_id,
-                            status,
-                            outcome,
-                        )
-                        .await
-                    }
-                    Err(_) => Err(error),
-                }
-            }
+    let sink = match state.detached_delivery_route() {
+        Ok(sink) => sink,
+        Err(unavailable) => {
+            return CouncilRelinkAction::Failed(format!(
+                "this host cannot submit the completion: {unavailable:?}"
+            ));
         }
-        other => other,
     };
-    match delivered {
+    if let Err(meerkat_core::service::SessionError::NotFound { .. }) =
+        state.session_service().read(owner_session_id).await
+    {
+        return CouncilRelinkAction::OwnerGone;
+    }
+    // A convener seated in a mob here is owed the outcome as that member, a
+    // convener seated in none (a top-level RPC, REST or CLI convener) as its
+    // session. A membership read that fails decides nothing: the re-link
+    // fails and is retried.
+    let owner = match state
+        .member_handle_for_bridge_session(owner_session_id)
+        .await
+    {
+        Ok(Some((_, handle, identity))) => DetachedCompletionOwner::Member(handle, identity),
+        Ok(None) => DetachedCompletionOwner::Session,
+        Err(error) => return CouncilRelinkAction::Failed(error.to_string()),
+    };
+    match sink
+        .submit(
+            &owner,
+            owner_session_id,
+            TOOL_COUNCIL,
+            job_id,
+            terminal.status,
+            &terminal.outcome,
+            &terminal.result_digest,
+        )
+        .await
+    {
         Ok(DetachedCompletionDelivered::Delivered) => CouncilRelinkAction::Delivered,
         Ok(_) => CouncilRelinkAction::AlreadyDelivered,
         Err(DetachedCompletionError::OwnerGone { .. }) => CouncilRelinkAction::OwnerGone,
-        Err(DetachedCompletionError::OwnerRevivalDeferred { mob_id, reason, .. }) => {
-            CouncilRelinkAction::AwaitingConvener { mob_id, reason }
-        }
         Err(error) => CouncilRelinkAction::Failed(error.to_string()),
     }
+}
+
+/// Commit council `council_id`'s outcome for job `job_id` on its custody
+/// record, once: the outcome delivered to the convener and the committed
+/// digest a retained completion is confirmed against. A council that already
+/// has one keeps it, and that recorded terminal is returned.
+pub(crate) async fn record_terminal(
+    state: &MobMcpState,
+    council_id: &TemporaryCouncilId,
+    job_id: &str,
+    status: meerkat_core::event::BackgroundJobTerminalStatus,
+    outcome: serde_json::Value,
+) -> Result<TemporaryCouncilJobTerminal, String> {
+    let terminal = TemporaryCouncilJobTerminal {
+        status,
+        result_digest: meerkat_mob::detached_outcome_digest(&outcome),
+        outcome,
+    };
+    let store = state.temporary_council_store();
+    for _ in 0..3 {
+        let mut record = store
+            .load(council_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("council {council_id} has no record"))?;
+        let Some(job) = record
+            .detached_job
+            .as_mut()
+            .filter(|job| job.job_id == job_id)
+        else {
+            return Err(format!("council {council_id} is not bound to job {job_id}"));
+        };
+        if let Some(recorded) = &job.terminal {
+            return Ok(recorded.clone());
+        }
+        job.terminal = Some(terminal.clone());
+        match store.commit(&record).await {
+            Ok(_) => return Ok(terminal),
+            Err(meerkat_mob::store::MobStoreError::CasConflict(_)) => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err(format!(
+        "council {council_id}'s record kept changing while its outcome was recorded"
+    ))
 }
 
 /// Mark the council's job settled so later restarts skip it. Best effort: a
 /// lost race leaves it unmarked, and the next re-link finds the job already
 /// delivered and marks it then.
-async fn mark_settled(state: &MobMcpState, council_id: &TemporaryCouncilId) {
+pub(crate) async fn mark_settled(state: &MobMcpState, council_id: &TemporaryCouncilId) {
     let store = state.temporary_council_store();
     for _ in 0..3 {
         let Ok(Some(mut record)) = store.load(council_id).await else {

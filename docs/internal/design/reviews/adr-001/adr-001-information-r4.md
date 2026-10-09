@@ -8,8 +8,8 @@ Reviewed on 2026-09-30 against `docs/internal/design/reviews/adr-001/candidate-r
 
 | Artifact | Lines | SHA-256 |
 | --- | --- | --- |
-| `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md` | 845 | `246ba64f62ba1cdf8022a27da0f275664dc1d4e0e4034dbe24114ab9f7f814b3` |
-| `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/governed-deployment-profiles.md` | 177 | `b2e39c432201ce3fe2f4df4f6a53e83193f0cdfdeefd22a0590c85f82c68dbe9` |
+| `(operator-retained path)/docs/internal/design/adr-001-runtime-security.md` | 845 | `246ba64f62ba1cdf8022a27da0f275664dc1d4e0e4034dbe24114ab9f7f814b3` |
+| `(operator-retained path)/docs/internal/design/governed-deployment-profiles.md` | 177 | `b2e39c432201ce3fe2f4df4f6a53e83193f0cdfdeefd22a0590c85f82c68dbe9` |
 
 This verdict concerns the pair of artifacts at these hashes. The companion is part of the reviewed contract, not optional background explanation.
 

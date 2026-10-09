@@ -269,6 +269,8 @@ of this full catalog.
 | `realm/list` | Realm | — | `WireRealmList` | List realm summaries |
 | `realm/get` | Realm | `RealmIdParams` | `WireRealmConnectionSet` | Get full realm connection set |
 
+Auth method errors (`auth/*`) carry a typed reason in `error.data.reason`, one of the closed `WireAuthErrorReason` values (for example `slot_occupied`, `account_mismatch`, `attempt_missing`, `reauth_required`, `infrastructure`). Branch on the reason, not the message text. Infrastructure failures have a fixed message.
+
 Both helper parameter types (`MobSpawnHelperParams`, `MobForkHelperParams`)
 require `result_label` and `max_text_bytes`. `MobHelperResult` is the exact
 operation carrier: `output`, `tokens_used`, `agent_identity`, `member_ref`,
@@ -2681,6 +2683,17 @@ REST/MCP config envelope.
 Replace config, optionally using generation CAS. Returns the
 [config write result](#config-write-results).
 
+<Warning>
+`config/set` replaces the realm's whole config document. The request is read
+as a typed `Config`, so every key it leaves out is written with its default.
+In a child realm each written key is the child's own override: the realm
+stops inheriting those keys from its parent, and capabilities the parent
+disabled whose defaults are on (`tools.schedule_enabled`, provider web search,
+Gemini Google search, `skills.enabled`) are enabled again. Sending back the
+`config` of a `config/get` response does the same, because that `config` has
+every default filled in. For a partial edit, use `config/patch` (below).
+</Warning>
+
 <CodeGroup>
 ```json Request
 {
@@ -2862,6 +2875,7 @@ live transport's realtime observations. See
 | `boundary_append_applied` | A durable steer's typed appends were written into the running turn at a model boundary; carries `run_id`, `input_id`, model-projected `content`, `append_count`, optional canonical `notices`, and optional application-time `transcript_start` offset |
 | `boundary_appends_discarded` | Exact discarded application facts (`session_id`, `run_id`, `input_ids`), published after any required requeue persistence succeeds |
 | `live_channel_closed` | One of the session's live channels closed; published after every committed close with `session_id`, `channel_id`, a typed `reason` (`LiveChannelCloseReason`) and `reopen_recommended` |
+| `request_reasoning_lowered` | One provider attempt of a turn that carries a reasoning-effort preference: the batch's `requested` disposition, the attempt's `baseline` effort, and the `outcome` it sent (`applied` with the level, or `not_applied` with a typed reason; absent when the batch applies no level). `turn_number` or `fallback_attempt` names the attempt |
 | `interaction_complete` | Interaction-scoped stream completed |
 | `interaction_callback_pending` | Interaction reached a callback boundary and is waiting for tool results |
 | `interaction_failed` | Interaction-scoped stream failed |

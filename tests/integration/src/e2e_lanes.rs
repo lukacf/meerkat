@@ -232,7 +232,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s82_typescript_sdk_blob_image_roundtrip, 82);
             scenario(e2e_smoke_s83_comms_multimodal_mcp_roundtrip, 83);
             scenario(e2e_smoke_s84_mob_generated_image_comms_roundtrip, 84);
-            scenario(e2e_smoke_s85_workgraph_homecore_agent_spine, 85);
+            scenario(e2e_smoke_s85_workgraph_downstream_agent_spine, 85);
             scenario(e2e_smoke_s86_mob_provider_image_relay_readout, 86);
             scenario(e2e_smoke_s87_rpc_transcript_rewrite_revision_graph, 87);
             scenario(e2e_smoke_s88_adaptive_mobpack_finish_decision_live, 88);
@@ -4991,7 +4991,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         85 => Some(&Spec {
             id: Some(85),
             lane: Lane::Smoke,
-            title: "WorkGraph Homecore agent spine",
+            title: "WorkGraph downstream agent spine",
             timeout_secs: 900,
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["cargo"],
@@ -5025,7 +5025,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
                 test_target: "smoke_shared_realm",
-                test_name: "e2e_scenario_85_workgraph_homecore_agent_spine",
+                test_name: "e2e_scenario_85_workgraph_downstream_agent_spine",
                 features: &[],
                 all_features: false,
             },
@@ -5399,6 +5399,25 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                 package: "rkat",
                 test_target: "system_cli_mcp_pending",
                 test_name: "integration_real_cli_mcp_pending_resume_journey",
+                features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
+        "cli-realm-mcp-servers" => Some(&Spec {
+            id: None,
+            lane: Lane::System,
+            title: "CLI sessions use the selected realm's own MCP servers",
+            timeout_secs: 600,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "rkat",
+                test_target: "system_cli_realm_mcp",
+                test_name: "integration_real_cli_realm_mcp_servers",
                 features: &["integration-real-tests"],
                 all_features: false,
             },

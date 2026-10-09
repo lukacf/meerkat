@@ -335,6 +335,8 @@ export type {
 } from "./generated/types.js";
 
 export { CONTRACT_VERSION } from "./generated/types.js";
+export { WIRE_AUTH_ERROR_REASONS, authErrorReason } from "./auth-errors.js";
+export type { WireAuthErrorReason } from "./generated/types.js";
 export type {
   AttentionBindingRequest,
   AttentionBindingResult,

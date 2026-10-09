@@ -203,6 +203,8 @@ impl AdmittedWorkPolicyOwner for Admitted {
 struct Resources {
     relation: ExactOperationRelation,
     unknown: AtomicBool,
+    /// Owner-resolved review tier, changed only under the publication.
+    review_tier: Mutex<meerkat_core::authorization::OperationReviewTier>,
 }
 impl OperationPolicyOwner for Resources {
     fn authorize_operation(
@@ -266,6 +268,7 @@ impl OperationPolicyOwner for Resources {
             operation_values: actual,
             restrictions,
             expires_at_ms: 800,
+            review_tier: *self.review_tier.lock().expect("review tier"),
         })
     }
 }
@@ -400,6 +403,7 @@ impl Fixture {
                 tuple("web_search", "web"),
             ]),
             unknown: AtomicBool::new(false),
+            review_tier: Mutex::new(meerkat_core::authorization::OperationReviewTier::R1),
         });
         (
             Arc::new(GrantBackedWorkPolicy::new(

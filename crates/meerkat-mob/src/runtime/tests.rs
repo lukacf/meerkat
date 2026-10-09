@@ -1674,6 +1674,13 @@ struct CreateSessionRecord {
     /// over the durable identity's (`ResumeOverrideMask::provider_params`).
     provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     provider_params_masked: bool,
+    /// The deny names of the build's declared tool restriction.
+    declared_deny: BTreeSet<String>,
+    /// Whether the build carries the host's consequence-policy registry, and
+    /// whether a resume build carries its application policy over the durable
+    /// binding (`ResumeOverrideMask::application_tool_policy`).
+    has_policy_registry: bool,
+    application_tool_policy_masked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3809,6 +3816,26 @@ impl MockSessionService {
                     .build
                     .as_ref()
                     .is_some_and(|build| build.resume_override_mask.provider_params),
+                declared_deny: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.declared_tool_restriction.as_ref())
+                    .map(|restriction| {
+                        restriction
+                            .deny
+                            .iter()
+                            .map(|name| name.as_str().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                has_policy_registry: req
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.tool_consequence_policy_registry.is_some()),
+                application_tool_policy_masked: req
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.resume_override_mask.application_tool_policy),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -5955,6 +5982,7 @@ impl FaultInjectedMobEventStore {
             MobEventKind::RespawnTopologyAbandoned { .. } => "RespawnTopologyAbandoned",
             MobEventKind::MemberReset { .. } => "MemberReset",
             MobEventKind::MemberSessionBindingRecovered(..) => "MemberSessionBindingRecovered",
+            MobEventKind::ForkJobTerminal(..) => "ForkJobTerminal",
             MobEventKind::MemberKickoffUpdated { .. } => "MemberKickoffUpdated",
             MobEventKind::ObjectiveOwnerBound { .. } => "ObjectiveOwnerBound",
             MobEventKind::ObjectiveConcluded { .. } => "ObjectiveConcluded",
@@ -15221,7 +15249,7 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
         request_id: crate::identity::IdentityAdoptionId::new("adopt-worker-1")
             .expect("valid adoption id"),
         precondition: crate::identity::IdentityAdoptionPrecondition::ExpectedAbsent,
-        declaration_scope: crate::identity::IdentityDeclarationScopeId::new("homecore-policy")
+        declaration_scope: crate::identity::IdentityDeclarationScopeId::new("example-policy")
             .expect("valid declaration scope"),
         declaration_revision: 1,
         session: crate::identity::DesiredSessionTarget {
@@ -15438,7 +15466,7 @@ async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_p
     let member = AgentIdentity::from("worker-persisted-prompt");
     let stale_prompt = "stale prompt with retired private context";
     let intermediate_prompt = "intermediate unkeyed prompt";
-    let persisted_prompt = "HomeCore current agent-specific persisted prompt";
+    let persisted_prompt = "Current agent-specific persisted prompt";
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let initial = service
@@ -15513,7 +15541,7 @@ async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_p
         request_id: crate::identity::IdentityAdoptionId::new("adopt-persisted-prompt")
             .expect("valid adoption id"),
         precondition: crate::identity::IdentityAdoptionPrecondition::ExpectedAbsent,
-        declaration_scope: crate::identity::IdentityDeclarationScopeId::new("homecore")
+        declaration_scope: crate::identity::IdentityDeclarationScopeId::new("example")
             .expect("valid declaration scope"),
         declaration_revision: 1,
         session: crate::identity::DesiredSessionTarget {
@@ -22132,8 +22160,8 @@ async fn test_rotate_supervisor_final_commit_failure_preserves_attempted_authori
     assert_eq!(retried.public_peer_id, attempted_public_peer_id);
 }
 
-/// Regression (OB3): the mob actor serves other commands while one spawn's
-/// supervisor private-trust install is parked. OB3 saw a mob-phase query and
+/// Regression (production): the mob actor serves other commands while one spawn's
+/// supervisor private-trust install is parked. A production deployment saw a mob-phase query and
 /// five spawns go unserved for 70 s behind one `finalize_spawn_admit` whose
 /// trust stage awaited a slow member runtime on the actor. The install now
 /// runs off the actor with the spawn's endpoint observation; finalize
@@ -24026,6 +24054,352 @@ async fn test_register_tool_bundle_is_wired_into_spawn() {
     assert_eq!(payload["echo"], "hello");
 }
 
+/// A host Rust bundle's tools carry the bundle's identity once a member
+/// mounts it, so that member's visible tools can be handed on as a
+/// witnessed ceiling (profile, minimal and inherit tooling); a visible tool
+/// with no source identity at all is still refused.
+#[tokio::test]
+async fn a_mounted_rust_bundle_carries_its_identity_into_a_witnessed_ceiling() {
+    use meerkat_core::tool_scope::{
+        ToolFilter, filter_witnesses_for_tool_defs, validate_witnessed_filter_authority,
+    };
+    use meerkat_core::types::{ToolProvenance, ToolSourceId, ToolSourceKind};
+
+    let (handle, _service) = create_test_mob(sample_definition_with_tool_bundle("bundle-a")).await;
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .and_then(|b| b.as_inline().cloned())
+        .expect("worker profile");
+    let bundles = BTreeMap::from([(
+        "bundle-a".to_string(),
+        Arc::new(EchoBundleDispatcher) as Arc<dyn AgentToolDispatcher>,
+    )]);
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &bundles,
+        handle.clone(),
+        None,
+        None,
+        None,
+    )
+    .expect("compose dispatcher")
+    .expect("the bundle mounts");
+    let defs: Vec<meerkat_core::ToolDef> = composed
+        .tools()
+        .iter()
+        .map(|tool| tool.as_ref().clone())
+        .collect();
+    let echo = defs
+        .iter()
+        .find(|tool| tool.name.as_str() == "bundle_echo")
+        .expect("the bundle tool is visible");
+    assert_eq!(
+        echo.provenance,
+        Some(ToolProvenance {
+            kind: ToolSourceKind::RustBundle,
+            source_id: ToolSourceId::new("bundle-a"),
+        }),
+        "the mounted bundle tool carries its bundle's identity"
+    );
+    let catalog = composed.tool_catalog();
+    assert_eq!(
+        catalog
+            .iter()
+            .find(|entry| entry.tool.name.as_str() == "bundle_echo")
+            .and_then(|entry| entry.tool.provenance.clone()),
+        echo.provenance.clone(),
+        "the catalog and the tool list agree on the identity"
+    );
+
+    let ceiling = ToolFilter::Allow(defs.iter().map(|tool| tool.name.to_string()).collect());
+    let witnesses = filter_witnesses_for_tool_defs(&defs, &ceiling);
+    validate_witnessed_filter_authority(&ceiling, &witnesses)
+        .expect("every visible tool, the bundle's included, is witnessed");
+
+    let mut with_anonymous = defs.clone();
+    with_anonymous.push(meerkat_core::ToolDef {
+        name: "anonymous".into(),
+        description: "A tool with no source identity".to_string(),
+        input_schema: serde_json::Value::Object(serde_json::Map::new()),
+        provenance: None,
+    });
+    let ceiling = ToolFilter::Allow(
+        with_anonymous
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect(),
+    );
+    let witnesses = filter_witnesses_for_tool_defs(&with_anonymous, &ceiling);
+    assert!(
+        validate_witnessed_filter_authority(&ceiling, &witnesses).is_err(),
+        "a visible tool with no source identity is still refused"
+    );
+}
+
+fn worker_profile_mounting_bundle(handle: &MobHandle) -> crate::profile::Profile {
+    handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .and_then(|b| b.as_inline().cloned())
+        .expect("worker profile")
+}
+
+fn rust_bundle_provenance(bundle: &str) -> meerkat_core::types::ToolProvenance {
+    meerkat_core::types::ToolProvenance {
+        kind: meerkat_core::types::ToolSourceKind::RustBundle,
+        source_id: meerkat_core::types::ToolSourceId::new(bundle),
+    }
+}
+
+/// A bundle tool that already names another source keeps it: the bundle's
+/// name proves nothing about the tool, and a witness that claims the mounting
+/// bundle for it is refused by the ordinary witness check against the catalog.
+#[tokio::test]
+async fn a_rust_bundle_keeps_a_tools_explicit_owner() {
+    use meerkat_core::tool_scope::{
+        ToolFilter, ToolScopeStageError, filter_witnesses_for_tool_defs,
+        validate_filter_witnesses_match_catalog,
+    };
+
+    struct ExplicitlyOwned;
+    #[async_trait]
+    impl AgentToolDispatcher for ExplicitlyOwned {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            vec![Arc::new(meerkat_core::ToolDef {
+                name: "owned_elsewhere".into(),
+                description: "names its own source".to_string(),
+                input_schema: serde_json::Value::Object(serde_json::Map::new()),
+                provenance: Some(rust_bundle_provenance("bundle-b")),
+            })]
+            .into()
+        }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    let (handle, _service) = create_test_mob(sample_definition_with_tool_bundle("bundle-a")).await;
+    let profile = worker_profile_mounting_bundle(&handle);
+    let bundles = BTreeMap::from([(
+        "bundle-a".to_string(),
+        Arc::new(ExplicitlyOwned) as Arc<dyn AgentToolDispatcher>,
+    )]);
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &bundles,
+        handle.clone(),
+        None,
+        None,
+        None,
+    )
+    .expect("a bundle may expose a tool another source owns")
+    .expect("the bundle mounts");
+    let defs: Vec<meerkat_core::ToolDef> = composed
+        .tools()
+        .iter()
+        .map(|tool| tool.as_ref().clone())
+        .collect();
+    let owned = defs
+        .iter()
+        .find(|tool| tool.name.as_str() == "owned_elsewhere")
+        .expect("the tool is visible");
+    assert_eq!(
+        owned.provenance,
+        Some(rust_bundle_provenance("bundle-b")),
+        "the explicit owner is kept"
+    );
+    assert_eq!(
+        composed
+            .tool_catalog()
+            .iter()
+            .find(|entry| entry.tool.name.as_str() == "owned_elsewhere")
+            .and_then(|entry| entry.tool.provenance.clone()),
+        Some(rust_bundle_provenance("bundle-b")),
+        "the catalog keeps the explicit owner too"
+    );
+
+    let ceiling = ToolFilter::Allow(defs.iter().map(|tool| tool.name.to_string()).collect());
+    let catalog = filter_witnesses_for_tool_defs(&defs, &ceiling);
+    validate_filter_witnesses_match_catalog(&ceiling, &catalog, &catalog)
+        .expect("the owner's own witness matches");
+
+    let mut claimed = owned.clone();
+    claimed.provenance = Some(rust_bundle_provenance("bundle-a"));
+    let claimed_witnesses = filter_witnesses_for_tool_defs(&[claimed], &ceiling);
+    let refused = validate_filter_witnesses_match_catalog(&ceiling, &claimed_witnesses, &catalog);
+    assert!(
+        matches!(
+            &refused,
+            Err(ToolScopeStageError::InvalidFilterWitnesses { names })
+                if names.iter().any(|name| name.as_str() == "owned_elsewhere")
+        ),
+        "a witness naming a different source is refused: {refused:?}"
+    );
+}
+
+/// A tool whose catalog entry names a deferred owner carries that owner in
+/// both the tool list and the catalog, never the mounting bundle's identity.
+#[tokio::test]
+async fn a_rust_bundle_keeps_a_deferred_tools_catalog_owner() {
+    struct DeferredOwned;
+    impl DeferredOwned {
+        fn tool() -> Arc<meerkat_core::ToolDef> {
+            Arc::new(meerkat_core::ToolDef {
+                name: "deferred_tool".into(),
+                description: "loaded on demand".to_string(),
+                input_schema: serde_json::Value::Object(serde_json::Map::new()),
+                provenance: None,
+            })
+        }
+    }
+    #[async_trait]
+    impl AgentToolDispatcher for DeferredOwned {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            vec![Self::tool()].into()
+        }
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            vec![meerkat_core::ToolCatalogEntry::session_deferred(
+                Self::tool(),
+                true,
+                rust_bundle_provenance("owner-b"),
+            )]
+            .into()
+        }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    let mounted = super::tools::BundleProvenanceDispatcher::mount(
+        Arc::new(DeferredOwned) as Arc<dyn AgentToolDispatcher>,
+        "bundle-a",
+    );
+    let tools = mounted.tools();
+    assert_eq!(
+        tools[0].provenance,
+        Some(rust_bundle_provenance("owner-b")),
+        "the tool list carries the catalog's deferred owner"
+    );
+    let catalog = mounted.tool_catalog();
+    assert_eq!(
+        catalog[0].tool.provenance,
+        Some(rust_bundle_provenance("owner-b")),
+        "the catalog entry's tool carries its deferred owner"
+    );
+    assert!(
+        matches!(
+            &catalog[0].deferred_eligibility,
+            meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { provenance }
+                if *provenance == rust_bundle_provenance("owner-b")
+        ),
+        "the deferred owner is unchanged: {:?}",
+        catalog[0].deferred_eligibility
+    );
+}
+
+/// The identity a bundle is mounted under is part of each tool's execution
+/// binding: one dispatcher mounted as two bundles binds differently.
+#[tokio::test]
+async fn one_dispatcher_mounted_as_two_bundles_binds_differently() {
+    let inner = Arc::new(EchoBundleDispatcher) as Arc<dyn AgentToolDispatcher>;
+    let as_a = super::tools::BundleProvenanceDispatcher::mount(Arc::clone(&inner), "bundle-a");
+    let as_b = super::tools::BundleProvenanceDispatcher::mount(inner, "bundle-b");
+    let fingerprint_a = as_a
+        .execution_binding_fingerprint("bundle_echo")
+        .expect("bundle-a binding");
+    let fingerprint_b = as_b
+        .execution_binding_fingerprint("bundle_echo")
+        .expect("bundle-b binding");
+    assert_ne!(fingerprint_a, fingerprint_b);
+    assert_eq!(
+        fingerprint_a,
+        as_a.execution_binding_fingerprint("bundle_echo")
+            .expect("bundle-a binding again"),
+        "the binding is stable for one mount"
+    );
+}
+
+/// A bundle whose catalog starts empty stays live once mounted: a tool it
+/// adds later is visible and carries the bundle's identity.
+#[tokio::test]
+async fn a_live_rust_bundle_attributes_tools_it_adds_later() {
+    struct LiveBundle {
+        tools: std::sync::Mutex<Vec<Arc<meerkat_core::ToolDef>>>,
+    }
+    #[async_trait]
+    impl AgentToolDispatcher for LiveBundle {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            self.tools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .into()
+        }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    let (handle, _service) = create_test_mob(sample_definition_with_tool_bundle("bundle-a")).await;
+    let profile = worker_profile_mounting_bundle(&handle);
+    let live = Arc::new(LiveBundle {
+        tools: std::sync::Mutex::new(Vec::new()),
+    });
+    let bundles = BTreeMap::from([(
+        "bundle-a".to_string(),
+        Arc::clone(&live) as Arc<dyn AgentToolDispatcher>,
+    )]);
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &bundles,
+        handle.clone(),
+        None,
+        None,
+        None,
+    )
+    .expect("compose dispatcher")
+    .expect("an empty bundle still mounts");
+    assert!(
+        !composed
+            .tools()
+            .iter()
+            .any(|tool| tool.name.as_str() == "late_tool"),
+        "nothing is visible before the bundle adds it"
+    );
+
+    live.tools
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(Arc::new(meerkat_core::ToolDef {
+            name: "late_tool".into(),
+            description: "added after mount".to_string(),
+            input_schema: serde_json::Value::Object(serde_json::Map::new()),
+            provenance: None,
+        }));
+
+    assert_eq!(
+        composed
+            .tools()
+            .iter()
+            .find(|tool| tool.name.as_str() == "late_tool")
+            .and_then(|tool| tool.provenance.clone()),
+        Some(rust_bundle_provenance("bundle-a")),
+        "the added tool is visible with the bundle's identity"
+    );
+    assert_eq!(
+        composed
+            .tool_catalog()
+            .iter()
+            .find(|entry| entry.tool.name.as_str() == "late_tool")
+            .and_then(|entry| entry.tool.provenance.clone()),
+        Some(rust_bundle_provenance("bundle-a")),
+        "the catalog sees the added tool with the same identity"
+    );
+}
+
 #[tokio::test]
 async fn test_spawn_fails_when_tool_bundle_not_registered() {
     let definition = sample_definition_with_tool_bundle("missing-bundle");
@@ -24635,7 +25009,7 @@ async fn test_coarse_spawn_tool_admission_is_machine_routed() {
     );
 }
 
-/// Regression (HomeCore): the member granted fork_off could not observe or
+/// Regression (downstream app): the member granted fork_off could not observe or
 /// retire its own children ("not allowed by policy" on member_status and
 /// list_members), because every per-member tool required manage scope over
 /// the whole mob. A member now sees and retires the members it spawned, and
@@ -25425,6 +25799,7 @@ async fn a_caller_turn_fork_refuses_a_job_bound_to_another_session() {
             Some(ForkJobBinding {
                 job_id: "job-bound-elsewhere".to_string(),
                 owner_session_id: elsewhere.clone(),
+                retained_work: None,
             }),
         )
         .await;
@@ -25462,6 +25837,7 @@ async fn a_caller_turn_fork_refuses_a_job_bound_to_another_session() {
             Some(ForkJobBinding {
                 job_id: "job-bound-to-the-source".to_string(),
                 owner_session_id: own_session,
+                retained_work: None,
             }),
         )
         .await
@@ -25508,6 +25884,7 @@ async fn a_caller_turn_fork_checks_the_job_owner_against_the_admitted_source_ses
                     Some(ForkJobBinding {
                         job_id: "job-bound-before-the-respawn".to_string(),
                         owner_session_id: old_session,
+                        retained_work: None,
                     }),
                 )
                 .await
@@ -25691,6 +26068,7 @@ fn a_fork_jobs_durable_reply_skips_nested_job_completion_records() {
         result_label: "fork_off_result".to_string(),
         max_text_bytes: 4096,
         turn_delivery: None,
+        retained_work: None,
     };
     let reply_of = |own_exchange: Vec<Message>| {
         let mut session = meerkat_core::Session::new();
@@ -26760,7 +27138,7 @@ fn bounded_fork_child_spec(child_identity: &AgentIdentity) -> SpawnMemberSpec {
     child
 }
 
-/// Regression (HomeCore fork_off): a fork child whose exact turn fails was
+/// Regression (downstream fork_off): a fork child whose exact turn fails was
 /// left seated and running with no one observing it. The failed run now
 /// retires the child before the error reaches the caller.
 #[tokio::test]
@@ -26797,7 +27175,7 @@ async fn fork_member_then_run_bounded_retires_child_when_its_turn_fails() {
     );
 }
 
-/// Regression (HomeCore fork_off, calls a and i): the agent loop's default
+/// Regression (downstream fork_off): the agent loop's default
 /// tool deadline ended the forker's wait and left the child in limbo. A
 /// detached fork returns once the child's turn is admitted, and nothing the
 /// caller does with the run handle affects the child: there is no implicit
@@ -26931,7 +27309,7 @@ async fn fork_member_then_run_detached_reports_completion_and_records_the_spawne
 // ---------------------------------------------------------------------------
 
 /// A per-spawn overlay with fixed tool names, standing in for a host's local
-/// tools (HomeCore's calendar tools, MobKit's per-spawn `memory` recorder).
+/// tools (a downstream app's calendar tools, MobKit's per-spawn `memory` recorder).
 struct FixedOverlayTools(Vec<&'static str>);
 
 #[async_trait]
@@ -27075,7 +27453,7 @@ async fn assert_child_built_as_source(
     );
 }
 
-/// Regression (HomeCore run-32): a `fork_off` child of `domain:calendar` was
+/// Regression (downstream run): a `fork_off` child of `domain:calendar` was
 /// built with bare mob labels, no application context and no per-spawn
 /// overlay, so its host built a generic member (92 of calendar's 150 tools).
 /// The `fork_off` composition (caller-turn detached fork) seats the child with
@@ -27396,6 +27774,52 @@ async fn revived_member_keeps_its_context_and_its_forks_inherit_it() {
             .app_context,
         Some(fork_source_app_context()),
         "a fork of the revived source inherits the source's original context"
+    );
+}
+
+/// Warm revival forwards the host's current consequence-policy registry and
+/// makes no policy choice of its own: the member keeps its durable binding,
+/// which only that registry can realize.
+#[tokio::test]
+async fn warm_revival_forwards_the_policy_registry_without_a_policy_choice() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let registry = Arc::new(
+        meerkat_core::ToolConsequencePolicyRegistry::new(
+            Vec::new(),
+            meerkat_core::PolicyEvaluationSupervisorConfig::default(),
+            None,
+        )
+        .expect("empty policy registry"),
+    );
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_tool_consequence_policy_registry(registry)
+        .create()
+        .await
+        .expect("create mob");
+    let identity = AgentIdentity::from("revived-under-registry");
+    let session = spawn_fork_source_with_build_inputs(&handle, &identity).await;
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard the member's live session");
+    handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("warm revival rebuilds the member");
+    wait_for_fork_source_settled(&handle, &session).await;
+    let revived = last_member_build(&service, &identity).await;
+    assert_eq!(revived.resume_session_id.as_ref(), Some(&session));
+    assert!(
+        revived.has_policy_registry,
+        "the revived build carries the host's current registry"
+    );
+    assert!(
+        !revived.application_tool_policy_masked,
+        "warm revival keeps the member's durable policy binding"
     );
 }
 
@@ -27775,7 +28199,7 @@ async fn caller_turn_fork_on_a_service_without_durable_fork_fails_fast_mid_turn(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), turn).await;
 }
 
-/// Regression (OB3 spawn stall): while a member's turn runs (here, held open
+/// Regression (the spawn stall): while a member's turn runs (here, held open
 /// as a coordinator's spawn tool call would hold it), a command parked on that
 /// member's session task (it serves none until the turn ends) must not hold
 /// the session service's map. A new member's spawn creates its session through
@@ -27804,7 +28228,7 @@ async fn spawn_completes_while_a_member_turn_runs_with_a_command_parked_on_it() 
         .create()
         .await
         .expect("create an ephemeral-backed mob");
-    let coordinator = AgentIdentity::from("ob3-coordinator");
+    let coordinator = AgentIdentity::from("ops-coordinator");
     let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), coordinator.clone());
     spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     handle
@@ -27849,7 +28273,7 @@ async fn spawn_completes_while_a_member_turn_runs_with_a_command_parked_on_it() 
         "the coordinator's task is busy with its turn"
     );
 
-    let worker = AgentIdentity::from("ob3-review-worker");
+    let worker = AgentIdentity::from("ops-review-worker");
     let mut worker_spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
     worker_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     tokio::time::timeout(
@@ -27981,7 +28405,7 @@ fn names(tools: &[&str]) -> Vec<String> {
 /// restored after a restart or an explicit resume was rebuilt with its
 /// source's overlay, but the overlay retained for it was the customizer's
 /// overlay for C's own identity. A grandchild G forked from C was then seated
-/// with generic tools (the original HomeCore bug one level down), and every
+/// with generic tools (the original downstream bug one level down), and every
 /// later rebuild of G repeated that. C's retained overlay is the one it was
 /// rebuilt with, so G is built with its root source's tools, byte for byte,
 /// and survives a second restart with them.
@@ -34836,6 +35260,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 agent_identity: &member_identity,
                 profile,
                 definition: &definition,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
@@ -46934,7 +47359,7 @@ async fn test_force_cancel_member_routes_boundary_cancel_without_retiring_member
         .expect("release blocked force-cancel test turn");
 }
 
-/// Defect regression (HomeCore report, defect C): the operator remedy for a
+/// Defect regression (downstream report, defect C): the operator remedy for a
 /// wedged run must itself never wedge. Force-cancel of a member whose turn is
 /// mid-provider-call (a `start_turn` that never completes) must transition and
 /// interrupt, and a second force-cancel while the first cancellation is still
@@ -57810,7 +58235,7 @@ async fn create_realm_session_for_test(
 /// session's metadata is read exactly once) and reports progress per scanned
 /// session. A scan whose total duration exceeds the inactivity watchdog
 /// therefore completes instead of failing `LifecycleOperationProgressStalled`
-/// the way the HomeCore cold boot did.
+/// the way a production cold boot did.
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
 async fn explicit_resume_successor_scan_reports_progress_and_scans_realm_once() {
@@ -57952,7 +58377,7 @@ async fn no_op_machine_input_does_not_publish_machine_state() {
 
 /// A two-member crew, stopped and crash-stopped, reconstructed for a cold
 /// explicit Resume against the SAME session service and runtime adapter (the
-/// HomeCore boot shape for #1251).
+/// production boot shape for #1251).
 #[cfg(feature = "runtime-adapter")]
 async fn cold_resume_crew_for_test(
     names: &[&str],
@@ -73555,9 +73980,9 @@ impl SpawnMemberCustomizer for ResumeRoleMigrationCustomizer {
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
         if ctx.spawn_source == SpawnSource::Resume
-            && spec.identity.as_str() == "mk--rt_cdomain_chome-automation_c0"
+            && spec.identity.as_str() == "mk--rt_cdomain_cautomation_c0"
         {
-            if ctx.requested_profile.as_str() != "home-automation" {
+            if ctx.requested_profile.as_str() != "automation" {
                 return Err(MobError::Internal(format!(
                     "unexpected migration target profile '{}'",
                     ctx.requested_profile
@@ -73565,8 +73990,8 @@ impl SpawnMemberCustomizer for ResumeRoleMigrationCustomizer {
             }
             spec.declare_resume_from_role("domain")?;
             spec.context = Some(serde_json::json!({
-                "homecore_profile": "home-automation",
-                "identity": "domain:home-automation",
+                "example_profile": "automation",
+                "identity": "domain:automation",
             }));
             self.called.store(true, Ordering::SeqCst);
         }
@@ -73594,7 +74019,7 @@ fn role_migration_definition(mob_id: &str) -> MobDefinition {
         .insert(ProfileName::from("domain"), predecessor);
     definition
         .profiles
-        .insert(ProfileName::from("home-automation"), target);
+        .insert(ProfileName::from("automation"), target);
     definition
 }
 
@@ -73612,12 +74037,12 @@ async fn role_migration_refuses_an_exact_live_session_even_when_idle() {
     predecessor
         .spawn_spec(SpawnMemberSpec::new(
             "domain",
-            "mk--rt_cdomain_chome-automation_c0",
+            "mk--rt_cdomain_cautomation_c0",
         ))
         .await
         .expect("spawn predecessor member");
     let session_id = predecessor
-        .resolve_bridge_session_id(&AgentIdentity::from("mk--rt_cdomain_chome-automation_c0"))
+        .resolve_bridge_session_id(&AgentIdentity::from("mk--rt_cdomain_cautomation_c0"))
         .await
         .expect("predecessor session");
     crash_stop_and_release_routes(predecessor).await;
@@ -73639,7 +74064,7 @@ async fn role_migration_refuses_an_exact_live_session_even_when_idle() {
         .expect("create successor mob");
     let error = successor
         .spawn_spec(
-            SpawnMemberSpec::new("home-automation", "mk--rt_cdomain_chome-automation_c0")
+            SpawnMemberSpec::new("automation", "mk--rt_cdomain_cautomation_c0")
                 .with_resume_bridge_session_id(session_id),
         )
         .await
@@ -73657,7 +74082,7 @@ async fn role_migration_refuses_an_exact_live_session_even_when_idle() {
 
 /// The adopter-shaped regression: an existing durable member was created as
 /// `domain` with shell disabled, then a new activation resumes the same exact
-/// mob/member/session as `home-automation` with shell enabled. The one-shot
+/// mob/member/session as `automation` with shell enabled. The one-shot
 /// declaration must survive the public Resume customizer round trip, reach the
 /// real resumed build, and keep the target role/tooling at the AgentFactory
 /// boundary.
@@ -73672,21 +74097,21 @@ async fn resume_customizer_carries_exact_role_migration_into_cold_build() {
         .create()
         .await
         .expect("create predecessor mob");
-    let mut predecessor_spec = SpawnMemberSpec::new("domain", "mk--rt_cdomain_chome-automation_c0");
+    let mut predecessor_spec = SpawnMemberSpec::new("domain", "mk--rt_cdomain_cautomation_c0");
     predecessor_spec.labels = Some(BTreeMap::from([(
         "identity".to_string(),
-        "domain:home-automation".to_string(),
+        "domain:automation".to_string(),
     )]));
     predecessor_spec.context = Some(serde_json::json!({
-        "homecore_profile": "domain",
-        "identity": "domain:home-automation",
+        "example_profile": "domain",
+        "identity": "domain:automation",
     }));
     predecessor
         .spawn_spec(predecessor_spec)
         .await
         .expect("spawn predecessor member");
     let session_id = predecessor
-        .resolve_bridge_session_id(&AgentIdentity::from("mk--rt_cdomain_chome-automation_c0"))
+        .resolve_bridge_session_id(&AgentIdentity::from("mk--rt_cdomain_cautomation_c0"))
         .await
         .expect("predecessor session");
     // Model an actual process restart: copy only durable session state into a
@@ -73710,7 +74135,7 @@ async fn resume_customizer_carries_exact_role_migration_into_cold_build() {
         .expect("create successor mob");
     successor
         .spawn_spec(
-            SpawnMemberSpec::new("home-automation", "mk--rt_cdomain_chome-automation_c0")
+            SpawnMemberSpec::new("automation", "mk--rt_cdomain_cautomation_c0")
                 .with_resume_bridge_session_id(session_id.clone()),
         )
         .await
@@ -73722,7 +74147,7 @@ async fn resume_customizer_carries_exact_role_migration_into_cold_build() {
     );
     assert_eq!(
         successor
-            .resolve_bridge_session_id(&AgentIdentity::from("mk--rt_cdomain_chome-automation_c0",))
+            .resolve_bridge_session_id(&AgentIdentity::from("mk--rt_cdomain_cautomation_c0",))
             .await
             .expect("successor session"),
         session_id,
@@ -73737,30 +74162,30 @@ async fn resume_customizer_carries_exact_role_migration_into_cold_build() {
         .expect("resumed build request");
     assert_eq!(
         request.comms_name.as_deref(),
-        Some("role-migration-cold/home-automation/mk--rt_cdomain_chome-automation_c0")
+        Some("role-migration-cold/automation/mk--rt_cdomain_cautomation_c0")
     );
     assert_eq!(
         request.mob_member_binding,
         Some(meerkat_core::MobMemberBinding {
             mob_id: "role-migration-cold".to_string(),
-            role: "home-automation".to_string(),
-            member: "mk--rt_cdomain_chome-automation_c0".to_string(),
+            role: "automation".to_string(),
+            member: "mk--rt_cdomain_cautomation_c0".to_string(),
         })
     );
     assert_eq!(
         request.peer_meta_labels.get("role").map(String::as_str),
-        Some("home-automation")
+        Some("automation")
     );
     assert_eq!(
         request
             .peer_meta_labels
             .get("profile_name")
             .map(String::as_str),
-        Some("home-automation")
+        Some("automation")
     );
     assert_eq!(
         request.peer_meta_labels.get("identity").map(String::as_str),
-        Some("domain:home-automation"),
+        Some("domain:automation"),
         "the adopter-owned raw identity label must survive beside the encoded transport identity"
     );
     assert_eq!(
@@ -73768,13 +74193,13 @@ async fn resume_customizer_carries_exact_role_migration_into_cold_build() {
             .peer_meta_labels
             .get("agent_identity")
             .map(String::as_str),
-        Some("mk--rt_cdomain_chome-automation_c0")
+        Some("mk--rt_cdomain_cautomation_c0")
     );
     assert_eq!(
         request.app_context,
         Some(serde_json::json!({
-            "homecore_profile": "home-automation",
-            "identity": "domain:home-automation",
+            "example_profile": "automation",
+            "identity": "domain:automation",
         })),
         "Meerkat must persist the current callback-owned context, never rewrite or restore the opaque predecessor profile"
     );
@@ -87515,6 +87940,11 @@ fn placement_fixture_uses_local_mob_authority_types() {
         "shared unit fixtures must not import the separately compiled self-dev-dependency",
     );
 }
+/// #1497 member continuations resolve through the mob roster.
+#[cfg(not(target_arch = "wasm32"))]
+mod continuation_resolver;
+/// #1497 fork job terminals are committed once and validated on every read.
+mod fork_job_terminal;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod host_outage_recovery;
 /// Member-level safe-boundary instruction activation on real persistent
@@ -87728,4 +88158,122 @@ async fn reclaimed_retained_actor_competitor_handles_are_refused_typed() {
         "competitor handles refused",
     )
     .await;
+}
+
+/// The deny the role `worker` gains after its members were first spawned.
+const ADDED_DENY: [&str; 2] = ["spawn_member", "wire_members"];
+
+/// Spawn `member` on `worker` (with `snapshot` as its `override_profile`
+/// when given), then add [`ADDED_DENY`] to the role and restart the mob from
+/// the same storage, stopped first when `stop_first` (so an explicit resume
+/// rebuilds it). Returns the service, the restarted handle and the member's
+/// first build.
+async fn spawn_then_add_role_deny_and_restart(
+    member: &AgentIdentity,
+    snapshot: bool,
+    stop_first: bool,
+) -> (Arc<MockSessionService>, MobHandle, CreateSessionRecord) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let restart_storage = MobStorage::with_events_and_runtime_metadata(
+        storage.events.clone(),
+        storage.runtime_metadata.clone(),
+    );
+    let mut definition = sample_definition();
+    let worker = definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("inline worker profile");
+    worker.tools.mob = true;
+    worker.tools.deny.clear();
+    let snapshot_profile = worker.clone();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec.override_profile = snapshot.then_some(snapshot_profile);
+    handle.spawn_spec(spec).await.expect("spawn");
+    let first = last_member_build(&service, member).await;
+    let session = handle
+        .resolve_bridge_session_id(member)
+        .await
+        .expect("session");
+    // The author adds the deny to the definition, applied below while the
+    // mob is down.
+    let mut updated = (*handle.definition()).clone();
+    updated
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("inline worker profile")
+        .tools
+        .deny = ADDED_DENY.iter().map(|name| (*name).to_string()).collect();
+    if stop_first {
+        handle.stop().await.expect("stop");
+    }
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard");
+    crash_stop_and_release_routes(handle).await;
+    restart_storage
+        .update_definition(1, updated)
+        .await
+        .expect("the author adds the deny to the stored definition");
+    let resumed = MobBuilder::for_resume(restart_storage)
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume");
+    if stop_first {
+        resumed.resume().await.expect("explicit resume");
+    }
+    (service, resumed, first)
+}
+
+fn added_deny() -> BTreeSet<String> {
+    ADDED_DENY.iter().map(|name| (*name).to_string()).collect()
+}
+
+/// 0.8.52 deny-on-resume: a member spawned on a profile snapshot that
+/// predates the role's deny is rebuilt with the role's current deny, on
+/// restart restore and on explicit resume.
+#[tokio::test]
+async fn snapshot_member_rebuild_declares_the_roles_added_deny() {
+    for stop_first in [false, true] {
+        let member = AgentIdentity::from("snapshot-worker");
+        let (service, resumed, first) =
+            spawn_then_add_role_deny_and_restart(&member, true, stop_first).await;
+        assert!(first.declared_deny.is_empty(), "seated before the deny");
+        let rebuilt = last_member_build(&service, &member).await;
+        assert!(
+            rebuilt.resume_session_id.is_some(),
+            "the member is rebuilt (explicit resume: {stop_first})"
+        );
+        assert_eq!(
+            rebuilt.declared_deny,
+            added_deny(),
+            "the rebuild declares the role's added deny (explicit resume: {stop_first})"
+        );
+        crash_stop_and_release_routes(resumed).await;
+    }
+}
+
+/// Control: a member without a snapshot is rebuilt from the role's current
+/// profile anyway, and declares the same deny.
+#[tokio::test]
+async fn member_without_snapshot_rebuild_declares_the_roles_added_deny() {
+    let member = AgentIdentity::from("plain-worker");
+    let (service, resumed, first) =
+        spawn_then_add_role_deny_and_restart(&member, false, false).await;
+    assert!(first.declared_deny.is_empty());
+    assert_eq!(
+        last_member_build(&service, &member).await.declared_deny,
+        added_deny()
+    );
+    crash_stop_and_release_routes(resumed).await;
 }

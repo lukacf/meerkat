@@ -2828,7 +2828,7 @@ mod tests {
     fn test_wire_session_history_exposes_system_message_identity() {
         let system = SystemMessage::with_identity(
             "new instruction",
-            Some("homecore".to_string()),
+            Some("example".to_string()),
             Some("instruction-17".to_string()),
         );
         let page = SessionHistoryPage {
@@ -2850,7 +2850,7 @@ mod tests {
                     }),
                 ..
             } => {
-                assert_eq!(source.as_deref(), Some("homecore"));
+                assert_eq!(source.as_deref(), Some("example"));
                 assert_eq!(idempotency_key.as_deref(), Some("instruction-17"));
             }
             other => panic!("expected System identity, got {other:?}"),

@@ -82,6 +82,12 @@ pub enum AuditTarget {
         range: meerkat_core::memory::MessageRange,
         usage: AuditSourceUse,
     },
+    RuntimeInput {
+        owner_session_id: SessionId,
+        runtime_epoch_id: meerkat_core::RuntimeEpochId,
+        input_id: InputId,
+        usage: AuditSourceUse,
+    },
     ExternalSource {
         resource: ResourceRef,
         usage: AuditSourceUse,
@@ -133,6 +139,10 @@ pub struct AuditPolicyRead {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuditObservation {
+    /// Historical candidate-to-attempt join, staged before review operations.
+    ReviewAttemptStarted {
+        attempt_ref: String,
+    },
     Prepared {
         target: Arc<AuditTarget>,
         policy: AuditPolicyRead,
@@ -162,7 +172,26 @@ pub struct AuthorizationAuditObservation {
     /// Scalar historical observation of the owner revision. Decoding this
     /// string cannot reconstruct `CanonicalContextRevision` authority.
     pub context_revision: Option<String>,
+    /// Passive origin of a source read or reviewer request. Older records omit
+    /// this field; neither decoding nor replay creates live review authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_attribution: Option<AuditReviewAttribution>,
     pub observation: AuditObservation,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditReviewAttribution {
+    pub candidate_operation_id: OperationId,
+    pub attempt_ref: String,
+    pub role: AuditReviewRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditReviewRole {
+    ContextRead,
+    ReviewerInference,
 }
 
 /// Parties projected by the actual native owner from its retained row. The
@@ -211,6 +240,7 @@ redacted_debug!(
     AuditPolicyRead,
     AuditObservation,
     AuthorizationAuditObservation,
+    AuditReviewAttribution,
     NativeAuditContributor,
     StoredAuthorizationAuditObservation
 );
@@ -220,6 +250,7 @@ redacted_debug!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafeAuditObservation {
+    ReviewStarted,
     AuthorizationUnavailable,
     Prepared,
     Refused,
@@ -231,6 +262,7 @@ impl AuthorizationAuditObservation {
     #[must_use]
     pub fn safe_projection(&self) -> SafeAuditObservation {
         match self.observation {
+            AuditObservation::ReviewAttemptStarted { .. } => SafeAuditObservation::ReviewStarted,
             AuditObservation::Prepared { .. } => SafeAuditObservation::Prepared,
             AuditObservation::AuthorizationUnavailable { .. } => {
                 SafeAuditObservation::AuthorizationUnavailable
@@ -239,5 +271,79 @@ impl AuthorizationAuditObservation {
             AuditObservation::Entry => SafeAuditObservation::EntryAttempt,
             AuditObservation::Outcome { .. } => SafeAuditObservation::Returned,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_audit_records_remain_unattributed_and_round_trip_without_new_fields() {
+        let old = serde_json::json!({
+            "operation_id": OperationId::new(),
+            "execution_scope": OperationExecutionScope::Domain,
+            "run_id": null,
+            "context_revision": null,
+            "observation": {"kind": "entry"},
+        });
+        let decoded: AuthorizationAuditObservation = serde_json::from_value(old.clone()).unwrap();
+        assert!(decoded.review_attribution.is_none());
+        assert_eq!(serde_json::to_value(decoded).unwrap(), old);
+    }
+
+    #[test]
+    fn protected_review_joins_round_trip_but_do_not_appear_in_safe_projection() {
+        let candidate = OperationId::new();
+        let start = AuthorizationAuditObservation {
+            operation_id: candidate.clone(),
+            execution_scope: OperationExecutionScope::Domain,
+            run_id: None,
+            context_revision: None,
+            review_attribution: None,
+            observation: AuditObservation::ReviewAttemptStarted {
+                attempt_ref: "private-attempt".into(),
+            },
+        };
+        for role in [
+            AuditReviewRole::ContextRead,
+            AuditReviewRole::ReviewerInference,
+        ] {
+            let child = AuthorizationAuditObservation {
+                operation_id: OperationId::new(),
+                review_attribution: Some(AuditReviewAttribution {
+                    candidate_operation_id: candidate.clone(),
+                    attempt_ref: "private-attempt".into(),
+                    role,
+                }),
+                observation: AuditObservation::Entry,
+                ..start.clone()
+            };
+            let value = serde_json::to_value(&child).unwrap();
+            assert_eq!(
+                serde_json::from_value::<AuthorizationAuditObservation>(value.clone()).unwrap(),
+                child
+            );
+            assert_eq!(
+                serde_json::to_value(child.safe_projection()).unwrap(),
+                "entry_attempt"
+            );
+            assert!(!format!("{child:?}").contains("private-attempt"));
+            let mut unknown = value;
+            unknown["review_attribution"]["recovered_allowance"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<AuthorizationAuditObservation>(unknown).is_err());
+        }
+        assert_eq!(
+            serde_json::to_value(start.safe_projection()).unwrap(),
+            "review_started"
+        );
+        assert_eq!(
+            serde_json::from_value::<AuthorizationAuditObservation>(
+                serde_json::to_value(&start).unwrap()
+            )
+            .unwrap(),
+            start
+        );
     }
 }

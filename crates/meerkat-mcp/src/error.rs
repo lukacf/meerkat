@@ -5,6 +5,10 @@ use meerkat_core::handles::DslTransitionError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
+    /// Mechanical local-process isolation refused before the MCP target ran.
+    /// This never grants or denies caller authority and carries no host secrets.
+    #[error(transparent)]
+    Confinement(#[from] meerkat_core::confinement::ConfinementRefusal),
     /// A trusted host refused preparation; never carries host payload text.
     #[error(transparent)]
     CallContext(#[from] crate::McpCallContextError),
@@ -76,6 +80,12 @@ pub enum McpError {
 
     #[error("Tool call failed for '{tool}': {reason}")]
     ToolCallFailed { tool: String, reason: String },
+
+    /// The native entry check at the physical handoff refused this call
+    /// (current authorization or required operation review). The typed tool
+    /// error is carried unchanged back to the tool surface; nothing was sent.
+    #[error(transparent)]
+    EntryRefused(Box<meerkat_core::ToolError>),
 
     /// The external-tool-surface owner rejected a staged or boundary input.
     #[error(transparent)]

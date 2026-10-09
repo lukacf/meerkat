@@ -63,8 +63,7 @@ pub struct Config {
     /// Realm-scoped connection sets (backend profiles, auth profiles,
     /// bindings). TOML keys use the singular `[realm.<id>.*]` namespace
     /// even though the Rust field is plural-adjacent — `#[serde(rename)]`
-    /// bridges the two. See
-    /// `/Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md`.
+    /// bridges the two.
     #[serde(rename = "realm", default, skip_serializing_if = "BTreeMap::is_empty")]
     pub realm: BTreeMap<String, RealmConfigSection>,
 }
@@ -344,6 +343,9 @@ impl Config {
         }
 
         // Storage config
+        if other.storage.hosting.is_some() {
+            self.storage.hosting = other.storage.hosting;
+        }
         #[allow(deprecated)]
         if other.storage.directory.is_some() {
             tracing::warn!(
@@ -939,6 +941,29 @@ impl Config {
             .or_else(|| template_defaults().max_tokens)
             .filter(|value| *value > 0)
             .unwrap_or_else(|| self.agent.resolved_max_tokens_per_turn())
+    }
+
+    /// [`validate`](Self::validate) for a config about to replace the
+    /// document whose own `tools.mcp_servers` are `persisted_servers`, plus
+    /// the checks that apply to writes only. Realm MCP servers are literal:
+    /// a new or changed `tools.mcp_servers` entry holding an environment
+    /// reference (`${`) is refused with
+    /// [`ConfigError::RealmMcpServerEnvReference`]. An entry is unchanged
+    /// only when `persisted_servers` holds the same whole typed definition
+    /// (name included), so a renamed or copied entry is new. An unchanged
+    /// legacy entry does not block the write; resolving the MCP set still
+    /// refuses it. Loading does not run this check.
+    pub fn validate_for_write(
+        &self,
+        catalog: crate::model_profile::ModelCatalog,
+        persisted_servers: &[crate::mcp_config::McpServerConfig],
+    ) -> Result<(), ConfigError> {
+        self.validate(catalog)?;
+        crate::mcp_config::reject_new_realm_server_env_references(
+            &self.tools.mcp_servers,
+            persisted_servers,
+        )?;
+        Ok(())
     }
 
     /// Validate configuration invariants.
@@ -2123,10 +2148,31 @@ pub enum CommsRuntimeMode {
 // block and the legacy shared settings maps are
 // removed in the same 0.6.0 cutover (plan §6.10).
 
+/// How sessions on a realm are hosted across processes (#1813).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HostingMode {
+    /// One process uses the realm at a time (today's behavior). Compatible
+    /// with every store; makes no multi-process claim.
+    #[default]
+    SingleProcess,
+    /// Several processes may serve the realm at once. Each session is hosted
+    /// by exactly one of them, enforced by OS-locked hosting claims, and
+    /// deliveries route to the hosting process. Startup refuses, typed, when
+    /// the store cannot provide trusted cross-process hosting.
+    Multiprocess,
+}
+
 /// Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct StorageConfig {
+    /// `[storage] hosting`: the realm's hosting mode. Absent means
+    /// [`HostingMode::SingleProcess`]. Layered like every realm option: a
+    /// child realm's value, including an explicit `single_process`,
+    /// overrides its parent's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosting: Option<HostingMode>,
     /// Directory for file-based storage.
     #[deprecated(
         since = "0.8.4",
@@ -2134,6 +2180,13 @@ pub struct StorageConfig {
                 meerkat_core::StorageLayout. Slated for removal."
     )]
     pub directory: Option<PathBuf>,
+}
+
+impl StorageConfig {
+    /// The effective hosting mode.
+    pub fn hosting_mode(&self) -> HostingMode {
+        self.hosting.unwrap_or_default()
+    }
 }
 
 /// Budget configuration
@@ -2870,8 +2923,29 @@ pub enum ConfigError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    /// A write adds or changes a realm MCP server that holds an environment
+    /// reference; realm MCP servers are literal. The caller's own entry is
+    /// refused and nothing is written.
+    #[error(transparent)]
+    RealmMcpServerEnvReference(#[from] crate::mcp_config::McpRealmServerEnvReference),
+
     #[error("realm inheritance chain error: {0}")]
     RealmChain(#[from] crate::connection::RealmChainError),
+}
+
+impl ConfigError {
+    /// A rule refused the document as it is persisted, not a caller's
+    /// candidate. The stored state is at fault, so a validation refusal here
+    /// becomes an internal error; surfaces keep `Validation` for the caller's
+    /// own candidate, including final validation of a write.
+    fn in_persisted_document(self) -> Self {
+        match self {
+            Self::Validation(message) => {
+                Self::InternalError(format!("persisted config document is invalid: {message}"))
+            }
+            other => other,
+        }
+    }
 }
 
 /// Typed, non-fatal diagnostic produced while loading a persisted config
@@ -2923,15 +2997,28 @@ impl std::fmt::Display for ConfigWarning {
 ///
 /// This is the single owner of the persisted-document load contract:
 /// [`Self::into_loaded`] is what a load returns, and
-/// [`Self::apply_patch`] is what a patch writes (the delta merges onto the
-/// document as persisted, so a patch that repairs a legacy shape keeps the
-/// operator's other values instead of their load-normalized form).
+/// [`Self::patch_content`] is what a patch writes (the delta edits the
+/// document as persisted, so a patch keeps the operator's other keys, and a
+/// patch that repairs a legacy shape keeps their values instead of their
+/// load-normalized form).
 #[derive(Debug, Clone)]
 pub(crate) struct PersistedConfigDocument {
     /// The document without its legacy keys; legacy VALUE shapes are kept.
     config: Config,
     /// Warnings for legacy keys removed from the document.
     removed_key_warnings: Vec<ConfigWarning>,
+}
+
+/// A persisted config document after a JSON merge patch.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub(crate) struct PatchedConfigDocument {
+    /// The document bytes the write stores.
+    pub(crate) content: String,
+    /// The config those bytes load as.
+    pub(crate) config: Config,
+    /// Warnings for legacy state the write normalized or dropped.
+    pub(crate) warnings: Vec<ConfigWarning>,
 }
 
 /// Keys under `[model_fallback]` that earlier releases persisted and the
@@ -2970,6 +3057,28 @@ impl LegacyModelFallbackKeys {
         })
     }
 
+    /// Drop the legacy keys from a document being edited, exactly as
+    /// [`Self::take_from`] drops them from a parsed one, so the written
+    /// document no longer carries them. The caller has already parsed the
+    /// same document, so a value of the wrong type was refused there.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drop_from_document(document: &mut toml_edit::DocumentMut) {
+        let Some(model_fallback) = document
+            .get_mut("model_fallback")
+            .and_then(toml_edit::Item::as_table_like_mut)
+        else {
+            return;
+        };
+        let use_catalog_default_chain = model_fallback.remove(Self::USE_CATALOG_DEFAULT_CHAIN);
+        if use_catalog_default_chain
+            .as_ref()
+            .and_then(toml_edit::Item::as_bool)
+            == Some(true)
+        {
+            model_fallback.clear();
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.use_catalog_default_chain.is_none()
     }
@@ -2983,18 +3092,10 @@ impl LegacyModelFallbackKeys {
 }
 
 impl PersistedConfigDocument {
-    /// The document of a store whose file does not exist.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn absent() -> Self {
-        Self {
-            config: Config::default(),
-            removed_key_warnings: Vec::new(),
-        }
-    }
-
     pub(crate) fn parse(content: &str) -> Result<Self, ConfigError> {
         let mut document: toml::Table = toml::from_str(content).map_err(ConfigError::Parse)?;
-        let legacy_keys = LegacyModelFallbackKeys::take_from(&mut document)?;
+        let legacy_keys = LegacyModelFallbackKeys::take_from(&mut document)
+            .map_err(ConfigError::in_persisted_document)?;
         // Without legacy keys, parse the original text so errors keep their
         // source spans; otherwise parse the document with the keys removed.
         let config: Config = if legacy_keys.is_empty() {
@@ -3003,7 +3104,9 @@ impl PersistedConfigDocument {
             document.try_into()
         }
         .map_err(ConfigError::Parse)?;
-        config.reject_unwired_agent_provider_params()?;
+        config
+            .reject_unwired_agent_provider_params()
+            .map_err(ConfigError::in_persisted_document)?;
         Ok(Self {
             config,
             removed_key_warnings: legacy_keys.warnings(),
@@ -3020,24 +3123,56 @@ impl PersistedConfigDocument {
         (config, removed_key_warnings)
     }
 
-    /// The config a JSON merge patch writes over this document, with the
-    /// warnings for legacy state the write normalizes or drops.
+    /// What a JSON merge patch writes over the persisted document `content`
+    /// (empty for a document that does not exist yet): the new document
+    /// bytes, the config they load as, and the warnings for legacy state the
+    /// write normalizes or drops.
     ///
-    /// The delta merges onto the document as persisted. The legacy fallback
-    /// default is normalized only when the document had it AND the merged
-    /// result still has it; a write that newly introduces that shape is left
-    /// for [`Config::validate`] to reject.
+    /// The patch edits the document itself, never a typed round trip of it:
+    /// keys the patch does not name keep their presence, values, comments and
+    /// order. Presence is policy here. Realm composition reads an explicit
+    /// key as the realm's own override even when it equals the struct
+    /// default, so a typed re-serialization would turn every default into an
+    /// override and stop the realm inheriting it, including capabilities a
+    /// parent realm disabled. A `null` member removes the key, so the field
+    /// inherits again.
+    ///
+    /// Legacy keys are dropped before the patch applies, and the patched
+    /// document is loaded strictly, so a patch that introduces a removed key
+    /// is refused. The legacy fallback default is normalized only when the
+    /// document had it AND the patched document still has it; a write that
+    /// newly introduces that shape is left for [`Config::validate`] to
+    /// reject.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn apply_patch(
-        &self,
+    pub(crate) fn patch_content(
+        content: &str,
         patch: serde_json::Value,
-    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
-        let mut merged = crate::config_store::apply_config_patch_preview(&self.config, patch)?;
-        let mut warnings = self.removed_key_warnings.clone();
-        if self.config.model_fallback.has_legacy_default_shape() {
-            warnings.extend(merged.model_fallback.normalize_persisted());
+    ) -> Result<PatchedConfigDocument, ConfigError> {
+        let persisted = Self::parse(content)?;
+        let mut document = crate::config_document::parse(content)?;
+        LegacyModelFallbackKeys::drop_from_document(&mut document);
+        crate::config_document::apply_merge_patch(&mut document, patch)?;
+        let mut config: Config = toml::from_str(&document.to_string())
+            .map_err(|error| crate::config_document::invalid_patched_document(&error))?;
+        let mut warnings = persisted.removed_key_warnings;
+        if persisted.config.model_fallback.has_legacy_default_shape()
+            && config.model_fallback.has_legacy_default_shape()
+        {
+            // Persist the normalization: the `enabled` key goes, so the
+            // table is no fallback policy and the document keeps inheriting.
+            if let Some(model_fallback) = document
+                .get_mut("model_fallback")
+                .and_then(toml_edit::Item::as_table_like_mut)
+            {
+                model_fallback.remove("enabled");
+            }
+            warnings.extend(config.model_fallback.normalize_persisted());
         }
-        Ok((merged, warnings))
+        Ok(PatchedConfigDocument {
+            content: document.to_string(),
+            config,
+            warnings,
+        })
     }
 }
 
@@ -5442,6 +5577,46 @@ model = "custom-model"
         assert_eq!(parsed.provider_params.params.temperature, Some(0.2));
     }
 
+    /// A persisted document that a load rule refuses is the stored state's
+    /// fault, never the caller's: it reports as an internal error, while the
+    /// same rule on a caller's candidate stays a validation error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_persisted_document_refused_on_load_is_a_stored_fault() {
+        let stored = r#"
+[agent]
+provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
+"#;
+        let err = Config::from_persisted_toml(stored).expect_err("the stored document is refused");
+        assert!(
+            matches!(
+                &err,
+                ConfigError::InternalError(message)
+                    if message.contains("[agent] provider_params")
+            ),
+            "unexpected error: {err}"
+        );
+        let patched = PersistedConfigDocument::patch_content(
+            stored,
+            serde_json::json!({ "max_tokens": 200 }),
+        );
+        assert!(
+            matches!(patched, Err(ConfigError::InternalError(_))),
+            "a patch over the refused document is a stored fault: {:?}",
+            patched.as_ref().err()
+        );
+
+        let mut candidate = Config::default();
+        candidate.agent.provider_params.params.temperature = Some(0.2);
+        let err = candidate
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect_err("the caller's candidate is refused");
+        assert!(
+            matches!(err, ConfigError::Validation(_)),
+            "unexpected error: {err}"
+        );
+    }
+
     /// Realm `[agent] provider_params` has no consumer (the factory never reads
     /// it and `Config::merge` does not carry it), so a fleet-wide cache policy
     /// placed there would parse and then silently do nothing. It is refused at
@@ -5457,10 +5632,12 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
 "#,
             )
             .expect_err("realm-level provider_params must not be silently ignored");
+        // `merge_toml_str` merges a persisted layer, so the refusal is a
+        // stored-document fault; the message still names the carrier.
         assert!(
             matches!(
                 &err,
-                ConfigError::Validation(message)
+                ConfigError::InternalError(message)
                     if message.contains("[agent] provider_params")
                         && message.contains("provider_tag")
             ),

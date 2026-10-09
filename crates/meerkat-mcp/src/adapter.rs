@@ -1080,6 +1080,21 @@ impl AgentToolDispatcher for McpRouterAdapter {
             .unwrap_or(meerkat_core::ToolMutationClass::Unknown)
     }
 
+    fn review_entry_support(
+        &self,
+        tool_name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        self.router
+            .try_read()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|router| AgentToolDispatcher::review_entry_support(router, tool_name))
+            })
+            .unwrap_or_default()
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
@@ -2084,7 +2099,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn shutdown_kills_a_stdio_server_still_connecting() {
-        use crate::stdio_test_fixture::{PidReport, process_exited};
+        use crate::stdio_test_fixture::PidReport;
         let mut report = PidReport::new("connect-join");
         let mut router = generated_surface_router();
         router
@@ -2104,10 +2119,7 @@ mod tests {
 
         adapter.shutdown().await;
 
-        assert!(
-            process_exited(pid),
-            "stdio child {pid} of a still-connecting server outlived adapter shutdown"
-        );
+        crate::connection::tests::assert_child_reaped(pid);
     }
 
     /// Stdio servers often launch through a wrapper (`sh -c`, `npx`, `uvx`),
@@ -2141,10 +2153,7 @@ mod tests {
 
         adapter.shutdown().await;
 
-        assert!(
-            process_exited(wrapper),
-            "wrapper {wrapper} outlived adapter shutdown"
-        );
+        crate::connection::tests::assert_child_reaped(wrapper);
         assert!(
             process_exited(server),
             "wrapped server {server} (a grandchild) outlived adapter shutdown"
@@ -2180,10 +2189,7 @@ mod tests {
 
         adapter.shutdown().await;
 
-        assert!(
-            process_exited(wrapper),
-            "established server {wrapper} outlived adapter shutdown"
-        );
+        crate::connection::tests::assert_child_reaped(wrapper);
         assert!(
             process_exited(server),
             "established server's grandchild {server} outlived adapter shutdown"

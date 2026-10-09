@@ -153,7 +153,7 @@ fn mob_scope_realm_id_is_refused_with_the_directory_name_rule() {
             "--state-root",
             realms_root.to_str().unwrap(),
             "--realm",
-            "mob.homecore",
+            "mob.example",
             "session",
             "repair-wholeblob",
             "01a000bb-b69e-7570-933d-ffd5d61d51ee",
@@ -162,7 +162,7 @@ fn mob_scope_realm_id_is_refused_with_the_directory_name_rule() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("invalid explicit realm id: mob.homecore"),
+        stderr.contains("invalid explicit realm id: mob.example"),
         "{stderr}"
     );
     assert!(stderr.contains("`mobkit`"), "{stderr}");

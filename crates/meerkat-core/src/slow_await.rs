@@ -16,6 +16,7 @@ pub const SLOW_AWAIT_WARN_AFTER: Duration = Duration::from_secs(2);
 /// How often a still-pending watched await is reported again.
 pub const SLOW_AWAIT_REPEAT: Duration = Duration::from_secs(5);
 
+#[cfg(not(target_arch = "wasm32"))]
 fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }

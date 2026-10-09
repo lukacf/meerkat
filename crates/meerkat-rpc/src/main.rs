@@ -356,6 +356,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     config
         .validate(meerkat_models::canonical())
         .map_err(|err| std::io::Error::other(format!("invalid runtime config: {err}")))?;
+    // #1813: a realm that declares multi-process hosting refuses to start
+    // when its stores cannot provide it.
+    persistence
+        .require_hosting_mode(config.storage.hosting_mode())
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
     let cli_user_root = cli.user_config_root.clone();
     let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let identity_registry =

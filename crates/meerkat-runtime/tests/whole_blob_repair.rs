@@ -252,7 +252,7 @@ async fn refused_committed_body_is_the_typed_audited_endpoint_error() {
 }
 
 /// Item 5, end to end on the sqlite store: a wedged body with a PENDING
-/// compaction projection outbox row (the HomeCore shape), refused on load;
+/// compaction projection outbox row (the field shape), refused on load;
 /// repaired; then the runtime's finalization sequence (load, clear the
 /// intent from the compatibility checkpoint, commit, mark finalized) runs
 /// with no second refusal and leaves the outbox empty.

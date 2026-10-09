@@ -4,9 +4,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{
-    OperationAuthorizationError, OperationObservation, OperationObservationError,
-    OperationObservedOutcome, OperationRefusalKind, OperationRefused, PreparedAuthorizationBinding,
-    PreparedOperationAuthorization, WorkAuthorizationContext,
+    ObservedAuthorizationResult, OperationAuthorizationError, OperationObservation,
+    OperationObservationError, OperationObservedOutcome, OperationRefusalKind, OperationRefused,
+    PolicyPublicationObservation, PreparedAuthorizationBinding, PreparedOperationAuthorization,
+    WorkAuthorizationContext,
 };
 
 struct PreparedCheck {
@@ -29,31 +30,88 @@ impl PreparedOperationCheck {
         context: WorkAuthorizationContext,
         binding: PreparedAuthorizationBinding,
     ) -> Result<Self, OperationAuthorizationError> {
-        let decision = context.authorization().prepare(&binding)?;
-        Ok(Self(Arc::new(PreparedCheck {
-            context,
-            binding,
-            decision,
-        })))
+        Self::prepare_observed(context, binding).result
+    }
+
+    pub fn prepare_observed(
+        context: WorkAuthorizationContext,
+        binding: PreparedAuthorizationBinding,
+    ) -> ObservedAuthorizationResult<Self> {
+        if binding
+            .review_attribution()
+            .is_some_and(|link| !link.origin().work_authorization().same_context(&context))
+        {
+            return ObservedAuthorizationResult::unobserved(Err(OperationRefused::new(
+                OperationRefusalKind::MalformedFacts,
+            )
+            .into()));
+        }
+        context
+            .authorization()
+            .prepare_observed(&binding)
+            .map(|decision| {
+                Self(Arc::new(PreparedCheck {
+                    context,
+                    binding,
+                    decision,
+                }))
+            })
     }
 
     /// Check the exact retained operation without allocation or policy traversal.
     /// On one stale projection, return a newly prepared check from current owners.
     /// The caller must forward the returned association to the real sink.
     pub fn current(&self) -> Result<Self, OperationAuthorizationError> {
+        self.current_observed().result
+    }
+
+    /// One canonical current/reprepare path, retaining only the observation of
+    /// the actual decision or coherent failed preparation returned by that path.
+    pub fn current_observed(&self) -> ObservedAuthorizationResult<Self> {
         match self.0.decision.check_current(&self.0.binding) {
-            Ok(()) => Ok(self.clone()),
+            Ok(()) => ObservedAuthorizationResult {
+                result: Ok(self.clone()),
+                policy: self.policy_observation(),
+            },
             Err(OperationAuthorizationError::Refused(refusal))
                 if refusal.kind() == OperationRefusalKind::ReprepareRequired =>
             {
-                let refreshed = Self::prepare(self.0.context.clone(), self.0.binding.clone())?;
-                if let Err(error) = refreshed.0.decision.check_current(&refreshed.0.binding) {
-                    return Err(refreshed.observe_check_failure(error));
+                let observed =
+                    Self::prepare_observed(self.0.context.clone(), self.0.binding.clone());
+                match observed.result {
+                    Ok(refreshed) => {
+                        let mut policy = refreshed.policy_observation();
+                        let result = match refreshed.0.decision.check_current(&refreshed.0.binding)
+                        {
+                            Ok(()) => Ok(refreshed),
+                            Err(error) => {
+                                if !matches!(error, OperationAuthorizationError::Refused(_)) {
+                                    policy = None;
+                                }
+                                Err(refreshed.observe_check_failure(error))
+                            }
+                        };
+                        ObservedAuthorizationResult { result, policy }
+                    }
+                    Err(error) => ObservedAuthorizationResult {
+                        result: Err(error),
+                        policy: observed.policy,
+                    },
                 }
-                Ok(refreshed)
             }
-            Err(error) => Err(self.observe_check_failure(error)),
+            Err(error) => ObservedAuthorizationResult {
+                result: Err(self.observe_check_failure(error)),
+                policy: if matches!(error, OperationAuthorizationError::Refused(_)) {
+                    self.policy_observation()
+                } else {
+                    None
+                },
+            },
         }
+    }
+
+    pub fn policy_observation(&self) -> Option<PolicyPublicationObservation> {
+        self.0.decision.policy_observation()
     }
 
     fn observe_check_failure(
@@ -75,9 +133,29 @@ impl PreparedOperationCheck {
         }
     }
 
+    /// Owner-resolved review tier retained by this exact decision. A
+    /// re-prepared decision carries its own freshly resolved tier.
+    #[must_use]
+    pub fn review_tier(&self) -> super::OperationReviewTier {
+        self.0.decision.review_tier()
+    }
+
     #[must_use]
     pub fn binding(&self) -> &PreparedAuthorizationBinding {
         &self.0.binding
+    }
+
+    pub(crate) fn work_authorization(&self) -> &WorkAuthorizationContext {
+        &self.0.context
+    }
+
+    /// R1-only gate for an entry that carries no operation review, applied
+    /// to this current decision before its entry observation. Review truth is
+    /// this decision's tier; R2/R3 settle locally with zero entry.
+    pub fn require_unreviewed_entry(
+        &self,
+    ) -> Result<(), crate::approval::review::OperationReviewRefusal> {
+        crate::approval::review::OperationReviewRefusal::for_unreviewed_entry(self.review_tier())
     }
 
     /// Stage entry after the final current check and immediately before the
@@ -87,6 +165,16 @@ impl PreparedOperationCheck {
         self.0
             .decision
             .observe(&self.0.binding, OperationObservation::Entry)
+    }
+
+    pub(crate) fn observe_review_attempt_started(
+        &self,
+        attempt_ref: crate::approval::review::ReviewAttemptRef,
+    ) -> Result<(), OperationObservationError> {
+        self.0.decision.observe(
+            &self.0.binding,
+            OperationObservation::ReviewAttemptStarted { attempt_ref },
+        )
     }
 
     /// Preserve the actual returned observation before subsequent bookkeeping.

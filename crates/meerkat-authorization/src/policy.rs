@@ -60,6 +60,10 @@ pub struct LocalPolicyAllowance {
     /// operation, in trusted local Unix milliseconds. Preparation cannot renew
     /// an authority or convert historical audit observations into permissions.
     pub expires_at_ms: u64,
+    /// Review tier this owner requires for the exact operation, resolved under
+    /// the same publication as the permission. Explicit, with no default: an
+    /// owner that requires no added review states R1.
+    pub review_tier: meerkat_core::authorization::OperationReviewTier,
 }
 
 /// Independent authority conjunct for one exact prepared operation.

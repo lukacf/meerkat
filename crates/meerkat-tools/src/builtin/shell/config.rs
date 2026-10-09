@@ -62,6 +62,13 @@ impl From<ShellError> for crate::builtin::BuiltinToolError {
         {
             return (*refusal).into();
         }
+        if let ShellError::Io(io_error) = &error
+            && let Some(refusal) = io_error.get_ref().and_then(|source| {
+                source.downcast_ref::<super::custody_spawn::ReviewedEntryRefused>()
+            })
+        {
+            return Self::EntryRefused(Box::new(refusal.0.clone()));
+        }
         Self::execution_failed(error.to_string())
     }
 }

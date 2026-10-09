@@ -25,7 +25,7 @@ use meerkat_workgraph::{
     AddEvidenceRequest, WorkEvidenceRef, WorkGraphError, WorkGraphService, WorkItemRef,
 };
 
-use crate::{JobDeliveryApplication, JobDeliveryContent, JobDeliverySink};
+use crate::{JobDeliveryApplication, JobDeliveryApplyError, JobDeliveryContent, JobDeliverySink};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -670,16 +670,19 @@ impl JobAwaitDeliverySink {
 
 #[async_trait]
 impl JobDeliverySink for JobAwaitDeliverySink {
-    async fn apply(&self, application: JobDeliveryApplication) -> Result<(), String> {
+    async fn apply(
+        &self,
+        application: JobDeliveryApplication,
+    ) -> Result<(), JobDeliveryApplyError> {
         let (job_id, session_id, terminal) = delivery_terminal(&application);
         if let Some(terminal) = terminal {
             let reference =
                 JobReference::new(self.coordinator.realm_id.to_string(), job_id.clone())
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| JobDeliveryApplyError::Infrastructure(error.to_string()))?;
             self.coordinator
                 .apply_terminal(session_id, &reference, terminal)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| JobDeliveryApplyError::Infrastructure(error.to_string()))?;
         }
         self.downstream.apply(application).await
     }

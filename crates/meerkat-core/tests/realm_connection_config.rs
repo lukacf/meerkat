@@ -7,8 +7,6 @@
 //! `RealmConnectionSet::lookup_binding`. Originally written during the
 //! T1+T2 scaffolding phase with red-at-assertion reds; flipped green once
 //! Phase 1 leaf slices (from_config + lookup_binding) landed.
-//!
-//! See /Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md.
 
 use meerkat_core::provider::Provider;
 use meerkat_core::{

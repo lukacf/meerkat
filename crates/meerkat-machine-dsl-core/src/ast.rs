@@ -316,6 +316,14 @@ pub enum ExprDef {
         key: Box<ExprDef>,
     },
     MapKeys(Box<ExprDef>),
+    /// Strict map read produced by normalization, never parsed: a guard's
+    /// value-projected read (`m.get_cloned(k).get("value")` and friends)
+    /// becomes this, so an absent key refuses the input in Rust and is a
+    /// TLC error in TLA+ instead of a silent default (#1811).
+    MapValue {
+        map: Box<ExprDef>,
+        key: Box<ExprDef>,
+    },
 
     // Quantifiers
     ForAll {

@@ -2960,7 +2960,7 @@ mod tests {
         Ok(())
     }
 
-    /// Ask 22 regression (HomeCore runaway): a one-shot whose occurrence
+    /// Downstream-ask regression (schedule runaway): a one-shot whose occurrence
     /// went terminal (misfired here) must never regenerate. Pre-fix, the
     /// ns-precision due compared against the ms-precision machine cursor
     /// re-yielded the same due every tick (~1/sec, unbounded).

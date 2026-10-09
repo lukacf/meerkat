@@ -705,6 +705,7 @@ impl MobActor {
             super::super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles);
         Ok(Box::new(DeferredResumeProvision {
             definition: Arc::clone(&self.definition),
+            realm_profile_store: self.realm_profile_store.clone(),
             profile_name: work.entry.role.clone(),
             agent_identity: work.entry.agent_identity.clone(),
             profile,
@@ -723,8 +724,10 @@ impl MobActor {
             tool_access_policy: None,
             tool_dispatch_admission: None,
             web_search_override: Default::default(),
-            application_tool_policy: Default::default(),
-            tool_consequence_policy_registry: None,
+            // No policy choice: the member keeps its durable binding, which
+            // the current registry realizes.
+            application_tool_policy: None,
+            tool_consequence_policy_registry: self.tool_consequence_policy_registry.clone(),
             system_prompt_override: None,
             resume_from_role: None,
             resume_id: work.session_id.clone(),
@@ -797,7 +800,7 @@ impl MobActor {
             // recovery, quarantined evidence) is the caller's classification
             // fact: the session is intact and withheld, and only the hold
             // class says what clears it. Rewriting it into restore-failure
-            // prose hid the HomeCore 2026-09-22 wedge behind a string every
+            // prose hid a 2026-09-22 production wedge behind a string every
             // host could only retry. The diagnostic keeps the machine's
             // record AND the hold, so every later `MemberRestoreFailed`
             // minted for this Broken member carries it; this reply keeps

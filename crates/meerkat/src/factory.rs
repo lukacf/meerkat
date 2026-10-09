@@ -161,7 +161,7 @@ fn brain_swap_available_models_for_resolved_identity(
 #[cfg(feature = "comms")]
 use crate::compose_tools_with_comms_and_post_commit_hooks;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::{create_default_hook_engine, resolve_layered_hooks_config};
+use crate::resolve_layered_hooks_config;
 
 /// Ephemeral in-process store used when no storage backend feature is enabled.
 #[cfg(not(feature = "memory-store"))]
@@ -1071,6 +1071,7 @@ impl AgentBuildConfig {
         self.additional_instructions = build.additional_instructions.clone();
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
+        self.initial_tool_visibility_state = build.initial_tool_visibility_state.clone();
         self.tool_access_policy = build.tool_access_policy.clone();
         self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
@@ -1108,6 +1109,8 @@ impl AgentBuildConfig {
             budget_limits: self.budget_limits.clone(),
             provider_params: self.provider_params.clone(),
             external_tools: self.external_tools.clone(),
+            // The session service decides hosting when it creates the actor.
+            hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
             mcp_servers: self.mcp_servers.clone(),
             recoverable_tool_defs: self.recoverable_tool_defs.clone(),
             blob_store_override: self.blob_store_override.clone(),
@@ -1148,6 +1151,7 @@ impl AgentBuildConfig {
             additional_instructions: self.additional_instructions.clone(),
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),
+            initial_tool_visibility_state: self.initial_tool_visibility_state.clone(),
             tool_access_policy: self.tool_access_policy.clone(),
             declared_tool_restriction: self.declared_tool_restriction.clone(),
             tool_dispatch_admission: self.tool_dispatch_admission.clone(),
@@ -1879,6 +1883,19 @@ fn model_aware_default_max_tokens(
         .unwrap_or(meerkat_core::config::DEFAULT_MAX_TOKENS_PER_TURN)
 }
 
+/// Whether an explicit web-search enable needs the Meerkat-owned fallback:
+/// native search must be both active for the model under the final
+/// provider-native policy and enabled in the provider settings.
+fn browser_fallback_web_search_required(
+    config: &Config,
+    provider: Provider,
+    override_web_search: ToolCategoryOverride,
+    native_web_search_active: bool,
+) -> bool {
+    override_web_search == ToolCategoryOverride::Enable
+        && !(native_web_search_active && provider_web_search_enabled(config, provider))
+}
+
 fn provider_web_search_enabled(config: &Config, provider: Provider) -> bool {
     match provider {
         Provider::Anthropic => config.provider_tools.anthropic.web_search,
@@ -2366,6 +2383,19 @@ pub struct AgentFactory {
     /// Session requests and recovered job metadata cannot weaken this policy.
     #[cfg(not(target_arch = "wasm32"))]
     shell_confinement: meerkat_tools::builtin::shell::ShellConfinement,
+    /// Required command launch restriction retained only by the host adapter.
+    /// Absence preserves legacy trusted-host compatibility.
+    #[cfg(not(target_arch = "wasm32"))]
+    command_hook_confinement: Option<Arc<crate::command_hook_confinement::CommandHookConfinement>>,
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile,
+    #[cfg(all(
+        feature = "test-mcp-oauth-fixtures",
+        feature = "mcp",
+        not(target_arch = "wasm32")
+    ))]
+    mcp_router_observer_for_test:
+        Option<Arc<dyn Fn(Arc<meerkat_mcp::McpRouterAdapter>) + Send + Sync>>,
     #[cfg(feature = "comms")]
     pub enable_comms: bool,
     pub enable_memory: bool,
@@ -2434,6 +2464,11 @@ pub struct AgentFactory {
     /// Process-local per-call MCP context preparation, shared by factory clones.
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     mcp_call_context_provider: Option<Arc<dyn meerkat_mcp::McpCallContextProvider>>,
+    /// Trusted host operation review composition for every agent this factory
+    /// builds. Deliberately absent from `AgentBuildConfig` and session build
+    /// options. Its absence never skips a tier: native authorization resolves
+    /// the tier, and required R2 review without it is local unavailable.
+    operation_review: Option<Arc<meerkat_core::approval::review::BoundOperationReview>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -2452,6 +2487,8 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_mob", &self.enable_mob);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("shell_confinement", &self.shell_confinement);
+        #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+        d.field("mcp_stdio_launch_profile", &self.mcp_stdio_launch_profile);
         #[cfg(feature = "comms")]
         d.field("enable_comms", &self.enable_comms);
         #[cfg(feature = "skills")]
@@ -2468,6 +2505,7 @@ impl std::fmt::Debug for AgentFactory {
         );
         #[cfg(feature = "comms")]
         d.field("comms_runtime", &self.comms_runtime.is_some());
+        d.field("operation_review", &self.operation_review.is_some());
         d.finish()
     }
 }
@@ -3390,10 +3428,12 @@ impl AgentFactory {
         config: &Config,
         registry: &ModelRegistry,
         search_provider: Provider,
-        selected_realm: Option<&RealmId>,
-        runtime_build_mode: &RuntimeBuildMode,
+        build_config: &AgentBuildConfig,
+        event_tap: meerkat_core::EventTap,
         explicit: bool,
     ) -> Result<Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>, BuildAgentError> {
+        let selected_realm = build_config.realm_id.as_ref();
+        let runtime_build_mode = &build_config.runtime_build_mode;
         // Fail closed on an explicit enable; degrade silently on inherit.
         let unavailable = |reason: String| -> Result<
             Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>,
@@ -3469,7 +3509,31 @@ impl AgentFactory {
             Self::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
                 .map_err(BuildAgentError::LlmClient)?;
         }
-        let client = match self.provider_registry.build_client(connection) {
+        // The helper is its own model route. Its selected target carries the
+        // helper's actual model and binding, so a governed request prepares
+        // and reports this route rather than the controller's account.
+        let helper_identity = SessionLlmIdentity {
+            model: model.clone(),
+            provider: search_provider,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: (!auth_binding.is_env_default()).then(|| auth_binding.clone()),
+        };
+        let Some(text_target) = registry
+            .profile_witness_for_provider(search_provider, &model)
+            .and_then(|profile| {
+                meerkat_llm_core::provider_runtime::ResolvedTextTarget::new(
+                    helper_identity,
+                    profile,
+                    connection,
+                )
+            })
+        else {
+            return unavailable(format!(
+                "web-search target for provider {search_provider:?} model '{model}' does not match its resolved connection"
+            ));
+        };
+        let client = match self.provider_registry.build_text_client(text_target) {
             Ok(client) => client,
             Err(err) => {
                 return unavailable(format!(
@@ -3479,7 +3543,8 @@ impl AgentFactory {
         };
         let adapted: Arc<dyn AgentLlmClient> = Arc::new(
             LlmClientAdapter::try_for_provider_identity(client, model.clone(), search_provider)
-                .map_err(|error| BuildAgentError::Config(error.to_string()))?,
+                .map_err(|error| BuildAgentError::Config(error.to_string()))?
+                .with_operation_observation_events(event_tap, build_config.event_tx.clone()),
         );
 
         // An Option rather than an early return in the fallback arm: with no
@@ -3528,6 +3593,16 @@ impl AgentFactory {
             enable_shell: false,
             #[cfg(not(target_arch = "wasm32"))]
             shell_confinement: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            command_hook_confinement: None,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+            #[cfg(all(
+                feature = "test-mcp-oauth-fixtures",
+                feature = "mcp",
+                not(target_arch = "wasm32")
+            ))]
+            mcp_router_observer_for_test: None,
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
@@ -3550,7 +3625,22 @@ impl AgentFactory {
             mcp_auth_resolver: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_call_context_provider: None,
+            operation_review: None,
         }
+    }
+
+    /// Install trusted host operation review (reviewer, approval owner and
+    /// deadline) for every agent this factory builds. The required tier is
+    /// resolved by native authorization for each prepared operation and is
+    /// enforced at the common prepared tool entry; without this composition a
+    /// required R2 review settles as local unavailable feedback.
+    #[must_use]
+    pub fn with_operation_review(
+        mut self,
+        review: Arc<meerkat_core::approval::review::BoundOperationReview>,
+    ) -> Self {
+        self.operation_review = Some(review);
+        self
     }
 
     /// Select the browser capability profile for every direct and mob build.
@@ -3671,6 +3761,16 @@ impl AgentFactory {
             enable_shell: false,
             #[cfg(not(target_arch = "wasm32"))]
             shell_confinement: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            command_hook_confinement: None,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+            #[cfg(all(
+                feature = "test-mcp-oauth-fixtures",
+                feature = "mcp",
+                not(target_arch = "wasm32")
+            ))]
+            mcp_router_observer_for_test: None,
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
@@ -3693,6 +3793,7 @@ impl AgentFactory {
             mcp_auth_resolver: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_call_context_provider: None,
+            operation_review: None,
         }
     }
 
@@ -3908,6 +4009,61 @@ impl AgentFactory {
         confinement: meerkat_tools::builtin::shell::ShellConfinement,
     ) -> Self {
         self.shell_confinement = confinement;
+        self
+    }
+
+    /// Require the host's immutable confinement for automatically composed
+    /// command hooks. The final command, argv, cwd and explicit environment
+    /// are bound before launch; ambient environment is not inherited.
+    ///
+    /// Missing native custody and unsupported requirements refuse the launch,
+    /// never fall back. A PreTool refusal blocks its tool and becomes local
+    /// feedback; other hook-point failure dispositions remain unchanged.
+    /// `hook_engine_override` is incompatible with this requirement because
+    /// an opaque engine cannot be adapted to this command owner.
+    /// Absence of this setting preserves legacy trusted-host compatibility.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_command_hook_confinement(
+        mut self,
+        requirement: meerkat_core::confinement::ExecutionConfinement,
+        working_directory: PathBuf,
+    ) -> Self {
+        self.command_hook_confinement = Some(Arc::new(
+            crate::command_hook_confinement::CommandHookConfinement::new(
+                &requirement,
+                working_directory,
+            ),
+        ));
+        self
+    }
+
+    /// Install the host's immutable local MCP launch boundary in newly built
+    /// routers. Every later add/reload retains it. This does not grant tool
+    /// permission, and remote MCP transports remain outside OS confinement.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    pub fn with_mcp_stdio_launch_profile(
+        mut self,
+        profile: meerkat_mcp::McpStdioLaunchProfile,
+    ) -> Self {
+        self.mcp_stdio_launch_profile = profile;
+        self
+    }
+
+    /// Observe the actual factory-created MCP router for fixture synchronization.
+    ///
+    /// This test-only observer does not replace the router or consume its
+    /// results. The Agent still accepts and projects completed setup notices.
+    #[doc(hidden)]
+    #[cfg(all(
+        feature = "test-mcp-oauth-fixtures",
+        feature = "mcp",
+        not(target_arch = "wasm32")
+    ))]
+    pub fn with_mcp_router_observer_for_test<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(Arc<meerkat_mcp::McpRouterAdapter>) + Send + Sync + 'static,
+    {
+        self.mcp_router_observer_for_test = Some(Arc::new(observer));
         self
     }
 
@@ -5665,6 +5821,13 @@ impl AgentFactory {
         config: &Config,
         controller_requirement: ControllerClientRequirement,
     ) -> Result<(DynAgent, Option<meerkat_core::ControllerModelClient>), BuildAgentError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.command_hook_confinement.is_some() && build_config.hook_engine_override.is_some() {
+            return Err(BuildAgentError::Config(
+                "required command-hook confinement cannot be combined with hook_engine_override"
+                    .into(),
+            ));
+        }
         self.validate_runtime_profile(&build_config, config)?;
         let mut effective_config;
         let config = if let Some(fallback) = &build_config.model_fallback {
@@ -5826,15 +5989,6 @@ impl AgentFactory {
             .and_then(|metadata| metadata.self_hosted_server_id.clone());
         let (provider, resolved_self_hosted_server_id) =
             self.resolve_provider_from_registry(&registry, &build_config)?;
-        if let Some(profile) = self.browser_runtime_profile
-            && build_config.override_web_search == ToolCategoryOverride::Enable
-            && !(registry
-                .profile_for_provider(provider, &build_config.model)
-                .is_some_and(|model| model.supports_web_search)
-                && provider_web_search_enabled(config, provider))
-        {
-            profile.require(meerkat_capabilities::RuntimeProfileCapability::FallbackWebSearch)?;
-        }
         // Durable agent construction is the single fail-closed chokepoint for
         // release-stage admission. This check deliberately precedes client
         // overrides, binding selection, credential resolution, lease
@@ -5875,6 +6029,107 @@ impl AgentFactory {
                 provider.as_str(),
                 build_config.model,
             )));
+        }
+
+        // Effective call-level policy: the launch part conjoined with the
+        // configuration's declared restriction. Every consumer below (the
+        // execution gate, the scheduler's and mob tools' creator policy, the
+        // parent authority children inherit from, and the persisted
+        // effective policy) sees the effective policy; only the launch part is
+        // additionally persisted as the session's spawn policy.
+        let spawn_tool_access_policy = build_config.tool_access_policy.clone();
+        let declared_tool_restriction = build_config
+            .declared_tool_restriction
+            .clone()
+            .filter(|restriction| !restriction.is_unrestricted());
+        if let Some(restriction) = &declared_tool_restriction {
+            build_config.tool_access_policy = restriction
+                .conjoin_with_launch_policy(build_config.tool_access_policy.take())
+                .map_err(|err| {
+                    BuildAgentError::Config(format!(
+                        "failed to compose the tool restriction declared by {}: {err}",
+                        restriction.declared_by
+                    ))
+                })?;
+        }
+
+        // Resolve the per-launch tool access policy into the sealed execution
+        // form BEFORE session metadata is persisted: an unresolved `Inherit`
+        // is a wiring fault (the spawn chain owns Inherit resolution - a child
+        // inherits its parent's persisted effective policy; host launches with
+        // no parent resolve to unrestricted) and must fail the build closed
+        // rather than persist or silently un-gate the session.
+        let tool_execution_policy = build_config
+            .tool_access_policy
+            .clone()
+            .map(meerkat_core::ToolExecutionPolicy::resolve)
+            .transpose()
+            .map_err(|err| BuildAgentError::Config(format!("Tool access policy: {err}")))?;
+        let tool_dispatch_admission = build_config.tool_dispatch_admission.clone();
+
+        let bound_consequence_policy = match &build_config.application_tool_policy {
+            meerkat_core::ApplicationToolPolicyBinding::Unmanaged => None,
+            meerkat_core::ApplicationToolPolicyBinding::Inherit => {
+                return Err(BuildAgentError::Config(
+                    "application tool policy 'inherit' is unresolved at the AgentFactory seam"
+                        .to_string(),
+                ));
+            }
+            meerkat_core::ApplicationToolPolicyBinding::Provider {
+                provider_id,
+                policy_id,
+            } => {
+                let member = build_config.mob_member_binding.clone().ok_or_else(|| {
+                    BuildAgentError::Config(
+                        "provider-bound application tool policy requires MobMemberBinding"
+                            .to_string(),
+                    )
+                })?;
+                let registry = build_config
+                    .tool_consequence_policy_registry
+                    .as_ref()
+                    .ok_or_else(|| {
+                        BuildAgentError::Config(
+                            "provider-bound application tool policy requires the host policy registry"
+                                .to_string(),
+                        )
+                    })?;
+                Some(
+                    registry
+                        .bind(member, provider_id.clone(), policy_id.clone())
+                        .map_err(|error| {
+                            BuildAgentError::Config(format!(
+                                "application tool policy binding failed: {error}"
+                            ))
+                        })?,
+                )
+            }
+        };
+
+        // Every governed input to the provider-native tool policy is final
+        // here: nothing below changes the effective restriction, consequence
+        // binding or admission. The policy is derived once, from these inputs
+        // and the final model identity, before any helper is provisioned.
+        let governed_tool_inputs_disable_native = tool_dispatch_admission.is_some()
+            || bound_consequence_policy.is_some()
+            || tool_execution_policy
+                .as_ref()
+                .is_some_and(|policy| !policy.is_unrestricted());
+        // Refuse a fallback the browser profile cannot provision before any
+        // credential is resolved. Governed inputs already disable native
+        // search; the final identity is rechecked before helper provisioning.
+        if let Some(profile) = self.browser_runtime_profile
+            && browser_fallback_web_search_required(
+                config,
+                provider,
+                build_config.override_web_search,
+                !governed_tool_inputs_disable_native
+                    && registry
+                        .profile_for_provider(provider, &build_config.model)
+                        .is_some_and(|model| model.supports_web_search),
+            )
+        {
+            profile.require(meerkat_capabilities::RuntimeProfileCapability::FallbackWebSearch)?;
         }
         let self_hosted_server_id = if matches!(provider, Provider::SelfHosted) {
             build_config
@@ -5991,6 +6246,35 @@ impl AgentFactory {
             provider_params: build_config.provider_params.clone(),
             auth_binding: build_config.auth_binding.clone(),
         };
+        let provider_native_tool_policy = if governed_tool_inputs_disable_native
+            || Self::llm_identity_uses_copilot(config, &resolved_llm_identity)
+                .map_err(BuildAgentError::LlmClient)?
+        {
+            meerkat_core::ProviderNativeToolPolicy::DisableAll
+        } else {
+            meerkat_core::ProviderNativeToolPolicy::Inherit
+        };
+        // The single web-search composition for this build: provider-native
+        // search is offered only when the final model supports it and the
+        // final provider-native policy keeps it. Otherwise an explicit Enable
+        // reaches the model as the ordinary governed `web_search` tool.
+        let native_web_search_active = model_profile
+            .as_ref()
+            .is_some_and(|profile| profile.supports_web_search)
+            && matches!(
+                provider_native_tool_policy,
+                meerkat_core::ProviderNativeToolPolicy::Inherit
+            );
+        if let Some(profile) = self.browser_runtime_profile
+            && browser_fallback_web_search_required(
+                config,
+                provider,
+                build_config.override_web_search,
+                native_web_search_active,
+            )
+        {
+            profile.require(meerkat_capabilities::RuntimeProfileCapability::FallbackWebSearch)?;
+        }
         // A client override means the session is not talking to a
         // registry-resolved provider at all, so no catalog model is provably
         // reachable and permanent switching must not be advertised.
@@ -6011,13 +6295,11 @@ impl AgentFactory {
             };
         let auth_credential_identity =
             configured_credential_identity.or(resolved_auth_credential_identity);
+        let event_tap = meerkat_core::new_event_tap();
         #[cfg(not(target_arch = "wasm32"))]
         let auto_web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>> = {
-            let active_model_has_native_search = model_profile
-                .as_ref()
-                .is_some_and(|profile| profile.supports_web_search);
             if build_config.web_search_executor_override.is_none()
-                && !active_model_has_native_search
+                && !native_web_search_active
                 && matches!(
                     build_config.override_web_search,
                     ToolCategoryOverride::Enable
@@ -6030,8 +6312,8 @@ impl AgentFactory {
                     config,
                     &registry,
                     provider,
-                    build_config.realm_id.as_ref(),
-                    &build_config.runtime_build_mode,
+                    &build_config,
+                    event_tap.clone(),
                     true,
                 )
                 .await?
@@ -6065,7 +6347,6 @@ impl AgentFactory {
                     BuildAgentError::Config(format!("session LLM capability hydration: {err}"))
                 })?;
         }
-        let event_tap = meerkat_core::new_event_tap();
         let llm_adapter: Arc<dyn AgentLlmClient> = if let Some(agent_client) =
             build_config.agent_llm_client_override.take()
         {
@@ -6644,14 +6925,17 @@ impl AgentFactory {
             // With a resolver, a missing credential is the typed
             // human-authorization status (the native authority opens no
             // browser); without one, servers connect without OAuth.
-            let mut router = meerkat_mcp::McpRouter::new_with_surface_handle(surface_handle)
-                .with_mcp_auth(
-                    meerkat_providers::mcp_oauth::McpAuthMode::Interactive,
-                    build_config
-                        .mcp_auth_resolver
-                        .clone()
-                        .or_else(|| self.mcp_auth_resolver.clone()),
-                );
+            let mut router = meerkat_mcp::McpRouter::new_with_surface_handle_and_stdio_profile(
+                surface_handle,
+                self.mcp_stdio_launch_profile.clone(),
+            )
+            .with_mcp_auth(
+                meerkat_providers::mcp_oauth::McpAuthMode::Interactive,
+                build_config
+                    .mcp_auth_resolver
+                    .clone()
+                    .or_else(|| self.mcp_auth_resolver.clone()),
+            );
             if let Some(provider) = &self.mcp_call_context_provider {
                 router = router.with_call_context_provider(Arc::clone(provider));
             }
@@ -6670,7 +6954,16 @@ impl AgentFactory {
             adapter.refresh_tools().await.map_err(|error| {
                 BuildAgentError::McpSetup(format!("refresh MCP tools: {error}"))
             })?;
-            let adapter: Arc<dyn AgentToolDispatcher> = Arc::new(adapter);
+            let adapter = Arc::new(adapter);
+            #[cfg(all(
+                feature = "test-mcp-oauth-fixtures",
+                feature = "mcp",
+                not(target_arch = "wasm32")
+            ))]
+            if let Some(observer) = &self.mcp_router_observer_for_test {
+                observer(Arc::clone(&adapter));
+            }
+            let adapter: Arc<dyn AgentToolDispatcher> = adapter;
             build_config.external_tools = Some(match build_config.external_tools.take() {
                 Some(existing) => Arc::new(meerkat_core::gateway::DynamicToolComposite::new(vec![
                     existing, adapter,
@@ -6688,27 +6981,6 @@ impl AgentFactory {
             ));
         }
 
-        // Effective call-level policy: the launch part conjoined with the
-        // configuration's declared restriction. Every consumer below (the
-        // execution gate, the scheduler's and mob tools' creator policy, the
-        // parent authority children inherit from, and the persisted
-        // effective policy) sees the effective policy; only the launch part is
-        // additionally persisted as the session's spawn policy.
-        let spawn_tool_access_policy = build_config.tool_access_policy.clone();
-        let declared_tool_restriction = build_config
-            .declared_tool_restriction
-            .clone()
-            .filter(|restriction| !restriction.is_unrestricted());
-        if let Some(restriction) = &declared_tool_restriction {
-            build_config.tool_access_policy = restriction
-                .conjoin_with_launch_policy(build_config.tool_access_policy.take())
-                .map_err(|err| {
-                    BuildAgentError::Config(format!(
-                        "failed to compose the tool restriction declared by {}: {err}",
-                        restriction.declared_by
-                    ))
-                })?;
-        }
         // External tools (MCP servers, host bundles) are not part of the
         // composed surface a declared deny list may name; only the names a
         // tool vocabulary declares for them are. Deferred catalog entries
@@ -6779,10 +7051,7 @@ impl AgentFactory {
                             .web_search_executor_override
                             .clone()
                             .or_else(|| auto_web_search_executor.clone()),
-                        if model_profile
-                            .as_ref()
-                            .is_some_and(|profile| profile.supports_web_search)
-                        {
+                        if native_web_search_active {
                             ToolCategoryOverride::Disable
                         } else {
                             build_config.override_web_search
@@ -7121,24 +7390,40 @@ impl AgentFactory {
                         config,
                     )
                     .await;
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    {
-                        match session_process_custody.as_ref() {
-                            Some(custody) if !layered_hooks.entries.is_empty() => Some(Arc::new(
-                                meerkat_hooks::DefaultHookEngine::new(layered_hooks)
-                                    .with_command_process_custody(Arc::new(
-                                        crate::process_custody::HookProcessCustody::new(
-                                            Arc::clone(custody),
-                                        ),
-                                    )),
-                            )
-                                as Arc<dyn meerkat_core::HookEngine>),
-                            _ => create_default_hook_engine(layered_hooks),
-                        }
-                    }
-                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    {
-                        create_default_hook_engine(layered_hooks)
+                    if layered_hooks.entries.is_empty() {
+                        None
+                    } else {
+                        let engine = meerkat_hooks::DefaultHookEngine::new(layered_hooks);
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        let engine = match session_process_custody.as_ref() {
+                            Some(custody) => {
+                                let mut adapter = crate::process_custody::HookProcessCustody::new(
+                                    Arc::clone(custody),
+                                );
+                                if let Some(confinement) = &self.command_hook_confinement {
+                                    adapter = adapter.with_confinement(Arc::clone(confinement));
+                                }
+                                engine.with_command_process_custody(Arc::new(adapter))
+                            }
+                            None => match &self.command_hook_confinement {
+                                Some(confinement) => engine.with_command_process_custody(Arc::new(
+                                    crate::command_hook_confinement::RefusingCommandHookCustody(
+                                        confinement.missing_custody_refusal(),
+                                    ),
+                                )),
+                                None => engine,
+                            },
+                        };
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                        let engine = match &self.command_hook_confinement {
+                            Some(confinement) => engine.with_command_process_custody(Arc::new(
+                                crate::command_hook_confinement::RefusingCommandHookCustody(
+                                    confinement.missing_custody_refusal(),
+                                ),
+                            )),
+                            None => engine,
+                        };
+                        Some(Arc::new(engine) as Arc<dyn meerkat_core::HookEngine>)
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
@@ -7373,6 +7658,14 @@ impl AgentFactory {
         if build_config.wait_for_mcp {
             loop {
                 let update = tools.poll_external_updates().await;
+                // This wait consumes the same completed notices as a model
+                // boundary. Preserve their safe failure projection before
+                // the first request instead of silently discarding it.
+                for notice in &update.notices {
+                    if let Some(message) = notice.model_setup_failure_notice() {
+                        session.push(message);
+                    }
+                }
                 if update.pending.is_empty() {
                     break;
                 }
@@ -7409,71 +7702,6 @@ impl AgentFactory {
         let resolved_structured_output_retries = build_config
             .structured_output_retries
             .unwrap_or(config.agent.structured_output_retries);
-
-        // Resolve the per-launch tool access policy into the sealed execution
-        // form BEFORE session metadata is persisted: an unresolved `Inherit`
-        // is a wiring fault (the spawn chain owns Inherit resolution — a child
-        // inherits its parent's persisted effective policy; host launches with
-        // no parent resolve to unrestricted) and must fail the build closed
-        // rather than persist or silently un-gate the session.
-        let tool_execution_policy = build_config
-            .tool_access_policy
-            .clone()
-            .map(meerkat_core::ToolExecutionPolicy::resolve)
-            .transpose()
-            .map_err(|err| BuildAgentError::Config(format!("Tool access policy: {err}")))?;
-        let tool_dispatch_admission = build_config.tool_dispatch_admission.clone();
-
-        let bound_consequence_policy = match &build_config.application_tool_policy {
-            meerkat_core::ApplicationToolPolicyBinding::Unmanaged => None,
-            meerkat_core::ApplicationToolPolicyBinding::Inherit => {
-                return Err(BuildAgentError::Config(
-                    "application tool policy 'inherit' is unresolved at the AgentFactory seam"
-                        .to_string(),
-                ));
-            }
-            meerkat_core::ApplicationToolPolicyBinding::Provider {
-                provider_id,
-                policy_id,
-            } => {
-                let member = build_config.mob_member_binding.clone().ok_or_else(|| {
-                    BuildAgentError::Config(
-                        "provider-bound application tool policy requires MobMemberBinding"
-                            .to_string(),
-                    )
-                })?;
-                let registry = build_config
-                    .tool_consequence_policy_registry
-                    .as_ref()
-                    .ok_or_else(|| {
-                        BuildAgentError::Config(
-                            "provider-bound application tool policy requires the host policy registry"
-                                .to_string(),
-                        )
-                    })?;
-                Some(
-                    registry
-                        .bind(member, provider_id.clone(), policy_id.clone())
-                        .map_err(|error| {
-                            BuildAgentError::Config(format!(
-                                "application tool policy binding failed: {error}"
-                            ))
-                        })?,
-                )
-            }
-        };
-        let provider_native_tool_policy = if tool_dispatch_admission.is_some()
-            || bound_consequence_policy.is_some()
-            || tool_execution_policy
-                .as_ref()
-                .is_some_and(|policy| !policy.is_unrestricted())
-            || Self::llm_identity_uses_copilot(config, &resolved_llm_identity)
-                .map_err(BuildAgentError::LlmClient)?
-        {
-            meerkat_core::ProviderNativeToolPolicy::DisableAll
-        } else {
-            meerkat_core::ProviderNativeToolPolicy::Inherit
-        };
 
         // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
         // effective bool. This ensures Inherit survives across save/resume cycles so
@@ -7651,8 +7879,18 @@ impl AgentFactory {
         if let Some(capability_base_filter) = capability_base_filter_override.clone() {
             builder = builder.with_capability_base_filter(capability_base_filter);
         }
+        // The tools the execution policy makes unreachable by name leave the
+        // visible scope on every build (a resume included); the execution
+        // gate below still refuses every denied call.
+        builder = builder.with_policy_base_filter(tool_execution_policy.as_ref().map_or(
+            ToolFilter::All,
+            meerkat_core::ToolExecutionPolicy::static_visibility_filter,
+        ));
         if let Some(state) = initial_visibility_state {
             builder = builder.with_initial_tool_visibility_state(state);
+        }
+        if let Some(review) = self.operation_review.as_ref() {
+            builder = builder.with_operation_review(Arc::clone(review));
         }
         if let Some(system_prompt) = system_prompt {
             builder = builder.system_prompt(system_prompt);
@@ -8660,11 +8898,234 @@ mod tests {
         ));
     }
 
+    /// Records each prepared helper operation and refuses it, so no request
+    /// leaves the process.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[derive(Default)]
+    struct RecordingHelperPolicy {
+        prepared: std::sync::Mutex<Vec<meerkat_core::authorization::OperationAuthorizationFacts>>,
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    impl meerkat_core::authorization::WorkAuthorization for RecordingHelperPolicy {
+        fn prepare(
+            &self,
+            binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
+        ) -> Result<
+            Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
+            meerkat_core::OperationAuthorizationError,
+        > {
+            self.prepared
+                .lock()
+                .expect("prepared lock")
+                .push(binding.facts().clone());
+            Err(meerkat_core::authorization::OperationRefused::new(
+                meerkat_core::authorization::OperationRefusalKind::Denied,
+            )
+            .into())
+        }
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    fn openai_helper_realm(bindings: &[(&str, bool)]) -> RealmConfigSection {
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                // Never reached: every helper request here is refused first.
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                options: serde_json::Value::Null,
+                server: None,
+            },
+        );
+        section.auth.insert(
+            "openai_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "sk-test-openai".to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        for (binding, provider_default) in bindings {
+            section.binding.insert(
+                (*binding).to_string(),
+                ProviderBindingConfig {
+                    backend_profile: "openai_api".to_string(),
+                    auth_profile: "openai_key".to_string(),
+                    credential_account: None,
+                    default_model: Some("gpt-5.5".to_string()),
+                    policy: Default::default(),
+                    provider_default: *provider_default,
+                },
+            );
+        }
+        section
+    }
+
+    /// The factory-built helper is authorized as its own resolved route B in
+    /// the session's realm chain, never as the controller's binding A, and
+    /// its prepared facts keep the calling run.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn factory_helper_prepares_its_own_binding_never_the_controller_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        // `team` holds the controller's explicit binding A and the realm
+        // default B; `child` owns nothing and `ambiguous` selects nothing, so
+        // both inherit B from `global`.
+        config.realm.insert(
+            "team".to_string(),
+            openai_helper_realm(&[("controller-a", false), ("search-b", true)]),
+        );
+        config.realm.insert(
+            "global".to_string(),
+            openai_helper_realm(&[("search-b", true)]),
+        );
+        config
+            .realm
+            .insert("child".to_string(), RealmConfigSection::default());
+        config.realm.insert(
+            "ambiguous".to_string(),
+            openai_helper_realm(&[("first", false), ("second", false)]),
+        );
+        let registry = factory.model_registry(&config).unwrap();
+        let controller = AuthBindingRef {
+            realm: RealmId::parse("team").unwrap(),
+            binding: meerkat_core::BindingId::parse("controller-a").unwrap(),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+
+        for (realm, owner) in [
+            ("team", "team"),
+            ("child", "global"),
+            ("ambiguous", "global"),
+        ] {
+            let executor = factory
+                .build_web_search_executor(
+                    &config,
+                    &registry,
+                    Provider::OpenAI,
+                    &AgentBuildConfig {
+                        realm_id: Some(RealmId::parse(realm).unwrap()),
+                        auth_binding: Some(controller.clone()),
+                        runtime_build_mode: RuntimeBuildMode::StandaloneEphemeral,
+                        ..AgentBuildConfig::new("gpt-5.5")
+                    },
+                    meerkat_core::new_event_tap(),
+                    true,
+                )
+                .await
+                .unwrap()
+                .expect("explicit enable provisions the helper");
+            let policy = Arc::new(RecordingHelperPolicy::default());
+            let run_id = meerkat_core::RunId::new();
+            let authorization = meerkat_core::LlmRequestAuthorization::new(
+                meerkat_core::WorkAuthorizationContext::new(
+                    Arc::clone(&policy) as Arc<dyn meerkat_core::authorization::WorkAuthorization>,
+                    meerkat_core::exact_operation::OperationExecutionScope::Domain,
+                ),
+                meerkat_core::OperationId::new(),
+                meerkat_core::authorization::ModelAuthorizationUse::Inference,
+            )
+            .with_coordinates(Some(run_id.clone()), None);
+            let error = executor
+                .execute_web_search_authorized(
+                    meerkat_core::web_search::WebSearchRequest {
+                        query: "fixture query".to_string(),
+                        provider: None,
+                        provider_params: None,
+                        context: None,
+                    },
+                    Some(authorization),
+                )
+                .await
+                .expect_err("the refused helper does not search");
+            assert!(
+                matches!(error, meerkat_llm_core::LlmError::OperationRefused { .. }),
+                "{realm}: {error:?}"
+            );
+
+            let prepared = policy.prepared.lock().expect("prepared lock");
+            assert_eq!(prepared.len(), 1, "{realm}: one helper preparation");
+            assert_eq!(prepared[0].run_id.as_ref(), Some(&run_id), "{realm}");
+            let meerkat_core::authorization::AuthorizationOperation::Model(facts) =
+                &prepared[0].operation
+            else {
+                unreachable!("a helper search is a model operation");
+            };
+            let helper = facts
+                .identity
+                .auth_binding
+                .as_ref()
+                .expect("the helper names its binding");
+            assert_eq!(
+                (helper.realm.as_str(), helper.binding.as_str()),
+                (owner, "search-b"),
+                "{realm}: helper attributed to its own owner-stamped binding"
+            );
+            assert_ne!(facts.identity.auth_binding.as_ref(), Some(&controller));
+            assert_eq!(
+                facts.hosted_capabilities.as_ref(),
+                &[meerkat_core::ServerToolKind::WebSearch]
+            );
+        }
+
+        // An ambiguous realm selects nothing itself: the canonical chain
+        // continues to its owner. With no owner further up, no helper exists.
+        let mut ambiguous_only = Config::default();
+        ambiguous_only.realm.insert(
+            "ambiguous".to_string(),
+            openai_helper_realm(&[("first", false), ("second", false)]),
+        );
+        let ambiguous = factory
+            .build_web_search_executor(
+                &ambiguous_only,
+                &factory.model_registry(&ambiguous_only).unwrap(),
+                Provider::OpenAI,
+                &AgentBuildConfig {
+                    realm_id: Some(RealmId::parse("ambiguous").unwrap()),
+                    runtime_build_mode: RuntimeBuildMode::StandaloneEphemeral,
+                    ..AgentBuildConfig::new("gpt-5.5")
+                },
+                meerkat_core::new_event_tap(),
+                true,
+            )
+            .await;
+        assert!(
+            matches!(
+                ambiguous,
+                Err(BuildAgentError::CapabilityUnavailable {
+                    capability: "web_search",
+                    ..
+                })
+            ),
+            "an ambiguous realm must not pick a helper binding"
+        );
+    }
+
     #[tokio::test]
     async fn browser_profile_refuses_fallback_search_before_credential_resolution() {
-        for (model, native_search_enabled) in [("gpt-5.3-codex", true), ("gpt-6-astra", false)] {
+        // A governed restriction disables provider-native tools, so even a
+        // native-search model needs the fallback the browser cannot provide.
+        let restricted = Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+            ["shell"].into_iter().collect(),
+        ));
+        for (model, native_search_enabled, tool_access_policy) in [
+            ("gpt-5.3-codex", true, None),
+            ("gpt-6-astra", false, None),
+            ("gpt-5.4", true, restricted),
+        ] {
             let mut build = AgentBuildConfig::new(model);
             build.override_web_search = ToolCategoryOverride::Enable;
+            build.tool_access_policy = tool_access_policy;
             let mut config = Config::default();
             config.provider_tools.openai.web_search = native_search_enabled;
             let error = match AgentFactory::minimal()
@@ -8683,6 +9144,18 @@ mod tests {
                 meerkat_capabilities::RuntimeProfileCapability::FallbackWebSearch
             );
         }
+        // Unrestricted control: native search remains, so no fallback is
+        // required and the build proceeds past the profile gate.
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.override_web_search = ToolCategoryOverride::Enable;
+        let outcome = AgentFactory::minimal()
+            .with_browser_runtime_profile()
+            .build_agent(build, &Config::default())
+            .await;
+        assert!(
+            !matches!(outcome, Err(BuildAgentError::RuntimeProfile(_))),
+            "native search needs no fallback capability"
+        );
     }
 
     #[tokio::test]
@@ -10696,6 +11169,99 @@ mod tests {
             cache_fields(&body).is_empty(),
             "cache defaults computed for an unresolved binding reached the ChatGPT backend wire: {:?}",
             cache_fields(&body)
+        );
+    }
+
+    /// An inherited tool-visibility ceiling keeps the identity witnesses that
+    /// back it through a model-call boundary, so the session's committed
+    /// record still witnesses every inherited name and the session resumes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn inherited_ceiling_witnesses_survive_a_turn_and_the_session_resumes() {
+        let temp = tempfile::tempdir().expect("temp session store");
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
+            ["parent_shell".to_string()].into_iter().collect(),
+        );
+        let (ceiling, expected_witnesses) =
+            inherited_visibility_authority(inherited_filter.clone(), &["parent_shell"]);
+        let expected_witness = expected_witnesses
+            .get("parent_shell")
+            .cloned()
+            .expect("the ceiling's identity witness");
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.initial_tool_visibility_state = Some(ceiling);
+        let mut agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("agent with an inherited ceiling");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text("one turn".into()))
+            .await
+            .expect("one turn");
+
+        let state = agent
+            .session()
+            .try_tool_visibility_state()
+            .expect("parse visibility")
+            .expect("a committed visibility record");
+        assert_eq!(state.inherited_base_filter, inherited_filter);
+        assert_eq!(
+            state.filter_witnesses.get("parent_shell"),
+            Some(&expected_witness),
+            "the model-call boundary kept the inherited ceiling's witness: {:?}",
+            state.filter_witnesses
+        );
+
+        let resumed_session = agent.session().clone();
+        let resumed_runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = resumed_runtime
+            .prepare_bindings(resumed_session.id().clone())
+            .await
+            .expect("resume bindings");
+        let mut resume = AgentBuildConfig::new("claude-sonnet-4-5");
+        resume.provider = Some(Provider::Anthropic);
+        resume.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        resume.resume_session = Some(resumed_session);
+        resume.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings.clone());
+        resume.override_builtins = ToolCategoryOverride::Disable;
+        let resumed = factory
+            .build_agent(resume, &Config::default())
+            .await
+            .expect("a session that ran a turn resumes with its inherited ceiling");
+        let resumed_state = resumed
+            .session()
+            .try_tool_visibility_state()
+            .expect("parse resumed visibility")
+            .expect("a resumed visibility record");
+        assert_eq!(resumed_state.inherited_base_filter, inherited_filter);
+        assert_eq!(
+            resumed_state.filter_witnesses.get("parent_shell"),
+            Some(&expected_witness)
+        );
+        let owner_state = bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("resumed owner visibility");
+        assert_eq!(owner_state.inherited_base_filter, inherited_filter);
+        assert_eq!(
+            owner_state.filter_witnesses.get("parent_shell"),
+            Some(&expected_witness),
+            "the resumed owner holds the original identity"
         );
     }
 
@@ -14699,6 +15265,15 @@ mod tests {
             .collect(),
             filter_witnesses: [
                 (
+                    "old_parent".into(),
+                    meerkat_core::ToolVisibilityWitness {
+                        last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                            kind: meerkat_core::ToolSourceKind::Callback,
+                            source_id: "old_parent".into(),
+                        }),
+                    },
+                ),
+                (
                     "active_secret".into(),
                     meerkat_core::ToolVisibilityWitness {
                         last_seen_provenance: Some(meerkat_core::ToolProvenance {
@@ -14753,7 +15328,15 @@ mod tests {
             .try_tool_visibility_state()
             .expect("parse visibility")
             .expect("visibility state");
-        assert_eq!(visibility_state.inherited_base_filter, inherited_filter);
+        // The handoff narrows the retained ceiling; it never replaces it.
+        assert_eq!(
+            visibility_state.inherited_base_filter,
+            meerkat_core::tool_scope::ToolFilter::Deny(
+                ["old_parent".to_string(), "parent_shell".to_string()]
+                    .into_iter()
+                    .collect(),
+            )
+        );
         assert_eq!(visibility_state.active_filter, original_state.active_filter);
         assert_eq!(visibility_state.staged_filter, original_state.staged_filter);
         assert_eq!(
@@ -14781,6 +15364,64 @@ mod tests {
             original_state.requested_witnesses
         );
         assert_eq!(owner_state.filter_witnesses, expected_filter_witnesses);
+    }
+
+    /// A retained inherited ceiling whose saved identity evidence is missing
+    /// is refused, typed, before the session is activated: a valid incoming
+    /// handoff neither erases it nor stands in for its lost witness.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn factory_resume_refuses_a_retained_ceiling_without_its_witness() {
+        // A handoff naming another tool, and one naming the same tool: its
+        // own valid witness never stands in for the retained identity.
+        for incoming_name in ["parent_shell", "old_parent"] {
+            let temp = tempfile::tempdir().unwrap();
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let incomplete = SessionToolVisibilityState {
+                inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
+                    ["old_parent".to_string()].into_iter().collect(),
+                ),
+                ..Default::default()
+            };
+            let session = session_with_raw_metadata(
+                Session::new(),
+                meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
+                serde_json::to_value(incomplete).expect("visibility state"),
+            );
+            let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+            let bindings = runtime
+                .prepare_bindings(session.id().clone())
+                .await
+                .expect("session runtime bindings");
+            let (inherited_authority, _) = inherited_visibility_authority(
+                meerkat_core::tool_scope::ToolFilter::Deny(
+                    [incoming_name.to_string()].into_iter().collect(),
+                ),
+                &[incoming_name],
+            );
+            let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+            build.provider = Some(Provider::Anthropic);
+            build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+            build.resume_session = Some(session);
+            build.runtime_build_mode =
+                meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.initial_tool_visibility_state = Some(inherited_authority);
+            let Err(error) = factory.build_agent(build, &Config::default()).await else {
+                panic!("a retained ceiling without its witness is refused ({incoming_name})");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("inherited tool visibility without witnesses"),
+                "the missing-witness refusal ({incoming_name}): {error}"
+            );
+            assert_eq!(
+                bindings.tool_visibility_owner().visibility_state().unwrap(),
+                SessionToolVisibilityState::default(),
+                "the refused build left the owner untouched ({incoming_name})"
+            );
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -16949,7 +17590,7 @@ mod tests {
             "list_members",
             "generate_image",
             "memory_search",
-            "mcp__homecore__probe",
+            "mcp__example__probe",
         ];
         let external: Arc<dyn AgentToolDispatcher> = Arc::new(VisibilityDispatcher {
             tools: external_fixture_names
@@ -17116,7 +17757,16 @@ impl AgentFactory {
     ) -> Result<Arc<dyn AgentToolDispatcher>, BuildAgentError> {
         let compose_image_generation =
             image_generation_visibility.resolve(false) && image_generation_machine.is_some();
-        if !effective_builtins && !effective_shell && !compose_image_generation {
+        // An explicitly enabled web-search fallback is its own capability: it
+        // needs the composite, which keeps the general builtin namespace
+        // closed. `resolve(false)` matches its registration: Inherit is off.
+        let compose_web_search =
+            web_search_visibility.resolve(false) && web_search_executor.is_some();
+        if !effective_builtins
+            && !effective_shell
+            && !compose_image_generation
+            && !compose_web_search
+        {
             // No builtins - return the external tools if provided, otherwise empty.
             return Ok(external.unwrap_or_else(|| Arc::new(EmptyToolDispatcher)));
         }
@@ -17156,7 +17806,7 @@ impl AgentFactory {
         };
 
         // Create builtin tool config. When a non-builtin capability such as
-        // image generation needs the composite dispatcher, keep the general
+        // image generation or web search needs the composite dispatcher, keep the general
         // builtin namespace closed and let the capability registration add its
         // own tool(s). This keeps profile category intent one-owner: enabling
         // `image_generation` must not also expose task/patch/skill utilities.

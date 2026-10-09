@@ -1112,7 +1112,10 @@ impl ProcessCustody {
         Ok((prepared, command))
     }
 
-    pub(in crate::builtin::shell) async fn prepare_gated_spawn(
+    /// Reserve the existing custody gate before an immutable native launch.
+    /// The caller must retain the preparation and child until `spawned_process`
+    /// records the leader, and reap a refused child without releasing the gate.
+    pub async fn prepare_gated_spawn(
         self: &Arc<Self>,
         spawner: ToolProcessSpawner,
         tool_call_id: Option<&str>,
@@ -1164,15 +1167,35 @@ pub struct PreparedCustodySpawn {
 }
 
 impl PreparedCustodySpawn {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(in crate::builtin::shell) fn spawn_confined(
         &self,
         prepared: meerkat_sandbox::PreparedConfinement,
     ) -> std::io::Result<meerkat_sandbox::ProcessChild> {
+        self.spawn_confined_with_io(prepared, meerkat_sandbox::SpawnIo::default())
+    }
+
+    /// Spawn the exact prepared launch behind this custody gate. Stream
+    /// selection cannot retarget the bound program, argv, cwd or environment.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn spawn_confined_with_io(
+        &self,
+        prepared: meerkat_sandbox::PreparedConfinement,
+        streams: meerkat_sandbox::SpawnIo,
+    ) -> std::io::Result<meerkat_sandbox::ProcessChild> {
         let (descriptor, token) = self.gate.launch_parts()?;
         prepared
-            .spawn_behind_gate(descriptor, token, meerkat_sandbox::SpawnIo::default())
+            .spawn_behind_gate(descriptor, token, streams)
             .map(Into::into)
+    }
+
+    /// Record the owned native child before releasing its gate. On failure
+    /// the gate stays closed and the caller must terminate and reap the child.
+    pub async fn spawned_process(
+        self,
+        child: &meerkat_sandbox::ProcessChild,
+    ) -> Result<CustodyGuard, ProcessCustodyError> {
+        self.spawned_pid(child.id()).await
     }
 
     /// Record the spawned leader, then release the gate so the command runs.
@@ -1190,22 +1213,54 @@ impl PreparedCustodySpawn {
         self,
         pid: Option<u32>,
     ) -> Result<CustodyGuard, ProcessCustodyError> {
+        self.spawned_pid_entering(pid, || Ok(()))
+            .await
+            .map_err(|failure| match failure {
+                GatedSpawnFailure::Custody(error) => error,
+                GatedSpawnFailure::Entry(error) => ProcessCustodyError::io("native entry", error),
+            })
+    }
+
+    /// Record the spawned leader, run the call's single native entry step,
+    /// then release the gate. The entry runs after custody recorded the
+    /// process and immediately before the release that lets the command run;
+    /// a refusal keeps the gate closed, so the command never runs and the
+    /// caller terminates and reaps the prologue exactly as for a custody
+    /// failure.
+    pub(in crate::builtin::shell) async fn spawned_pid_entering(
+        self,
+        pid: Option<u32>,
+        enter: impl FnOnce() -> std::io::Result<()>,
+    ) -> Result<CustodyGuard, GatedSpawnFailure> {
         let Self {
             mut reservation,
             mut gate,
         } = self;
         gate.spawned();
         let pid = pid.and_then(|pid| i32::try_from(pid).ok()).ok_or_else(|| {
-            ProcessCustodyError::io(
+            GatedSpawnFailure::Custody(ProcessCustodyError::io(
                 "capture spawned leader pid",
                 std::io::Error::from(std::io::ErrorKind::NotFound),
-            )
+            ))
         })?;
-        reservation.record_spawned(pid).await?;
-        gate.release()
-            .map_err(|error| ProcessCustodyError::io("release spawn gate", error))?;
+        reservation
+            .record_spawned(pid)
+            .await
+            .map_err(GatedSpawnFailure::Custody)?;
+        enter().map_err(GatedSpawnFailure::Entry)?;
+        gate.release().map_err(|error| {
+            GatedSpawnFailure::Custody(ProcessCustodyError::io("release spawn gate", error))
+        })?;
         Ok(CustodyGuard { reservation })
     }
+}
+
+/// Why a gated spawn did not release its gate. Both leave the gate closed.
+#[derive(Debug)]
+pub(in crate::builtin::shell) enum GatedSpawnFailure {
+    Custody(ProcessCustodyError),
+    /// The native entry step refused; carries its own typed io error.
+    Entry(std::io::Error),
 }
 
 /// Custody of one spawned, released process group. Dropping it keeps the

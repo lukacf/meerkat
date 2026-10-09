@@ -462,6 +462,9 @@ required fields in a known cause still produce
 `UnknownEvent(type="malformed_event")` with the raw payload preserved, without
 falling back to the legacy error.
 
+`request_reasoning_lowered` is likewise recognized through the generated
+inventory and arrives as `UnknownEvent` with its payload in `event.data`.
+
 `hook_launch_refused` is recognized through the current generated inventory
 and arrives as `UnknownEvent` with the full wire payload in `event.data`,
 including `reason` and the exact optional `tool_use_id`. This mechanical

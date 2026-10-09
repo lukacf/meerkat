@@ -135,6 +135,38 @@ pub(crate) struct EphemeralDriverRollbackSnapshot {
     policy_snapshot: HashMap<InputId, PolicyDecision>,
     admission_order: HashSet<InputId>,
     live_boundary_join_witnesses: HashMap<InputId, meerkat_core::CoreBoundaryDeliveryWitness>,
+    staged_retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+}
+
+/// The driver's slot for the retained work identity of its last staged work
+/// context. Cloning copies the current value, so an isolated driver clone
+/// keeps its own slot. A poisoned lock still holds a plain `Option` with no
+/// invariant to break, so reads and writes both recover its value.
+#[derive(Default)]
+struct StagedRetainedWork(
+    std::sync::Mutex<Option<meerkat_core::retained_work::RetainedWorkIdentity>>,
+);
+
+impl StagedRetainedWork {
+    fn get(&self) -> Option<meerkat_core::retained_work::RetainedWorkIdentity> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set(&self, identity: Option<meerkat_core::retained_work::RetainedWorkIdentity>) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
+    }
+}
+
+impl Clone for StagedRetainedWork {
+    fn clone(&self) -> Self {
+        Self(std::sync::Mutex::new(self.get()))
+    }
 }
 
 /// Ephemeral runtime driver -- all state in-memory.
@@ -192,6 +224,12 @@ pub struct EphemeralRuntimeDriver {
     /// typed apply fact to the run terminal, where
     /// `ResolveLiveBoundaryDurableAppendJoin` consumes it.
     live_boundary_join_witnesses: HashMap<InputId, meerkat_core::CoreBoundaryDeliveryWitness>,
+    /// The retained work identity minted for the last successfully staged
+    /// work context (`batch_work_authorization`), so a producer dispatched in
+    /// that run can be admitted against the exact batch the driver staged.
+    /// It names its run; a stale value fails the caller's active-run check.
+    /// Passive data, never permission.
+    staged_retained_work: StagedRetainedWork,
 }
 
 /// Wrapper around the DSL authority that provides `Debug` output.
@@ -300,6 +338,7 @@ impl EphemeralRuntimeDriver {
             policy_snapshot: HashMap::new(),
             admission_order: HashSet::new(),
             live_boundary_join_witnesses: HashMap::new(),
+            staged_retained_work: StagedRetainedWork::default(),
         }
     }
 
@@ -324,6 +363,9 @@ impl EphemeralRuntimeDriver {
     pub(crate) fn authenticate_work(&self, input: &Input) -> Result<(), RuntimeDriverError> {
         if let Some(row) = self.ledger.get(input.id()) {
             crate::input_authority::verify_retained_replay(row, input)?;
+        }
+        if let Some(grant) = input.header().retained_resume.as_ref() {
+            return self.authenticate_retained_resume(input, grant);
         }
         match (
             self.work_authorization_host.get(),
@@ -366,6 +408,77 @@ impl EphemeralRuntimeDriver {
             }
             _ => Err(crate::input_authority::unavailable()),
         }
+    }
+
+    /// A recovered, already admitted resume row has no runnable client (one
+    /// never survives persistence). Ask the currently installed host for a
+    /// usable, exactly selected client again from the row's historical
+    /// evidence; never build one from it. Without a host, or when the host
+    /// does not admit it now, the row keeps no client and cannot stage.
+    fn reacquire_retained_resume_client(&self, state: &mut InputState) {
+        let (Some(record), Some(host), Some(input)) = (
+            state.retained_resume.as_ref(),
+            self.work_authorization_host.get(),
+            state.persisted_input.as_ref(),
+        ) else {
+            return;
+        };
+        let evidence = crate::retained_work::RetainedResumeEvidence {
+            identity: record.identity.clone(),
+            delivery: record.delivery.clone(),
+            contributors: state.authority_contributors.clone(),
+        };
+        match host
+            .host()
+            .authenticate_retained_resume(&self.runtime_id, input, &evidence)
+        {
+            Ok(client) if record.identity.controller() == Some(client.selection()) => {
+                state.controller_client = Some(client);
+            }
+            Ok(_) | Err(_) => {
+                tracing::warn!(
+                    input_id = %state.input_id,
+                    "recovered retained-work resume row has no usable controller from the installed host"
+                );
+            }
+        }
+    }
+
+    /// A governed resume of retained work: runtime-minted custody bound to
+    /// this exact input and this runtime, re-validated by the native owner
+    /// under driver custody. It never carries an association or ingress of
+    /// its own.
+    fn authenticate_retained_resume(
+        &self,
+        input: &Input,
+        grant: &crate::retained_work::RetainedResumeGrant,
+    ) -> Result<(), RuntimeDriverError> {
+        let host = self
+            .work_authorization_host
+            .get()
+            .ok_or_else(crate::input_authority::unavailable)?;
+        if input.header().authority_association.is_some()
+            || input.header().ingress_context.is_some()
+            || grant.evidence.identity.runtime_id() != self.runtime_id.to_string()
+            || (self.runtime_phase_snapshot() == RuntimeState::Running
+                && input.handling_mode() == Some(HandlingMode::Steer))
+        {
+            return Err(crate::input_authority::unavailable());
+        }
+        grant.verify_submission(input)?;
+        let client = host
+            .host()
+            .authenticate_retained_resume(&self.runtime_id, input, &grant.evidence)
+            .map_err(crate::retained_work::classify_resume_error)?;
+        if client.selection() != grant.controller_client.selection() {
+            return Err(crate::input_authority::unavailable());
+        }
+        if !self.executor_supports_work_authorization {
+            return Err(RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: crate::traits::ControllerReadinessFailure::ExecutorUnavailable,
+            });
+        }
+        Ok(())
     }
 
     /// Exact query of this driver's accepted rows and generated lifecycle.
@@ -435,10 +548,15 @@ impl EphemeralRuntimeDriver {
             {
                 return Err(crate::input_authority::unavailable());
             }
-            let own = row
-                .authority_contributors
-                .iter()
-                .find(|item| item.input_id() == input_id);
+            // A resume of retained work has no association of its own: it is
+            // bound under its canonical original contributor.
+            let own = if row.retained_resume.is_some() {
+                row.authority_contributors.first()
+            } else {
+                row.authority_contributors
+                    .iter()
+                    .find(|item| item.input_id() == input_id)
+            };
             let expected = own
                 .map(|item| crate::input_authority::association_binding(item.association()))
                 .transpose()?
@@ -539,10 +657,26 @@ impl EphemeralRuntimeDriver {
             audit_sink,
             durability_health: self.work_durability_health.clone(),
         };
-        host.host()
+        let identity = crate::retained_work::identity_of(&batch)?;
+        let context = host
+            .host()
             .work_context(&batch)
-            .map(Some)
-            .map_err(|_| crate::input_authority::unavailable())
+            .map_err(|_| crate::input_authority::unavailable())?;
+        // Retained only once the context is built. A failed staging keeps
+        // the previous run's identity, which the caller's active-run check
+        // rejects.
+        self.staged_retained_work.set(Some(identity.clone()));
+        Ok(Some(context.with_retained_work(identity)))
+    }
+
+    /// The retained work identity of the last successfully staged work
+    /// context. Callers must still check that its run is the active staged
+    /// run in the generated state.
+    #[cfg(feature = "live")]
+    pub(crate) fn staged_retained_work(
+        &self,
+    ) -> Option<meerkat_core::retained_work::RetainedWorkIdentity> {
+        self.staged_retained_work.get()
     }
 
     pub(crate) fn rollback_snapshot(&self) -> EphemeralDriverRollbackSnapshot {
@@ -562,6 +696,7 @@ impl EphemeralRuntimeDriver {
             policy_snapshot: self.policy_snapshot.clone(),
             admission_order: self.admission_order.clone(),
             live_boundary_join_witnesses: self.live_boundary_join_witnesses.clone(),
+            staged_retained_work: self.staged_retained_work.get(),
         }
     }
 
@@ -598,6 +733,7 @@ impl EphemeralRuntimeDriver {
         self.policy_snapshot = snapshot.policy_snapshot;
         self.admission_order = snapshot.admission_order;
         self.live_boundary_join_witnesses = snapshot.live_boundary_join_witnesses;
+        self.staged_retained_work.set(snapshot.staged_retained_work);
     }
 
     pub(crate) fn shared_dsl_authority(&self) -> SharedIngressDslAuthority {
@@ -1063,7 +1199,10 @@ impl EphemeralRuntimeDriver {
         input_id.to_string()
     }
 
-    fn with_dsl_state<R>(&self, body: impl FnOnce(&mm_dsl::MeerkatMachineState) -> R) -> R {
+    pub(crate) fn with_dsl_state<R>(
+        &self,
+        body: impl FnOnce(&mm_dsl::MeerkatMachineState) -> R,
+    ) -> R {
         let authority = self.dsl.lock();
         body(authority.state())
     }
@@ -1644,6 +1783,29 @@ impl EphemeralRuntimeDriver {
                 )?;
             }
             (None, None) if recovered_state.authority_contributors.is_empty() => {}
+            // A recovered resume of retained work is bound under its canonical
+            // original contributor, as at admission.
+            (None, None)
+                if recovered_state.retained_resume.is_some()
+                    && !recovered_state.authority_contributors.is_empty() =>
+            {
+                let canonical = recovered_state
+                    .authority_contributors
+                    .first()
+                    .ok_or_else(crate::input_authority::unavailable)?;
+                let (binding, batch) =
+                    crate::input_authority::association_binding(canonical.association())?;
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                        input_id: Self::dsl_key(&work_id),
+                        authority_binding: binding
+                            .ok_or_else(crate::input_authority::unavailable)?,
+                        authority_batch_key: batch
+                            .ok_or_else(crate::input_authority::unavailable)?,
+                    },
+                    "BindInputAuthority(recovered retained resume)",
+                )?;
+            }
             _ => return Err(crate::input_authority::unavailable()),
         }
         self.register_accepted_idempotency(&work_id, recovered_state.idempotency_key.as_ref())?;
@@ -2828,6 +2990,9 @@ impl EphemeralRuntimeDriver {
             )?;
         }
 
+        if !terminal {
+            self.reacquire_retained_resume_client(&mut bundle.state);
+        }
         bundle.state.authorization_audit = bundle
             .state
             .authorization_audit
@@ -4599,17 +4764,14 @@ impl EphemeralRuntimeDriver {
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
         state.idempotency_key = crate::input_authority::qualified_idempotency_key(&input)?;
-        state.authority_contributors =
-            crate::input_authority::RetainedInputAuthority::from_input(&input)?
-                .into_iter()
-                .collect();
-        state.controller_client = input
-            .header()
-            .ingress_context
-            .as_ref()
-            .and_then(|ingress| ingress.controller_client().cloned());
+        let admitted = crate::retained_work::admitted_authority(&input)?;
+        state.authority_contributors = admitted.contributors;
+        state.controller_client = admitted.controller_client;
+        state.retained_resume = admitted.retained_resume;
         state.prompt_replay_identity =
             crate::input_state::PromptReplayIdentity::from_input(&input)?;
+        state.external_event_replay_identity =
+            crate::input_state::ExternalEventReplayIdentity::from_input(&input)?;
         state.directed_run_started_attribution =
             crate::input_state::DirectedRunStartedAttribution::from_input(&input)
                 .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
@@ -4867,15 +5029,10 @@ impl EphemeralRuntimeDriver {
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
         state.idempotency_key = crate::input_authority::qualified_idempotency_key(input)?;
-        state.authority_contributors =
-            crate::input_authority::RetainedInputAuthority::from_input(input)?
-                .into_iter()
-                .collect();
-        state.controller_client = input
-            .header()
-            .ingress_context
-            .as_ref()
-            .and_then(|ingress| ingress.controller_client().cloned());
+        let admitted = crate::retained_work::admitted_authority(input)?;
+        state.authority_contributors = admitted.contributors;
+        state.controller_client = admitted.controller_client;
+        state.retained_resume = admitted.retained_resume;
         state.policy = Some(PolicySnapshot {
             version: resolved.policy().policy_version,
             decision: resolved.policy().clone(),
@@ -5331,6 +5488,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -5361,6 +5519,7 @@ mod tests {
         Input::Operation(OperationInput {
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -5385,6 +5544,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -6031,6 +6191,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_keyed_external_event_with_a_changed_payload_is_an_idempotency_conflict() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("event-dedup"));
+        let event = |status: &str| {
+            Input::ExternalEvent(crate::input::ExternalEventInput {
+                header: InputHeader {
+                    id: InputId::new(),
+                    timestamp: chrono::Utc::now(),
+                    source: InputOrigin::External {
+                        source_name: "webhook".into(),
+                    },
+                    durability: InputDurability::Durable,
+                    visibility: InputVisibility::default(),
+                    idempotency_key: Some(IdempotencyKey::new("event-1")),
+                    supersession_key: None,
+                    correlation_id: None,
+                    ingress_context: None,
+                    retained_resume: None,
+                    authority_association: None,
+                },
+                event_type: "build".into(),
+                payload: serde_json::json!({ "status": status }),
+                blocks: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
+                objective_id: None,
+            })
+        };
+        let first = event("green");
+        let first_id = first.id().clone();
+        assert!(driver.accept_input(first).await.unwrap().is_accepted());
+        match driver.accept_input(event("green")).await.unwrap() {
+            crate::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                assert_eq!(existing_id, first_id);
+            }
+            other => panic!("the same event replays as a dedupe, got {other:?}"),
+        }
+        match driver.accept_input(event("red")).await {
+            Err(RuntimeDriverError::InputIdempotencyConflict { existing_id }) => {
+                assert_eq!(existing_id, first_id);
+            }
+            other => panic!("a changed payload under the key must conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn admission_validation_rejection_class_is_generated() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("validation-authority"));
 
@@ -6530,6 +6735,7 @@ mod tests {
             sender_taint: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),

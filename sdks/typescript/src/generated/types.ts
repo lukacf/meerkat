@@ -171,7 +171,7 @@ export type LiveBridgeEffectOutcome = "committed" | "failed" | "unknown";
 
 export type ToolDispatchAdmissionSource = "configured_gate" | "context_gate" | "authorization_audit";
 
-export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending" | "confinement_refused" | "hook_denied" | "outcome_uncertain";
+export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending" | "confinement_refused" | "hook_denied" | "outcome_uncertain" | "review_unsatisfied" | "review_unavailable" | "hook_launch_refused";
 
 export interface ToolDispatchSettlementFailure {
   admission_source: ToolDispatchAdmissionSource;
@@ -563,6 +563,17 @@ export interface WireScopeEvidenceRetainedOnRefresh {
 }
 
 export type WireScopeEvidence = WireScopeEvidenceTokenEndpointResponse | WireScopeEvidenceRetainedOnRefresh;
+
+export type WireAuthErrorReason = "realm_not_found" | "binding_not_found" | "mcp_server_not_configured" | "account_selection_required" | "unknown_strategy" | "device_poll_in_progress" | "device_code_already_admitted" | "device_expiry_invalid" | "missing_scopes" | "slot_occupied" | "slot_account_mismatch" | "slot_context_mismatch" | "slot_mode_mismatch" | "unverified_connector_publication" | "reauth_required" | "configuration_invalid" | "invalid_target" | "binding_invalid" | "binding_inherited" | "flow_unsupported" | "mcp_server_mismatch" | "attempt_missing" | "attempt_mismatch" | "account_mismatch" | "credential_mismatch" | "verification_unavailable" | "authorization_required" | "callback_unavailable" | "upstream_failure" | "infrastructure";
+
+export interface WireAuthErrorData {
+  reason: WireAuthErrorReason;
+}
+
+export interface WireAuthErrorBody {
+  error: string;
+  reason: WireAuthErrorReason;
+}
 
 export type InstructionActivationDisposition = unknown;
 
@@ -3449,6 +3460,8 @@ export type ToolConfigChangeOperation = "add" | "remove" | "reload";
 
 export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
 
+export type ConfinementRefusal = "invalid_requirement" | "invalid_launch" | "unsupported_requirement" | "backend_unavailable" | "preparation_failed";
+
 export interface ToolConfigChangeStatusBoundaryApplied {
   base_changed: boolean;
   kind: "boundary_applied";
@@ -3469,6 +3482,7 @@ export interface ToolConfigChangeStatusWarningFailedClosed {
 }
 
 export interface ToolConfigChangeStatusExternalToolDelta {
+  confinement_refusal?: ConfinementRefusal | null;
   detail?: string | null;
   kind: "external_tool_delta";
   phase: ExternalToolDeltaPhase;
@@ -6766,6 +6780,7 @@ export interface SystemNoticeBlockToolConfig {
 }
 
 export interface SystemNoticeBlockMcp {
+  confinement_refusal?: ConfinementRefusal | null;
   detail?: string | null;
   operation?: ToolConfigChangeOperation | null;
   pending_sources?: string[];

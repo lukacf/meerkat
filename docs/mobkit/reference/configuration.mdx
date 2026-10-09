@@ -4,7 +4,7 @@ description: "Configuration reference for MobKit: module definitions, runtime op
 icon: "gear"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 MobKit is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -147,6 +147,23 @@ runtime default applies. Setting the runtime default to `null` therefore does
 not disable a member's explicit numeric timeout. See
 [roster and member lifecycle](/mobkit/concepts/roster) for the identity/worker boundary.
 
+Agents set a per-member override with the `idle_retire_secs` argument of the
+`delegate`, `fork_off` and `mob_spawn_member` tools. A non-negative integer is
+that many idle seconds. JSON `null` is the same as omitting the argument, like
+every other optional tool argument:
+
+| Tool | Omitted or `null` | Integer |
+|------|-------------------|---------|
+| `delegate` | The runtime default | That many seconds |
+| `fork_off` | Opted in on the runtime default | That many seconds |
+| `mob_spawn_member` | Not opted in; the member is kept | Opted in with that many seconds |
+
+Any other value is refused as invalid arguments. Agents cannot disable
+retirement for the members they spawn; a host that wants helpers kept sets the
+runtime default to `null` (above). A `disabled` override persisted by an
+earlier MobKit, when `idle_retire_secs: null` meant disable, still loads and
+still keeps its member.
+
 ### Model fallback
 
 Automatic model fallback is **off by default**. An enabled policy requires an
@@ -210,7 +227,7 @@ authorized to change the durable definition:
 runtime = await (
     MobKit.builder()
     .mob("config/mob.toml")  # complete replacement definition
-    .persistent_state("/var/lib/homecore")
+    .persistent_state("/var/lib/example")
     .declare_spec_update(expected_revision=1)
     .gateway("/path/to/rpc_gateway")
     .build()
@@ -375,7 +392,7 @@ creates the mob.
 
 **Provider-annotated profiles bypass the refusal.** By Meerkat's rule a
 profile that sets `provider = "..."` is resolvable whatever its `model` string
-says, so a dated or misspelled id on such a profile (every HomeCore profile
+says, so a dated or misspelled id on such a profile (every profile in the downstream app
 carries `provider = "openai"`) passes init and surfaces at the first LLM call.
 `rpc_gateway` does not add a second refusal authority for that case; it logs
 one WARN per such profile at init naming the profile, the model and the closest
@@ -460,6 +477,91 @@ identity plane to migrate on. See
 [roster and member lifecycle](/mobkit/concepts/roster#role-migration) for the operator
 view of the refusal.
 
+## Child mob tool policy and bundles
+
+A child mob is a mob a member creates itself: the agent `mob_create` tool, and
+the implicit mob `delegate` helpers run in. Mobs the host creates, same-mob
+`fork_off` and `mob_spawn_member`, and temporary councils are not child mobs;
+their members keep their own bindings.
+
+### `child_application_tool_policy`
+
+Once the host serves application tool policies (the `application_tool_policies`
+init parameter, or `with_tool_consequence_policy_registry` in Rust), every
+child mob member needs an application tool policy the host chose. Without one
+a governed member could create a child mob whose members run outside the
+host's policy, so Meerkat refuses `mob_create` and `delegate` until one is
+configured. There is no implicit default.
+
+The refusal is a typed tool error, not a run failure: the member's turn goes
+on and the model sees `policy_denied` with code `child_tool_policy_required`
+and a message that says why (the host runs a tool-policy registry and no child
+application tool policy is configured) and names the three fixes below.
+
+The value is an `ApplicationToolPolicyBinding` object, a top-level
+`mobkit/init` parameter next to `application_tool_policies`:
+
+```json
+{
+  "application_tool_policies": ["{\"schema_version\":1,...}\n"],
+  "child_application_tool_policy": {
+    "kind": "provider",
+    "provider_id": "example",
+    "policy_id": "example-tools"
+  }
+}
+```
+
+| Value | Effect |
+|-------|--------|
+| `{"kind": "provider", "provider_id": ..., "policy_id": ...}` | Child members are built under that served policy. The policy's grants are per member identity, so it must grant the identities child members use (a delegate helper is the `member_id` the delegating member names). |
+| `{"kind": "unmanaged"}` | The explicit opt-out: child members run without the host's tool policy, as they did before 0.8.46. |
+| absent | No child policy. With application tool policies served, `mob_create` and `delegate` are refused; without them nothing changes. |
+
+`{"kind": "inherit"}` is refused: a child mob has no member to inherit from
+when it is created. The gateway checks the value at init and refuses the boot
+with `-32602` when it is malformed, `inherit`, or a provider binding whose
+provider or policy no `application_tool_policies` entry carries, so a binding
+that could never resolve does not surface later as a refused `delegate`.
+
+- Python: `MobKit.builder().child_application_tool_policy({"kind": "provider", "provider_id": "example", "policy_id": "example-tools"})`.
+- Rust: `MobBootstrapSpec::with_child_application_tool_policy(binding)` or
+  `UnifiedRuntimeBuilder::child_application_tool_policy(binding)`. A
+  conflicting binding from the two refuses the build with
+  `ConflictingConfiguration`.
+
+The binding is the host's choice and is never caller-settable; it persists
+with each child member, so a restored child keeps the policy it was built
+with.
+
+### Child-available tool bundles
+
+Host Rust tool bundles are host-only by default: agent-created child mobs do
+not receive them. Register a bundle as child-available to supply it to child
+members:
+
+```rust
+use meerkat_mobkit::ChildToolBundleAvailability;
+
+let spec = spec
+    .register_tool_bundle("team", team_tools.clone())
+    .register_tool_bundle_with_availability(
+        "calendar",
+        calendar_tools.clone(),
+        ChildToolBundleAvailability::ChildAvailable,
+    );
+```
+
+`UnifiedRuntimeBuilder::register_tool_bundle_with_availability` takes the same
+arguments. When a child mob is created, every child-available bundle id is
+supplied to each inline profile of its definition and persisted with it;
+callers never name bundles, and naming `rust_bundles` in an agent's profile
+input is refused. The child profile's `deny` list still narrows the supplied
+bundle tools, and the child application tool policy governs them like any
+other tool. A bundle the host later stops registering is neither dropped nor
+granted: resuming a child member that was built with it refuses with
+`MobError::ToolBundleUnavailable { bundle }`.
+
 ## Mob profile tools (`[profiles.*.tools]`)
 
 The mob definition (`.mob("config/mob.toml")`, or the `mob_config` string of
@@ -482,7 +584,7 @@ schedule = true
 
 | Key | Default | Effect |
 |-----|---------|--------|
-| `comms` | `false` | **Must be `true` for every profile a member spawns from.** A member's durable identity, roster occupancy check, wiring, peer messaging and supervisor bridge are all keyed on its comms name, and the peer-messaging tools are composed whenever a member has one, so there is no honest member without comms: Meerkat refuses `comms = false`, and an omitted key, at build time with `MobError::WiringError`: `profile '<name>' has tools.comms=false; mob meerkats require comms=true`. On the worker plane `mobkit/ensure_member` answers `-32602` with `ensure_member failed: wiring error: ...` and creates no roster entry; on the identity plane the identity reconciles to outcome `broken` (`EmbodimentFailed`, the message as its detail), `mobkit/status_identity_bootstrap` carries it as `error`, and the continuity repair task retries what is a static configuration error. To keep a member from messaging peers, leave `comms = true` and set `read_only = true` (`send_message` is denied, `peers` stays permitted) or deny the tools through a per-spawn tool access policy. Mobpack validation does not flag this; it fails at spawn. |
+| `comms` | `false` | **Must be `true` for every profile a member spawns from.** A member's durable identity, roster occupancy check, wiring, peer messaging and supervisor bridge are all keyed on its comms name, and the peer-messaging tools are composed whenever a member has one, so there is no honest member without comms: Meerkat refuses `comms = false`, and an omitted key, at build time with `MobError::WiringError`: `profile '<name>' has tools.comms=false; mob meerkats require comms=true`. On the worker plane `mobkit/ensure_member` answers `-32602` with `ensure_member failed: wiring error: ...` and creates no roster entry; on the identity plane the identity reconciles to outcome `broken` (`EmbodimentFailed`, the message as its detail), `mobkit/status_identity_bootstrap` carries it as `error`, and the continuity repair task retries what is a static configuration error. To keep a member from messaging peers, leave `comms = true` and set `read_only = true` (`send_message` is denied, `peers` stays permitted) or list the tools in `deny` (or deny them through a per-spawn tool access policy). Mobpack validation does not flag this; it fails at spawn. |
 | `builtins` | `false` | Meerkat's built-in tools (task, blob, patch, datetime, web search and similar). When `workgraph` is `false` and `builtins` is `true`, the `task-workflow` skill is preloaded. |
 | `shell` | `false` | The shell execution tool. Never read-only: nothing classifies a command line, so `read_only = true` denies it outright. |
 | `memory` | `false` | Memory and semantic-search tools. |
@@ -491,9 +593,10 @@ schedule = true
 | `schedule` | `false` | Durable schedule tools (create, list, update, pause, resume, delete). |
 | `image_generation` | `false` | Image generation tools; the profile's `image_generation_provider` names the backend. |
 | `read_only` | `false` | An enforcement declaration, not prompt guidance: a tool call executes only when its owning dispatcher declares it read-only, and the declaration wins over any per-spawn tool access policy. The category booleans above still decide what the model sees; this decides what may run. Provider-native tools, MCP tools and `shell` are outside the guarantee. |
+| `deny` | `[]` | Tool names a member built from this profile may not run. An enforcement declaration, like `read_only`: a denied tool stays listed to the model (the prompt-cache prefix does not change) and every call to it is refused with an `access_denied` tool error while the turn continues. Each name must be a tool the build composed or a name in a known vocabulary: Meerkat's built-in tool families, the mob operator and agent mob tools, the exposed `tool_names` of the profile's `mcp_servers`, and tool bundles. A known name the build does not mount is inert; a declared MCP server that maps no `tool_names` leaves its names to the call-time refusal. Any other name (a typo, a stale tool) fails the member build with `DeclaredToolUnknown`, the same way a `comms = false` profile fails. A call runs only when `read_only`, `deny` and any per-spawn tool access policy all allow it. |
 | `mcp` | `[]` | MCP server names this profile may use from the mob-wide default external-tools provider; an empty list means the full host surface. |
 | `mcp_servers` | `[]` | Declarative MCP server configs durable on the profile, so a revived member recomposes the same MCP tools that built it. |
-| `rust_bundles` | `[]` | Names of Rust tool bundles registered at mob construction. Not serializable; re-register them on resume. |
+| `rust_bundles` | `[]` | Names of Rust tool bundles the host registers with `MobBootstrapSpec::register_tool_bundle` or `UnifiedRuntimeBuilder::register_tool_bundle`. They are wired on every spawn, resume (including revived members) and respawn. Dispatchers are not serializable; register them again on every boot. A name that is not registered refuses the member build. Agent-created child mobs receive only the bundles registered as child-available; see [Child mob tool policy and bundles](#child-mob-tool-policy-and-bundles). |
 
 The `mob-communication` skill is preloaded for every member regardless of these
 flags. Agent-side spawns that inherit the parent's tool filter open every
@@ -590,6 +693,18 @@ on `mobkit/status`, `mobkit/capabilities`, and `mobkit/storage/doctor`:
 (H2), and the per-slot `slots` array (`domain`, `class`, `resolution`,
 `backend`, `degraded`, optional `detail`).
 
+**Incremental session persistence.** `session_store_incremental: false` means
+the session store writes the whole session document at every turn boundary.
+For an identity-first launch, that happens when the continuity store does not
+serve `ContinuityStore::as_incremental_sessions`. The method has no default,
+so every continuity store states its choice, and a wrapper must forward its
+inner store's channel. Rust embedders can opt in to strict mode with
+`UnifiedRuntime::builder().require_incremental_session_persistence(true)`.
+`build()` then refuses with `SessionStoreNotIncremental` instead of starting
+on that fallback. To check a wrapper, run
+`mobkit_store_conformance::chapters::continuity_wrapper_preserves_incremental_channel`
+with your wrapping function.
+
 <Note>
 **Changelog policy.** Any storage file rename or table move gets the
 binary-rename treatment: an explicit, loud changelog entry naming the old
@@ -659,13 +774,42 @@ rather than leaving the barrier pending indefinitely. Provider or restore
 failures that apply to the whole pass are reported in the snapshot's optional
 `error` field.
 
+During an eager restore pass each identity's entry also carries typed
+`restore` progress: `{"stage": "registered"}`, `"resuming"`, `"minted"` (a
+fresh identity's durable record and session were created), `"resumed"`, or
+`{"stage": "broken", "kind": "<continuity failure kind>"}`. A minted or resumed
+member is `active` (and a broken one `broken`) as soon as its own restore
+settles, before the whole pass ends. In process,
+`IdentityRuntime::watch_identity_bootstrap_status` streams the snapshot. On
+the stdio gateway `mobkit/init` still returns after the eager pass; a host
+that must not wait on the whole fleet uses `lazy_with_background_warm` and
+follows the same typed progress with `mobkit/wait_identity_bootstrap`.
+
+Broken identities are retried by the continuity repair supervisor, which is
+event-driven. It runs one pass when it starts and then waits for a typed
+trigger: another identity's embodiment settled (a resume or a fresh durable
+mint committed, releasing the store writer it held), a host restore or
+reconcile pass settled (boot, a roster refresh, `mobkit/reconcile_identity`),
+a delivery or materialization was refused because the identity is Broken (a
+caller's demand), or an explicit request (`mobkit/request_continuity_repair`,
+`request_continuity_repair()` / `requestContinuityRepair()` in the SDKs). It
+defers a pass while other embodiments are in flight, so a warm-up burst runs
+one pass rather than one per member. Its own passes never re-trigger it.
+Only a transient cause with no typed signal (a heal authority that could not
+be reached, a pass that failed on a roster provider or store error, a member
+still Broken on an unavailable store) arms a last-resort fallback wake: 1 s,
+doubling to 30 s, reset by the first pass without such a cause. The
+agent-memory member-event observer uses the same fallback stance for a
+subscribe that fails or a stream that closes as soon as it opens.
+
 The stock persistent gateway also advertises a private shutdown handshake and
 its bounded `stdio_shutdown_horizon_ms` in the `mobkit/init` result. SDK hosts
 keep stdin and provider callbacks open until that handshake completes, then
 close the process. Honor the advertised `stdio_shutdown_horizon_ms` rather than
-hard-coding it. The current stock 347-second horizon covers an already-admitted
+hard-coding it. The current stock 352-second horizon covers an already-admitted
 provider callback, runtime event and mob drains, the final lease-release
-callback, and bounded response-delivery/reaping margin. Provider operations
+callback, the mob's terminal shutdown report, and bounded
+response-delivery/reaping margin. Provider operations
 must resolve or reject within their public 120-second contract. The Python host
 allows 125 seconds for event-loop completion before cancelling that callback;
 the TypeScript host exposes the same cancellation as an optional
@@ -734,12 +878,12 @@ View-level configuration for the stock console. `mobkit_gateway` discovers `conf
 The config is normalized and projected through `GET /console/experience` as `console_config`.
 
 ```toml
-title = "OB3"
+title = "Ops"
 
 [brand]
-label = "Open Brain"
-logo_url = "/assets/ob3.svg"
-logo_alt = "OB3"
+label = "Ops Console"
+logo_url = "/assets/ops.svg"
+logo_alt = "Ops"
 
 [appearance]
 default_theme = "dark"
@@ -771,9 +915,9 @@ visible_controls = ["topology", "roster", "logs", "health"]
 hidden_controls = []
 
 [[sidebar.buttons]]
-id = "ob3-board"
-label = "OB3 Board"
-href = "https://example.test/ob3"
+id = "ops-board"
+label = "Ops Board"
+href = "https://example.test/ops"
 target = "_blank"
 icon_name = "external-link"
 
@@ -807,10 +951,10 @@ retire_label = "Retire"
 reset_label = "Reset"
 show_reset = false
 
-[realms.ob3]
-title = "OB3"
+[realms.ops]
+title = "Ops"
 
-[realms.ob3.agent_list]
+[realms.ops.agent_list]
 subgroup_by = ["labels.org"]
 ```
 
@@ -963,7 +1107,7 @@ LocalJsonMemoryBackendConfig {
 | `state_path` | `String` | Local JSON file holding the operational assertion ledger (`mobkit/memory/*`). Runtime-owned: read once at bootstrap into memory, and rewritten wholesale on every `mobkit/memory/index`. The whole state is written to the sibling `state_path.with_extension("tmp")` (replacing the final extension: `memory-ledger-state.json` stages through `memory-ledger-state.tmp`), then renamed over the original file. Not a shared append log; see below. |
 | `health_check_endpoint` | `Option<String>` | Optional HTTP base URL probed with `GET /v1/health` at the bootstrap load and before every persist; a failed probe refuses that load or persist. No ledger data is ever sent to it |
 
-For SDK builds that boot through `rpc_gateway`, `state_path` is derived from `.persistent_state(path)` as `<path>/memory-ledger-state.json`; callers provide only `backend: "local_json"` (and optionally `health_check_endpoint`). The legacy `ElephantMemoryBackendConfig` / `backend: "elephant"` shape is deprecated: it was always local JSON persistence plus a health check — no data ever reached Elephant — and it converts to this config on load. Real Elephant integration is the wire-boundary provider described in `docs/design/memory-hub-roadmap.md`.
+For SDK builds that boot through `rpc_gateway`, `state_path` is derived from `.persistent_state(path)` as `<path>/memory-ledger-state.json`; callers provide only `backend: "local_json"` (and optionally `health_check_endpoint`). The legacy `ElephantMemoryBackendConfig` / `backend: "elephant"` shape is deprecated: it was always local JSON persistence plus a health check — no data ever reached an external memory hub - and it converts to this config on load. Real external memory hub integration is the wire-boundary provider described in `docs/design/memory-hub-roadmap.md`.
 
 **Ownership of the assertion ledger.** The file is a snapshot of runtime
 state, not a log that other writers may append to. `MobkitRuntimeHandle` loads
@@ -996,7 +1140,7 @@ can carry configured typed injected context for `autonomous_host` too. This
 exception does not cover arbitrary external bindings, and steer input bypasses
 injection in either mode.
 
-The bundled gateway provider is one SQLite database per realm under `<persistent_state>/agent-memory` (`store: "sqlite"`, the only live gateway store). The earlier per-identity markdown files are import-only: `store: "markdown"` is refused at init with a migration verdict, and pointing SQLite at the same directory imports a realm's un-imported markdown files when that realm is first accessed and its SQLite connection is opened, preserving ids, tag content and timestamps and renaming each original `<file>.imported` rather than deleting it (tags are collated on insert, so tag ORDER is not preserved - assert on the set, not the sequence). The path is server-owned and cannot be overridden from SDK init input. Elephant remains an optional deeper knowledge backend for graph/document/truth/provenance use cases and is not required for this hot path.
+The bundled gateway provider is one SQLite database per realm under `<persistent_state>/agent-memory` (`store: "sqlite"`, the only live gateway store). The earlier per-identity markdown files are import-only: `store: "markdown"` is refused at init with a migration verdict, and pointing SQLite at the same directory imports a realm's un-imported markdown files when that realm is first accessed and its SQLite connection is opened, preserving ids, tag content and timestamps and renaming each original `<file>.imported` rather than deleting it (tags are collated on insert, so tag ORDER is not preserved - assert on the set, not the sequence). The path is server-owned and cannot be overridden from SDK init input. An external memory hub remains an optional deeper knowledge backend for graph/document/truth/provenance use cases and is not required for this hot path.
 
 With the SQLite store, build-time injection also composes a metadata index (record ids, kinds, titles, descriptions, human-phrased age) over the identity's readable scopes, budgeted at ~8 KiB, ahead of the selected record bodies. Every injected record is logged to an injection ledger inside the realm database and counted in per-record usage statistics; explicit `mobkit/agent_memory/recall` reads are counted separately from ambient injection.
 
@@ -1004,7 +1148,7 @@ Inbound anti-spoofing is on by default (`defang_inbound: true`): every non-steer
 
 Rust builders can use `.persistent_agent_memory_stack(config, engines)` with `.persistent_state(path)` to install the full SQLite stack (store plus taint firewall plus the enabled judgment-plane engines). Callers that need a different authority use `.agent_memory(provider, config)`. The former `.persistent_agent_memory(...)` markdown constructor is removed; legacy markdown is accepted only by the one-shot SQLite importer.
 
-Gateway callers can write records with `mobkit/agent_memory/remember`, read them with `mobkit/agent_memory/recall`, and delete individual records with `mobkit/agent_memory/forget`. TypeScript callers can use `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and `handle.forgetAgentMemory(identity, memoryId, { realm })`; Python callers can use `handle.remember_agent_memory(identity, title=..., body=..., tags=..., realm=...)`, `handle.recall_agent_memory(identity, realm=..., selection=..., query_text=..., query_terms=..., max_entries=...)`, and `handle.forget_agent_memory(identity, memory_id, realm=...)`. Writes and deletes are identity-scoped and require the identity to be registered in the identity runtime. Writes are eligible for turn context on the next identity-first send, subject to the runtime-mode and recall policies, plus build context on materialization/resume/respawn/reset for that identity. A successful write means the configured hot provider accepted the record; it does not mean optional Elephant extraction/enrichment has completed. Bundled SQLite writes enforce the staged-memory validator's record limits. The retired markdown parser is used only while importing existing files.
+Gateway callers can write records with `mobkit/agent_memory/remember`, read them with `mobkit/agent_memory/recall`, and delete individual records with `mobkit/agent_memory/forget`. TypeScript callers can use `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and `handle.forgetAgentMemory(identity, memoryId, { realm })`; Python callers can use `handle.remember_agent_memory(identity, title=..., body=..., tags=..., realm=...)`, `handle.recall_agent_memory(identity, realm=..., selection=..., query_text=..., query_terms=..., max_entries=...)`, and `handle.forget_agent_memory(identity, memory_id, realm=...)`. Writes and deletes are identity-scoped and require the identity to be registered in the identity runtime. Writes are eligible for turn context on the next identity-first send, subject to the runtime-mode and recall policies, plus build context on materialization/resume/respawn/reset for that identity. A successful write means the configured hot provider accepted the record; it does not mean optional external memory hub extraction/enrichment has completed. Bundled SQLite writes enforce the staged-memory validator's record limits. The retired markdown parser is used only while importing existing files.
 
 When `selection = "always"`, the latest memories for the identity are injected. When `selection = "contextual"` (the default), build-time injection sends synthesized identity/profile/label query text and deterministic terms; per-turn injection sends the raw current identity-first message plus normalized terms. Common stopwords are ignored by the bundled provider and records below the relevance threshold are not injected. MobKit does not send app context or customizer-added instructions to the memory provider. Semantic/vector retrieval remains a provider concern rather than a MobKit runtime authority.
 

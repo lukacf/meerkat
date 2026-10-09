@@ -3087,6 +3087,36 @@ impl MobEventStore for InMemoryMobEventStore {
         Ok(Some(stored))
     }
 
+    async fn append_fork_job_terminal_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        validate_mob_event_write_authority(&event.kind)?;
+        let mut aggregate = self.aggregate.write().await;
+        let events = &mut aggregate.events;
+        let mut scan = super::ForkJobTerminalScan::new(&event)?;
+        for existing in events.iter() {
+            scan.observe(existing);
+        }
+        if scan.finish()? {
+            return Ok(None);
+        }
+
+        let cursor = events.last().map_or(1, |existing| existing.cursor + 1);
+        let stored = MobEvent {
+            cursor,
+            timestamp: event.timestamp.unwrap_or_else(Utc::now),
+            mob_id: event.mob_id,
+            kind: event.kind,
+        };
+        events.push(stored.clone());
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
+        let _ = self.event_tx.send(stored.clone());
+        drop(aggregate);
+        Ok(Some(stored))
+    }
+
     async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
         for event in &batch {
             validate_mob_event_write_authority(&event.kind)?;

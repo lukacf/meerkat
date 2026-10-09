@@ -286,7 +286,10 @@ pub fn publish_token_lifecycle_acquired_for_identity(
     tokens: &PersistedTokens,
 ) -> Result<AuthLeaseTransition, DslTransitionError> {
     let lease_key = LeaseKey::from_credential_identity(credential_identity);
-    handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))
+    handle.acquire_lease_for_credential_publication(
+        &lease_key,
+        persisted_token_expires_at_epoch_secs(tokens),
+    )
 }
 
 pub fn publish_token_lifecycle_released(

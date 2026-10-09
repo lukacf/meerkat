@@ -16,7 +16,6 @@ use meerkat_mob::AgentIdentity;
 use meerkat_mob::ProfileName;
 use meerkat_mob::temporary_council::{TemporaryCouncilDurability, TemporaryCouncilJobBinding};
 use meerkat_mob_mcp::council_relink::CouncilRelinkAction;
-use meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral;
 use meerkat_mob_mcp::temporary_council::{
     MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilParticipantSpec,
     TemporaryCouncilRequest,
@@ -164,6 +163,8 @@ async fn relink_delivers_a_council_sealed_before_the_restart_exactly_once() {
     assert_eq!(binding.owner_session_id, owner);
     assert!(binding.settled_at.is_none());
 
+    // The process dies: its mobs stop holding their routes.
+    fixture.shut_down_predecessor().await;
     tokio::time::sleep(Duration::from_millis(5)).await;
     let restarted = fixture.restart_state();
     let reports = restarted.relink_detached_councils().await;
@@ -389,6 +390,7 @@ async fn a_mobkit_style_host_recovers_and_relinks_councils_after_restore() {
     .expect("construct runtime authority")
     .with_temporary_council_store(council_store.clone())
     .into_shared();
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle)
         .await;
@@ -460,9 +462,10 @@ async fn relink_settles_a_council_whose_convener_is_gone() {
 
 /// A MobKit-style host restores the convener's mob stopped, inserts its
 /// handle, and activates it later. The convener is not live and cannot be
-/// revived while its mob is stopped: the re-link reports that typed, and the
-/// post-restore sweep delivers the sealed outcome once the mob runs, exactly
-/// once (lifecycle review: the single attempt failed and was never retried).
+/// revived while its mob is stopped: the re-link commits and submits the
+/// sealed outcome durably, settling the job, and the host's delivery owner
+/// applies it once the mob runs, exactly once (lifecycle review: the single
+/// attempt failed and was never retried).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_council_relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
     let fixture =
@@ -506,6 +509,7 @@ async fn a_council_relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
     .expect("construct runtime authority")
     .with_temporary_council_store(council_store.clone())
     .into_shared();
+    fixture.bind_continuations(&restarted);
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -515,33 +519,17 @@ async fn a_council_relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
         .iter()
         .find(|report| report.council_id == council_id)
         .expect("the council is visited");
-    assert_eq!(
-        report.action,
-        CouncilRelinkAction::AwaitingConvener {
-            mob_id: fixture.source_mob_id(),
-            reason: OwnerRevivalDeferral::MobNotRunning {
-                phase: meerkat_mob::MobState::Stopped,
-            },
-        }
-    );
-    // The restored host's own sweep has finished a pass over the stopped
-    // mob (and waits for it to run) without delivering. Hang guard only.
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        restarted
-            .temporary_council_sweep_passes()
-            .wait_for(|passes| *passes >= 1),
-    )
-    .await
-    .expect("the restored sweep finishes a pass")
-    .expect("sweep pass signal");
+    assert_eq!(report.action, CouncilRelinkAction::Delivered);
+    await_settled(&council_store, &council_id).await;
+    assert!(restarted.relink_detached_councils().await.is_empty());
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         completion_records(&fixture, &owner, job_id)
             .await
             .is_empty()
     );
 
-    // The host activates the mob: the sweep delivers now.
+    // The host activates the mob: the delivery owner applies it now.
     handle.resume().await.expect("activate the mob");
     let delivered = await_completion_records(&fixture, &owner, job_id).await;
     assert!(
@@ -549,8 +537,6 @@ async fn a_council_relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
         "the council's real result is delivered: {}",
         delivered[0]
     );
-    await_settled(&council_store, &council_id).await;
-    assert!(restarted.relink_detached_councils().await.is_empty());
     assert_eq!(
         completion_records(&fixture, &owner, job_id).await.len(),
         1,
@@ -613,6 +599,7 @@ async fn a_relink_sweep_that_runs_before_the_convener_mob_is_registered_delivers
     .expect("construct runtime authority")
     .with_temporary_council_store(council_store.clone())
     .into_shared();
+    fixture.bind_continuations(&restarted);
     let mut sweep_passes = restarted.temporary_council_sweep_passes();
 
     // A verb before the host registers its mobs starts the sweep; its first
@@ -726,7 +713,7 @@ impl PlainConvenerCouncil {
     /// The restarted host: the durable council store and no mobs, so the
     /// convener is a plain session to it.
     fn restarted_state(&self) -> std::sync::Arc<meerkat_mob_mcp::MobMcpState> {
-        std::sync::Arc::new(
+        let state = std::sync::Arc::new(
             meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                 self.fixture.service.clone(),
                 Some(std::sync::Arc::clone(&self.runtime)),
@@ -734,7 +721,9 @@ impl PlainConvenerCouncil {
             )
             .expect("construct runtime authority")
             .with_temporary_council_store(self.store.clone()),
-        )
+        );
+        self.fixture.bind_continuations(&state);
+        state
     }
 
     fn marker(&self) -> String {
@@ -817,18 +806,24 @@ async fn relink_revives_a_plain_session_convener_through_the_host_hook() {
     council.fixture.teardown().await;
 }
 
-/// The same convener on a host without an owner hook: nothing is recorded,
-/// the convener is not woken, and the job stays owed (unsettled), so a
-/// re-link on a host that can make the convener live delivers it, once.
+/// The same convener on a host without an owner hook: the re-link commits
+/// and submits the outcome durably and settles the job, but nothing can make
+/// the convener live, so nothing is recorded and it is not woken. The owed
+/// outcome is applied, once, when the convener's session is attached again,
+/// with no re-link of its own.
 #[tokio::test(flavor = "multi_thread")]
-async fn without_a_host_hook_a_plain_session_convener_stays_owed() {
+async fn without_a_host_hook_a_plain_session_convener_is_delivered_on_attach() {
     let council = PlainConvenerCouncil::after_restart("unhooked").await;
     let restarted = council.restarted_state();
 
-    let action = council.relink_action(&restarted).await;
+    assert_eq!(
+        council.relink_action(&restarted).await,
+        Some(CouncilRelinkAction::Delivered),
+        "submitted durably"
+    );
     assert!(
-        matches!(action, Some(CouncilRelinkAction::Failed(_))),
-        "the runtime's refusal is reported: {action:?}"
+        council.settled().await,
+        "a durable submission settles the job"
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
@@ -838,14 +833,13 @@ async fn without_a_host_hook_a_plain_session_convener_stays_owed() {
         "nothing is recorded"
     );
     assert_eq!(council.seen.turns_that_saw(&council.marker()), 0, "no wake");
-    assert!(!council.settled().await, "the job stays owed");
 
-    let host = MobBackedOwnerHost::new(council.handle.clone(), "convener");
-    restarted.set_detached_owner_host(Some(host.clone()));
-    assert_eq!(
-        council.relink_action(&restarted).await,
-        Some(CouncilRelinkAction::Delivered)
-    );
+    // The convener's session is attached again: the outcome is applied once.
+    council
+        .handle
+        .ensure_member_live(&meerkat_mob::AgentIdentity::from("convener"))
+        .await
+        .expect("attach the convener's session");
     await_completion_records(&council.fixture, &council.owner, &council.job_id).await;
     council.await_one_wake().await;
     assert_eq!(
@@ -854,6 +848,5 @@ async fn without_a_host_hook_a_plain_session_convener_stays_owed() {
             .len(),
         1
     );
-    assert!(council.settled().await);
     council.fixture.teardown().await;
 }

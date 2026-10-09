@@ -6015,6 +6015,20 @@ class MeerkatClient:
         return block
 
     @staticmethod
+    def _validate_optional_confinement_refusal(raw: dict[str, Any], context: str) -> None:
+        if raw.get("confinement_refusal") is None:
+            return
+        refusal = MeerkatClient._require_string_field(raw, "confinement_refusal", context)
+        if refusal not in {
+            "invalid_requirement", "invalid_launch", "unsupported_requirement",
+            "backend_unavailable", "preparation_failed",
+        }:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported confinement_refusal {refusal!r}",
+            )
+
+    @staticmethod
     def _validate_tool_config_status(raw: Any, context: str) -> None:
         status = MeerkatClient._require_dict(raw, "status_info", context)
         kind = MeerkatClient._require_string_field(status, "kind", context)
@@ -6047,6 +6061,7 @@ class MeerkatClient:
                     f"{context}: unsupported external-tool phase {phase!r}",
                 )
             MeerkatClient._validate_nullable_response_string(status, "detail", context)
+            MeerkatClient._validate_optional_confinement_refusal(status, context)
         else:
             raise MeerkatError(
                 "INVALID_RESPONSE",
@@ -6185,6 +6200,7 @@ class MeerkatClient:
                 f"{context}: payload",
             )
         elif block_type == "mcp":
+            MeerkatClient._validate_optional_confinement_refusal(block, context)
             for field in ("detail", "server_id"):
                 MeerkatClient._validate_nullable_response_string(block, field, context)
             if "operation" in block and block["operation"] is not None:

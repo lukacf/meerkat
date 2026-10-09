@@ -452,9 +452,15 @@ fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
             collect_helper_calls(map, calls);
             collect_helper_calls(key, calls);
         }
-        Expr::MapGet { map, key } => {
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
             collect_helper_calls(map, calls);
             collect_helper_calls(key, calls);
+        }
+        Expr::MapLiteral(entries) => {
+            for (key, value) in entries {
+                collect_helper_calls(key, calls);
+                collect_helper_calls(value, calls);
+            }
         }
         Expr::Call { helper, args } => {
             calls.insert(helper.clone());
@@ -504,9 +510,12 @@ fn expr_uses_u64_max(expr: &Expr) -> bool {
         Expr::Contains { collection, value } | Expr::Count { collection, value } => {
             expr_uses_u64_max(collection) || expr_uses_u64_max(value)
         }
-        Expr::MapContainsKey { map, key } | Expr::MapGet { map, key } => {
-            expr_uses_u64_max(map) || expr_uses_u64_max(key)
-        }
+        Expr::MapContainsKey { map, key }
+        | Expr::MapGet { map, key }
+        | Expr::MapValue { map, key } => expr_uses_u64_max(map) || expr_uses_u64_max(key),
+        Expr::MapLiteral(entries) => entries
+            .iter()
+            .any(|(key, value)| expr_uses_u64_max(key) || expr_uses_u64_max(value)),
         Expr::SeqStartsWith { seq, prefix } => expr_uses_u64_max(seq) || expr_uses_u64_max(prefix),
         Expr::Call { helper, args } => {
             native_helper_uses_u64_max(helper) || args.iter().any(expr_uses_u64_max)
@@ -4203,7 +4212,7 @@ fn collect_named_literals_from_expr(
                 binding_types,
             );
         }
-        Expr::MapGet { map, key } => {
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
             let map_ty = infer_expr_type(map, field_types, helper_returns, binding_types);
             let key_ty = match map_ty {
                 Some(TypeRef::Map(key_ty, _)) => Some(*key_ty),
@@ -4225,6 +4234,32 @@ fn collect_named_literals_from_expr(
                 helper_returns,
                 binding_types,
             );
+        }
+        Expr::MapLiteral(entries) => {
+            let (key_ty, value_ty) = match expected_ty {
+                Some(TypeRef::Map(key_ty, value_ty)) => {
+                    (Some(key_ty.as_ref()), Some(value_ty.as_ref()))
+                }
+                _ => (None, None),
+            };
+            for (key, value) in entries {
+                collect_named_literals_from_expr(
+                    samples,
+                    key,
+                    key_ty,
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+                collect_named_literals_from_expr(
+                    samples,
+                    value,
+                    value_ty,
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
         }
         Expr::Call { helper: _, args } => {
             for arg in args {
@@ -4354,18 +4389,32 @@ fn infer_expr_type(
                 _ => None,
             }
         }
-        Expr::MapGet { map, .. } => {
+        Expr::MapGet { map, .. } | Expr::MapValue { map, .. } => {
             match infer_expr_type(map, field_types, helper_returns, binding_types) {
                 Some(TypeRef::Map(_, value_ty)) => Some(*value_ty),
                 _ => None,
             }
         }
+        Expr::MapLiteral(entries) => entries.first().and_then(|(key, value)| {
+            let key_ty = infer_expr_type(key, field_types, helper_returns, binding_types)?;
+            let value_ty = infer_expr_type(value, field_types, helper_returns, binding_types)?;
+            Some(TypeRef::Map(Box::new(key_ty), Box::new(value_ty)))
+        }),
         Expr::Some(inner) => infer_expr_type(inner, field_types, helper_returns, binding_types)
             .map(|inner_ty| TypeRef::Option(Box::new(inner_ty))),
         Expr::Call { helper, .. } if helper == "mob_machine_step_status_from_frame_node_status" => {
             meerkat_machine_schema::identity::EnumTypeId::parse("StepRunStatus")
                 .ok()
                 .map(TypeRef::Enum)
+        }
+        Expr::Call { helper, .. } if helper == "runtime_delivery_recipient_outcomes_after_set" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::String),
+                Box::new(TypeRef::Enum(
+                    meerkat_machine_schema::identity::EnumTypeId::parse("DeliveryRecipientOutcome")
+                        .ok()?,
+                )),
+            ))
         }
         Expr::Call { helper, .. } if helper == "mob_machine_run_step_status_after_set" => {
             Some(TypeRef::Map(
@@ -5447,6 +5496,36 @@ fn collect_composition_named_bindings<'a>(
 mod tests {
     use super::*;
 
+    /// A populated witness map literal renders as a TLC function in both the
+    /// witness-literal path and the expression path, never as the `None`
+    /// fallback (#1811).
+    #[test]
+    fn a_witness_map_literal_renders_as_a_tlc_function() {
+        let machines = meerkat_machine_schema::canonical_machine_schemas();
+        let compositions = meerkat_machine_schema::canonical_composition_schemas();
+        let composition = compositions
+            .iter()
+            .find(|candidate| candidate.name.as_str() == "job_runtime_delivery")
+            .expect("job_runtime_delivery composition");
+        let compiler =
+            CompositionTlaCompiler::new(composition, &machines).expect("composition compiler");
+        let literal = Expr::MapLiteral(vec![
+            (
+                Expr::String("alpha".into()),
+                Expr::String("member-a".into()),
+            ),
+            (Expr::String("beta".into()), Expr::U64(2)),
+        ]);
+        assert_eq!(
+            compiler.render_literal_expr(&literal),
+            "(\"alpha\" :> \"member-a\" @@ \"beta\" :> 2)"
+        );
+        assert_eq!(
+            crate::render::render_expr_for_tests(&literal),
+            "(\"alpha\" :> \"member-a\" @@ \"beta\" :> 2)"
+        );
+    }
+
     /// Every quantified Next disjunct leads with its transition's source-phase
     /// guard, so TLC rejects the whole disjunct in other phases instead of
     /// enumerating each parameter tuple per state (#1499 measured 464 s
@@ -6105,6 +6184,29 @@ mod tests {
             cfg_string_domain_values(&ci_cfg, "SessionIdValues")
                 .is_disjoint(&cfg_string_domain_values(&ci_cfg, "StringValues")),
             "the composition CI profile must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn runtime_delivery_recipient_insert_has_identical_local_map_semantics_in_tla() {
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_runtime_delivery_machine();
+        let model = render_machine_semantic_model(&schema).expect("render recipient model");
+        let definition = "runtime_delivery_recipient_outcomes_after_set(current, recipient, outcome) ==\n    MapSet(current, recipient, outcome)\n";
+        assert!(model.contains(definition));
+        assert!(
+            model
+                .matches("runtime_delivery_recipient_outcomes_after_set(")
+                .count()
+                > 1,
+            "the generated settlement must call the formally defined insert"
+        );
+        let composition = render_composition_semantic_model(
+            &meerkat_machine_schema::catalog::job_runtime_delivery_composition(),
+        )
+        .expect("render embedded recipient model");
+        assert!(
+            composition.contains(&format!("runtime_delivery__{definition}")),
+            "embedded delivery machines require their scoped helper definition too"
         );
     }
 
@@ -6889,6 +6991,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             if machine.machine.as_str() == "MeerkatMachine" {
                 compiler.render_meerkat_machine_native_helpers(&mut out);
+                pushln!(&mut out);
+            }
+            if machine.machine.as_str() == "RuntimeDeliveryMachine" {
+                compiler.render_runtime_delivery_native_helpers(&mut out);
                 pushln!(&mut out);
             }
 
@@ -8195,6 +8301,10 @@ impl<'a> CompositionTlaCompiler<'a> {
                 compiler.render_meerkat_machine_native_helpers(out);
                 pushln!(out);
             }
+            if machine.machine.as_str() == "RuntimeDeliveryMachine" {
+                compiler.render_runtime_delivery_native_helpers(out);
+                pushln!(out);
+            }
 
             let branches = machine
                 .transitions
@@ -8983,6 +9093,22 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             Expr::EmptySet => "{}".into(),
             Expr::EmptyMap => "<< >>".into(),
+            // A populated map literal (witness inputs, manifests) as a TLC
+            // function; never the `None` fallback below.
+            Expr::MapLiteral(entries) => {
+                let rendered = entries
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{} :> {}",
+                            self.render_literal_expr(key),
+                            self.render_literal_expr(value)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" @@ ");
+                format!("({rendered})")
+            }
             _ => "None".into(),
         }
     }
@@ -9813,6 +9939,9 @@ impl<'a> MachineTlaCompiler<'a> {
         if self.schema.machine.as_str() == "MeerkatMachine" {
             self.render_meerkat_machine_native_helpers(&mut out);
         }
+        if self.schema.machine.as_str() == "RuntimeDeliveryMachine" {
+            self.render_runtime_delivery_native_helpers(&mut out);
+        }
         if !self.schema.helpers.is_empty() || !self.schema.derived.is_empty() {
             pushln!(&mut out);
         }
@@ -10071,6 +10200,16 @@ impl<'a> MachineTlaCompiler<'a> {
             )
             .expect("write to string");
         }
+    }
+
+    fn render_runtime_delivery_native_helpers(&self, out: &mut String) {
+        writeln!(
+            out,
+            "{}(current, recipient, outcome) ==",
+            self.scoped_helper_name("runtime_delivery_recipient_outcomes_after_set")
+        )
+        .expect("write to string");
+        pushln!(out, "    MapSet(current, recipient, outcome)");
     }
 
     fn render_meerkat_machine_native_helpers(&self, out: &mut String) {
@@ -12216,6 +12355,27 @@ impl<'a> MachineTlaCompiler<'a> {
                     )
                 }
             ),
+            // A populated map literal as a TLC function: `k1 :> v1 @@ k2 :> v2`
+            // (the TLC module every generated model extends).
+            Expr::MapLiteral(entries) => format!(
+                "({})",
+                entries
+                    .iter()
+                    .map(|(key, value)| format!(
+                        "{} :> {}",
+                        self.render_expr_with_types(key, env, binding_env, binding_types),
+                        self.render_expr_with_types(value, env, binding_env, binding_types)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" @@ ")
+            ),
+            // Strict read: plain function application, so TLC reports an
+            // error if a reachable state reads a key outside DOMAIN (#1811).
+            Expr::MapValue { map, key } => format!(
+                "({})[{}]",
+                self.render_expr_with_types(map, env, binding_env, binding_types),
+                self.render_expr_with_types(key, env, binding_env, binding_types)
+            ),
             Expr::Some(inner) => format!(
                 "Some({})",
                 self.render_expr_with_types(inner, env, binding_env, binding_types)
@@ -12393,7 +12553,9 @@ impl<'a> MachineTlaCompiler<'a> {
             Expr::FieldAccess { .. } => None,
             Expr::EnumVariantIs { .. } => Some(TypeRef::Bool),
             Expr::EnumStringSetPayload { .. } => Some(TypeRef::Set(Box::new(TypeRef::String))),
-            Expr::MapGet { map, .. } => self.map_value_type(map, binding_types),
+            Expr::MapGet { map, .. } | Expr::MapValue { map, .. } => {
+                self.map_value_type(map, binding_types)
+            }
             Expr::Field(name) => self
                 .schema
                 .state
@@ -12741,9 +12903,15 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
             collect_expr_bindings(seq, bindings);
             collect_expr_bindings(prefix, bindings);
         }
-        Expr::MapGet { map, key } => {
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
             collect_expr_bindings(map, bindings);
             collect_expr_bindings(key, bindings);
+        }
+        Expr::MapLiteral(entries) => {
+            for (key, value) in entries {
+                collect_expr_bindings(key, bindings);
+                collect_expr_bindings(value, bindings);
+            }
         }
         Expr::Call { args, .. } => {
             for arg in args {
@@ -12830,9 +12998,15 @@ fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
             collect_expr_fields(seq, fields);
             collect_expr_fields(prefix, fields);
         }
-        Expr::MapGet { map, key } => {
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
             collect_expr_fields(map, fields);
             collect_expr_fields(key, fields);
+        }
+        Expr::MapLiteral(entries) => {
+            for (key, value) in entries {
+                collect_expr_fields(key, fields);
+                collect_expr_fields(value, fields);
+            }
         }
         Expr::Call { args, .. } => {
             for arg in args {

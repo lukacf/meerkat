@@ -429,6 +429,7 @@ fn agent_event_all_variants_roundtrip() {
     // Variants that can be constructed without chrono or uuid (direct construction).
     let direct_variants: Vec<AgentEvent> = vec![
         AgentEvent::RunStarted {
+            request_reasoning: None,
             identity: Default::default(),
             session_id: session_id.clone(),
             input: meerkat_core::types::RunInput::Content {
@@ -716,6 +717,7 @@ fn agent_event_all_variants_roundtrip() {
 fn documented_event_catalog_covers_core_agent_event_discriminators() {
     let events = vec![
         AgentEvent::RunStarted {
+            request_reasoning: None,
             identity: Default::default(),
             session_id: SessionId::new(),
             input: meerkat_core::types::RunInput::Content {

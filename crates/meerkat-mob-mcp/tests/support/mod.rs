@@ -43,6 +43,9 @@ pub enum ScriptedTurn {
         name: String,
         args: serde_json::Value,
     },
+    /// Request several calls in one batch, in this order: the turn continues
+    /// with all their results and a further provider call.
+    ToolCalls(Vec<(String, String, serde_json::Value)>),
     /// Emit this exact assistant text.
     Text(String),
     /// Fail the provider call, so the member turn fails terminally.
@@ -191,6 +194,29 @@ impl LlmClient for ScriptedCouncilClient {
                     },
                 },
             ],
+            ScriptedTurn::ToolCalls(calls) => calls
+                .into_iter()
+                .map(|(id, name, args)| LlmEvent::ToolCallComplete {
+                    id,
+                    name,
+                    args,
+                    meta: None,
+                })
+                .chain([
+                    LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            meerkat_core::Provider::Anthropic,
+                            &request.model,
+                            meerkat_core::Usage::default(),
+                        ),
+                    },
+                    LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::ToolUse,
+                        },
+                    },
+                ])
+                .collect(),
             ScriptedTurn::Text(text) => vec![
                 LlmEvent::TextDelta {
                     delta: text,
@@ -345,6 +371,9 @@ pub struct CouncilFixture {
     pub runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
     /// Present for runtime-backed fixtures ([`CouncilFixture::new_runtime_backed`]).
     pub runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    /// The continuation owner of fixtures with a runtime, bound to `state`
+    /// (and to every [`CouncilFixture::restart_state`]).
+    pub continuations: Option<FixtureContinuations>,
     pub calls: Arc<AtomicUsize>,
     pub root: std::path::PathBuf,
     pub temp: tempfile::TempDir,
@@ -419,6 +448,72 @@ fn persistent_service(
     ))
 }
 
+/// Where a host submits detached completions: a runtime delivery inbox over
+/// the fixture's runtime store, drained by a delivery owner armed the way the
+/// product surfaces arm theirs, and the continuation services it resolves
+/// through.
+#[derive(Clone)]
+pub struct FixtureContinuations {
+    pub inbox: meerkat_runtime::RuntimeDeliveryInbox,
+    pub bindings: Arc<meerkat::ContinuationHostBindings>,
+    /// The generation of the state that holds the bindings now: a restarted
+    /// state takes them over from it, as a host that rebuilds its mob state
+    /// does.
+    holder: Arc<std::sync::Mutex<Option<meerkat::ContinuationBindingGeneration>>>,
+}
+
+impl FixtureContinuations {
+    /// Arm a delivery owner for `service` and `runtime` over `runtime_store`.
+    fn arm(
+        service: &Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
+        runtime: &Arc<meerkat_runtime::MeerkatMachine>,
+        runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    ) -> Self {
+        let inbox = meerkat_runtime::RuntimeDeliveryInbox::new(runtime_store);
+        let bindings = Arc::new(meerkat::ContinuationHostBindings::default());
+        let job_store: Arc<dyn meerkat::DetachedJobStore> =
+            Arc::new(meerkat::MemoryDetachedJobStore::new());
+        let host = Arc::new(
+            meerkat::surface::SessionServiceDeliveryHost::new(
+                service,
+                runtime,
+                meerkat::DetachedJobService::new(Arc::clone(&job_store)),
+                None,
+            )
+            .with_continuation_bindings(Arc::clone(&bindings)),
+        );
+        meerkat::RuntimeDeliveryOwner::new(job_store, inbox.clone())
+            .with_attachment_commits(runtime.subscribe_attachment_commits())
+            .with_run_settlements(runtime.subscribe_run_settlements())
+            .arm(host)
+            .expect("arm the fixture's delivery owner")
+            .detach();
+        Self {
+            inbox,
+            bindings,
+            holder: Arc::default(),
+        }
+    }
+
+    /// Bind `state` as the host's continuation owner, taking the bindings
+    /// over from the state that holds them (a state without a runtime binds
+    /// nothing).
+    pub fn bind(&self, state: &Arc<MobMcpState>) {
+        let mut holder = self.holder.lock().expect("binding holder");
+        let bound = match *holder {
+            None => state.bind_continuations(self.inbox.clone(), &self.bindings),
+            Some(replaced) => {
+                state.rebind_continuations(replaced, self.inbox.clone(), &self.bindings)
+            }
+        };
+        match bound {
+            Ok(()) => *holder = state.continuation_binding_generation(),
+            Err(meerkat_mob_mcp::BindContinuationsError::NoRuntime) => {}
+            Err(error) => panic!("bind the fixture's continuations: {error}"),
+        }
+    }
+}
+
 /// The runtime-backed composition product surfaces use: members run through
 /// a `MeerkatMachine`, which is also what admits detached completions.
 fn runtime_backed_service(
@@ -442,6 +537,45 @@ fn runtime_backed_service(
             .expect("construct runtime authority"),
     );
     (Arc::new(event_projection(service, &project_root)), runtime)
+}
+
+/// The production runtime-backed composition with the agent mob tools wired
+/// the way `wire_mob_tools` wires them, after `configure` has shaped the mob
+/// state: every member mounting the `mob` family gets the real agent mob
+/// tools with its own parent tool scope, so a member's model turn can
+/// `delegate` or `mob_spawn_member` exactly as in production.
+pub fn agent_mob_tools_state(
+    root: &std::path::Path,
+    client: Arc<dyn LlmClient>,
+    configure: impl FnOnce(MobMcpState) -> MobMcpState,
+) -> Arc<MobMcpState> {
+    let (builder, store, _project_root) = fixture_builder(root, client);
+    let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+    let store_dyn: Arc<dyn meerkat::SessionStore> = store;
+    let (service, runtime) = meerkat::surface::build_runtime_backed_service(
+        builder,
+        32,
+        meerkat::PersistenceBundle::new(
+            store_dyn,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        )
+        .expect("persistence bundle"),
+    );
+    let state = Arc::new(configure(
+        MobMcpState::new_with_runtime_adapter(
+            Arc::new(service),
+            Some(runtime),
+            MobControlPrincipal::Owner,
+        )
+        .expect("mob state"),
+    ));
+    *mob_tools_slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+        meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
+    ));
+    state
 }
 
 impl CouncilFixture {
@@ -578,12 +712,27 @@ impl CouncilFixture {
             .try_with_persistent_storage_root(Some(state_root))
             .expect("open rooted council + capability custody")
             .into_shared();
+        // Every fixture whose mob state has a runtime gets a delivery owner,
+        // as the product surfaces arm one, so detached completions apply.
+        let delivery_runtime = runtime_adapter.clone().or_else(|| {
+            state
+                .session_service()
+                .acquire_runtime_adapter(None)
+                .ok()
+                .flatten()
+        });
+        let continuations = delivery_runtime
+            .map(|runtime| FixtureContinuations::arm(&service, &runtime, runtime_store.clone()));
+        if let Some(continuations) = &continuations {
+            continuations.bind(&state);
+        }
         Self {
             scope,
             state,
             service,
             runtime_store,
             runtime_adapter,
+            continuations,
             calls,
             root,
             temp,
@@ -681,14 +830,74 @@ impl CouncilFixture {
         MobMcpState::persistent_forked_participant_store_path(&self.root.join("state"))
     }
 
+    /// Shut the fixture state's mobs down without destroying them, as a
+    /// process that dies leaves them: their durable stores stay, and a
+    /// restarted state restores them without meeting a live predecessor.
+    pub async fn shut_down_predecessor(&self) {
+        for (_, handle) in self.state.mob_handles_snapshot().await.unwrap_or_default() {
+            handle
+                .shutdown()
+                .await
+                .expect("shut the predecessor's mob down");
+        }
+    }
+
+    /// Bind `state` (one a test built over this fixture's stores) as the
+    /// host's continuation owner.
+    pub fn bind_continuations(&self, state: &Arc<MobMcpState>) {
+        if let Some(continuations) = &self.continuations {
+            continuations.bind(state);
+        }
+    }
+
     /// Rebuild the state over the SAME durable stores, the way a restarted
     /// process would. The session service and runtime store are retained
     /// because replacing them would model data loss, not a cold restart.
     pub fn restart_state(&self) -> Arc<MobMcpState> {
-        Self::state_over(&self.service, self.runtime_adapter.as_ref())
+        let state = Self::state_over(&self.service, self.runtime_adapter.as_ref())
             .try_with_persistent_storage_root(Some(self.root.join("state")))
             .expect("reopen rooted council + capability custody")
-            .into_shared()
+            .into_shared();
+        if let Some(continuations) = &self.continuations {
+            continuations.bind(&state);
+        }
+        state
+    }
+
+    /// Restart over the SAME durable stores with a FRESH session service, the
+    /// way a restarted process comes back: the previous lifetime's mobs and
+    /// sessions are shut down and no live actor survives, so a member returns
+    /// only through the factory's resume path. `script` drives the new
+    /// service's model and `customize` composes the new state (its policy
+    /// registry, child policy and host tools), which may differ from the
+    /// previous lifetime's. Not for runtime-backed fixtures.
+    pub async fn restart_cold_with(
+        &mut self,
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
+    ) {
+        assert!(
+            self.runtime_adapter.is_none(),
+            "a cold restart of a runtime-backed fixture is not modelled here"
+        );
+        for (_, handle) in self.state.mob_handles_snapshot().await.unwrap_or_default() {
+            handle
+                .shutdown()
+                .await
+                .expect("shut the previous lifetime's mob down");
+        }
+        self.service
+            .try_shutdown()
+            .await
+            .expect("shut the previous lifetime's sessions down");
+        let client = Arc::new(ScriptedCouncilClient::new(script));
+        self.calls = client.calls();
+        self.service = persistent_service(&self.root, self.runtime_store.clone(), client);
+        let state_root = self.root.join("state");
+        self.state = customize(Self::state_over(&self.service, None), &state_root)
+            .try_with_persistent_storage_root(Some(state_root))
+            .expect("reopen rooted council + capability custody")
+            .into_shared();
     }
 
     /// A second session service over the SAME durable stores, with no live
@@ -1224,4 +1433,59 @@ impl meerkat_mob_mcp::DetachedOwnerHost for MobBackedOwnerHost {
                 detail: error.to_string(),
             })
     }
+}
+
+/// Admit job `job_id`'s completion to `owner_session_id` the way a live
+/// delivery admitted it before completions were continuations (and before a
+/// crash or an upgrade): the `BackgroundJob` completion input under the
+/// job's key (`{tool}:{job_id}`), straight into the runtime.
+pub async fn admit_pre_upgrade_session_completion(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    owner_session_id: &meerkat_core::SessionId,
+    tool: &'static str,
+    job_id: &str,
+    status: meerkat_core::event::BackgroundJobTerminalStatus,
+    outcome: serde_json::Value,
+) -> Result<meerkat_mob_mcp::DetachedCompletionDelivered, String> {
+    let notice = meerkat_mob_mcp::detached_completion_notice(tool, job_id, status, &outcome)
+        .map_err(|error| error.to_string())?;
+    let input = meerkat_runtime::Input::Prompt(
+        meerkat_runtime::PromptInput::detached_job_completed(format!("{tool}:{job_id}"), notice),
+    );
+    match runtime
+        .accept_input_with_completion(owner_session_id, input)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        (meerkat_runtime::AcceptOutcome::Accepted { .. }, _) => {
+            Ok(meerkat_mob_mcp::DetachedCompletionDelivered::Delivered)
+        }
+        (meerkat_runtime::AcceptOutcome::Deduplicated { .. }, _) => {
+            Ok(meerkat_mob_mcp::DetachedCompletionDelivered::AlreadyDelivered)
+        }
+        (outcome, _) => Err(format!("{outcome:?}")),
+    }
+}
+
+/// [`admit_pre_upgrade_session_completion`] for an owner that is a member of
+/// `owner`'s mob, revived through it when the runtime does not have it live.
+#[allow(clippy::too_many_arguments)]
+pub async fn admit_pre_upgrade_completion(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    owner: &meerkat_mob::MobHandle,
+    owner_identity: &AgentIdentity,
+    owner_session_id: &meerkat_core::SessionId,
+    tool: &'static str,
+    job_id: &str,
+    status: meerkat_core::event::BackgroundJobTerminalStatus,
+    outcome: serde_json::Value,
+) -> Result<meerkat_mob_mcp::DetachedCompletionDelivered, String> {
+    if !runtime.contains_session(owner_session_id).await {
+        owner
+            .ensure_member_live(owner_identity)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    admit_pre_upgrade_session_completion(runtime, owner_session_id, tool, job_id, status, outcome)
+        .await
 }

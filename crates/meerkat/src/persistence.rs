@@ -185,6 +185,15 @@ impl From<meerkat_store::realm::RealmFirstStartError> for PersistenceError {
     }
 }
 
+/// A realm declared `Multiprocess` hosting, but its stores cannot provide it
+/// (#1813). Startup refuses rather than run with a weaker guarantee than the
+/// realm asked for.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("multi-process hosting is unavailable for this realm: {reason}")]
+pub struct HostingUnavailable {
+    pub reason: String,
+}
+
 /// Backend-owned pairing of a session store with its matching runtime companion.
 #[derive(Clone)]
 pub struct PersistenceBundle {
@@ -212,6 +221,9 @@ pub struct PersistenceBundle {
     projector: Option<Arc<SessionProjector>>,
     #[cfg(feature = "session-store")]
     runtime_adapter: Arc<MeerkatMachine>,
+    /// Continuation services bound once the host's mob runtime exists.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    continuation_bindings: Arc<crate::ContinuationHostBindings>,
 }
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -331,6 +343,8 @@ impl PersistenceBundle {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             projector: None,
             runtime_adapter,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            continuation_bindings: Arc::default(),
         }
     }
 
@@ -451,6 +465,47 @@ impl PersistenceBundle {
     #[cfg(feature = "session-store")]
     pub fn runtime_delivery_inbox(&self) -> meerkat_runtime::RuntimeDeliveryInbox {
         self.runtime_delivery_inbox.clone()
+    }
+
+    /// The continuation services this bundle's host binds once its mob
+    /// runtime exists; shared by every clone of the bundle.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub fn continuation_bindings(&self) -> Arc<crate::ContinuationHostBindings> {
+        Arc::clone(&self.continuation_bindings)
+    }
+
+    /// Require the realm's declared hosting mode (#1813). `Multiprocess`
+    /// refuses, typed, unless the runtime store offers trusted cross-process
+    /// hosting (decorators forward the capability) AND its store watch (the
+    /// delivery owners' cross-process wake) can be established.
+    /// `SingleProcess` always holds.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub fn require_hosting_mode(
+        &self,
+        mode: meerkat_core::config::HostingMode,
+    ) -> Result<(), HostingUnavailable> {
+        if mode == meerkat_core::config::HostingMode::SingleProcess {
+            return Ok(());
+        }
+        let capability = self.runtime_store.hosting_capability();
+        if !capability.is_cross_process() {
+            return Err(HostingUnavailable {
+                reason: "the runtime store offers no trusted cross-process hosting claims \
+                         (an in-memory or unsupported store, a decorator that does not forward \
+                         the capability, or a filesystem where OS locks cannot be trusted)"
+                    .to_string(),
+            });
+        }
+        match meerkat_runtime::watch_delivery_store(
+            &capability,
+            meerkat_runtime::DELIVERY_STORE_SWEEP,
+        ) {
+            Ok(Some(_watch)) => Ok(()),
+            Ok(None) => Err(HostingUnavailable {
+                reason: "the runtime store has no store watch".to_string(),
+            }),
+            Err(reason) => Err(HostingUnavailable { reason }),
+        }
     }
 
     /// The delivery owner over this bundle's job store and runtime delivery
@@ -1237,6 +1292,17 @@ pub async fn open_realm_persistence_with_provider(
     Ok((manifest, bundle))
 }
 
+/// The realm's session hosting paths (#1813), from its path authority. The
+/// runtime store adds its own database file.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+fn session_hosting_paths(paths: &meerkat_store::RealmPaths) -> meerkat_runtime::HostingPaths {
+    meerkat_runtime::HostingPaths {
+        hosting_lock_dir: paths.session_hosting_lock_dir(),
+        cold_delivery_lock: paths.cold_delivery_lock_path(),
+        database: None,
+    }
+}
+
 /// The built-in disk composition (sqlite / jsonl / memory), unchanged in
 /// behavior from before the provider seam existed. Crate-visible so the
 /// `DiskStorageProvider` stays a thin adapter.
@@ -1288,10 +1354,12 @@ pub(crate) fn open_disk_store_set(
             let workgraph_store: Arc<dyn WorkGraphStore> = Arc::new(SqliteWorkGraphStore::open(
                 paths.root.join("workgraph.sqlite3"),
             )?);
-            let runtime_store =
-                Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(
+            let runtime_store = Arc::new(
+                meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(
                     paths.runtime_sqlite_path.clone(),
-                )?) as Arc<dyn RuntimeStore>;
+                )?
+                .with_hosting_paths(session_hosting_paths(paths)),
+            ) as Arc<dyn RuntimeStore>;
             let job_store = Arc::new(meerkat_jobs::SqliteDetachedJobStore::open(
                 paths.jobs_sqlite_path.clone(),
             )?) as Arc<dyn meerkat_jobs::DetachedJobStore>;
@@ -1371,7 +1439,8 @@ pub(crate) fn open_disk_store_set(
             let runtime_store = Arc::new(
                 meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(
                     sqlite_store.path().to_path_buf(),
-                )?,
+                )?
+                .with_hosting_paths(session_hosting_paths(paths)),
             ) as Arc<dyn RuntimeStore>;
             let job_store = Arc::new(meerkat_jobs::SqliteDetachedJobStore::open(
                 paths.jobs_sqlite_path.clone(),
@@ -3082,6 +3151,63 @@ mod tests {
             "sqlite realms must not pair durable stores with an in-memory blob store"
         );
 
+        Ok(())
+    }
+
+    /// #1813 explicit multi-process mode: `multiprocess` requires trusted
+    /// cross-process hosting claims and a store watch, and refuses typed
+    /// otherwise (an in-memory store; a SQLite store composed without its
+    /// realm's hosting paths, the same capability a decorator that does not
+    /// forward it reports). A realm opened through the path authority
+    /// passes. `single_process` always holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn multiprocess_hosting_requires_trusted_claims_and_a_store_watch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::config::HostingMode;
+
+        let temp = TempDir::new()?;
+        let memory = PersistenceBundle::new(
+            Arc::new(MemoryStore::new()),
+            Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
+            Arc::new(MemoryBlobStore::new()),
+        )?;
+        let claimless = PersistenceBundle::new(
+            Arc::new(MemoryStore::new()),
+            Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
+                temp.path().join("claimless.sqlite3"),
+            )?),
+            Arc::new(MemoryBlobStore::new()),
+        )?;
+        for bundle in [&memory, &claimless] {
+            assert!(
+                bundle
+                    .require_hosting_mode(HostingMode::SingleProcess)
+                    .is_ok()
+            );
+            assert!(
+                bundle
+                    .require_hosting_mode(HostingMode::Multiprocess)
+                    .is_err(),
+                "no trusted cross-process claims: refused"
+            );
+        }
+
+        let (_manifest, realm) = open_realm_persistence_in(
+            temp.path(),
+            "multiprocess-realm",
+            Some(RealmBackend::Sqlite),
+            Some(RealmOrigin::Explicit),
+        )
+        .await?;
+        assert!(
+            realm
+                .runtime_store()
+                .hosting_capability()
+                .is_cross_process()
+        );
+        realm.require_hosting_mode(HostingMode::Multiprocess)?;
+        realm.require_hosting_mode(HostingMode::SingleProcess)?;
         Ok(())
     }
 

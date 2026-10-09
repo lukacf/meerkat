@@ -604,7 +604,7 @@ mod tests {
             UnsupportedProfileKey::from_key("instructions"),
             Some(UnsupportedProfileKey::Instructions)
         );
-        // Host-private keys (HomeCore carries `role_summary` under every
+        // Host-private keys (a downstream app carries `role_summary` under every
         // profile table) and real fields are never refused.
         assert_eq!(UnsupportedProfileKey::from_key("role_summary"), None);
         assert_eq!(UnsupportedProfileKey::from_key("peer_description"), None);

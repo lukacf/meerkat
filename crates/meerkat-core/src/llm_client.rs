@@ -224,6 +224,7 @@ pub struct LlmRequestAuthorization {
     run_id: Option<RunId>,
     context_revision: Option<CanonicalContextRevision>,
     usage: ModelAuthorizationUse,
+    review_attribution: Option<crate::approval::review::ReviewOperationAttribution>,
 }
 
 impl LlmRequestAuthorization {
@@ -238,6 +239,23 @@ impl LlmRequestAuthorization {
             run_id: None,
             context_revision: None,
             usage,
+            review_attribution: None,
+        }
+    }
+
+    /// A fresh independently authorized reviewer inference under the exact
+    /// candidate's work and coordinates. No controller exemption is inherited.
+    pub fn for_operation_review(
+        attribution: crate::approval::review::ReviewOperationAttribution,
+    ) -> Self {
+        let facts = attribution.candidate_binding().facts();
+        Self {
+            work: attribution.work_authorization().clone(),
+            operation_id: OperationId::new(),
+            run_id: facts.run_id.clone(),
+            context_revision: facts.context_revision.clone(),
+            usage: ModelAuthorizationUse::Inference,
+            review_attribution: Some(attribution),
         }
     }
 
@@ -265,13 +283,21 @@ impl LlmRequestAuthorization {
         mut target: ModelAuthorizationFacts,
     ) -> Result<PreparedOperationCheck, OperationAuthorizationError> {
         target.usage = self.usage;
-        let binding = PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
+        let facts = OperationAuthorizationFacts {
             operation_id: self.operation_id.clone(),
             execution_scope: self.work.execution_scope().clone(),
             run_id: self.run_id.clone(),
             context_revision: self.context_revision.clone(),
             operation: AuthorizationOperation::Model(target),
-        });
+        };
+        let binding = match &self.review_attribution {
+            Some(attribution) => attribution.bind_child(
+                facts,
+                &self.work,
+                crate::approval::review::ReviewOperationRole::ReviewerInference,
+            )?,
+            None => PreparedAuthorizationBinding::new(facts),
+        };
         PreparedOperationCheck::prepare(self.work.clone(), binding)
     }
 }

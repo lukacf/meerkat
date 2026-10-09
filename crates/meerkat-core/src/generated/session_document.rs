@@ -1437,18 +1437,32 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::MarkSessionInitialTurnPending { session_id } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Inactive)
-                        || (self.session_first_turn_phase_value(&session_id)?
-                            == SessionFirstTurnPhase::Pending))
+                    && (((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && (((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Inactive)
+                            || (self
+                                .state
+                                .session_first_turn_phase
+                                .contains_key(&session_id))))
+                        && (((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Inactive)
+                            || ((self.session_first_turn_phase_value(&session_id)?)
+                                == SessionFirstTurnPhase::Pending)))
                 {
                     matches.push(
                         SessionDocumentTransition::MarkSessionInitialTurnPendingInactiveOrPending,
                     );
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Consumed)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && ((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Consumed))
                 {
                     matches.push(SessionDocumentTransition::MarkSessionInitialTurnPendingConsumed);
                 }
@@ -1480,20 +1494,32 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::StartSessionInitialTurn { session_id } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Pending)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && ((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Pending))
                 {
                     matches.push(SessionDocumentTransition::StartSessionInitialTurnPending);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Inactive)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && ((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Inactive))
                 {
                     matches.push(SessionDocumentTransition::StartSessionInitialTurnInactive);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Consumed)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && ((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Consumed))
                 {
                     matches.push(SessionDocumentTransition::StartSessionInitialTurnConsumed);
                 }
@@ -1535,18 +1561,26 @@ impl SessionDocumentMachineAuthority {
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (should_store_initial_prompt(
-                        self.session_first_turn_phase_value(&session_id)?,
-                        prompt_has_content,
-                    ))
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && (should_store_initial_prompt(
+                            self.session_first_turn_phase_value(&session_id)?,
+                            prompt_has_content,
+                        )))
                 {
                     matches.push(SessionDocumentTransition::StageSessionInitialPromptStore);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (should_store_initial_prompt(
-                        self.session_first_turn_phase_value(&session_id)?,
-                        prompt_has_content,
-                    ) == false)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && (should_store_initial_prompt(
+                            self.session_first_turn_phase_value(&session_id)?,
+                            prompt_has_content,
+                        ) == false))
                 {
                     matches.push(SessionDocumentTransition::StageSessionInitialPromptClear);
                 }
@@ -1586,12 +1620,28 @@ impl SessionDocumentMachineAuthority {
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Inactive)
-                        || (self.session_first_turn_phase_value(&session_id)?
-                            == SessionFirstTurnPhase::Pending)
-                        || (self.session_first_turn_phase_value(&session_id)?
-                            == SessionFirstTurnPhase::Consumed))
+                    && (((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && (((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Inactive)
+                            || ((self
+                                .state
+                                .session_first_turn_phase
+                                .contains_key(&session_id))
+                                && (((self.session_first_turn_phase_value(&session_id)?)
+                                    == SessionFirstTurnPhase::Pending)
+                                    || (self
+                                        .state
+                                        .session_first_turn_phase
+                                        .contains_key(&session_id))))))
+                        && (((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Inactive)
+                            || ((self.session_first_turn_phase_value(&session_id)?)
+                                == SessionFirstTurnPhase::Pending)
+                            || ((self.session_first_turn_phase_value(&session_id)?)
+                                == SessionFirstTurnPhase::Consumed)))
                 {
                     matches.push(SessionDocumentTransition::StageSessionToolResults);
                 }
@@ -1617,20 +1667,32 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::ConsumeSessionDeferredInputs { session_id } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Pending)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && ((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Pending))
                 {
                     matches.push(SessionDocumentTransition::ConsumeSessionDeferredInputsPending);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Inactive)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && ((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Inactive))
                 {
                     matches.push(SessionDocumentTransition::ConsumeSessionDeferredInputsInactive);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_first_turn_phase_value(&session_id)?
-                        == SessionFirstTurnPhase::Consumed)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && ((self.session_first_turn_phase_value(&session_id)?)
+                            == SessionFirstTurnPhase::Consumed))
                 {
                     matches.push(SessionDocumentTransition::ConsumeSessionDeferredInputsConsumed);
                 }
@@ -1784,17 +1846,25 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::ResolveSessionFirstTurnOverridesAllowed { session_id } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (phase_allows_initial_turn_overrides(
-                        self.session_first_turn_phase_value(&session_id)?,
-                    ))
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && (phase_allows_initial_turn_overrides(
+                            self.session_first_turn_phase_value(&session_id)?,
+                        )))
                 {
                     matches
                         .push(SessionDocumentTransition::ResolveSessionFirstTurnOverridesAllowed);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (phase_allows_initial_turn_overrides(
-                        self.session_first_turn_phase_value(&session_id)?,
-                    ) == false)
+                    && ((self
+                        .state
+                        .session_first_turn_phase
+                        .contains_key(&session_id))
+                        && (phase_allows_initial_turn_overrides(
+                            self.session_first_turn_phase_value(&session_id)?,
+                        ) == false))
                 {
                     matches.push(SessionDocumentTransition::ResolveSessionFirstTurnOverridesDenied);
                 }
@@ -5164,15 +5234,23 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::ResolveRuntimeCheckpointProjection { session_id } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_lifecycle_terminal_value(&session_id)?
-                        == SessionDocumentLifecycle::Active)
+                    && ((self
+                        .state
+                        .session_lifecycle_terminal
+                        .contains_key(&session_id))
+                        && ((self.session_lifecycle_terminal_value(&session_id)?)
+                            == SessionDocumentLifecycle::Active))
                 {
                     matches
                         .push(SessionDocumentTransition::ResolveRuntimeCheckpointProjectionActive);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_lifecycle_terminal_value(&session_id)?
-                        == SessionDocumentLifecycle::Archived)
+                    && ((self
+                        .state
+                        .session_lifecycle_terminal
+                        .contains_key(&session_id))
+                        && ((self.session_lifecycle_terminal_value(&session_id)?)
+                            == SessionDocumentLifecycle::Archived))
                 {
                     matches.push(
                         SessionDocumentTransition::ResolveRuntimeCheckpointProjectionArchived,
@@ -5402,8 +5480,12 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::ReviveArchivedSessionDocument { session_id } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_lifecycle_terminal_value(&session_id)?
-                        == SessionDocumentLifecycle::Archived)
+                    && ((self
+                        .state
+                        .session_lifecycle_terminal
+                        .contains_key(&session_id))
+                        && ((self.session_lifecycle_terminal_value(&session_id)?)
+                            == SessionDocumentLifecycle::Archived))
                 {
                     matches.push(SessionDocumentTransition::ReviveArchivedSessionDocument);
                 }
@@ -5430,21 +5512,33 @@ impl SessionDocumentMachineAuthority {
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_lifecycle_terminal_value(&session_id)?
-                        == SessionDocumentLifecycle::Active)
+                    && ((self
+                        .state
+                        .session_lifecycle_terminal
+                        .contains_key(&session_id))
+                        && ((self.session_lifecycle_terminal_value(&session_id)?)
+                            == SessionDocumentLifecycle::Active))
                 {
                     matches.push(SessionDocumentTransition::ArchiveSessionDocumentActive);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_lifecycle_terminal_value(&session_id)?
-                        == SessionDocumentLifecycle::Archived)
+                    && ((self
+                        .state
+                        .session_lifecycle_terminal
+                        .contains_key(&session_id))
+                        && ((self.session_lifecycle_terminal_value(&session_id)?)
+                            == SessionDocumentLifecycle::Archived))
                     && (runtime_observation != SessionArchiveRuntimeObservation::RetirementRequired)
                 {
                     matches.push(SessionDocumentTransition::ArchiveSessionDocumentAlreadyArchived);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (self.session_lifecycle_terminal_value(&session_id)?
-                        == SessionDocumentLifecycle::Archived)
+                    && ((self
+                        .state
+                        .session_lifecycle_terminal
+                        .contains_key(&session_id))
+                        && ((self.session_lifecycle_terminal_value(&session_id)?)
+                            == SessionDocumentLifecycle::Archived))
                     && (runtime_observation == SessionArchiveRuntimeObservation::RetirementRequired)
                 {
                     matches.push(SessionDocumentTransition::ArchiveSessionDocumentCompleteRetire);

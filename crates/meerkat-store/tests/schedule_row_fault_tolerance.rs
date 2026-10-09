@@ -1,5 +1,5 @@
 //! Per-row tolerance and scan-bounding contracts for the sqlite schedule
-//! store (upstream asks 17–19, HomeCore field regression: one poisoned row —
+//! store (upstream asks 17-19, a downstream field regression: one poisoned row -
 //! 31/31 occurrences pending across ~5 binary generations — starved every
 //! schedule, silently, until operators hand-edited sqlite).
 //!
@@ -628,8 +628,8 @@ async fn tolerant_listing_surfaces_poisoned_schedule_rows_and_strict_listing_sta
 /// Ask 18 upgrade-carry: a Deleted tombstone written by a binary generation
 /// whose Delete transition did not clear the planning cursor must heal at
 /// the durable-format parse boundary — `list()` (strict!) and `get` succeed
-/// and the healed tombstone carries no cursor. HomeCore needed manual sqlite
-/// surgery on 16 such rows before this.
+/// and the healed tombstone carries no cursor. Before this, such rows
+/// needed manual sqlite surgery.
 #[tokio::test]
 async fn legacy_deleted_tombstone_with_planning_cursor_heals_on_read() {
     let dir = tempfile::tempdir().expect("tempdir");

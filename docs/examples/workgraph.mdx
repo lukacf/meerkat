@@ -6,21 +6,21 @@ icon: "workflow"
 
 # WorkGraph Example
 
-This example models a Homecore-style situation where incoming information,
+This example models an assistant-style situation where incoming information,
 calendar context, and routine automation produce shared durable work.
 
 ## Scenario
 
-A calendar event says L is taking A to the dentist on May 20. A strongly
-prefers car P. A new maintenance update says car P is in the workshop. A needs
-preparation for irregularities, so L should receive a reminder the day before
-the appointment.
+A calendar event says L is driving to a client visit on May 20 and the visit
+plan assumes pool car P. A new maintenance update says car P is in the
+workshop. The client expects a punctual arrival, so L should receive a
+reminder the day before the visit.
 
-WorkGraph does not infer the family policy. The agent reasons about the data,
+WorkGraph does not infer the team policy. The agent reasons about the data,
 then records the durable commitment and dependencies.
 
 The standard persistent host grants the `default` namespace, so every call in
-this example uses `default`. An embedding host may use `homecore` instead only
+this example uses `default`. An embedding host may use `logistics` instead only
 if it issues that exact namespace in the session's
 `WorkGraphNamespaceGrant`.
 
@@ -31,12 +31,12 @@ if it issues that exact namespace in the session's
   "tool": "workgraph_create",
   "arguments": {
     "namespace": "default",
-    "title": "Verify dentist transport details",
-    "description": "Confirm appointment time, driver, preferred car status, and replacement car.",
+    "title": "Verify client visit transport details",
+    "description": "Confirm visit time, driver, planned car status, and replacement car.",
     "priority": "high",
-    "labels": ["family-logistics", "transport"],
+    "labels": ["team-logistics", "transport"],
     "external_refs": [
-      { "kind": "calendar_event", "id": "dentist-a-2026-05-20" },
+      { "kind": "calendar_event", "id": "client-visit-2026-05-20" },
       { "kind": "maintenance_record", "id": "car-p-workshop-2026-05-18" }
     ]
   }
@@ -48,13 +48,13 @@ if it issues that exact namespace in the session's
   "tool": "workgraph_create",
   "arguments": {
     "namespace": "default",
-    "title": "Prepare L reminder for dentist transport change",
-    "description": "Tell L to explain to A that car P is unavailable and name the replacement car.",
+    "title": "Prepare L reminder for client visit transport change",
+    "description": "Tell L that car P is unavailable and name the replacement car.",
     "priority": "high",
-    "labels": ["family-logistics", "autism-support"],
+    "labels": ["team-logistics", "travel"],
     "due_at": "2026-05-19T08:00:00Z",
     "external_refs": [
-      { "kind": "calendar_event", "id": "dentist-a-2026-05-20" }
+      { "kind": "calendar_event", "id": "client-visit-2026-05-20" }
     ]
   }
 }
@@ -83,7 +83,7 @@ The reminder item should not be ready until transport details are verified.
   "tool": "workgraph_ready",
   "arguments": {
     "namespace": "default",
-    "labels": ["family-logistics"],
+    "labels": ["team-logistics"],
     "limit": 10
   }
 }
@@ -102,8 +102,8 @@ returned by WorkGraph.
     "id": "work_verify_transport",
     "expected_revision": 1,
     "owner": {
-      "key": { "kind": "agent", "id": "homecore/logistics" },
-      "display_name": "Homecore logistics"
+      "key": { "kind": "agent", "id": "example/logistics" },
+      "display_name": "Example logistics"
     },
     "lease_seconds": 1200
   }
@@ -154,7 +154,7 @@ Create a coordination item with explicit child terminal policies:
   "tool": "workgraph_create",
   "arguments": {
     "namespace": "default",
-    "title": "Coordinate dentist transport change",
+    "title": "Coordinate client visit transport change",
     "priority": "high",
     "failed_child_join_policy": "propagate",
     "cancelled_child_join_policy": "accept"
@@ -172,7 +172,7 @@ to parent. The first edge is shown below:
     "namespace": "default",
     "kind": "parent",
     "from_id": "work_verify_transport",
-    "to_id": "work_coordinate_dentist_change"
+    "to_id": "work_coordinate_visit_change"
   }
 }
 ```
@@ -187,7 +187,7 @@ A trusted local operator can create a WorkItem and attention binding together:
 
 ```bash
 rkat --realm home workgraph goal-create SESSION_ID \
-  "Review dentist transport preparation" \
+  "Review client visit transport preparation" \
   --namespace default \
   --mode review \
   --completion-policy self-attest \
@@ -213,6 +213,6 @@ curl "http://127.0.0.1:8080/workgraph/snapshot?namespace=default"
 
 ## Why This Is Not An Expert System
 
-The LLM decides what matters from calendar data, maintenance records, family
+The LLM decides what matters from calendar data, maintenance records, team
 preferences, and user policy. WorkGraph only records the durable to-do spine:
 dependencies, readiness, claim state, evidence, and terminal truth.

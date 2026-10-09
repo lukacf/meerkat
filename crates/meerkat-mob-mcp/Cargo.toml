@@ -70,6 +70,7 @@ tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 meerkat-mob = { workspace = true, features = ["test-support"] }
 meerkat-runtime = { workspace = true, features = ["test-support"] }
+meerkat-authorization-contracts = { workspace = true }
 meerkat-schedule = { workspace = true }
 meerkat-session = { workspace = true, features = ["session-store"] }
 meerkat-store = { workspace = true, features = ["sqlite", "jsonl"] }

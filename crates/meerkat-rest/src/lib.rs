@@ -575,6 +575,11 @@ impl AppState {
                 format!("Invalid config: {err}"),
             )));
         }
+        // #1813: a realm that declares multi-process hosting refuses to start
+        // when its stores cannot provide it.
+        persistence
+            .require_hosting_mode(config.storage.hosting_mode())
+            .map_err(|err| Box::new(err) as Box<dyn std::error::Error>)?;
 
         let store_path = persistence
             .store_path()
@@ -652,6 +657,11 @@ impl AppState {
             &builder,
             Some(workgraph_service.namespace_grant().clone()),
         );
+        #[cfg(feature = "mob")]
+        let (runtime_delivery_inbox, continuation_bindings) = (
+            persistence.runtime_delivery_inbox(),
+            persistence.continuation_bindings(),
+        );
         let (session_service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
                 builder,
@@ -718,6 +728,14 @@ impl AppState {
                     state = state.with_controlling_acceptor(acceptor);
                 }
                 let state = state.into_shared();
+                // fork_off and council outcomes are submitted durably to the
+                // service's delivery owner, which resolves members and
+                // confirms jobs through this state.
+                if let Err(error) =
+                    state.bind_continuations(runtime_delivery_inbox, &continuation_bindings)
+                {
+                    tracing::warn!(%error, "fork_off and council run in the turn: continuation owner not bound");
+                }
                 state.start_workgraph_flow_reconciler();
                 *mob_tools_slot
                     .write()
@@ -845,9 +863,13 @@ async fn prepare_rest_session_runtime_executor_locked(
         })?;
         // Attaching a persisted-only session: resolve a crash-window
         // provisional tail before the committed read.
+        let claim = state
+            .session_service
+            .grant_session_hosting(session_id)
+            .map_err(runtime_driver_error_from_session_error)?;
         state
             .session_service
-            .prepare_cold_attach(session_id)
+            .prepare_cold_attach(session_id, claim)
             .await
             .map_err(runtime_driver_error_from_session_error)?;
         let session = state
@@ -922,16 +944,29 @@ async fn prepare_rest_session_runtime_executor_locked(
 fn runtime_driver_error_from_session_error(
     error: SessionError,
 ) -> meerkat_runtime::RuntimeDriverError {
-    meerkat_runtime::RuntimeDriverError::Internal(error.to_string())
+    match error {
+        // Keeps the typed refusal through the attach path (#1813).
+        SessionError::ServedElsewhere { id } => {
+            meerkat_runtime::RuntimeDriverError::ServedElsewhere { session_id: id }
+        }
+        SessionError::HostingUnavailable { id } => {
+            meerkat_runtime::RuntimeDriverError::HostingUnavailable { session_id: id }
+        }
+        other => meerkat_runtime::RuntimeDriverError::Internal(other.to_string()),
+    }
 }
 
 fn runtime_executor_attach_error_to_api(error: meerkat_runtime::RuntimeDriverError) -> ApiError {
-    if let Some(busy) = error
+    if let Some(typed) = error
         .teardown_in_progress_session_error()
+        .or_else(|| error.hosting_session_error())
         .as_ref()
-        .and_then(session_busy_api_error)
+        .and_then(|session_error| {
+            session_busy_api_error(session_error)
+                .or_else(|| session_runtime_unavailable_api_error(session_error))
+        })
     {
-        return busy;
+        return typed;
     }
     ApiError::Internal(format!("failed to attach REST runtime executor: {error}"))
 }
@@ -941,6 +976,9 @@ fn runtime_driver_error_to_session_error(
 ) -> SessionError {
     if let Some(in_progress) = error.teardown_in_progress_session_error() {
         return in_progress;
+    }
+    if let Some(hosting) = error.hosting_session_error() {
+        return hosting;
     }
     SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
 }
@@ -3710,6 +3748,7 @@ fn make_runtime_external_event_input(
             objective_id: None,
             header: meerkat_runtime::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -4448,6 +4487,13 @@ fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError 
                 "Generation conflict: expected {expected}, current {current}"
             ))
         }
+        // The store refused the caller's candidate config (a new or changed
+        // realm MCP server with an environment reference, or an invalid
+        // written config); document and store failures stay server errors.
+        meerkat_core::ConfigRuntimeError::Config(
+            error @ (meerkat_core::ConfigError::RealmMcpServerEnvReference(_)
+            | meerkat_core::ConfigError::Validation(_)),
+        ) => ApiError::BadRequest(format!("Invalid config: {error}")),
         other => ApiError::Configuration(other.to_string()),
     }
 }
@@ -5439,6 +5485,8 @@ async fn create_session_inner(
         budget_limits: req.budget_limits,
         provider_params: req.provider_params.clone().map(Into::into),
         external_tools: mcp_external_tools,
+        // The session service decides hosting when it creates the actor.
+        hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
         mcp_servers: Vec::new(),
         recoverable_tool_defs: None,
         llm_client_override: state
@@ -5478,6 +5526,7 @@ async fn create_session_inner(
         additional_instructions: req.additional_instructions,
         initial_metadata_entries: std::collections::BTreeMap::new(),
         initial_tool_filter: None,
+        initial_tool_visibility_state: None,
         shell_env: req.shell_env,
         resume_override_mask,
         call_timeout_override: Default::default(),
@@ -6270,6 +6319,8 @@ fn system_context_error_to_api(err: SessionControlError) -> ApiError {
             ApiError::NotFound("Session not found".to_string())
         }
         SessionControlError::Session(other) => ApiError::Internal(other.to_string()),
+        SessionControlError::Authorization(error) => ApiError::OperationAuthorization(error),
+        SessionControlError::Review(refusal) => ApiError::OperationReview(refusal),
         SessionControlError::InvalidRequest { message } => ApiError::BadRequest(message),
         SessionControlError::Conflict { key, .. } => ApiError::Conflict(format!(
             "system-context idempotency conflict for key '{key}'"
@@ -6666,6 +6717,8 @@ async fn continue_session_inner(
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            // The session service decides hosting when it creates the actor.
+            hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
             mcp_servers: Vec::new(),
             recoverable_tool_defs: None,
             llm_client_override: state
@@ -6703,6 +6756,7 @@ async fn continue_session_inner(
             additional_instructions: None,
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
+            initial_tool_visibility_state: None,
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: req.model.is_some(),
@@ -8271,6 +8325,9 @@ pub async fn shutdown_all_mcp_sessions(state: &AppState) {
 /// API error types
 #[derive(Debug)]
 pub enum ApiError {
+    OperationAuthorization(meerkat_core::OperationAuthorizationError),
+    /// A current, permitted operation settled its required review locally.
+    OperationReview(meerkat_core::OperationReviewRefusal),
     BadRequest(String),
     BadRequestWithData {
         message: String,
@@ -8315,10 +8372,14 @@ pub enum ApiError {
 /// still in progress (`SessionError::runtime_teardown_in_progress`).
 fn session_runtime_unavailable_api_error(error: &SessionError) -> Option<ApiError> {
     match error {
-        SessionError::RuntimeUnavailable { .. } => Some(ApiError::SessionRuntimeUnavailable {
-            message: error.to_string(),
-            details: meerkat_contracts::error::session_error_details(error)?,
-        }),
+        // A session whose hosting claim is unavailable (#1813) travels the
+        // same 503 class, with `kind = "session_hosting_unavailable"`.
+        SessionError::RuntimeUnavailable { .. } | SessionError::HostingUnavailable { .. } => {
+            Some(ApiError::SessionRuntimeUnavailable {
+                message: error.to_string(),
+                details: meerkat_contracts::error::session_error_details(error)?,
+            })
+        }
         _ => None,
     }
 }
@@ -8333,12 +8394,20 @@ fn session_busy_api_error(error: &SessionError) -> Option<ApiError> {
                 details: data.clone(),
             })
         }
+        // Another runtime owner hosts the session (#1813): the busy class
+        // with `kind = "session_served_elsewhere"`.
+        SessionError::ServedElsewhere { .. } => Some(ApiError::SessionBusyWithData {
+            message: error.to_string(),
+            details: error.structured_data().unwrap_or(Value::Null),
+        }),
         _ => None,
     }
 }
 
 fn api_error_message(error: &ApiError) -> String {
     match error {
+        ApiError::OperationAuthorization(error) => error.to_string(),
+        ApiError::OperationReview(refusal) => refusal.to_string(),
         ApiError::BadRequest(message)
         | ApiError::Unauthorized(message)
         | ApiError::NotFound(message)
@@ -8365,6 +8434,39 @@ fn api_error_message(error: &ApiError) -> String {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message, details) = match self {
+            ApiError::OperationAuthorization(error) => {
+                let (status, code) = match error {
+                    meerkat_core::OperationAuthorizationError::Refused(_) => {
+                        (StatusCode::FORBIDDEN, "OPERATION_REFUSED")
+                    }
+                    meerkat_core::OperationAuthorizationError::Unavailable => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "OPERATION_AUTHORIZATION_UNAVAILABLE",
+                    ),
+                    meerkat_core::OperationAuthorizationError::ObservationUnavailable(_) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "OPERATION_OBSERVATION_UNAVAILABLE",
+                    ),
+                };
+                (status, code.to_string(), error.to_string(), None)
+            }
+            ApiError::OperationReview(refusal) => {
+                let (status, details) = match refusal {
+                    meerkat_core::OperationReviewRefusal::Unsatisfied { kind } => {
+                        (StatusCode::FORBIDDEN, json!({ "kind": kind }))
+                    }
+                    meerkat_core::OperationReviewRefusal::Unavailable { kind } => {
+                        (StatusCode::SERVICE_UNAVAILABLE, json!({ "kind": kind }))
+                    }
+                };
+                (
+                    status,
+                    refusal.code().to_string(),
+                    refusal.to_string(),
+                    Some(details),
+                )
+            }
+
             ApiError::BadRequest(msg) => (
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST".to_string(),
@@ -15543,6 +15645,50 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             wire.shadowed_by.expect("shadowed by").identity,
             shadow_identity
         );
+    }
+
+    /// Realm MCP servers are literal, judged entry by entry by the store, so
+    /// the commit prevalidator does not veto a document that keeps a legacy
+    /// entry. The store's refusal of the caller's own new or changed entry,
+    /// and its validation refusal, are bad requests; document and store
+    /// failures stay server errors.
+    #[test]
+    fn test_realm_mcp_env_references_are_refused_by_the_store_as_bad_requests() {
+        let mut config = Config::default();
+        config.tools.mcp_servers = vec![meerkat_core::McpServerConfig::stdio(
+            "legacy",
+            "tool",
+            vec![],
+            std::collections::HashMap::from([("TOKEN".to_string(), "${HOST_SECRET}".to_string())]),
+        )];
+        validate_config_for_commit_with_roots(&config, None, None)
+            .expect("the prevalidator leaves literal-server checks to the store");
+
+        let refused = config_runtime_err_to_api(meerkat_core::ConfigRuntimeError::Config(
+            meerkat_core::ConfigError::RealmMcpServerEnvReference(
+                meerkat_core::mcp_config::McpRealmServerEnvReference {
+                    server: "exfil".to_string(),
+                    field: "env",
+                },
+            ),
+        ));
+        assert!(
+            matches!(&refused, ApiError::BadRequest(message)
+                if message.contains("'exfil'") && message.contains("never expanded from the environment")),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            config_runtime_err_to_api(meerkat_core::ConfigRuntimeError::Config(
+                meerkat_core::ConfigError::Validation("max_tokens".to_string())
+            )),
+            ApiError::BadRequest(_)
+        ));
+        assert!(matches!(
+            config_runtime_err_to_api(meerkat_core::ConfigRuntimeError::Io(std::io::Error::other(
+                "disk"
+            ))),
+            ApiError::Configuration(_)
+        ));
     }
 
     #[test]

@@ -374,6 +374,7 @@ fn replacement_channel_accepts_reset_provider_local_turn_ref_and_fences_stale_so
             session_id: SESSION.to_string(),
             channel_id: REPLACEMENT.to_string(),
             llm_identity: identity(),
+            member_turn_reasoning: None,
         },
     )
     .expect("channel B open admission");
@@ -3810,6 +3811,7 @@ fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() 
             session_id: SESSION.to_string(),
             channel_id: "channel-result-recovery".to_string(),
             llm_identity: identity(),
+            member_turn_reasoning: None,
         },
     )
     .expect("fresh result-recovery channel passes ordinary open admission");
@@ -4658,6 +4660,7 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
             session_id: SESSION.to_string(),
             channel_id: REPLACEMENT.to_string(),
             llm_identity: identity(),
+            member_turn_reasoning: None,
         },
     )
     .expect("exact replacement receives ordinary open admission");
@@ -5089,6 +5092,7 @@ fn concurrent_result_recovery_validates_nonzero_pin_but_binds_empty_provider_con
             session_id: SESSION.into(),
             channel_id: REPLACEMENT.into(),
             llm_identity: identity(),
+            member_turn_reasoning: None,
         },
     )
     .expect("open recovery replacement");
@@ -5648,6 +5652,7 @@ fn admit_live_bridge_on_channel(
             agent_identity: mm::AgentIdentity("durable-agent".to_string()),
             canonical_context_revision: "canonical-revision".to_string(),
             request_digest: request_digest.to_string(),
+            original_work: "test-original-work".to_string(),
             structural_lineage_proven: true,
         },
     )
@@ -5686,6 +5691,7 @@ fn admit_live_bridge(authority: &mut mm::MeerkatMachineAuthority) {
             agent_identity: mm::AgentIdentity("durable-agent".to_string()),
             canonical_context_revision: "canonical-revision".to_string(),
             request_digest: "request-digest-without-text-equivalence".to_string(),
+            original_work: "test-original-work".to_string(),
             structural_lineage_proven: true,
         },
     )
@@ -5776,6 +5782,7 @@ fn live_bridge_provider_refs_are_channel_scoped_and_stale_callbacks_are_fenced()
             session_id: SESSION.to_string(),
             channel_id: CHANNEL_B.to_string(),
             llm_identity: identity(),
+            member_turn_reasoning: None,
         },
     )
     .expect("channel B becomes the current fenced channel");
@@ -6021,6 +6028,7 @@ fn live_bridge_is_prefinal_fail_closed_and_submission_recovery_never_resends() {
                 agent_identity: mm::AgentIdentity("durable-agent".to_string()),
                 canonical_context_revision: "canonical-revision".to_string(),
                 request_digest: "request-digest-without-text-equivalence".to_string(),
+                original_work: "test-original-work".to_string(),
                 structural_lineage_proven: false,
             },
         )

@@ -102,6 +102,7 @@ pub mod protocol_supervisor_trust_publish;
 #[path = "generated/protocol_supervisor_trust_revoke.rs"]
 pub mod protocol_supervisor_trust_revoke;
 pub mod recovery;
+pub mod retained_work;
 pub(crate) mod run_progress;
 pub mod run_stop;
 pub mod run_stop_wire;
@@ -109,6 +110,7 @@ pub mod runtime_event;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
+pub mod session_hosting;
 pub(crate) mod silent_intent;
 pub mod stack_relief;
 pub mod store;
@@ -537,9 +539,12 @@ pub use completion::{
     CompletionCleanupObservation, CompletionHandle, CompletionOutcome, CompletionWaitError,
 };
 pub use delivery_inbox::{
-    RuntimeDeliveryAcknowledgement, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
-    RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership,
-    RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
+    ContinuationKeyClaim, KeyedSubmitOutcome, RuntimeDeliveryAcknowledgement, RuntimeDeliveryError,
+    RuntimeDeliveryId, RuntimeDeliveryInbox, RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed,
+    RuntimeDeliveryOwnership, RuntimeDeliveryReceipt, RuntimeDeliveryRecipient,
+    RuntimeDeliveryRecipientGroupOutcome, RuntimeDeliveryRecipientOutcome,
+    RuntimeDeliveryRecipientState, RuntimeDeliveryRecord, RuntimeDeliveryRefusalReason,
+    RuntimeDeliveryStatus, RuntimeDeliverySubmission, delivery_digest_hex,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use exact_operation::{
@@ -555,7 +560,8 @@ pub use handles::{
 };
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, InputKind, KindId,
-    LogicalRuntimeId, PolicyVersion, ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey,
+    LogicalRuntimeId, LogicalRuntimeIdError, MemberDeliveryAddress, PolicyVersion,
+    ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey,
 };
 pub use ingress_types::{ContentShape, RequestId, ReservationKey};
 pub use input::{
@@ -568,7 +574,8 @@ pub use input_ledger::InputLedger;
 pub use input_scope::InputScope;
 pub use input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStateEvent, InputStateHistoryEntry,
-    InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
+    InputTerminalOutcome, PolicySnapshot, ReconstructionSource, verify_exact_replay,
+    verify_exact_resume_replay,
 };
 pub use meerkat_core::types::HandlingMode;
 #[cfg(not(target_arch = "wasm32"))]
@@ -631,6 +638,16 @@ pub use ops_lifecycle::{
     RuntimeOpsLifecycleRegistry,
 };
 pub use run_stop::{RunStopContributor, RunStopReceipt};
+#[cfg(not(target_arch = "wasm32"))]
+pub use session_hosting::spawn_blocking_holding_claim;
+pub use session_hosting::{
+    ColdDeliveryOwnership, HostingCapability, HostingClaim, HostingClaimUnavailable, HostingOwner,
+    HostingPaths, HostingRefused, ServedElsewhere, SessionHostingAuthority, SessionServing,
+    grant_session_hosting, local_session_serving, os_lock_if_trusted, try_cold_delivery_ownership,
+    with_write_hosting,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use session_hosting::{DELIVERY_STORE_SWEEP, DeliveryStoreWatch, watch_delivery_store};
 
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 #[doc(hidden)]
@@ -1095,10 +1112,12 @@ pub use service_ext::{SessionServiceRuntimeExt, persistent_runtime_pre_dequeue_h
 pub use store::SqliteRuntimeStore;
 pub use store::{
     CommittedRecoveryBoundary, CommittedWholeBlobMetadata, CommittedWholeBlobProvisionalTail,
-    CommittedWholeBlobSnapshot, CommittingWholeBlobSession,
+    CommittedWholeBlobSnapshot, CommittingWholeBlobSession, ContinuationAdmission,
+    ContinuationAdmissionOutcome, ContinuationAdmissionTransition, ContinuationKeyBinding,
     FencedPreparedRuntimeSessionCommitOutcome, HeadCanonicalProvisionalTailAuthority,
     HeadCanonicalRuntimeAuthorityActivation, HeadCanonicalStoreAuthority, InMemoryRuntimeStore,
-    InputStateRow, PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
+    InputIdempotencyIndexConstraint, InputStateRow, KeyedRuntimeDeliveryCasOutcome,
+    PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
     PreparedHeadCanonicalProvisionalTail, PreparedRecoveryEvidence,
     PreparedRecoveryReceiptDigestEnrichment, PreparedRecoveryReceiptSource,
     PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitKind,

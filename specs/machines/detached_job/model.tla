@@ -563,7 +563,7 @@ ObserveNeedsAttentionDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) 
 
 ApplyRunningNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "Running"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -572,7 +572,7 @@ ApplyRunningNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ApplyWaitingExternalNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "WaitingExternal"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "WaitingExternal"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -581,7 +581,7 @@ ApplyWaitingExternalNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ApplyLossObservedNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "LossObserved"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "LossObserved"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -590,7 +590,7 @@ ApplyLossObservedNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ApplyRetryScheduledNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "RetryScheduled"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "RetryScheduled"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -599,7 +599,7 @@ ApplyRetryScheduledNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ApplySucceededNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "Succeeded"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "Succeeded"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -608,7 +608,7 @@ ApplySucceededNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ApplyFailedNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "Failed"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -617,7 +617,7 @@ ApplyFailedNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ApplyCancelledNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "Cancelled"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -626,7 +626,7 @@ ApplyCancelledNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ApplyWorkerLostNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "WorkerLost"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "WorkerLost"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -635,7 +635,7 @@ ApplyWorkerLostNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ApplyNeedsAttentionNotificationDelivery(delivery_id, arg_delivery_sequence) ==
     /\ phase = "NeedsAttention"
-    /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~(((delivery_id \in notification_applied) = FALSE)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ ((delivery_id \in notification_applied) = FALSE) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "NeedsAttention"
     /\ model_step_count' = model_step_count + 1
     /\ notification_applied' = (notification_applied \cup {delivery_id})
@@ -644,7 +644,7 @@ ApplyNeedsAttentionNotificationDelivery(delivery_id, arg_delivery_sequence) ==
 
 ObserveRunningNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "Running"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5
@@ -652,7 +652,7 @@ ObserveRunningNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_seque
 
 ObserveWaitingExternalNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "WaitingExternal"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "WaitingExternal"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5
@@ -660,7 +660,7 @@ ObserveWaitingExternalNotificationDeliveryAlreadyApplied(delivery_id, arg_delive
 
 ObserveLossObservedNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "LossObserved"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "LossObserved"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5
@@ -668,7 +668,7 @@ ObserveLossObservedNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_
 
 ObserveRetryScheduledNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "RetryScheduled"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "RetryScheduled"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5
@@ -676,7 +676,7 @@ ObserveRetryScheduledNotificationDeliveryAlreadyApplied(delivery_id, arg_deliver
 
 ObserveSucceededNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "Succeeded"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "Succeeded"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5
@@ -684,7 +684,7 @@ ObserveSucceededNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_seq
 
 ObserveFailedNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "Failed"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5
@@ -692,7 +692,7 @@ ObserveFailedNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequen
 
 ObserveCancelledNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "Cancelled"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5
@@ -700,7 +700,7 @@ ObserveCancelledNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_seq
 
 ObserveWorkerLostNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "WorkerLost"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "WorkerLost"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5
@@ -708,7 +708,7 @@ ObserveWorkerLostNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_se
 
 ObserveNeedsAttentionNotificationDeliveryAlreadyApplied(delivery_id, arg_delivery_sequence) ==
     /\ phase = "NeedsAttention"
-    /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((IF "value" \in DOMAIN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None) THEN (IF (delivery_id \in DOMAIN notification_sequences) THEN Some((IF delivery_id \in DOMAIN notification_sequences THEN notification_sequences[delivery_id] ELSE 0)) ELSE None)["value"] ELSE None) = arg_delivery_sequence))
+    /\ ((IF ~((delivery_id \in notification_ids)) THEN TRUE ELSE (IF ~((delivery_id \in notification_applied)) THEN TRUE ELSE (delivery_id \in DOMAIN notification_sequences))) /\ ((delivery_id \in notification_ids) /\ (delivery_id \in notification_applied) /\ ((notification_sequences)[delivery_id] = arg_delivery_sequence)))
     /\ phase' = "NeedsAttention"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_b0c9d3b6b38c4ae5

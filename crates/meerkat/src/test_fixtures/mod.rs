@@ -11,3 +11,8 @@ pub mod realtime;
 /// (`test-mcp-oauth-fixtures`).
 #[cfg(feature = "test-mcp-oauth-fixtures")]
 pub mod mcp_oauth;
+
+/// One native auth error per public reason, for the auth surface tests
+/// (`test-mcp-oauth-fixtures`).
+#[cfg(feature = "test-mcp-oauth-fixtures")]
+pub mod auth_errors;

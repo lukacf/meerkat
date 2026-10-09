@@ -108,6 +108,13 @@ impl GeneratedStagedSessionAuthority {
                         } => {
                             format!("guard rejected transition from {phase:?} for {trigger}")
                         }
+                        machine_dsl::MeerkatMachineTransitionError::AbsentMapKey {
+                            phase,
+                            trigger,
+                            field,
+                        } => {
+                            format!("guard read absent key of {field} from {phase:?} for {trigger}")
+                        }
                         machine_dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected {
                             phase,
                             invariant,
@@ -678,6 +685,34 @@ impl StagedSessionRegistry {
         Ok(Some(status))
     }
 
+    /// Governed counterpart of the raw append. Keep the exact owner command
+    /// across the slot-lock wait and apply its current check inside the slot.
+    /// The nested result retains typed refusal without losing the staged-slot
+    /// lifecycle disposition used for promotion fallback.
+    pub async fn apply_system_context_control(
+        &self,
+        control: &meerkat_core::service::SystemContextAppendControl,
+        updated_at_secs: u64,
+    ) -> Result<
+        Option<Result<meerkat_core::AppendSystemContextResult, meerkat_core::SessionControlError>>,
+        StagedLifecycleError,
+    > {
+        let mut slots = self.slots.write().await;
+        let id = control.session_id();
+        let Some(slot) = slots.get_mut(id) else {
+            return Ok(None);
+        };
+        let StagedPayload::Staged { build_config } = &mut slot.payload else {
+            return Err(StagedLifecycleError::AlreadyPromoting(id.clone()));
+        };
+        let session = build_config
+            .resume_session
+            .get_or_insert_with(|| Session::with_id(id.clone()));
+        let result = control.apply(session);
+        slot.updated_at_secs = updated_at_secs;
+        Ok(Some(result))
+    }
+
     /// Flip a slot from `Staged` to `Promoting` and return the build
     /// payload + metadata. Called at the start of the pending-session
     /// materialization path.
@@ -932,6 +967,48 @@ mod tests {
             false,
         )
         .expect("test staged slot should be accepted by generated authority")
+    }
+
+    #[tokio::test]
+    async fn staged_context_without_authority_records_refusal_without_content() {
+        let reg = StagedSessionRegistry::new();
+        let id = SessionId::new();
+        let control = meerkat_core::service::SystemContextAppendControl::unavailable(
+            id.clone(),
+            AppendSystemContextRequest::from_text("untrusted staged context"),
+        )
+        .unwrap();
+        // Absence only selects the live service fallback. It must not consume
+        // the actual control before any session owner has handled it.
+        assert!(
+            reg.apply_system_context_control(&control, 101)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
+        assert!(matches!(
+            reg.apply_system_context_control(&control, 102)
+                .await
+                .unwrap(),
+            Some(Err(meerkat_core::SessionControlError::Authorization(
+                meerkat_core::OperationAuthorizationError::Unavailable
+            )))
+        ));
+        let promoted = reg.begin_promotion(&id).await.unwrap().unwrap();
+        let session = promoted.build_config.resume_session.as_ref().unwrap();
+        assert!(session.messages().is_empty());
+        let records = session
+            .context_control_observations()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(matches!(records[0].outcome, meerkat_core::session::context_control::ContextControlAuditOutcome::AuthorizationUnavailable));
+        assert!(
+            records[0].requester.is_none()
+                && records[0].actor.is_none()
+                && records[0].source.is_none()
+        );
     }
 
     #[tokio::test]

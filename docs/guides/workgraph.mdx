@@ -36,16 +36,16 @@ Use `workgraph_create` for a durable commitment.
 
 ```json
 {
-  "title": "Prepare dentist transport reminder",
-  "description": "Create a reminder for L to explain to A that car P is in the workshop.",
+  "title": "Prepare client visit transport reminder",
+  "description": "Create a reminder for L that car P is in the workshop.",
   "namespace": "default",
   "priority": "high",
-  "labels": ["family-logistics", "autism-support"],
+  "labels": ["team-logistics", "travel"],
   "due_at": "2026-05-19T08:00:00Z",
   "external_refs": [
     {
       "kind": "calendar_event",
-      "id": "dentist-a-2026-05-20"
+      "id": "client-visit-2026-05-20"
     }
   ]
 }
@@ -59,7 +59,7 @@ Use `workgraph_link` to describe relationships.
 {
   "kind": "blocks",
   "from_id": "work_check_car_status",
-  "to_id": "work_prepare_dentist_reminder",
+  "to_id": "work_prepare_visit_reminder",
   "namespace": "default"
 }
 ```
@@ -96,7 +96,7 @@ Use `workgraph_ready` instead of inferring readiness.
 ```json
 {
   "namespace": "default",
-  "labels": ["family-logistics"],
+  "labels": ["team-logistics"],
   "limit": 10
 }
 ```
@@ -110,12 +110,12 @@ Use `workgraph_claim` before doing durable work. Include the current
 
 ```json
 {
-  "id": "work_prepare_dentist_reminder",
+  "id": "work_prepare_visit_reminder",
   "namespace": "default",
   "expected_revision": 3,
   "owner": {
-    "key": { "kind": "agent", "id": "homecore/logistics-agent" },
-    "display_name": "Homecore logistics agent"
+    "key": { "kind": "agent", "id": "example/logistics-agent" },
+    "display_name": "Example logistics agent"
   },
   "lease_seconds": 1800
 }
@@ -145,7 +145,7 @@ completion.
 
 ```json
 {
-  "id": "work_prepare_dentist_reminder",
+  "id": "work_prepare_visit_reminder",
   "namespace": "default",
   "expected_revision": 4,
   "evidence": {
@@ -166,7 +166,7 @@ Use `workgraph_close` only when terminal truth exists.
 
 ```json
 {
-  "id": "work_prepare_dentist_reminder",
+  "id": "work_prepare_visit_reminder",
   "namespace": "default",
   "expected_revision": 5,
   "status": "completed"
@@ -192,7 +192,7 @@ Create a session-bound goal from the trusted local CLI:
 
 ```bash
 rkat --realm home workgraph goal-create SESSION_ID \
-  "Prepare dentist transport reminder" \
+  "Prepare client visit transport reminder" \
   --namespace default \
   --mode pursue \
   --completion-policy self-attest

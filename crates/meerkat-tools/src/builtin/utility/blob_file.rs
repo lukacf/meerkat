@@ -1,6 +1,6 @@
 //! Blob file bridge tools.
 
-use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
+use crate::builtin::{BuiltinTool, BuiltinToolError, LeafEntry, ToolOutput};
 use async_trait::async_trait;
 use base64::Engine;
 use meerkat_core::types::{ToolDef, ToolProvenance, ToolSourceKind};
@@ -180,10 +180,13 @@ async fn ensure_existing_file_under_root(
     Ok(metadata)
 }
 
+/// Validate and create the parent directories. `entry` runs before the
+/// first directory is created, which may be this tool's first change.
 async fn ensure_writable_parent_under_root(
     project_root: &Path,
     resolved: &Path,
     original: &Path,
+    entry: &mut LeafEntry,
 ) -> Result<(), BuiltinToolError> {
     let parent = resolved.parent().ok_or_else(|| {
         BuiltinToolError::invalid_args(format!("path '{}' has no parent", original.display()))
@@ -235,6 +238,7 @@ async fn ensure_writable_parent_under_root(
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                entry.enter()?;
                 tokio::fs::create_dir(&current).await.map_err(|err| {
                     BuiltinToolError::execution_failed(format!(
                         "failed to create parent directory '{}': {err}",
@@ -317,6 +321,32 @@ impl BuiltinTool for BlobSaveFileTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::none()).await
+    }
+
+    async fn call_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::for_call(context, call)?)
+            .await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
+    }
+}
+
+impl BlobSaveFileTool {
+    /// The entry runs before the first change: a missing parent directory's
+    /// creation, or otherwise the destination open.
+    async fn call_entering(
+        &self,
+        args: Value,
+        mut entry: LeafEntry,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let args: BlobSaveFileArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
         let user_path = PathBuf::from(&args.path);
@@ -335,7 +365,8 @@ impl BuiltinTool for BlobSaveFileTool {
                 ))
             })?;
 
-        ensure_writable_parent_under_root(&self.project_root, &resolved, &user_path).await?;
+        ensure_writable_parent_under_root(&self.project_root, &resolved, &user_path, &mut entry)
+            .await?;
         if tokio::fs::try_exists(&resolved).await.map_err(|err| {
             BuiltinToolError::execution_failed(format!(
                 "failed to check destination '{}': {err}",
@@ -351,6 +382,7 @@ impl BuiltinTool for BlobSaveFileTool {
             ensure_existing_file_under_root(&self.project_root, &resolved, &user_path).await?;
         }
 
+        entry.enter()?;
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true);
         if args.overwrite {
@@ -414,6 +446,32 @@ impl BuiltinTool for BlobLoadFileTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::none()).await
+    }
+
+    async fn call_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_entering(args, LeafEntry::for_call(context, call)?)
+            .await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
+    }
+}
+
+impl BlobLoadFileTool {
+    /// The entry runs immediately before the artifact store write, the
+    /// tool's first change; reading the source file precedes it.
+    async fn call_entering(
+        &self,
+        args: Value,
+        mut entry: LeafEntry,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let args: BlobLoadFileArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
         let user_path = PathBuf::from(&args.path);
@@ -445,6 +503,7 @@ impl BuiltinTool for BlobLoadFileTool {
             ))
         })?;
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        entry.enter()?;
         let blob_ref = self
             .blob_store
             .put_artifact(&media_type, &data)
@@ -561,6 +620,41 @@ mod tests {
 
     fn png_bytes() -> Vec<u8> {
         vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3]
+    }
+
+    /// The entry precedes the first change, here the missing parent's mkdir:
+    /// a refusal leaves no directory and no file, and keeps its typed error.
+    #[tokio::test]
+    async fn refused_entry_precedes_the_parent_mkdir_and_the_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, blob_id) = seeded_store().await;
+        let tool = BlobSaveFileTool::new(temp.path().to_path_buf(), store);
+        let refusal = meerkat_core::ToolError::ReviewUnavailable {
+            kind: meerkat_core::ReviewUnavailableKind::DeadlineExpired,
+        };
+        let result = tool
+            .call_entering(
+                json!({"blob_id": blob_id.as_str(), "path": "fresh/out.png"}),
+                LeafEntry::refusing(refusal.clone()),
+            )
+            .await;
+        assert!(
+            matches!(&result, Err(BuiltinToolError::EntryRefused(error)) if **error == refusal),
+            "expected the typed entry refusal, got {result:?}"
+        );
+        assert!(
+            !temp.path().join("fresh").exists(),
+            "no directory was created"
+        );
+        // With an existing parent the open is the first change.
+        let result = tool
+            .call_entering(
+                json!({"blob_id": blob_id.as_str(), "path": "top.png"}),
+                LeafEntry::refusing(refusal),
+            )
+            .await;
+        assert!(matches!(result, Err(BuiltinToolError::EntryRefused(_))));
+        assert!(!temp.path().join("top.png").exists(), "no file was opened");
     }
 
     async fn seeded_store() -> (Arc<dyn BlobStore>, BlobId) {

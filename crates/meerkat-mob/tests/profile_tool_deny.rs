@@ -1,6 +1,6 @@
 //! A mob profile's `tools.deny` gates its members end to end.
 //!
-//! The HomeCore shape: a family stays enabled while named tools of it are
+//! The downstream shape: a family stays enabled while named tools of it are
 //! denied. A member built from a real factory composes the family, the deny
 //! entry reaches the execution gate, and the model's call to the denied tool
 //! comes back as an ordinary `access_denied` result without executing. A deny
@@ -156,7 +156,7 @@ fn mob_definition(deny: &[&str]) -> MobDefinition {
                 deny: deny.iter().map(|name| (*name).to_string()).collect(),
                 ..Default::default()
             },
-            peer_description: "household peer".to_string(),
+            peer_description: "team peer".to_string(),
             external_addressable: true,
             backend: None,
             runtime_mode: MobRuntimeMode::TurnDriven,

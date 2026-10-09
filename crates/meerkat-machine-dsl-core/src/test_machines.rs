@@ -469,6 +469,159 @@ machine TokenProbe {
 }
 "#;
 
+    const STRICT_READ_MACHINE: &str = r#"
+machine StrictReadProbe {
+    version: 1,
+    rust: "test" / "strict_read_probe",
+
+    state {
+        phase: ProbePhase,
+        reasons: Map<String, String>,
+        ids: Set<String>,
+    }
+
+    init(Open) {
+        reasons = EmptyMap,
+        ids = EmptySet,
+    }
+
+    terminal []
+
+    phase ProbePhase {
+        Open,
+    }
+
+    input ProbeInput {
+        Observe { id: String, reason: String },
+        Sweep {},
+    }
+
+    effect ProbeEffect {
+        Observed,
+    }
+
+    disposition Observed => local seam NoOwnerRealization,
+
+    transition ObserveReason {
+        on input Observe { id, reason }
+        guard {
+            self.phase == Phase::Open
+                && (self.reasons.get_cloned(id).get("value") == reason
+                    || self.reasons.get_copied(id).get("value") != reason)
+        }
+        update {}
+        to Open
+        emit Observed
+    }
+
+    transition SweepAll {
+        on input Sweep {}
+        guard {
+            self.phase == Phase::Open
+                && for_all(id in self.ids, self.reasons.get_cloned(id).get("value") == "")
+        }
+        update {}
+        to Open
+        emit Observed
+    }
+}
+"#;
+
+    fn count_strict(expr: &crate::ast::ExprDef) -> usize {
+        let rendered = format!("{expr:?}");
+        rendered.matches("MapValue").count()
+    }
+
+    #[test]
+    fn guard_value_reads_become_strict_reads_outside_quantifier_bodies() {
+        let mut def = parse(STRICT_READ_MACHINE);
+        crate::strict_reads::normalize_guard_value_reads(&mut def);
+        let guard = |name: &str| {
+            def.transitions
+                .iter()
+                .find(|t| t.name == name)
+                .expect("transition")
+                .guards[0]
+                .expr
+                .clone()
+        };
+        // Both projections under `||` become strict reads, with no hoisted
+        // membership conjunct: a read is an error only where it is evaluated.
+        let observe = guard("ObserveReason");
+        assert_eq!(count_strict(&observe), 2, "{observe:?}");
+        assert!(crate::strict_reads::contains_map_value(&observe));
+        assert!(!format!("{observe:?}").contains("MapContainsKey"));
+        // A read inside a quantifier body keeps its lenient form.
+        let sweep = guard("SweepAll");
+        assert_eq!(count_strict(&sweep), 0, "{sweep:?}");
+        assert!(!crate::strict_reads::contains_map_value(&sweep));
+    }
+
+    #[test]
+    fn definedness_is_lazy_through_or_and_if() {
+        use crate::ast::ExprDef;
+        let mut def = parse(STRICT_READ_MACHINE);
+        crate::strict_reads::normalize_guard_value_reads(&mut def);
+        let observe = def
+            .transitions
+            .iter()
+            .find(|t| t.name == "ObserveReason")
+            .expect("transition")
+            .guards[0]
+            .expr
+            .clone();
+        let defined = crate::strict_reads::definedness(&observe).expect("strict reads present");
+        // phase == Open && (A || B): defined is
+        // (!(phase == Open) || (contains(A) && (A || contains(B)))).
+        let rendered = format!("{defined:?}");
+        assert_eq!(rendered.matches("MapContainsKey").count(), 2, "{rendered}");
+        assert!(
+            matches!(&defined, ExprDef::Or(_)),
+            "the phase conjunct guards the rest lazily: {rendered}"
+        );
+        let top: &[ExprDef] = match &defined {
+            ExprDef::Or(top) => top,
+            _ => &[],
+        };
+        assert_eq!(top.len(), 2, "{rendered}");
+        assert!(matches!(&top[0], ExprDef::Not(_)), "{rendered}");
+        // The second membership test is only required when A is false.
+        assert!(
+            format!("{:?}", top[1]).contains("Or(["),
+            "B's membership sits under A || ...: {rendered}"
+        );
+        // A guard without strict reads is trivially defined.
+        let sweep = &def
+            .transitions
+            .iter()
+            .find(|t| t.name == "SweepAll")
+            .expect("transition")
+            .guards[0]
+            .expr;
+        assert!(crate::strict_reads::definedness(sweep).is_none());
+    }
+
+    #[test]
+    fn strict_guard_reads_generate_an_absent_key_refusal() {
+        let mut def = parse(STRICT_READ_MACHINE);
+        crate::strict_reads::normalize_guard_value_reads(&mut def);
+        let rendered = crate::gen_dispatch::generate(&def).to_string();
+        assert!(rendered.contains("AbsentMapKey"), "error variant missing");
+        assert!(
+            rendered.contains("__absent_map_key"),
+            "refusal closure missing"
+        );
+        assert!(
+            !rendered.contains("unwrap_or_default"),
+            "a guard read must never default"
+        );
+        let schema = crate::gen_schema::generate(&def).to_string();
+        assert!(
+            schema.contains("Expr :: MapValue"),
+            "schema keeps the strict read"
+        );
+    }
+
     #[test]
     fn redacted_attribute_marks_fields_and_drives_generated_debug() {
         let def = parse(REDACTED_TOKEN_MACHINE);

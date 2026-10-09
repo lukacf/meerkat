@@ -6063,7 +6063,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_existing_store_unavailable_errors_keep_paths_out_of_public_payloads() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("private-household-workgraph.sqlite3");
+        let path = dir.path().join("private-team-workgraph.sqlite3");
         let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
         let service =
             WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
@@ -6079,7 +6079,7 @@ mod tests {
                 "{public_text}"
             );
             assert!(
-                !public_text.contains("private-household-workgraph.sqlite3"),
+                !public_text.contains("private-team-workgraph.sqlite3"),
                 "{public_text}"
             );
         }
@@ -6104,7 +6104,7 @@ mod tests {
                 "{public_text}"
             );
             assert!(
-                !public_text.contains("private-household-workgraph.sqlite3"),
+                !public_text.contains("private-team-workgraph.sqlite3"),
                 "{public_text}"
             );
         }
@@ -6115,7 +6115,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_held_maintenance_fence_keeps_paths_out_of_public_payloads() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("private-household-workgraph.sqlite3");
+        let path = dir.path().join("private-team-workgraph.sqlite3");
         let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
         let service =
             WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
@@ -6145,7 +6145,7 @@ mod tests {
                 "{public_text}"
             );
             assert!(
-                !public_text.contains("private-household-workgraph.sqlite3"),
+                !public_text.contains("private-team-workgraph.sqlite3"),
                 "{public_text}"
             );
         };

@@ -60,6 +60,19 @@ impl std::fmt::Debug for WorkOwnerAllowance {
 /// that is already held by its caller. Real runtime/schedule adapters must bind
 /// this contract to their own admitted records; this trait creates none.
 pub trait AdmittedWorkPolicyOwner: Send + Sync {
+    /// Resolve the actual authenticated control/original or service mandate.
+    /// The process receipt is not a claim-derived grant. Validate its exact
+    /// requester, executor, source, destination and immutable request against
+    /// the real owner. All relevant changes share this grant publication.
+    fn authorize_context_control(
+        &self,
+        _control: &meerkat_core::service::SystemContextControlRequest,
+        _binding: &PreparedAuthorizationBinding,
+        _now_ms: u64,
+    ) -> Result<WorkOwnerAllowance, meerkat_core::OperationAuthorizationError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+
     fn authorize_admitted_work(
         &self,
         association: &InputAuthorityAssociation,
@@ -87,6 +100,19 @@ pub trait AdmittedWorkPolicyOwner: Send + Sync {
 /// enclosing publication observation. This is a trusted extension seam for
 /// application ABAC, not a generic policy language or an allow-by-default hook.
 pub trait OperationPolicyOwner: Send + Sync {
+    /// Independently resolve the actual source or destination bound here for
+    /// the exact authenticated control. Called for Source(Hydrate) and for
+    /// Publication, in one coherent native publication observation. Neither
+    /// invocation permission nor content/source annotations replace these ACLs.
+    fn authorize_context_control(
+        &self,
+        _control: &meerkat_core::service::SystemContextControlRequest,
+        _binding: &PreparedAuthorizationBinding,
+        _now_ms: u64,
+    ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+
     /// Authorize this exact plain controller before native admission. The native
     /// ingress owner separately checks the current authenticated caller's right
     /// to invoke the mandate. No operation, run or transcript exists yet.
@@ -164,6 +190,21 @@ impl std::fmt::Debug for GrantBackedWorkPolicy {
 }
 
 impl GrantBackedWorkPolicy {
+    /// Non-input control composition over these same actual installed owners.
+    /// No accepted input, run, grant or original requester is manufactured.
+    pub fn context_control_authorization(
+        self: &Arc<Self>,
+        control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> WorkAuthorizationContext {
+        WorkAuthorizationContext::new(
+            Arc::new(ContextControlAuthorization {
+                policy: Arc::clone(self),
+                control,
+            }),
+            OperationExecutionScope::Domain,
+        )
+    }
+
     /// Native production factory. The actual admitted row supplies this sink;
     /// a logging-only exporter is not a substitute. Entry staging must succeed
     /// before a body runs, and observations join that row's next existing commit.
@@ -410,3 +451,81 @@ fn grant_refusal(refusal: GrantRefusal) -> meerkat_core::OperationAuthorizationE
 
 #[cfg(test)]
 mod tests;
+
+/// One exact control; every prepared projection covers both source and audience.
+struct ContextControlAuthorization {
+    policy: Arc<GrantBackedWorkPolicy>,
+    control: Arc<meerkat_core::service::SystemContextControlRequest>,
+}
+
+impl meerkat_core::authorization::WorkAuthorization for ContextControlAuthorization {
+    fn prepare(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<
+        Arc<dyn meerkat_core::PreparedOperationAuthorization>,
+        meerkat_core::OperationAuthorizationError,
+    > {
+        self.prepare_observed(binding).result
+    }
+
+    fn prepare_observed(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> meerkat_core::authorization::ObservedAuthorizationResult<
+        Arc<dyn meerkat_core::PreparedOperationAuthorization>,
+    > {
+        use meerkat_core::authorization::{
+            OperationAuthorizationFacts, PublicationRecipient, SourceAuthorizationFacts,
+            SourceAuthorizationUse,
+        };
+        let facts = binding.facts();
+        if facts.operation_id != *self.control.operation_id()
+            || facts.execution_scope != OperationExecutionScope::Domain
+            || facts.run_id.is_some()
+            || facts.context_revision.is_some()
+            || !matches!(&facts.operation, AuthorizationOperation::Publication(publication)
+                if matches!(&publication.recipient, PublicationRecipient::Destination(destination)
+                    if destination.authority == self.control.facts().destination.authority
+                    && destination.namespace == self.control.facts().destination.namespace
+                    && destination.id == self.control.facts().destination.id)
+                && publication.scope.is_none() && publication.live_channel.is_none()
+                && publication.mode == meerkat_core::authorization::PublicationMode::Buffered)
+        {
+            return meerkat_core::authorization::ObservedAuthorizationResult::unobserved(Err(
+                denied().into(),
+            ));
+        }
+        let source = PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
+            operation_id: facts.operation_id.clone(),
+            execution_scope: OperationExecutionScope::Domain,
+            run_id: None,
+            context_revision: None,
+            operation: AuthorizationOperation::Source(SourceAuthorizationFacts {
+                target: self.control.facts().source.clone(),
+                usage: SourceAuthorizationUse::Hydrate,
+            }),
+        });
+        self.policy
+            .grants
+            .compile_context_control(binding, |now_ms| {
+                let mandate = self.policy.work_owner.authorize_context_control(
+                    &self.control,
+                    binding,
+                    now_ms,
+                )?;
+                let mut allowances = Vec::with_capacity(2);
+                for operation in [&source, binding] {
+                    let mut allowance = self.policy.operation_owner.authorize_context_control(
+                        &self.control,
+                        operation,
+                        now_ms,
+                    )?;
+                    allowance.restrictions = allowance.restrictions.conjoin(&mandate.restrictions);
+                    allowance.expires_at_ms = allowance.expires_at_ms.min(mandate.expires_at_ms);
+                    allowances.push(allowance);
+                }
+                Ok(allowances)
+            })
+    }
+}

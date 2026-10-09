@@ -381,6 +381,8 @@ impl HookEngine for PreLlmDenyingHooks {
                 .map(|outcome| outcome.hook_id.clone())
                 .collect(),
             outcomes,
+            launch_refusals: Vec::new(),
+            background_skips: Vec::new(),
             decision,
         })
     }
@@ -424,6 +426,8 @@ impl HookEngine for PointDenyingHooks {
                 .map(|outcome| outcome.hook_id.clone())
                 .collect(),
             outcomes,
+            launch_refusals: Vec::new(),
+            background_skips: Vec::new(),
             decision,
         })
     }

@@ -1715,7 +1715,7 @@ mod tests {
             StreamingToolExecutionPolicy::new(Duration::from_secs(5), Duration::from_secs(60))
                 .expect("valid streaming policy");
         let detached = DetachedToolExecutionPolicy::new(
-            RunnerIdentity::new("homecore.security_scan", "v1").expect("valid runner"),
+            RunnerIdentity::new("example.security_scan", "v1").expect("valid runner"),
             RestartClass::NonResumable,
             IdempotencyScope::InteractionAndArguments,
             Duration::from_secs(10),
@@ -1778,7 +1778,7 @@ mod tests {
     #[test]
     fn detached_resolution_carries_typed_runner_restart_and_idempotency() {
         let detached = DetachedToolExecutionPolicy::new(
-            RunnerIdentity::new("homecore.security_scan", "v1").expect("valid runner"),
+            RunnerIdentity::new("example.security_scan", "v1").expect("valid runner"),
             RestartClass::NonResumable,
             IdempotencyScope::InteractionAndArguments,
             Duration::from_secs(10),
@@ -1839,7 +1839,7 @@ mod tests {
         );
 
         let detached = DetachedToolExecutionPolicy::new(
-            RunnerIdentity::new("homecore.security_scan", "v1").expect("valid runner"),
+            RunnerIdentity::new("example.security_scan", "v1").expect("valid runner"),
             RestartClass::NonResumable,
             IdempotencyScope::InteractionAndArguments,
             Duration::from_secs(10),
@@ -2008,7 +2008,7 @@ mod tests {
     #[test]
     fn resolved_plan_exposes_explicit_mode_applicability_and_owner_witness() {
         let detached = DetachedToolExecutionPolicy::new(
-            RunnerIdentity::new("homecore.security_scan", "v1").expect("valid runner"),
+            RunnerIdentity::new("example.security_scan", "v1").expect("valid runner"),
             RestartClass::NonResumable,
             IdempotencyScope::InteractionAndArguments,
             Duration::from_secs(10),
@@ -2040,7 +2040,7 @@ mod tests {
         assert_eq!(
             plan.runner(),
             &ToolExecutionApplicability::Applicable(
-                RunnerIdentity::new("homecore.security_scan", "v1").expect("valid runner")
+                RunnerIdentity::new("example.security_scan", "v1").expect("valid runner")
             )
         );
         assert_eq!(

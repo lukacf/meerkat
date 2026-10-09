@@ -54,7 +54,7 @@ AuditPrefix ==
     \/ model_step_count = 0 /\ Initialize
     \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
     \/ model_step_count = 2 /\ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession)
-    \/ model_step_count = 3 /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditFirstChannel, AuditIdentity)
+    \/ model_step_count = 3 /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditFirstChannel, AuditIdentity, None)
     \/ model_step_count = 4 /\ BindLiveExecutionChannelAttached(AuditSession, AuditFirstChannel, AuditRuntime, 1, 1, 0)
 
 AuditRequestAttached ==
@@ -95,8 +95,8 @@ AuditChannelLifecycle ==
     \/ \E c \in AuditChannels :
         \/ RecordLiveCloseClosedAttached(AuditSession, c, 1)
         \/ RecordLiveCloseClosedRunning(AuditSession, c, 1)
-    \/ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditSecondChannel, AuditIdentity)
-    \/ ResolveLiveOpenAdmissionAcceptedRunning(AuditSession, AuditSecondChannel, AuditIdentity)
+    \/ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditSecondChannel, AuditIdentity, None)
+    \/ ResolveLiveOpenAdmissionAcceptedRunning(AuditSession, AuditSecondChannel, AuditIdentity, None)
     \/ BindLiveExecutionChannelAttached(AuditSession, AuditSecondChannel, AuditRuntime, 1, 1, 0)
     \/ BindLiveExecutionChannelRunning(AuditSession, AuditSecondChannel, AuditRuntime, 1, 1, 0)
 

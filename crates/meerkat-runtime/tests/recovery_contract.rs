@@ -438,6 +438,7 @@ fn make_prompt(text: &str) -> Input {
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),

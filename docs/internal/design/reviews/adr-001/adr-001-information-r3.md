@@ -4,7 +4,7 @@ Verdict: GREEN. The candidate is coherent enough to send to the project owners f
 
 This is a design verdict for the declared profiles. It is not implementation acceptance, deployment approval, or evidence that the referenced product integrations already meet the contracts.
 
-Reviewed file: `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md`, 904 lines.
+Reviewed file: `(operator-retained path)/docs/internal/design/adr-001-runtime-security.md`, 904 lines.
 
 Verified SHA-256 before and after the full read: `a242a21407fbf52d2ca5615edfdd6b5649b40fa6f73c959d4857eddd8e2db87e`.
 
@@ -34,7 +34,7 @@ Disposition: closed. There is no conflict between ordinary unknown-dependency re
 
 Relevant text: lines 408-418, 426-449 and 547-562; acceptance at lines 831 and 845.
 
-Attempted counterexample: a private email tells its classifier to choose `household`. That label is inside the permitted outcome set, so a lattice-only test passes although confidentiality broadens.
+Attempted counterexample: a private email tells its classifier to choose `team`. That label is inside the permitted outcome set, so a lattice-only test passes although confidentiality broadens.
 
 Lines 555-559 explicitly call every permitted broadening from the restrictive ingestion baseline a preauthorized release/trust assumption. The text says the lattice does not prove correct classification or resistance to prompt injection. A deployment rejecting that discretion retains the restrictive baseline. The classification is committed by the decision authority under a typed source-scoped mandate, with source and model-attempt evidence; the model itself is not made an issuer.
 
@@ -48,7 +48,7 @@ Disposition: closed. The residual classifier error risk is deliberately admitted
 
 Relevant text: lines 497-518; acceptance at line 843.
 
-Attempted counterexample: a household calendar receives an adults-only appointment. It stores or hydrates the appointment, later discovers that children are among its intended recipients, and permanently restricts all subsequent responses. A triage variant runs one model over mixed private inputs and emits separate output objects with supposedly disjoint dependencies.
+Attempted counterexample: a team calendar receives an leads-only appointment. It stores or hydrates the appointment, later discovers that non-lead members are among its intended recipients, and permanently restricts all subsequent responses. A triage variant runs one model over mixed private inputs and emits separate output objects with supposedly disjoint dependencies.
 
 Lines 497-503 put intended audience and processing domain under an authority and require compatibility before context hydration or transcript admission. Incompatible input must be refused or routed elsewhere, and unclassified input starts in restricted ingestion. The new rule prevents this contamination path rather than relying solely on a late release denial.
 
@@ -98,7 +98,7 @@ Disposition: closed.
 
 Relevant text: lines 89-98, 132-153, 199-314, 589-622.
 
-Attempted counterexamples: treat a device's credential as the speaker's identity; treat a parent's relationship or operator role as blanket data access; substitute a service token for the requester; infer tool execution authority from discoverability; or use a waiver-bearing source to relax another source.
+Attempted counterexamples: treat a device's credential as the speaker's identity; treat a lead's relationship or operator role as blanket data access; substitute a service token for the requester; infer tool execution authority from discoverability; or use a waiver-bearing source to relax another source.
 
 The candidate retains canonical principal qualification and issuer validation, introduces an explicit owner for principal relationships without making them universal grants, and distinguishes unidentified speakers from device owners. Unsupported anonymous/physical profiles refuse hydration and release. Approval requires an authenticated approver event bound to the displayed operation, not a model's paraphrase. Service commissioning authorizes bounded internal processing but preserves separate publication authorization. Literal Elephant wiki scope, current service grant, subject restrictions and waiver propagation remain distinct.
 

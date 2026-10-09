@@ -274,6 +274,13 @@ impl AgentToolDispatcher for ToolDispatcher {
         self.router.live_bridge_effect_kind(tool_name)
     }
 
+    fn review_entry_support(
+        &self,
+        tool_name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        self.router.review_entry_support(tool_name)
+    }
+
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         self.dispatch_with_context(call, &ToolDispatchContext::default())
             .await

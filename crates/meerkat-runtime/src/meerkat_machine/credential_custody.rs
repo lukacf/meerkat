@@ -81,21 +81,36 @@ impl NativeCredentialCustody {
         )>,
         RuntimeDriverError,
     > {
-        if slot.get().is_none() && input.header().authority_association.is_none() {
+        if slot.get().is_none()
+            && input.header().authority_association.is_none()
+            && input.header().retained_resume.is_none()
+        {
             return Ok(None);
         }
         let host = slot
             .get()
             .ok_or_else(|| unavailable(ControllerReadinessFailure::AuthorityUnavailable))?;
-        let ingress = input
-            .header()
-            .ingress_context
-            .as_ref()
-            .ok_or_else(crate::input_authority::unavailable)?;
-        ingress.verify_submission(input)?;
-        let controller = ingress
-            .controller_client()
-            .ok_or_else(crate::input_authority::unavailable)?;
+        // A resume of retained work holds the client its governed host
+        // supplied; any other governed input holds its ingress client.
+        let controller = if let Some(grant) = input.header().retained_resume.as_ref() {
+            if input.header().ingress_context.is_some()
+                || input.header().authority_association.is_some()
+            {
+                return Err(crate::input_authority::unavailable());
+            }
+            grant.verify_submission(input)?;
+            &grant.controller_client
+        } else {
+            let ingress = input
+                .header()
+                .ingress_context
+                .as_ref()
+                .ok_or_else(crate::input_authority::unavailable)?;
+            ingress.verify_submission(input)?;
+            ingress
+                .controller_client()
+                .ok_or_else(crate::input_authority::unavailable)?
+        };
         let key = LeaseKey::from_credential_identity(controller.selection().credential());
         let authority = host.credential_authority()?;
         Ok(Some((host.host().clone(), authority, key)))
@@ -167,7 +182,9 @@ impl NativeCredentialCustody {
     ) -> Result<(), RuntimeDriverError> {
         match self {
             Self::Ungoverned
-                if slot.get().is_none() && input.header().authority_association.is_none() =>
+                if slot.get().is_none()
+                    && input.header().authority_association.is_none()
+                    && input.header().retained_resume.is_none() =>
             {
                 Ok(())
             }
@@ -263,13 +280,16 @@ impl super::MeerkatMachine {
                     }) => {}
                     Err(error) => return Err(error),
                 }
-                input
-                    .header()
-                    .ingress_context
-                    .as_ref()
-                    .and_then(|ingress| ingress.controller_client())
-                    .cloned()
-                    .ok_or_else(crate::input_authority::unavailable)?
+                match input.header().retained_resume.as_ref() {
+                    Some(grant) => grant.controller_client.clone(),
+                    None => input
+                        .header()
+                        .ingress_context
+                        .as_ref()
+                        .and_then(|ingress| ingress.controller_client())
+                        .cloned()
+                        .ok_or_else(crate::input_authority::unavailable)?,
+                }
             };
             // No native or lease guard crosses HTTP. Retain the actual owner
             // through maintenance even if its waiting caller goes away. Input
@@ -320,6 +340,35 @@ mod native {
     }
 
     impl AuthLeaseReleaseObserver for NativeCredentialReleaseObserver {
+        fn with_auth_lease_replacement(
+            &self,
+            key: &LeaseKey,
+            operation: &mut dyn FnMut() -> Result<
+                meerkat_core::handles::AuthLeaseTransition,
+                DslTransitionError,
+            >,
+        ) -> Result<meerkat_core::handles::AuthLeaseTransition, DslTransitionError> {
+            let Some(machine) = self.machine.upgrade() else {
+                return operation();
+            };
+            let machine = MeerkatMachine { shared: machine };
+            let custody = machine
+                .try_controller_custody_for_readiness()
+                .map_err(release_error)?;
+            if custody
+                .references_credential(Some(key))
+                .map_err(release_error)?
+            {
+                return Err(release_error(RuntimeDriverError::ControllerInUse));
+            }
+            // Native admission and the durable writer remain excluded through
+            // actual lifecycle publication. The coordinated token mutation's
+            // normalized lease guard then spans its separate durable token I/O.
+            let result = operation();
+            drop(custody);
+            result
+        }
+
         fn begin_auth_lease_release<'a>(
             &'a self,
             key: &LeaseKey,
@@ -339,7 +388,10 @@ mod native {
             {
                 return Err(release_error(RuntimeDriverError::ControllerInUse));
             }
-            // Full release already owns this exact normalized lease. All
+            // Full release already owns this exact normalized lease. The
+            // persistent scan retains BEGIN IMMEDIATE through the reference
+            // decision; the governed execution claim excludes other native
+            // owners after it drops. All
             // supported admission paths must acquire it before publishing a row.
             // Returning no native permit keeps unrelated sessions out of OAuth I/O.
             Ok(None)

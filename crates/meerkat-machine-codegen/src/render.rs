@@ -1733,6 +1733,12 @@ fn render_effect_emit(effect: &EffectEmit) -> String {
     }
 }
 
+/// Test hook for the expression renderer (#1811 map-literal rendering).
+#[cfg(test)]
+pub(crate) fn render_expr_for_tests(expr: &Expr) -> String {
+    render_expr(expr)
+}
+
 fn render_expr(expr: &Expr) -> String {
     match expr {
         Expr::Bool(value) => value.to_string().to_uppercase(),
@@ -1814,7 +1820,17 @@ fn render_expr(expr: &Expr) -> String {
         }
         Expr::Head(inner) => format!("Head({})", render_expr(inner)),
         Expr::MapKeys(inner) => format!("DOMAIN {}", render_expr(inner)),
-        Expr::MapGet { map, key } => format!("{}[{}]", render_expr(map), render_expr(key)),
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
+            format!("{}[{}]", render_expr(map), render_expr(key))
+        }
+        Expr::MapLiteral(entries) => format!(
+            "({})",
+            entries
+                .iter()
+                .map(|(key, value)| format!("{} :> {}", render_expr(key), render_expr(value)))
+                .collect::<Vec<_>>()
+                .join(" @@ ")
+        ),
         Expr::Some(inner) => format!("Some({})", render_expr(inner)),
         Expr::Call { helper, args } => format!(
             "{}({})",

@@ -180,11 +180,14 @@ pub(crate) enum UpcallToolErrorClass {
     AuthorizationRefused,
     OperationObservationUnavailable,
     OperationAuthorizationUnavailable,
+    ReviewUnsatisfied,
+    ReviewUnavailable,
     PolicyDenied,
     PolicyIndeterminate,
     Other,
     ConfinementRefused,
     HookDenied,
+    HookLaunchRefused,
 }
 
 /// Typed error payload: enough atoms to reconstruct the exact `ToolError`
@@ -204,6 +207,16 @@ pub(crate) struct UpcallToolError {
     pub data: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settlement_failures: Vec<meerkat_core::ops::ToolDispatchSettlementFailure>,
+}
+
+/// Wire facts for the hook-specific refusal. Missing or malformed atoms cannot
+/// become a different hook decision or a pre-entry refusal of the tool body.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpcallHookLaunchRefusal {
+    hook_id: meerkat_core::HookId,
+    point: meerkat_core::HookPoint,
+    refusal: meerkat_core::confinement::ConfinementRefusal,
 }
 
 impl UpcallToolOutcome {
@@ -315,6 +328,15 @@ impl UpcallToolOutcome {
                 data: Some(serde_json::json!(denial)),
                 settlement_failures: Vec::new(),
             },
+            ToolError::HookLaunchRefused { .. } => UpcallToolError {
+                class: UpcallToolErrorClass::HookLaunchRefused,
+                message: error.to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: error.structured_data(),
+                settlement_failures: Vec::new(),
+            },
             ToolError::AuthorizationRefused { refusal } => UpcallToolError {
                 class: UpcallToolErrorClass::AuthorizationRefused,
                 message: refusal.to_string(),
@@ -340,6 +362,24 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
+            },
+            ToolError::ReviewUnsatisfied { kind } => UpcallToolError {
+                class: UpcallToolErrorClass::ReviewUnsatisfied,
+                message: kind.to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: serde_json::to_value(kind).ok(),
+                settlement_failures: Vec::new(),
+            },
+            ToolError::ReviewUnavailable { kind } => UpcallToolError {
+                class: UpcallToolErrorClass::ReviewUnavailable,
+                message: kind.to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: serde_json::to_value(kind).ok(),
                 settlement_failures: Vec::new(),
             },
             ToolError::OutcomeUncertain { name, reason } => UpcallToolError {
@@ -500,6 +540,19 @@ impl UpcallToolError {
                 .unwrap_or_else(|| {
                     ToolError::execution_failed("member upcall carried malformed hook_denied data")
                 }),
+            UpcallToolErrorClass::HookLaunchRefused => self
+                .data
+                .and_then(|data| serde_json::from_value::<UpcallHookLaunchRefusal>(data).ok())
+                .map(|data| ToolError::HookLaunchRefused {
+                    hook_id: data.hook_id,
+                    point: data.point,
+                    refusal: data.refusal,
+                })
+                .unwrap_or_else(|| {
+                    ToolError::execution_failed(
+                        "member upcall carried malformed hook_launch_refused data",
+                    )
+                }),
             UpcallToolErrorClass::AuthorizationRefused => ToolError::AuthorizationRefused {
                 refusal: meerkat_core::authorization::OperationRefused::new(
                     self.data
@@ -515,6 +568,23 @@ impl UpcallToolError {
             UpcallToolErrorClass::OperationAuthorizationUnavailable => {
                 ToolError::OperationAuthorizationUnavailable
             }
+            // A malformed review payload cannot become a permission: it keeps
+            // the unavailable infrastructure class, never an allow.
+            UpcallToolErrorClass::ReviewUnsatisfied => self
+                .data
+                .and_then(|data| serde_json::from_value(data).ok())
+                .map(|kind| ToolError::ReviewUnsatisfied { kind })
+                .unwrap_or(ToolError::ReviewUnavailable {
+                    kind: meerkat_core::approval::review::ReviewUnavailableKind::OwnerUnavailable,
+                }),
+            UpcallToolErrorClass::ReviewUnavailable => ToolError::ReviewUnavailable {
+                kind: self
+                    .data
+                    .and_then(|data| serde_json::from_value(data).ok())
+                    .unwrap_or(
+                        meerkat_core::approval::review::ReviewUnavailableKind::OwnerUnavailable,
+                    ),
+            },
             UpcallToolErrorClass::PolicyDenied => self
                 .data
                 .and_then(|data| serde_json::from_value(data).ok())
@@ -1757,6 +1827,102 @@ mod tests {
             assert_eq!(error.error_code(), "execution_failed");
             assert!(error.structured_data().is_none());
             assert!(!matches!(error, ToolError::HookDenied { .. }));
+        }
+    }
+
+    #[test]
+    fn hook_launch_refusal_upcall_roundtrip_keeps_scope_and_settlement_sequence() {
+        use meerkat_core::confinement::ConfinementRefusal;
+        let first = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        let second = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ContextGate,
+            ..first.clone()
+        };
+        for refusal in [
+            ConfinementRefusal::InvalidRequirement,
+            ConfinementRefusal::InvalidLaunch,
+            ConfinementRefusal::UnsupportedRequirement,
+            ConfinementRefusal::BackendUnavailable,
+            ConfinementRefusal::PreparationFailed,
+        ] {
+            let primary = ToolError::HookLaunchRefused {
+                hook_id: meerkat_core::HookId::new("result-guardrail"),
+                point: meerkat_core::HookPoint::PostToolExecution,
+                refusal,
+            };
+            let error = primary
+                .clone()
+                .with_settlement_failures(vec![first.clone(), second.clone()]);
+            let envelope = UpcallToolOutcome::from_tool_error(&error);
+            let mut encoded = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(encoded["class"], "hook_launch_refused");
+            assert_eq!(encoded["data"], primary.structured_data().unwrap());
+            // Free-form transport text cannot replace the fixed publication
+            // refusal or reclassify the tool as never having entered.
+            encoded["message"] = json!("private hook diagnostic");
+            let wire = WireOpaqueJson::from_value(&encoded);
+            let restored: UpcallToolOutcome =
+                serde_json::from_value(wire.to_value().unwrap()).unwrap();
+            let restored = restored
+                .into_dispatch_outcome("entered-call", "tool")
+                .unwrap_err();
+            assert_eq!(restored.primary_error(), &primary);
+            assert_eq!(restored.to_error_payload(), error.to_error_payload());
+            assert_eq!(
+                meerkat_core::ToolDispatchTerminalErrorKind::from(&restored),
+                meerkat_core::ToolDispatchTerminalErrorKind::HookLaunchRefused,
+            );
+            assert_eq!(
+                restored.settlement_failures().cloned().collect::<Vec<_>>(),
+                vec![first.clone(), second.clone()],
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_upcall_hook_launch_refusal_does_not_invent_hook_facts() {
+        let complete = json!({
+            "hook_id": "result-guardrail",
+            "point": "post_tool_execution",
+            "refusal": "backend_unavailable",
+        });
+        let mut malformed = vec![None, Some(json!({}))];
+        for field in ["hook_id", "point", "refusal"] {
+            let mut missing = complete.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            malformed.push(Some(missing));
+            let mut invalid = complete.clone();
+            invalid[field] = json!(17);
+            malformed.push(Some(invalid));
+        }
+        let mut extra = complete.clone();
+        extra["payload"] = json!("private hook diagnostic");
+        malformed.push(Some(extra));
+        let mut unknown_point = complete.clone();
+        unknown_point["point"] = json!("future_hook_point");
+        malformed.push(Some(unknown_point));
+        let mut unknown = complete;
+        unknown["refusal"] = json!("future_refusal");
+        malformed.push(Some(unknown));
+        for data in malformed {
+            let error = UpcallToolError {
+                class: UpcallToolErrorClass::HookLaunchRefused,
+                message: "private hook diagnostic".into(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data,
+                settlement_failures: Vec::new(),
+            }
+            .into_tool_error("tool");
+            assert_eq!(error.error_code(), "execution_failed");
+            assert!(error.structured_data().is_none());
+            assert!(!error.to_string().contains("private hook diagnostic"));
         }
     }
 

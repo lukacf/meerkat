@@ -182,7 +182,7 @@ async fn failed_release_is_typed_and_retry_converges_at_the_recorded_tuple() {
         .await
         .expect_err("a failed release must surface typed — ArchiveSession is critical");
     // The retirement durably started, so the failed release leaves it owned
-    // and stuck with the generic typed cause (OB3); the exact retry is an
+    // and stuck with the generic typed cause; the exact retry is an
     // explicit re-drive.
     assert!(
         matches!(&error, meerkat_mob::MobError::MemberRetirementStuck { .. })

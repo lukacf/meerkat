@@ -104,6 +104,21 @@ impl ResolvedGrant {
 }
 
 impl LocalGrantAuthority {
+    pub(crate) fn compile_context_control(
+        &self,
+        binding: &meerkat_core::PreparedAuthorizationBinding,
+        evaluate: impl FnOnce(
+            u64,
+        ) -> Result<
+            Vec<crate::policy::LocalPolicyAllowance>,
+            meerkat_core::OperationAuthorizationError,
+        >,
+    ) -> meerkat_core::authorization::ObservedAuthorizationResult<
+        Arc<dyn meerkat_core::PreparedOperationAuthorization>,
+    > {
+        crate::work::compile_context_control(&self.publication, &self.clock, binding, evaluate)
+    }
+
     /// Keep admission observations on this exact grant owner's publication and
     /// local clock. The caller must not recursively acquire the writer here.
     pub(crate) fn observe_controller_admission<T>(

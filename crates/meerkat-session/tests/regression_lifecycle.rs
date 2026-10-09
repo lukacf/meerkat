@@ -95,6 +95,7 @@ impl SessionAgent for MockAgent {
 
         let _ = event_tx
             .send(AgentEvent::RunStarted {
+                request_reasoning: None,
                 identity: Default::default(),
                 session_id: self.session_id.clone(),
                 input: meerkat_core::types::RunInput::Content {
@@ -1240,6 +1241,7 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
         known_base_names: vec!["alpha".into(), "beta".into()],
         visible_names: vec!["beta".into()],
         base_filter: meerkat_core::ToolFilter::All,
+        policy_base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::Deny(
             ["alpha".to_string()].into_iter().collect(),
         ),
@@ -1297,6 +1299,7 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
         known_base_names: vec!["read_file".into(), "search".into(), "write_file".into()],
         visible_names: vec!["read_file".into(), "search".into()],
         base_filter: meerkat_core::ToolFilter::All,
+        policy_base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::Deny(
             ["write_file".to_string()].into_iter().collect(),
         ),
@@ -1356,6 +1359,7 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         known_base_names: vec!["mcp__planner".into()],
         visible_names: vec!["mcp__planner".into()],
         base_filter: meerkat_core::ToolFilter::All,
+        policy_base_filter: meerkat_core::ToolFilter::All,
         active_external_filter: meerkat_core::ToolFilter::All,
         active_turn_allow: None,
         active_turn_deny: Vec::new(),

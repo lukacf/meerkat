@@ -311,7 +311,7 @@ Identity-first hosts (MobKit) have two more knobs that reach the prompt
 without editing the definition: `DurableAgentSpec.additional_instructions`,
 appended after the skills text and baked once at materialization, and an
 `AgentCustomizer` whose `draft.system_prompt` replaces the assembled prompt.
-A host that keeps its own per-profile prompt key (HomeCore's `role_summary`)
+A host that keeps its own per-profile prompt key (for example a `role_summary` key)
 parses that key itself and lowers it to `additional_instructions`.
 
 There is no `system_prompt` key on a profile. Loading a TOML definition whose
@@ -319,7 +319,7 @@ There is no `system_prompt` key on a profile. Loading a TOML definition whose
 `instructions`) fails with `MobError::UnsupportedProfileKey`, whose message
 names the profile, the key, and the mechanisms above; a realm-reference table
 (`realm_profile = "..."`) is refused the same way. Any other key the table
-does not declare (a host-private key such as HomeCore's `role_summary`, a typo
+does not declare (a host-private key such as a downstream app's `role_summary`, a typo
 such as `comm = true` under `[profiles.<name>.tools]`, or anything but
 `realm_profile` on a realm reference) is reported once per key as an
 `unknown_profile_key` warning diagnostic, returned by

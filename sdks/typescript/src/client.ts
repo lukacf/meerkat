@@ -542,12 +542,15 @@ const SETTLEMENT_FAILURE_KINDS = {
   authorization_refused: true,
   operation_observation_unavailable: true,
   operation_authorization_unavailable: true,
+  review_unsatisfied: true,
+  review_unavailable: true,
   policy_denied: true,
   policy_indeterminate: true,
   other: true,
   callback_pending: true,
   confinement_refused: true,
   hook_denied: true,
+  hook_launch_refused: true,
   outcome_uncertain: true,
 } as const satisfies Record<ToolDispatchTerminalErrorKind, true>;
 
@@ -5096,6 +5099,20 @@ export class MeerkatClient {
     }
   }
 
+  private static validateOptionalConfinementRefusal(
+    raw: Record<string, unknown>,
+    context: string,
+  ): void {
+    if (raw.confinement_refusal == null) return;
+    MeerkatClient.requireClosedStringField(
+      raw,
+      "confinement_refusal",
+      ["invalid_requirement", "invalid_launch", "unsupported_requirement",
+        "backend_unavailable", "preparation_failed"],
+      context,
+    );
+  }
+
   private static validateToolConfigStatus(
     raw: unknown,
     context: string,
@@ -5130,6 +5147,7 @@ export class MeerkatClient {
         context,
       );
       MeerkatClient.validateOptionalStringField(status, "detail", context);
+      MeerkatClient.validateOptionalConfinementRefusal(status, context);
     }
   }
 
@@ -5174,6 +5192,27 @@ export class MeerkatClient {
         }
       }
     }
+  }
+
+  private static validateSystemNoticeBlockRefusal(
+    raw: Record<string, unknown>,
+    context: string,
+  ): void {
+    if (raw.type === "mcp") {
+      MeerkatClient.validateOptionalConfinementRefusal(raw, context);
+      return;
+    }
+    if (raw.type !== "tool_config") return;
+    const payload = raw.payload;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return;
+    const status = (payload as Record<string, unknown>).status_info;
+    if (status === null || typeof status !== "object" || Array.isArray(status)) return;
+    const statusRecord = status as Record<string, unknown>;
+    if (statusRecord.kind !== "external_tool_delta") return;
+    MeerkatClient.validateOptionalConfinementRefusal(
+      statusRecord,
+      `${context}: payload: status_info`,
+    );
   }
 
   private static validateSystemNoticeBlock(
@@ -5241,6 +5280,7 @@ export class MeerkatClient {
     } else if (type === "tool_config") {
       MeerkatClient.validateToolConfigPayload(raw.payload, `${context}: payload`);
     } else if (type === "mcp") {
+      MeerkatClient.validateOptionalConfinementRefusal(raw, context);
       for (const field of ["detail", "server_id"] as const) {
         MeerkatClient.validateOptionalStringField(raw, field, context);
       }
@@ -7744,6 +7784,20 @@ export class MeerkatClient {
     }
     const rawBlocks = (data.blocks as Array<Record<string, unknown>> | undefined) ?? [];
     const rawResults = (data.results as Array<Record<string, unknown>> | undefined) ?? [];
+    if (role === "system_notice" && data.blocks != null) {
+      // A system-notice block's typed confinement refusal fails closed before
+      // any projection: an unknown or non-string refusal on an mcp block or on
+      // a tool_config external-tool delta is a wire-contract violation. Only
+      // that typed field is checked here; every other canonical block shape
+      // and nullable field parses as before.
+      MeerkatClient.requireRecordArray(data.blocks, `${context}: blocks`).forEach(
+        (block, index) =>
+          MeerkatClient.validateSystemNoticeBlockRefusal(
+            block,
+            `${context}: blocks[${index}]`,
+          ),
+      );
+    }
     let promptVersion: SystemPromptVersionIdentity | undefined;
     if (data.prompt_version !== undefined && data.prompt_version !== null) {
       if (

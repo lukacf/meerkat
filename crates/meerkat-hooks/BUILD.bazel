@@ -70,6 +70,7 @@ rust_library(
         "//crates/meerkat-capabilities:meerkat_capabilities",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-sandbox:meerkat_sandbox",
         "//crates/meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "crates/meerkat-hooks",
@@ -105,6 +106,7 @@ rust_library(
         "//crates/meerkat:meerkat_capabilities_agent_factory_build",
         "//crates/meerkat:meerkat_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_sandbox_agent_factory_build",
         "//crates/meerkat:meerkat_skills_agent_factory_build",
     ] + all_crate_deps(
         package_name = "crates/meerkat-hooks",
@@ -157,6 +159,7 @@ rust_test(
         "//crates/meerkat-capabilities:meerkat_capabilities",
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-sandbox:meerkat_sandbox",
         "//crates/meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "crates/meerkat-hooks",

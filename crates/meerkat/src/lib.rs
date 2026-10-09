@@ -165,6 +165,7 @@ pub use meerkat_core::{
 mod agent_builder;
 pub use agent_builder::AgentBuilder;
 mod experimental_live_admission;
+pub mod operation_reviewer;
 pub use experimental_live_admission::{
     ExperimentalLiveAdmissionError, ExperimentalLiveAdmissionOwner,
     ExperimentalLiveAdmissionWitness, ExperimentalLiveCapabilityQualification,
@@ -189,17 +190,37 @@ pub(crate) fn gpt_live_client_context_session_instructions() -> &'static str {
 pub mod gpt_live_gate0;
 mod job_delivery;
 pub use job_delivery::{
-    AppliedRuntimeJobDelivery, BlockedRuntimeJobDelivery, JobDeliveryApplication,
-    JobDeliveryContent, JobDeliverySink, JobNotificationDeliveryPayload, JobOutboxProjectionError,
-    JobOutboxProjectionPass, JobOutboxProjector, JobRuntimeDeliveryApplier,
-    JobTerminalDeliveryPayload, PreparedJobDelivery, ProjectedJobDelivery, RuntimeJobDeliveryDrain,
+    AppliedRuntimeJobDelivery, AwaitingRuntimeJobDelivery, BlockedDeliveryReason,
+    BlockedRuntimeJobDelivery, DeliveryRoute, JobDeliveryApplication, JobDeliveryApplyError,
+    JobDeliveryContent, JobDeliveryRouter, JobDeliverySink, JobNotificationDeliveryPayload,
+    JobOutboxProjectionError, JobOutboxProjectionPass, JobOutboxProjector,
+    JobRuntimeDeliveryApplier, JobTerminalDeliveryPayload, LocallySettledRuntimeJobDelivery,
+    PreparedJobDelivery, ProjectedJobDelivery, RefusedRuntimeJobDelivery, RuntimeJobDeliveryDrain,
     SkippedJobOutboxEntry, job_delivery_event_input, job_delivery_notification_request,
+};
+#[cfg(not(target_arch = "wasm32"))]
+mod continuation;
+#[cfg(not(target_arch = "wasm32"))]
+pub use continuation::{
+    AddressResolution, ContinuationAddressResolver, ContinuationBody, ContinuationDelivery,
+    ContinuationDeliverySink, ContinuationHandling, ContinuationKey, ContinuationOwner,
+    ContinuationOwnerService, ContinuationProducer, ContinuationReceipt, ContinuationResultRef,
+    ContinuationStatus, ContinuationStatusError, ContinuationSubmitError,
+    MAX_CONTINUATION_KEY_BYTES, MachineContinuationSink, SessionAddressResolver, StrandedCause,
+    member_delivery_address,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use continuation::{
+    ContinuationAdmitError, ContinuationBindError, ContinuationBinding,
+    ContinuationBindingGeneration, ContinuationHostBindings, RetainedJobFacts, RetainedJobLookup,
+    RetainedJobRecord, RetainedJobSource, retained_admission_outcome,
 };
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime_delivery_owner;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime_delivery_owner::{
     RuntimeDeliveryHost, RuntimeDeliveryOwner, RuntimeDeliveryOwnerHandle, RuntimeDeliveryPass,
+    default_address_resolution,
 };
 mod job_composition;
 pub use job_composition::{
@@ -321,6 +342,8 @@ pub use meerkat_workgraph::{
 };
 
 // AgentFactory and build_agent types
+#[cfg(not(target_arch = "wasm32"))]
+mod command_hook_confinement;
 mod factory;
 #[cfg(not(target_arch = "wasm32"))]
 mod host_auth;
@@ -345,7 +368,7 @@ pub use host_auth::{
     HostMcpAuthStatus, HostMcpTargetRefusal, connector_ready_to_wire, connector_slot_from_wire,
     connector_slot_to_wire, connector_status_to_wire, connector_target_from_wire,
     mcp_account_verification_to_wire, mcp_auth_target_to_wire, mcp_login_disposition_to_wire,
-    resolve_configured_mcp_target,
+    resolve_configured_mcp_target, resolve_configured_mcp_target_in_realm,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};
@@ -371,11 +394,11 @@ pub mod help;
 mod persistence;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod storage_provider;
-pub use persistence::PersistenceBundle;
 #[cfg(feature = "session-store")]
 pub use persistence::PersistenceError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistence::open_realm_persistence_with_provider;
+pub use persistence::{HostingUnavailable, PersistenceBundle};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistence::{
     PreV0810DomainBridgeFailure, PreV0810DomainBridgeReport, PreV0810DomainRefusal,
@@ -588,6 +611,7 @@ pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 pub use meerkat_mcp::{
     McpApplyDelta, McpApplyResult, McpAuthResolver, McpConnection, McpError, McpLifecycleAction,
     McpLifecyclePhase, McpReloadTarget, McpRouter, McpRouterAdapter, McpServerLifecycleState,
+    McpStdioLaunchProfile,
 };
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub mod mcp;

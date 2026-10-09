@@ -1335,7 +1335,7 @@ mod tests {
         }
     }
 
-    /// Regression (HomeCore fork_off calls f-h): a source transcript holding
+    /// Regression (downstream fork_off calls): a source transcript holding
     /// an image written under MobKit's pre-0.8.41 raw-bytes address failed
     /// every fork with "blob identity mismatch". A store that attests the
     /// address now lets the fork proceed, and the child's reference is
@@ -1371,7 +1371,7 @@ mod tests {
     }
 
     /// Fail closed: without the store's attestation the same reference is
-    /// refused exactly as before, with HomeCore's error shape.
+    /// refused exactly as before, with the field error shape.
     #[tokio::test]
     async fn durable_fork_refuses_unattested_foreign_image_address() {
         let store = LegacyAddressStore::new(false);
@@ -1392,7 +1392,7 @@ mod tests {
         assert_eq!(only_user_image_blob_id(&messages), legacy_id);
     }
 
-    /// HomeCore's failing turn issued three forks of the same source at once.
+    /// The failing downstream turn issued three forks of the same source at once.
     /// Concurrent preflights over one legacy reference all succeed and agree
     /// on the re-homed address.
     #[tokio::test]

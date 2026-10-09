@@ -500,8 +500,8 @@ naming no cause.
 A limit that has already elapsed is decided at once, so an idle child past its
 limit always gets `max_run_elapsed`. When the limit wins, the child's run is
 cancelled, `max_run_elapsed` is delivered, and the child and its descendants
-are retired once that delivery settles (delivered, or the owner gone). A
-delivery that must wait keeps the cancelled child and its job record, and a
+are retired once that delivery settles (submitted durably, or the owner gone).
+A submission that fails keeps the cancelled child and its job record, and a
 later pass delivers and retires it; a child left seated after its record was
 committed is retired by the next pass without a second record.
 
@@ -513,18 +513,20 @@ forker, a member of the same mob; a forker that was respawned or retired
 since is gone, so the job is reported as owner gone and a child past its limit
 is retired with its descendants.
 
-Delivery uses the same record and idempotency key, so an outcome recorded
-before the restart is never recorded twice, and an idle forker is woken to see
-it. A job whose completion was already admitted is finished: the pass leaves
-it and its child alone (no limit, no cancel, no second record), and a
-respawned child carries no job, although its ownership still follows the
-identity. A job whose forker no longer exists is reported as owner gone
-instead of retried. A forker that cannot be revived yet, because its mob is
-not running (for example restored Stopped after a clean shutdown) or is still
-being revived, is reported as awaiting (`ForkRelinkAction::AwaitingOwner {
-mob_id, reason }`, naming the owner's mob). Each such job waits on its own
-owner's mob with its own bounded budget, and delivery is retried for that job
-alone when the mob starts running or after a bounded backoff.
+Delivery is the live custodian's: the outcome is committed once with the job
+(a `ForkJobTerminal` event in the child's mob, with the outcome's result
+digest) and submitted to the owner as a continuation under the same record and
+idempotency key (`fork_off:<job_id>`), so an outcome recorded before the
+restart is never recorded twice, and an idle forker is woken to see it. A job
+whose outcome is already committed is submitted with that outcome. A job whose
+completion was already admitted is finished: the pass leaves it and its child
+alone (no limit, no cancel, no second record), and a respawned child carries
+no job, although its ownership still follows the identity. A job whose forker
+no longer exists is reported as owner gone instead of retried. The
+continuation is durable from submission: a forker that cannot be served yet,
+because its mob is not running (for example restored Stopped after a clean
+shutdown) or is still being revived, receives it from the host's delivery
+owner once it is, with no wait or retry of the pass's own.
 `MobMcpState::relink_restored_fork_children` runs the pass explicitly.
 
 `council` follows the same split. Detached, it returns `status: "running"`,
@@ -544,8 +546,10 @@ store is durable and whose `MobMcpState` was built with `into_shared()` (a
 state wrapped in a plain `Arc::new` never runs it), and it retries after the
 earliest observed lease expiry;
 `MobMcpState::relink_detached_councils` runs the re-link explicitly. Blocking, `council` returns the sealed outcome as its tool
-result, with `blocked_because`. A detached convener that is not live is
-revived first: through its mob when it is a mob member, or through the host's
+result, with `blocked_because`. A council's outcome is committed once on its
+custody record and submitted as a continuation like a fork_off outcome. A
+detached convener that is not live is revived when its continuation is
+applied: through its mob when it is a mob member, or through the host's
 `DetachedOwnerHost` when it is a plain session. A plain-session convener on a
 host without that hook (a top-level REST, MCP-server, or `rkat run
 --keep-alive` session) is not given the detached route at all: its council
@@ -559,11 +563,16 @@ An embedding host declares the capability on its `MobMcpState`
 (`with_detached_completion_delivery` / `set_detached_completion_delivery` with
 `DetachedCompletionDelivery::Available` or `Unavailable`). The default follows
 the presence of a runtime adapter, and `detached_delivery_blocked_because`
-reports why the tools would block. A host whose detached-job owners can be
-plain sessions installs a `DetachedOwnerHost` (`with_detached_owner_host` /
-`set_detached_owner_host`) so their results are delivered, live and by the
-restart re-link, after the runtime retired an idle executor. Install it before
-inserting restored mob handles: `mob_insert_handle` reads it at insert.
+reports why the tools would block. Detached outcomes are submitted through
+the host's runtime delivery inbox, which the host binds with
+`MobMcpState::bind_continuations` (passing the bundle's
+`runtime_delivery_inbox()` and `continuation_bindings()`); a host that does not
+bind it runs the tools in the turn (`no_continuation_owner`). Every product
+surface binds it. A host whose detached-job owners can be plain sessions
+installs a `DetachedOwnerHost` (`with_detached_owner_host` /
+`set_detached_owner_host`) so their results are applied after the runtime
+retired an idle executor. Bind continuations and install the hook before
+inserting restored mob handles: `mob_insert_handle` starts the re-link.
 `compose_rpc_mob_state` does this for the JSON-RPC host.
 
 ### Forked children belong to their forker

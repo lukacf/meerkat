@@ -114,6 +114,7 @@ mod tests {
     fn make_header_with_supersession(key: Option<&str>) -> InputHeader {
         InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),

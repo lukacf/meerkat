@@ -649,7 +649,37 @@ pub fn dsl_detached_job_machine_production_schema() -> MachineSchema {
 }
 
 pub fn dsl_runtime_delivery_machine() -> MachineSchema {
-    runtime_delivery::RuntimeDeliveryMachineState::schema()
+    runtime_delivery_schema_metadata()
+        .attach_to(runtime_delivery::RuntimeDeliveryMachineState::schema())
+}
+
+pub fn runtime_delivery_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "DeliveryRefusalReason",
+                &[
+                    "NoAdmissibleWorkBinding",
+                    "AuthorityDenied",
+                    "OperationAuthorizationUnavailable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DeliveryRecipientOutcome",
+                &["Applied", "Refused", "OperationAuthorizationUnavailable"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DeliveryRecipientGroupOutcome",
+                &[
+                    "AllApplied",
+                    "AllRefused",
+                    "AllAuthorizationUnavailable",
+                    "Mixed",
+                ],
+            ),
+        ],
+        vec![],
+    )
 }
 
 pub fn dsl_runtime_delivery_machine_production_schema() -> MachineSchema {
@@ -709,6 +739,31 @@ pub fn approval_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "InvalidDecision",
                     "EmptyAllowedDecisions",
                     "InvalidRestoredRecord",
+                    "ReviewRetired",
+                    "ReviewNotSatisfied",
+                    "ReviewPending",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ReviewAttemptStatus",
+                &[
+                    "Pending",
+                    "Allowed",
+                    "Denied",
+                    "Escalated",
+                    "Unavailable",
+                    "Retired",
+                    "Used",
+                ],
+            ),
+            NamedTypeBinding::string_enum("ReviewVerdict", &["Allow", "Deny", "Escalate"]),
+            NamedTypeBinding::string_enum(
+                "ReviewRetirementReason",
+                &[
+                    "ContextChanged",
+                    "AuthorityChanged",
+                    "DeadlineExpired",
+                    "Abandoned",
                 ],
             ),
         ],
@@ -1340,6 +1395,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "LiveDelegationWorkerOwnership",
                 &["OwnedMember", "ExistingMember"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveMemberTurnReasoning",
+                &["None", "Low", "Medium", "High", "Xhigh", "Max"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationCancellationReason",

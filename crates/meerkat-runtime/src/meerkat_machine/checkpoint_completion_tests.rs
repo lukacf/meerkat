@@ -919,7 +919,8 @@ async fn multiple_checkpoint_batches_of_one_run_settle_independently() {
 }
 
 #[tokio::test]
-async fn homecore_consumed_checkpoint_recovers_from_attached_without_replacing_later_correlation() {
+async fn downstream_consumed_checkpoint_recovers_from_attached_without_replacing_later_correlation()
+{
     // Reconstructs the confirmed frozen checkpoint-owner/receipt shape and
     // Attached refusal, not the historical production cancellation timing.
     let fixture = Fixture::new().await;

@@ -326,7 +326,7 @@ const IMAGE_TOKEN_ESTIMATE: u64 = 1_600;
 /// escaping) plus request components outside the transcript (tool schemas,
 /// provider parameters). Base64 payloads never need JSON escaping, so on the
 /// media-dominated transcripts this estimate protects against (2026-07-29
-/// household incident: inline media crossed Anthropic's request-size cap and
+/// production incident: inline media crossed Anthropic's request-size cap and
 /// every turn failed with `request_too_large`) the raw sum is within a few
 /// percent of the wire size and the factor is pure margin.
 const REQUEST_BYTE_SAFETY_NUMERATOR: u64 = 6;

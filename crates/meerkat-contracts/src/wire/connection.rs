@@ -300,6 +300,82 @@ pub enum WireScopeEvidence {
     RetainedOnRefresh { granted_at: String },
 }
 
+/// Typed reason of an auth error on the RPC and REST surfaces: RPC
+/// `error.data.reason`, REST body `reason`. Hosts branch on it, never on the
+/// error text. One native mapping (`HostAuthError::reason`) owns it; the
+/// existing status codes and RPC error codes are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAuthErrorReason {
+    /// Malformed or inconsistent target (ids, provider, backend, auth
+    /// method, source, connector target, redirect or descriptor).
+    InvalidTarget,
+    RealmNotFound,
+    BindingNotFound,
+    /// The binding exists but its configuration is invalid.
+    BindingInvalid,
+    /// A credential write addressed a binding the realm only inherits.
+    BindingInherited,
+    /// The provider does not support the requested login flow.
+    FlowUnsupported,
+    McpServerNotConfigured,
+    /// The MCP target differs from the configured server, or it does not
+    /// use OAuth login.
+    McpServerMismatch,
+    AccountSelectionRequired,
+    UnknownStrategy,
+    /// No live attempt under this state (unknown, expired or consumed).
+    AttemptMissing,
+    /// The attempt exists but the target, provider, identity, redirect or
+    /// descriptor differs.
+    AttemptMismatch,
+    DevicePollInProgress,
+    DeviceCodeAlreadyAdmitted,
+    DeviceExpiryInvalid,
+    /// The provider-verified account is not the expected one.
+    AccountMismatch,
+    MissingScopes,
+    /// Token material does not match the verified evidence.
+    CredentialMismatch,
+    /// The account strategy could not verify the provider account.
+    VerificationUnavailable,
+    SlotOccupied,
+    SlotAccountMismatch,
+    SlotContextMismatch,
+    SlotModeMismatch,
+    UnverifiedConnectorPublication,
+    ReauthRequired,
+    /// No usable credential: a human must authorize through the host.
+    AuthorizationRequired,
+    /// The host's loopback callback could not be bound, failed or timed out.
+    CallbackUnavailable,
+    /// The provider's authorization server failed (discovery, registration,
+    /// token exchange or refresh).
+    UpstreamFailure,
+    ConfigurationInvalid,
+    /// An internal failure; its detail is only in protected diagnostics.
+    Infrastructure,
+}
+
+/// `error.data` of an auth RPC error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireAuthErrorData {
+    pub reason: WireAuthErrorReason,
+}
+
+/// Body of a REST auth endpoint error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireAuthErrorBody {
+    /// Human-readable, secret-free text; never part of the contract.
+    pub error: String,
+    pub reason: WireAuthErrorReason,
+}
+
 /// Provider binding addressed by `auth/login/*`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

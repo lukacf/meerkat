@@ -145,6 +145,21 @@ async fn make_smoke_stack(paths: &SmokePaths) -> (MethodRouter, Arc<MobMcpState>
         meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
     ));
     let runtime = Arc::new(runtime);
+    // As the rkat-rpc host does: detached outcomes are submitted to the
+    // runtime's continuation owner, and its delivery owner (armed in its
+    // realm) applies them.
+    runtime.set_realm_context(
+        Some(meerkat_core::connection::RealmId::global()),
+        None,
+        None,
+    );
+    mob_state
+        .bind_continuations(
+            runtime.runtime_delivery_inbox(),
+            runtime.continuation_bindings(),
+        )
+        .expect("bind the runtime's continuation services");
+    runtime.arm_runtime_delivery_owner();
     let (notif_tx, _notif_rx) = mpsc::channel(256);
     let sink = NotificationSink::new(notif_tx);
     let router =

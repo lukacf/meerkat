@@ -691,7 +691,10 @@ impl AgentMobToolSurface {
     /// - `InheritParent`: snapshot parent's visible tools, apply overlays
     /// - `Minimal`: only comms tools (send, send_message, reply_to_peer,
     ///   send_request, send_response, peers)
-    /// - `Profile`: resolve the profile from inline/realm source and apply overlays
+    /// - `Profile`: resolve the profile from inline/realm source; the
+    ///   profile decides what the child mounts, and the parent's visible
+    ///   tools (with any overlays) cap what it may dispatch, so a
+    ///   profile-sourced child never gains a tool its parent cannot see
     async fn resolve_spawn_tooling(
         &self,
         tooling: &meerkat_mob::SpawnTooling,
@@ -804,48 +807,45 @@ impl AgentMobToolSurface {
                     }
                 };
 
-                // The profile's ToolConfig controls categories (builtins,
-                // shell, etc.) through build_agent_config(). Overlays become the
-                // inherited filter on session metadata.
-                let inherited_tool_filter = if allow_overlay.is_none() && deny_overlay.is_none() {
-                    None
-                } else {
-                    // When overlays are present but we need a base set from the parent
-                    // to apply them against, require ParentOwned.
-                    let provider = match &self.snapshot_context {
-                        meerkat_core::service::MobToolSnapshotContext::ParentOwned(p) => p,
-                        meerkat_core::service::MobToolSnapshotContext::Standalone => {
-                            return Err(ToolError::execution_failed(
-                                "Profile tooling with overlays requires a parent tool scope",
-                            ));
-                        }
-                    };
-                    let allow_set = allow_overlay.as_ref().map(|v| {
-                        v.iter()
-                            .cloned()
-                            .collect::<std::collections::HashSet<String>>()
-                    });
-                    let deny_set = deny_overlay.as_ref().map(|v| {
-                        v.iter()
-                            .cloned()
-                            .collect::<std::collections::HashSet<String>>()
-                    });
-                    Some(
-                        provider
-                            .authorize_inherited_tool_visibility_with_overlays(
-                                allow_set.as_ref(),
-                                deny_set.as_ref(),
-                            )
-                            .map_err(|err| {
-                                ToolError::execution_failed(format!(
-                                    "profile tool visibility inheritance requires tool provenance witnesses: {err}"
-                                ))
-                            })?,
-                    )
+                // The profile's ToolConfig decides what the child mounts
+                // (builtins, shell, etc.) through build_agent_config(). The
+                // parent's visible tools, narrowed by any overlays, become the
+                // inherited filter on session metadata: an immutable ceiling
+                // on what the child may dispatch, so a profile cannot switch
+                // on a tool its parent cannot use.
+                let provider = match &self.snapshot_context {
+                    meerkat_core::service::MobToolSnapshotContext::ParentOwned(p) => p,
+                    meerkat_core::service::MobToolSnapshotContext::Standalone => {
+                        return Err(ToolError::execution_failed(
+                            "Profile tooling requires a parent tool scope (ParentOwned context), \
+                             because the child is narrowed to the parent's visible tools, \
+                             but this agent is running in Standalone mode",
+                        ));
+                    }
                 };
+                let allow_set = allow_overlay.as_ref().map(|v| {
+                    v.iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                });
+                let deny_set = deny_overlay.as_ref().map(|v| {
+                    v.iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                });
+                let inherited_tool_filter = provider
+                    .authorize_inherited_tool_visibility_with_overlays(
+                        allow_set.as_ref(),
+                        deny_set.as_ref(),
+                    )
+                    .map_err(|err| {
+                        ToolError::execution_failed(format!(
+                            "profile tool visibility inheritance requires tool provenance witnesses: {err}"
+                        ))
+                    })?;
 
                 Ok(ResolvedSpawnTooling {
-                    inherited_tool_filter,
+                    inherited_tool_filter: Some(inherited_tool_filter),
                     override_profile: Some(*resolved_profile),
                 })
             }
@@ -1354,6 +1354,7 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
         objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+        retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let args: ForkOffArgs = call
             .parse_args()
@@ -1446,6 +1447,7 @@ impl AgentMobToolSurface {
         let job = runtime.as_ref().map(|_| meerkat_mob::ForkJobBinding {
             job_id: job_id.clone(),
             owner_session_id: self.owner_bridge_session_id.clone(),
+            retained_work: retained_work.clone(),
         });
         let handle = audit_handle.clone();
         let operation_source = source_identity.clone();
@@ -1490,12 +1492,18 @@ impl AgentMobToolSurface {
             // its outcome into the owner's one durable completion record.
             let identity = fork.agent_identity.to_string();
             let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity);
+            let recorder = DetachedJobRecorder::Fork {
+                mob: owner.clone(),
+                child: fork.agent_identity.clone(),
+                retained_work: retained_work.clone(),
+            };
             spawn_detached_completion_custodian(
                 runtime,
                 owner_session_id,
                 DetachedCompletionOwner::Member(owner, source),
                 job_id,
                 TOOL_FORK_OFF,
+                recorder,
                 async move {
                     let completion =
                         ForkOffCompletion::from_outcome(identity, member_ref, run.outcome().await);
@@ -1582,6 +1590,7 @@ impl AgentMobToolSurface {
     async fn dispatch_council(
         &self,
         call: ToolCallView<'_>,
+        retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         self.ensure_create_authority(call.name).await?;
         let args: CouncilArgs = call
@@ -1720,11 +1729,13 @@ impl AgentMobToolSurface {
         let job = meerkat_mob::temporary_council::TemporaryCouncilJobBinding::new(
             job_id.clone(),
             self.owner_bridge_session_id.clone(),
-        );
+        )
+        .with_retained_work(retained_work);
         // The council runs on its own task and hands its outcome over a
         // channel, so the custodian's future is Send even where the council's
         // is not (the single-threaded browser runtime).
         let (outcome_tx, outcome_rx) = oneshot::channel();
+        let council_id = request.council_id.clone();
         tokio::spawn(async move {
             let outcome = match council.run_detached(request, job).await {
                 // A council that ran but failed (e.g. participant seating)
@@ -1754,7 +1765,7 @@ impl AgentMobToolSurface {
                 )),
                 identity,
             ),
-            session @ DetachedCompletionOwner::Session(_) => session,
+            DetachedCompletionOwner::Session => DetachedCompletionOwner::Session,
         };
         spawn_detached_completion_custodian(
             runtime,
@@ -1762,6 +1773,10 @@ impl AgentMobToolSurface {
             convener,
             job_id.clone(),
             TOOL_COUNCIL,
+            DetachedJobRecorder::Council {
+                state: Arc::clone(&self.state),
+                council_id,
+            },
             async move {
                 outcome_rx.await.unwrap_or_else(|_| {
                     (
@@ -2257,9 +2272,14 @@ impl AgentMobToolSurface {
     boxed_agent_dispatch!(
         dispatch_fork_off_boxed,
         dispatch_fork_off,
-        objective_id: Option<meerkat_core::interaction::ObjectiveId>
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+        retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>
     );
-    boxed_agent_dispatch!(dispatch_council_boxed, dispatch_council);
+    boxed_agent_dispatch!(
+        dispatch_council_boxed,
+        dispatch_council,
+        retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>
+    );
     boxed_agent_dispatch!(dispatch_mob_retire_member_boxed, dispatch_mob_retire_member);
     boxed_agent_dispatch!(dispatch_mob_check_member_boxed, dispatch_mob_check_member);
     boxed_agent_dispatch!(dispatch_mob_list_members_boxed, dispatch_mob_list_members);
@@ -2314,8 +2334,14 @@ impl AgentMobToolSurface {
                 self.dispatch_mob_spawn_member_boxed(call, objective_id)
                     .await
             }
-            TOOL_FORK_OFF => self.dispatch_fork_off_boxed(call, objective_id).await,
-            TOOL_COUNCIL => self.dispatch_council_boxed(call).await,
+            TOOL_FORK_OFF => {
+                self.dispatch_fork_off_boxed(call, objective_id, context.retained_work().cloned())
+                    .await
+            }
+            TOOL_COUNCIL => {
+                self.dispatch_council_boxed(call, context.retained_work().cloned())
+                    .await
+            }
             TOOL_MOB_RETIRE_MEMBER => self.dispatch_mob_retire_member_boxed(call).await,
             TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member_boxed(call).await,
             TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members_boxed(call).await,
@@ -3525,15 +3551,34 @@ impl ForkOffCompletion {
     }
 }
 
-/// Own one detached tool run's completion: when `outcome` resolves, deliver
-/// the owner's one durable completion record (see
-/// [`crate::detached_delivery`]).
+/// The committed owner that records a detached job's terminal outcome.
+pub(crate) enum DetachedJobRecorder {
+    /// A fork_off job: a `ForkJobTerminal` event in the child's mob.
+    Fork {
+        mob: meerkat_mob::MobHandle,
+        child: meerkat_mob::AgentIdentity,
+        retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+    },
+    /// A council: the committed terminal on its custody record.
+    Council {
+        state: Arc<crate::MobMcpState>,
+        council_id: meerkat_mob::temporary_council::TemporaryCouncilId,
+    },
+}
+
+/// Own one detached tool run's completion: when `outcome` resolves, record
+/// it once with the job's committed owner, under its result digest, and
+/// submit it as the owner's one durable completion (see
+/// [`crate::detached_completion_sink`]). A submission that fails is
+/// submitted again from the recorded outcome by the restart re-link; the
+/// outcome itself is never dropped.
 fn spawn_detached_completion_custodian<F>(
-    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    sink: crate::detached_completion_sink::DetachedCompletionSink,
     owner_session_id: SessionId,
     owner: DetachedCompletionOwner,
     job_id: String,
     tool_name: &'static str,
+    recorder: DetachedJobRecorder,
     outcome: F,
 ) where
     F: std::future::Future<
@@ -3549,40 +3594,79 @@ fn spawn_detached_completion_custodian<F>(
         let value = value.unwrap_or_else(|error| {
             json!({ "error": format!("{tool_name} could not encode its outcome: {error}") })
         });
-        let delivered = match owner {
-            DetachedCompletionOwner::Member(handle, identity) => {
-                crate::detached_delivery::deliver_detached_completion_to_member_when_revivable(
-                    &runtime,
-                    &handle,
-                    &identity,
-                    &owner_session_id,
-                    tool_name,
-                    &job_id,
+        let result_digest = meerkat_mob::detached_outcome_digest(&value);
+        // The outcome committed with the job's owner is the one delivered:
+        // an outcome already recorded for the job (a lost race) stands.
+        let recorded = match &recorder {
+            DetachedJobRecorder::Fork {
+                mob,
+                child,
+                retained_work,
+            } => {
+                let terminal = meerkat_mob::ForkJobTerminalEvent {
+                    job_id: job_id.clone(),
+                    child: child.clone(),
+                    owner_session_id: owner_session_id.clone(),
+                    retained_work: retained_work.clone(),
                     status,
-                    value,
-                )
-                .await
+                    outcome: value.clone(),
+                    result_digest: result_digest.clone(),
+                };
+                match mob.record_fork_job_terminal(terminal).await {
+                    Ok(()) => Ok((status, value, result_digest)),
+                    Err(error) => match mob.fork_job_terminal(&job_id, child).await {
+                        Ok(Some(recorded)) => {
+                            Ok((recorded.status, recorded.outcome, recorded.result_digest))
+                        }
+                        _ => Err((error.to_string(), (status, value, result_digest))),
+                    },
+                }
             }
-            DetachedCompletionOwner::Session(host) => {
-                crate::detached_delivery::deliver_detached_completion_to_session(
-                    &runtime,
-                    Some(host.as_ref()),
-                    &owner_session_id,
-                    tool_name,
+            DetachedJobRecorder::Council { state, council_id } => {
+                crate::council_relink::record_terminal(
+                    state,
+                    council_id,
                     &job_id,
                     status,
-                    value,
+                    value.clone(),
                 )
                 .await
+                .map(|terminal| (terminal.status, terminal.outcome, terminal.result_digest))
+                .map_err(|error| (error, (status, value, result_digest)))
             }
         };
-        if let Err(error) = delivered {
+        let (status, value, result_digest) = recorded.unwrap_or_else(|(error, unrecorded)| {
             tracing::warn!(
                 tool = tool_name,
                 job_id = %job_id,
                 error = %error,
-                "detached completion could not be delivered to its owner"
+                "detached outcome could not be recorded with its job owner"
             );
+            unrecorded
+        });
+        match sink
+            .submit(
+                &owner,
+                &owner_session_id,
+                tool_name,
+                &job_id,
+                status,
+                &value,
+                &result_digest,
+            )
+            .await
+        {
+            Ok(_) => {
+                if let DetachedJobRecorder::Council { state, council_id } = &recorder {
+                    crate::council_relink::mark_settled(state, council_id).await;
+                }
+            }
+            Err(error) => tracing::warn!(
+                tool = tool_name,
+                job_id = %job_id,
+                error = %error,
+                "detached completion was not submitted now; the restart re-link submits it from the recorded outcome"
+            ),
         }
     });
 }
@@ -3599,7 +3683,7 @@ fn detached_started_note(tool: &'static str, job_id: &str, control: &str) -> Str
 
 /// The typed status of a council's completion record, for the live
 /// custodian and the restart re-link alike.
-fn council_terminal_status(
+pub(crate) fn council_terminal_status(
     outcome: &crate::temporary_council::TemporaryCouncilOutcome,
 ) -> meerkat_core::event::BackgroundJobTerminalStatus {
     if outcome.result.exit_reason.is_failure() {
@@ -4228,7 +4312,7 @@ mod tests {
 
     #[test]
     fn fork_off_rejects_unknown_arguments_instead_of_ignoring_them() {
-        // Regression: HomeCore's calendar member passed a field fork_off does
+        // Regression: a downstream calendar member passed a field fork_off does
         // not define and the call proceeded as if it had been honoured.
         let raw = serde_json::value::RawValue::from_string(
             serde_json::json!({
@@ -6720,7 +6804,12 @@ mod tests {
             meerkat_mob::MobControlPrincipal::Owner,
         )
         .expect("construct runtime authority");
-        assert_eq!(with_runtime.detached_delivery_blocked_because(), None);
+        // A runtime alone is not enough: outcomes are submitted through the
+        // host's continuation owner, which this state never bound.
+        assert_eq!(
+            with_runtime.detached_delivery_blocked_because(),
+            Some(crate::DetachedDeliveryUnavailable::NoContinuationOwner)
+        );
         with_runtime
             .set_detached_completion_delivery(crate::DetachedCompletionDelivery::Unavailable);
         assert_eq!(
@@ -8054,8 +8143,8 @@ mod tests {
 
     async fn surface_with_unprovenanced_parent_tool() -> AgentMobToolSurface {
         let snapshot_context = parent_snapshot_context_for_tools(vec![Arc::new(ToolDef {
-            name: "external_ob3_tool".into(),
-            description: "external Ob3 tool".to_string(),
+            name: "external_ops_tool".into(),
+            description: "external ops tool".to_string(),
             input_schema: json!({"type": "object"}),
             provenance: None,
         })])
@@ -8147,7 +8236,7 @@ mod tests {
         match err {
             ToolError::ExecutionFailed { message } => {
                 assert!(message.contains("requires tool provenance witnesses"));
-                assert!(message.contains("external_ob3_tool"));
+                assert!(message.contains("external_ops_tool"));
             }
             other => {
                 panic!("expected ExecutionFailed for unprovenanced parent tool, got {other:?}")
@@ -8225,7 +8314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_spawn_tooling_profile_no_overlays_returns_none() {
+    async fn test_resolve_spawn_tooling_profile_no_overlays_narrows_to_parent_visible() {
         let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
@@ -8252,10 +8341,85 @@ mod tests {
             deny_overlay: None,
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
-        assert!(
-            resolved.inherited_tool_filter.is_none(),
-            "Profile without overlays should return None (no inherited filter)"
-        );
+        assert!(resolved.override_profile.is_some());
+        // The profile still decides what the child mounts; the parent's
+        // visible tools cap what it may dispatch.
+        let names = inherited_allow_names(resolved);
+        assert_eq!(names.len(), 9, "capped at all 9 parent tools");
+        assert!(names.contains("send"));
+        assert!(names.contains("bash"));
+    }
+
+    /// The cap is the parent's VISIBLE set: a tool the parent's own scope
+    /// hides stays out of a profile-sourced child's reach.
+    #[tokio::test]
+    async fn test_resolve_spawn_tooling_profile_excludes_tools_hidden_from_the_parent() {
+        let surface = surface_with_filtered_parent_tools().await;
+        let tooling = meerkat_mob::SpawnTooling::Profile {
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model_fallback: None,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig {
+                        shell: true,
+                        builtins: true,
+                        ..meerkat_mob::ToolConfig::default()
+                    },
+                    peer_description: "test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
+            allow_overlay: None,
+            deny_overlay: None,
+        };
+        let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
+        let names = inherited_allow_names(resolved);
+        assert!(!names.contains("bash"), "hidden from the parent: {names:?}");
+        assert!(names.contains("read_file"));
+    }
+
+    /// Without a parent tool scope there is no ceiling to narrow to, so a
+    /// profile-sourced spawn is refused rather than left unrestricted.
+    #[tokio::test]
+    async fn test_resolve_spawn_tooling_profile_no_overlays_standalone_errors() {
+        let surface = surface_standalone();
+        let tooling = meerkat_mob::SpawnTooling::Profile {
+            source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
+                meerkat_mob::Profile {
+                    model_fallback: None,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools: meerkat_mob::ToolConfig::default(),
+                    peer_description: "test".to_string(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: MobRuntimeMode::TurnDriven,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+            ))),
+            allow_overlay: None,
+            deny_overlay: None,
+        };
+        let err = surface.resolve_spawn_tooling(&tooling).await.unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }), "{err:?}");
     }
 
     #[tokio::test]

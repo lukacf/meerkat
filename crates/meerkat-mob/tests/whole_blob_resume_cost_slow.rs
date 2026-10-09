@@ -1,7 +1,7 @@
 //! Cold-resume cost gate for the WholeBlob runtime profile with deep rewrite
 //! history.
 //!
-//! Production (HomeCore) runs the WholeBlob runtime store: every committed
+//! A production deployment runs the WholeBlob runtime store: every committed
 //! session is one serialized document, and members carry long compaction
 //! histories (rewrite generation ~119). On a cold resume every consumer that
 //! needed the committed body decoded the whole document again, re-validated

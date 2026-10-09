@@ -15,11 +15,11 @@ line links, and phase lists describe the historical baseline rather than an
 open implementation state. Use [Durable Jobs and Monitors](/guides/durable-jobs)
 and the current `meerkat-jobs`, `meerkat-runtime::delivery_inbox`,
 `meerkat::job_delivery`, and `meerkat::job_composition` sources for the shipped
-Meerkat contract. Downstream MobKit and HomeCore status belongs to those
+Meerkat contract. Downstream MobKit and the downstream app status belongs to those
 repositories.
 
 Historical baseline: Meerkat `dda5f2b2e`; MobKit PR [#301](https://github.com/lukacf/meerkat-mobkit/pull/301) at `c2920a8a`
-Scope: Meerkat platform, MobKit gateway/SDKs, and downstream host-callback consumers such as HomeCore
+Scope: Meerkat platform, MobKit gateway/SDKs, and downstream host-callback consumers such as the downstream app
 
 ## Decision
 
@@ -33,7 +33,7 @@ Detached means durable. Today’s `shell(background: true)` is asynchronous but 
 
 The platform will introduce a feature-owned durable job authority. It will reuse the existing runtime completion-feed wake path, but it will not use runtime operations, WorkGraph, Schedule, or MobKit callbacks as the canonical execution store.
 
-For HomeCore, the key outcome is:
+For the downstream app, the key outcome is:
 
 > A security scan is accepted durably within the MobKit callback deadline, runs outside the callback and agent turn, appears as healthy detached activity, re-resolves credentials at execution time, and becomes `WorkerLost`/`NeedsAttention` rather than being blindly replayed after an unrecoverable restart.
 
@@ -174,7 +174,7 @@ MobKit’s callback-built tool specification currently carries only name, descri
   "execution": {
     "default_mode": "detached",
     "supported_modes": ["detached"],
-    "runner": "homecore.security_scan.v1",
+    "runner": "example.security_scan.v1",
     "restart": "non_resumable",
     "idempotency": "interaction_and_arguments",
     "credential_scopes": ["network"]
@@ -331,7 +331,7 @@ The work is safe to run again under its stable idempotency key.
 
 The work cannot be safely continued or replayed automatically. Worker loss produces `WorkerLost`/`NeedsAttention`.
 
-HomeCore security scans should initially be Non-resumable:
+The downstream app security scans should initially be Non-resumable:
 
 - A rebooted scan is not silently replayed.
 - The operator or agent can explicitly start a new scan.
@@ -347,7 +347,7 @@ survives. State the guarantee as a restart matrix:
 | Runtime/gateway and worker restart, but an accepted checkpoint exists | A Checkpoint-resumable runner may claim a new fenced attempt and resume from the committed checkpoint. |
 | Runtime/gateway and worker restart, and replay is safe under the stable idempotency key | A Replayable runner may claim a new fenced attempt and execute again. |
 
-For HomeCore v1, a detached scan running inside the co-deployed Python host
+For the downstream app v1, a detached scan running inside the co-deployed Python host
 survives a gateway-only restart only when the host process and reconnectable
 attempt handle remain alive. A routine upgrade that stops both host and gateway
 loses a plain in-process Non-resumable scan. Surviving that topology requires a
@@ -432,7 +432,7 @@ At every attempt start:
 
 If the binding has been removed, rotated incompatibly, or is no longer authorized, the job becomes `BlockedCredentials` or `NeedsAttention`. It must not fall back to ambient environment variables or stale serialized material.
 
-For HomeCore, a network scan therefore re-resolves UniFi credentials from the network profile when the attempt actually starts.
+For the downstream app, a network scan therefore re-resolves network-controller credentials from the network profile when the attempt actually starts.
 
 ## 10. Submission idempotency
 
@@ -564,7 +564,7 @@ steer/queue fallback or scheduling path.
 
 This preserves the design boundary between predicate detection and judgment.
 Release/version changes, HTTP conditions, file changes, and numeric thresholds
-can normally remain turn-free. Camera triage, ambiguous household events, and
+can normally remain turn-free. Camera triage, ambiguous site events, and
 other judgment-bearing decisions use the monitor only as the cheap predicate
 and then select `event` delivery with the appropriate `HandlingMode`; the
 monitor primitive must not replace the reasoning turn.
@@ -607,7 +607,7 @@ durable source semantics, not merely from whether their implementation is
 called “native” or “domain.” For example, an HTTP release watcher with a stable
 ETag/version can be Replayable; a local file watcher on persistent storage may
 be Checkpoint-resumable; an external event system with a durable cursor may be
-Adoptable; and a HomeCore callback that requires a currently running Python
+Adoptable; and a downstream app callback that requires a currently running Python
 host remains explicitly host-dependent.
 
 Agent-authored monitor scripts declare their restart class honestly:
@@ -903,7 +903,7 @@ No detached execution behavior changes yet.
 - Add fail-closed capability tiers separating broadly grantable predicates from
   unrestricted durable script execution.
 
-### Phase 4 — MobKit and HomeCore callbacks
+### Phase 4 — MobKit and downstream app callbacks
 
 - Implement async detached callback protocol.
 - Add Python and TypeScript SDK support.
@@ -935,7 +935,7 @@ The implementation is complete only when all of these hold:
 1. Fast MobKit callbacks are documented and tested at 120-second public, 125-second host, and 130-second wire tiers.
 2. A detached submit commits before returning a receipt.
 3. A crash after commit but before receipt returns the same `JobId` on retry.
-4. A completion-triggered agent retry cannot launch a second HomeCore scan for the same interaction intent.
+4. A completion-triggered agent retry cannot launch a second downstream-app scan for the same interaction intent.
 5. No provider turn or callback remains open while a detached job runs.
 6. A stale worker cannot report progress or terminalize after a newer fence.
 7. A non-resumable scan becomes `WorkerLost`/`NeedsAttention` after worker loss and is never automatically replayed.

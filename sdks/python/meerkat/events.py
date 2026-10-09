@@ -665,11 +665,12 @@ class WarningFailedClosedToolConfigChangeStatus:
 
 @dataclass(frozen=True, slots=True)
 class ExternalToolDeltaToolConfigChangeStatus:
-    """Structured status for external-tool lifecycle deltas."""
+    """External-tool lifecycle status with an optional native refusal observation."""
 
     kind: Literal["external_tool_delta"] = "external_tool_delta"
     phase: Literal["pending", "applied", "draining", "forced", "failed"] = "pending"
     detail: str | None = None
+    confinement_refusal: ConfinementRefusal | None = None
 
 
 ToolConfigChangeStatus = (
@@ -1032,9 +1033,15 @@ def _parse_tool_config_change_status(raw: Any) -> ToolConfigChangeStatus | None:
         phase = str(raw.get("phase", "pending"))
         if phase not in {"pending", "applied", "draining", "forced", "failed"}:
             phase = "pending"
+        refusal = None
+        if raw.get("confinement_refusal") is not None:
+            refusal = _require_str(raw, "confinement_refusal")
+            if refusal not in _CONFINEMENT_REFUSAL_MESSAGES:
+                raise ValueError("confinement_refusal must be a known native reason")
         return ExternalToolDeltaToolConfigChangeStatus(
             phase=cast(Literal["pending", "applied", "draining", "forced", "failed"], phase),
             detail=str(raw["detail"]) if raw.get("detail") is not None else None,
+            confinement_refusal=cast(ConfinementRefusal | None, refusal),
         )
     return None
 

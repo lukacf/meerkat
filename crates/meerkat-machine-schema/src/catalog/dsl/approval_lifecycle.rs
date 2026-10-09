@@ -1,7 +1,5 @@
 use meerkat_machine_dsl::machine;
 
-use super::OptionValueExt;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum ApprovalLifecycleStatus {
     #[default]
@@ -29,11 +27,48 @@ pub enum ApprovalLifecycleRejectionReason {
     InvalidDecision,
     EmptyAllowedDecisions,
     InvalidRestoredRecord,
+    ReviewRetired,
+    ReviewNotSatisfied,
+    ReviewPending,
+}
+
+/// Process-local review attempt for one retained native operation candidate.
+/// Attempts are never persisted or restored: a restart invalidates them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ReviewAttemptStatus {
+    #[default]
+    Pending,
+    Allowed,
+    Denied,
+    Escalated,
+    Unavailable,
+    Retired,
+    Used,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ReviewVerdict {
+    #[default]
+    Allow,
+    Deny,
+    Escalate,
+}
+
+/// Why the owner retired a retained review before its allow was spent.
+/// `Abandoned` covers every dropped dispatch (caller interrupt, enclosing
+/// deadline, other drops); the review owner never claims caller cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ReviewRetirementReason {
+    #[default]
+    ContextChanged,
+    AuthorityChanged,
+    DeadlineExpired,
+    Abandoned,
 }
 
 machine! {
     machine ApprovalLifecycleMachine {
-        version: 1,
+        version: 2,
         rust: "self" / "catalog::dsl::approval_lifecycle",
 
         state {
@@ -43,6 +78,9 @@ machine! {
             approval_approve_allowed: Map<String, bool>,
             approval_deny_allowed: Map<String, bool>,
             approval_has_expiry: Map<String, bool>,
+            review_ids: Set<String>,
+            review_statuses: Map<String, Enum<ReviewAttemptStatus>>,
+            review_retirements: Map<String, Enum<ReviewRetirementReason>>,
         }
 
         init(Ready) {
@@ -51,6 +89,9 @@ machine! {
             approval_approve_allowed = EmptyMap,
             approval_deny_allowed = EmptyMap,
             approval_has_expiry = EmptyMap,
+            review_ids = EmptySet,
+            review_statuses = EmptyMap,
+            review_retirements = EmptyMap,
         }
 
         terminal []
@@ -82,11 +123,33 @@ machine! {
                 approval_id: String,
                 decision: Enum<ApprovalLifecycleDecision>,
             },
+            BeginReview {
+                review_id: String,
+            },
+            RecordReviewVerdict {
+                review_id: String,
+                verdict: Enum<ReviewVerdict>,
+            },
+            RecordReviewUnavailable {
+                review_id: String,
+            },
+            RetireReview {
+                review_id: String,
+                reason: Enum<ReviewRetirementReason>,
+            },
+            ConsumeReviewForEntry {
+                review_id: String,
+            },
+            ReleaseReview {
+                review_id: String,
+            },
         }
 
         effect ApprovalLifecycleEffect {
             ApprovalStatusResolved { approval_id: String, status: Enum<ApprovalLifecycleStatus> },
             ApprovalLifecycleRejected { approval_id: String, reason: Enum<ApprovalLifecycleRejectionReason> },
+            ReviewStatusResolved { review_id: String, status: Enum<ReviewAttemptStatus> },
+            ReviewLifecycleRejected { review_id: String, reason: Enum<ApprovalLifecycleRejectionReason> },
         }
 
         helper allowed_non_empty(approve_allowed: bool, deny_allowed: bool) -> bool {
@@ -99,8 +162,31 @@ machine! {
                 || status == ApprovalLifecycleStatus::Cancelled
         }
 
+        // Every guard reads the approval maps behind
+        // approval_ids.contains(id); this pins the key sets those strict
+        // reads rely on (#1811).
+        invariant approval_maps_cover_exactly_the_registered_ids {
+            self.approval_statuses.keys() == self.approval_ids
+                && self.approval_approve_allowed.keys() == self.approval_ids
+                && self.approval_deny_allowed.keys() == self.approval_ids
+                && self.approval_has_expiry.keys() == self.approval_ids
+        }
+
         disposition ApprovalStatusResolved => local seam SurfaceResultAlignment,
         disposition ApprovalLifecycleRejected => local seam SurfaceResultAlignment,
+        disposition ReviewStatusResolved => local seam SurfaceResultAlignment,
+        disposition ReviewLifecycleRejected => local seam SurfaceResultAlignment,
+
+        // Review guards read review_statuses behind review_ids.contains(id),
+        // so the key set must equal the registered attempts (#1811).
+        invariant review_statuses_cover_exactly_the_review_ids {
+            self.review_statuses.keys() == self.review_ids
+        }
+
+        invariant review_retirement_only_for_retired_attempts {
+            for_all(id in self.review_retirements.keys(),
+                self.review_statuses.get_cloned(id) == Some(ReviewAttemptStatus::Retired))
+        }
 
         transition CreateRejectedEmptyAllowedDecisions {
             on input CreateApproval {
@@ -539,6 +625,398 @@ machine! {
             }
             to Ready
             emit ApprovalStatusResolved { approval_id: approval_id, status: ApprovalLifecycleStatus::Denied }
+        }
+
+        transition BeginReviewRejectedDuplicate {
+            on input BeginReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::AlreadyExists }
+        }
+
+        transition BeginReviewPending {
+            on input BeginReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id) == false
+            }
+            update {
+                self.review_ids.insert(review_id);
+                self.review_statuses.insert(review_id, ReviewAttemptStatus::Pending);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Pending }
+        }
+
+        transition RecordReviewVerdictRejectedMissing {
+            on input RecordReviewVerdict { review_id, verdict }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id) == false
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::NotFound }
+        }
+
+        transition RecordReviewVerdictRejectedRetired {
+            on input RecordReviewVerdict { review_id, verdict }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Retired
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ReviewRetired }
+        }
+
+        transition RecordReviewVerdictRejectedSettled {
+            on input RecordReviewVerdict { review_id, verdict }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") != ReviewAttemptStatus::Pending
+                && self.review_statuses.get_cloned(review_id).get("value") != ReviewAttemptStatus::Retired
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::AlreadyDecided }
+        }
+
+        transition RecordReviewVerdictAllowed {
+            on input RecordReviewVerdict { review_id, verdict }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Pending
+                && verdict == ReviewVerdict::Allow
+            }
+            update {
+                self.review_statuses.insert(review_id, ReviewAttemptStatus::Allowed);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Allowed }
+        }
+
+        transition RecordReviewVerdictDenied {
+            on input RecordReviewVerdict { review_id, verdict }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Pending
+                && verdict == ReviewVerdict::Deny
+            }
+            update {
+                self.review_statuses.insert(review_id, ReviewAttemptStatus::Denied);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Denied }
+        }
+
+        transition RecordReviewVerdictEscalated {
+            on input RecordReviewVerdict { review_id, verdict }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Pending
+                && verdict == ReviewVerdict::Escalate
+            }
+            update {
+                self.review_statuses.insert(review_id, ReviewAttemptStatus::Escalated);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Escalated }
+        }
+
+        transition RecordReviewUnavailableRejectedMissing {
+            on input RecordReviewUnavailable { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id) == false
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::NotFound }
+        }
+
+        transition RecordReviewUnavailableRejectedRetired {
+            on input RecordReviewUnavailable { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Retired
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ReviewRetired }
+        }
+
+        transition RecordReviewUnavailableRejectedSettled {
+            on input RecordReviewUnavailable { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") != ReviewAttemptStatus::Pending
+                && self.review_statuses.get_cloned(review_id).get("value") != ReviewAttemptStatus::Retired
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::AlreadyDecided }
+        }
+
+        transition RecordReviewUnavailable {
+            on input RecordReviewUnavailable { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Pending
+            }
+            update {
+                self.review_statuses.insert(review_id, ReviewAttemptStatus::Unavailable);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Unavailable }
+        }
+
+        transition RetireReviewRejectedMissing {
+            on input RetireReview { review_id, reason }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id) == false
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::NotFound }
+        }
+
+        transition RetireReviewRejectedRetired {
+            on input RetireReview { review_id, reason }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Retired
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ReviewRetired }
+        }
+
+        transition RetireReviewRejectedSettled {
+            on input RetireReview { review_id, reason }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") != ReviewAttemptStatus::Pending
+                && self.review_statuses.get_cloned(review_id).get("value") != ReviewAttemptStatus::Allowed
+                && self.review_statuses.get_cloned(review_id).get("value") != ReviewAttemptStatus::Retired
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::AlreadyDecided }
+        }
+
+        transition RetireReview {
+            on input RetireReview { review_id, reason }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && (self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Pending
+                    || self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Allowed)
+            }
+            update {
+                self.review_statuses.insert(review_id, ReviewAttemptStatus::Retired);
+                self.review_retirements.insert(review_id, reason);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Retired }
+        }
+
+        transition ConsumeReviewRejectedMissing {
+            on input ConsumeReviewForEntry { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id) == false
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::NotFound }
+        }
+
+        transition ConsumeReviewRejectedRetired {
+            on input ConsumeReviewForEntry { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Retired
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ReviewRetired }
+        }
+
+        transition ConsumeReviewRejectedUsed {
+            on input ConsumeReviewForEntry { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::AlreadyDecided }
+        }
+
+        transition ConsumeReviewRejectedNotSatisfied {
+            on input ConsumeReviewForEntry { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && (self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Pending
+                    || self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Denied
+                    || self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Escalated
+                    || self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Unavailable)
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ReviewNotSatisfied }
+        }
+
+        transition ConsumeReviewForEntry {
+            on input ConsumeReviewForEntry { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Allowed
+            }
+            update {
+                self.review_statuses.insert(review_id, ReviewAttemptStatus::Used);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
+        }
+
+        transition ReleaseReviewRejectedMissing {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id) == false
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::NotFound }
+        }
+
+        transition ReleaseReviewRejectedPending {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Pending
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ReviewPending }
+        }
+
+        transition ReleaseReviewAllowed {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Allowed
+            }
+            update {
+                self.review_ids.remove(review_id);
+                self.review_statuses.remove(review_id);
+                self.review_retirements.remove(review_id);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Allowed }
+        }
+
+        transition ReleaseReviewDenied {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Denied
+            }
+            update {
+                self.review_ids.remove(review_id);
+                self.review_statuses.remove(review_id);
+                self.review_retirements.remove(review_id);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Denied }
+        }
+
+        transition ReleaseReviewEscalated {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Escalated
+            }
+            update {
+                self.review_ids.remove(review_id);
+                self.review_statuses.remove(review_id);
+                self.review_retirements.remove(review_id);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Escalated }
+        }
+
+        transition ReleaseReviewUnavailable {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Unavailable
+            }
+            update {
+                self.review_ids.remove(review_id);
+                self.review_statuses.remove(review_id);
+                self.review_retirements.remove(review_id);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Unavailable }
+        }
+
+        transition ReleaseReviewRetired {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Retired
+            }
+            update {
+                self.review_ids.remove(review_id);
+                self.review_statuses.remove(review_id);
+                self.review_retirements.remove(review_id);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Retired }
+        }
+
+        transition ReleaseReviewUsed {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+            }
+            update {
+                self.review_ids.remove(review_id);
+                self.review_statuses.remove(review_id);
+                self.review_retirements.remove(review_id);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
         }
     }
 }

@@ -9,8 +9,8 @@ This record supplies the subsequent disposition.
 | Reviewer | UTC verdict time | Disposition |
 | --- | --- | --- |
 | Meerkat/MobKit lead | 2026-09-30 23:31:19 | Protocol design accepted; generated implementation, physical enforcement and deployment measurements remain required. |
-| OB3 | 2026-09-30 23:31:33 | Design accepted; synchronous ingress acknowledgment and model witness cost remain operational consequences. |
-| Homecore | 2026-09-30 23:32:24 | Protocol accepted; witness outage prevents model operation, and unresolved external effects need honest recovery. |
+| The operator deployment | 2026-09-30 23:31:33 | Design accepted; synchronous ingress acknowledgment and model witness cost remain operational consequences. |
+| The downstream app | 2026-09-30 23:32:24 | Protocol accepted; witness outage prevents model operation, and unresolved external effects need honest recovery. |
 | Meerkat Toolkit | 2026-09-30 23:35:57 | No remaining protocol blocker; source-contract findings closed, with all runtime and adoption requirements retained. |
 
 The [operational addendum](owner-composition-operational-addendum.md) records
@@ -30,9 +30,9 @@ All four reviewers accepted the exact [keyed request amendment](owner-compositio
 
 | Reviewer | UTC verdict time | Disposition |
 | --- | --- | --- |
-| OB3 | 02:11:01 | Bounded protocol accepted; dependent entry now triggers scoped recovery without waiting for a control request. |
+| The operator deployment | 02:11:01 | Bounded protocol accepted; dependent entry now triggers scoped recovery without waiting for a control request. |
 | Meerkat/MobKit lead | 02:11:03 | Protocol accepted; no periodic retry, no entry fence held during recovery, separately authenticated phases over one mutation binding. |
-| Homecore | 02:11:12 | Protocol accepted; automatic member-scoped recovery and independent member progress retained. |
+| The downstream app | 02:11:12 | Protocol accepted; automatic member-scoped recovery and independent member progress retained. |
 | Meerkat Toolkit | 02:19:28 | Bounded protocol source accepted; recovery single-flight lifetime through cancellation and exact phase authentication still require implementation evidence. |
 
 The reviews closed specific design gaps: a realm-wide control mutex, ambiguous background retry behavior, recovery depending on rare control mutations, and phase envelopes conflicting despite binding the same mutation. Generated keyed joins, canonical owner transitions, physical transactions, retention, antirollback custody and actual protected-entry tests remain required. These verdicts do not accept a deployment or the complete ADR implementation.

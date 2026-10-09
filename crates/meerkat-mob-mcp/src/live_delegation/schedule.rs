@@ -298,15 +298,83 @@ fn result_evidence_digest(result: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// What closing a voice work item came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkItemCloseOutcome {
+    /// The item was closed (with its result evidence, when there was one).
+    Closed,
+    /// The item was already terminal; nothing was written.
+    AlreadyTerminal,
+    /// The item no longer exists (the store pruned or never kept it);
+    /// nothing was written.
+    NotFound,
+}
+
+/// Which step of closing a voice work item failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkItemClosePhase {
+    /// Reading the item.
+    Read,
+    /// Attaching the result evidence.
+    Evidence,
+    /// The close itself.
+    Close,
+}
+
+/// A failed attempt to close a voice work item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WorkItemCloseFailure {
+    pub(super) phase: WorkItemClosePhase,
+    /// A stale revision or a store error: another attempt may succeed. A
+    /// conflict or an invalid transition will not.
+    pub(super) retryable: bool,
+    pub(super) message: String,
+}
+
+impl WorkItemCloseFailure {
+    fn from_error(
+        phase: WorkItemClosePhase,
+        error: &meerkat::WorkGraphError,
+        what: String,
+    ) -> Self {
+        Self {
+            phase,
+            retryable: matches!(
+                error,
+                meerkat::WorkGraphError::StaleRevision { .. } | meerkat::WorkGraphError::Store(_)
+            ),
+            message: format!("{what}: {error}"),
+        }
+    }
+}
+
+impl std::fmt::Display for WorkItemCloseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// WorkGraph access scoped the way the mob's members see it.
 #[derive(Clone)]
 pub(super) struct VoiceWorkGraph {
     service: WorkGraphService,
+    /// Namespace snapshots taken to classify a worker's item (test count).
+    #[cfg(test)]
+    classification_snapshots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Closes that fail with an injected transient store fault (test hook).
+    #[cfg(test)]
+    injected_close_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl VoiceWorkGraph {
     pub(super) fn new(service: WorkGraphService) -> Self {
-        Self { service }
+        Self {
+            service,
+            #[cfg(test)]
+            classification_snapshots: std::sync::Arc::default(),
+            #[cfg(test)]
+            injected_close_faults: std::sync::Arc::default(),
+        }
     }
 
     pub(super) async fn create_item(
@@ -339,7 +407,8 @@ impl VoiceWorkGraph {
             WorkStatus::Cancelled,
             Some(&failed_blockers_evidence_summary(failed)),
         )
-        .await?;
+        .await
+        .map_err(|failure| failure.message)?;
         self.create_item_with_evidence(
             channel_id,
             session_id,
@@ -412,6 +481,39 @@ impl VoiceWorkGraph {
             .await
             .map_err(|error| format!("voice work item creation failed: {error}"))?;
         Ok(VoiceWorkItem { id: item.id, title })
+    }
+
+    /// Make the next `count` closes fail with a transient store fault.
+    #[cfg(test)]
+    pub(super) fn inject_close_faults(&self, count: usize) {
+        self.injected_close_faults
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Attach evidence under the result digest id of `summary` with content
+    /// that differs from what the close would write.
+    #[cfg(test)]
+    #[allow(clippy::expect_used)]
+    pub(super) async fn add_conflicting_result_evidence(&self, item: &WorkItemId, summary: &str) {
+        let current = self.get(item).await.expect("item");
+        self.service
+            .add_evidence(AddEvidenceRequest {
+                id: item.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: current.revision,
+                evidence: WorkEvidenceRef {
+                    kind: "live_delegation_result".to_string(),
+                    id: result_evidence_digest(summary),
+                    label: Some("a different label".to_string()),
+                    summary: Some("different content".to_string()),
+                    confirmation_kind: None,
+                    confirming_owner_key: None,
+                    execution_binding_id: None,
+                },
+            })
+            .await
+            .expect("conflicting evidence");
     }
 
     async fn get(&self, id: &WorkItemId) -> Result<WorkItem, String> {
@@ -512,11 +614,24 @@ impl VoiceWorkGraph {
             .map_err(|error| format!("voice work item {item} claim failed: {error}"))
     }
 
-    /// Classify the item after its worker's bounded turn ended.
+    /// Classify the item after its worker's bounded turn ended. The four
+    /// simple statuses come from the item alone; only Open and Blocked need
+    /// the namespace snapshot, whose readiness (child joins, time windows,
+    /// blockers) is one coherent observation of the item and its graph.
     pub(super) async fn disposition_after_worker_turn(
         &self,
         item: &WorkItemId,
     ) -> Result<WorkItemDisposition, String> {
+        match self.get(item).await?.status {
+            WorkStatus::Completed => return Ok(WorkItemDisposition::Completed),
+            WorkStatus::Failed => return Ok(WorkItemDisposition::Failed),
+            WorkStatus::Cancelled => return Ok(WorkItemDisposition::Cancelled),
+            WorkStatus::InProgress => return Ok(WorkItemDisposition::InProgress),
+            WorkStatus::Open | WorkStatus::Blocked => {}
+        }
+        #[cfg(test)]
+        self.classification_snapshots
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let snapshot = self
             .service
             .snapshot(WorkGraphSnapshotFilter {
@@ -564,24 +679,55 @@ impl VoiceWorkGraph {
     }
 
     /// Close an item the worker left open, attaching the result summary as
-    /// self-attested evidence first. A terminal item is left as it is.
+    /// self-attested evidence first. A terminal item is left as it is. Safe
+    /// to replay: the evidence id is a digest of the result, so evidence a
+    /// failed earlier attempt already attached is not added twice, and a
+    /// replay after the close finds the item terminal.
     pub(super) async fn close(
         &self,
         item: &WorkItemId,
         status: WorkStatus,
         result_summary: Option<&str>,
-    ) -> Result<(), String> {
-        let mut current = self.get(item).await?;
+    ) -> Result<WorkItemCloseOutcome, WorkItemCloseFailure> {
+        #[cfg(test)]
+        if self
+            .injected_close_faults
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(WorkItemCloseFailure::from_error(
+                WorkItemClosePhase::Close,
+                &meerkat::WorkGraphError::Store("injected transient fault".to_string()),
+                format!("voice work item {item} close failed"),
+            ));
+        }
+        let mut current = match self.service.get(None, None, item.clone()).await {
+            Ok(current) => current,
+            Err(meerkat::WorkGraphError::NotFound { .. }) => {
+                return Ok(WorkItemCloseOutcome::NotFound);
+            }
+            Err(error) => {
+                return Err(WorkItemCloseFailure::from_error(
+                    WorkItemClosePhase::Read,
+                    &error,
+                    format!("voice work item {item} read failed"),
+                ));
+            }
+        };
         if matches!(
             current.status,
             WorkStatus::Completed | WorkStatus::Failed | WorkStatus::Cancelled
         ) {
-            return Ok(());
+            return Ok(WorkItemCloseOutcome::AlreadyTerminal);
         }
         if let Some(summary) = result_summary.filter(|summary| !summary.trim().is_empty()) {
             current = self
                 .service
-                .add_evidence(AddEvidenceRequest {
+                .add_evidence_idempotent(AddEvidenceRequest {
                     id: item.clone(),
                     realm_id: None,
                     namespace: None,
@@ -597,7 +743,13 @@ impl VoiceWorkGraph {
                     },
                 })
                 .await
-                .map_err(|error| format!("voice work item {item} evidence failed: {error}"))?;
+                .map_err(|error| {
+                    WorkItemCloseFailure::from_error(
+                        WorkItemClosePhase::Evidence,
+                        &error,
+                        format!("voice work item {item} evidence failed"),
+                    )
+                })?;
         }
         self.service
             .close(CloseWorkItemRequest {
@@ -608,8 +760,14 @@ impl VoiceWorkGraph {
                 status,
             })
             .await
-            .map(|_| ())
-            .map_err(|error| format!("voice work item {item} close failed: {error}"))
+            .map(|_| WorkItemCloseOutcome::Closed)
+            .map_err(|error| {
+                WorkItemCloseFailure::from_error(
+                    WorkItemClosePhase::Close,
+                    &error,
+                    format!("voice work item {item} close failed"),
+                )
+            })
     }
 }
 
@@ -620,6 +778,139 @@ impl VoiceWorkGraph {
 )]
 mod tests {
     use super::*;
+
+    async fn voice_workgraph() -> VoiceWorkGraph {
+        VoiceWorkGraph::new(WorkGraphService::new(std::sync::Arc::new(
+            meerkat::MemoryWorkGraphStore::new(),
+        )))
+    }
+
+    async fn voice_item(workgraph: &VoiceWorkGraph, transcript: &str) -> WorkItemId {
+        workgraph
+            .create_item(
+                &LiveChannelId::new("schedule-test-channel"),
+                &meerkat_core::SessionId::new(),
+                &format!("delegation-{transcript}"),
+                transcript,
+            )
+            .await
+            .expect("voice item")
+            .id
+    }
+
+    /// #1820 follow-up: the four simple statuses come from the item alone. A
+    /// terminal or running item is classified with no namespace snapshot,
+    /// even when a stale Blocks edge still points at it; only Open and
+    /// Blocked read the namespace.
+    #[tokio::test]
+    async fn a_terminal_or_running_item_is_classified_without_a_namespace_read() {
+        let workgraph = voice_workgraph().await;
+        let blocker = voice_item(&workgraph, "the stale blocker").await;
+        let item = voice_item(&workgraph, "the finished work").await;
+        // The worker holds the item before the edge appears: a stale edge
+        // a member added while it ran.
+        workgraph.claim(&item, "worker-a").await.expect("claim");
+        workgraph
+            .service
+            .link(meerkat::LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.clone(),
+                to_id: item.clone(),
+            })
+            .await
+            .expect("stale blocks edge");
+        let reads = || {
+            workgraph
+                .classification_snapshots
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert!(matches!(
+            workgraph.disposition_after_worker_turn(&item).await,
+            Ok(WorkItemDisposition::InProgress)
+        ));
+        assert_eq!(reads(), 0, "a running item needs no snapshot");
+        for (status, expected) in [
+            (WorkStatus::Completed, WorkItemDisposition::Completed),
+            (WorkStatus::Failed, WorkItemDisposition::Failed),
+            (WorkStatus::Cancelled, WorkItemDisposition::Cancelled),
+        ] {
+            let item = voice_item(&workgraph, &format!("work ending {status:?}")).await;
+            workgraph.claim(&item, "worker-b").await.expect("claim");
+            workgraph
+                .close(&item, status, None)
+                .await
+                .expect("close the item");
+            let disposition = workgraph
+                .disposition_after_worker_turn(&item)
+                .await
+                .expect("disposition");
+            assert_eq!(
+                std::mem::discriminant(&disposition),
+                std::mem::discriminant(&expected),
+                "{status:?}"
+            );
+        }
+        assert_eq!(reads(), 0, "terminal items need no snapshot");
+        let open = voice_item(&workgraph, "still open").await;
+        let _ = workgraph.disposition_after_worker_turn(&open).await;
+        assert_eq!(reads(), 1, "an Open item is classified from the snapshot");
+    }
+
+    /// A close replayed after its result evidence landed (the earlier
+    /// attempt failed at the close) attaches no second evidence ref and
+    /// closes the item.
+    #[tokio::test]
+    async fn a_replayed_close_attaches_the_result_evidence_once() {
+        let workgraph = voice_workgraph().await;
+        let item = voice_item(&workgraph, "the replayed work").await;
+        workgraph.claim(&item, "worker").await.expect("claim");
+        let summary = "the worker's result";
+        let current = workgraph.get(&item).await.expect("item");
+        workgraph
+            .service
+            .add_evidence(AddEvidenceRequest {
+                id: item.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: current.revision,
+                evidence: WorkEvidenceRef {
+                    kind: "live_delegation_result".to_string(),
+                    id: result_evidence_digest(summary),
+                    label: Some("worker result".to_string()),
+                    summary: Some(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
+                    confirmation_kind: None,
+                    confirming_owner_key: None,
+                    execution_binding_id: None,
+                },
+            })
+            .await
+            .expect("evidence from the failed attempt");
+        assert_eq!(
+            workgraph
+                .close(&item, WorkStatus::Completed, Some(summary))
+                .await,
+            Ok(WorkItemCloseOutcome::Closed)
+        );
+        let closed = workgraph.get(&item).await.expect("item");
+        assert_eq!(closed.status, WorkStatus::Completed);
+        assert_eq!(
+            closed
+                .evidence_refs
+                .iter()
+                .filter(|evidence| evidence.kind == "live_delegation_result")
+                .count(),
+            1
+        );
+        assert_eq!(
+            workgraph
+                .close(&item, WorkStatus::Completed, Some(summary))
+                .await,
+            Ok(WorkItemCloseOutcome::AlreadyTerminal),
+            "a second replay finds the item terminal"
+        );
+    }
 
     #[test]
     fn narration_templates_are_fixed_and_carry_titles_verbatim() {

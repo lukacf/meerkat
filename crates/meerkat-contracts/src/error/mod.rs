@@ -315,11 +315,13 @@ pub fn session_error_details(error: &meerkat_core::SessionError) -> Option<serde
 impl From<meerkat_core::SessionError> for WireError {
     fn from(err: meerkat_core::SessionError) -> Self {
         let code = match &err {
-            meerkat_core::SessionError::RuntimeUnavailable { .. } => {
+            meerkat_core::SessionError::RuntimeUnavailable { .. }
+            | meerkat_core::SessionError::HostingUnavailable { .. } => {
                 ErrorCode::SessionRuntimeUnavailable
             }
             meerkat_core::SessionError::NotFound { .. } => ErrorCode::SessionNotFound,
-            meerkat_core::SessionError::Busy { .. } => ErrorCode::SessionBusy,
+            meerkat_core::SessionError::Busy { .. }
+            | meerkat_core::SessionError::ServedElsewhere { .. } => ErrorCode::SessionBusy,
             meerkat_core::SessionError::NotRunning { .. } => ErrorCode::SessionNotRunning,
             meerkat_core::SessionError::Agent(meerkat_core::AgentError::Cancelled) => {
                 ErrorCode::RequestCancelled
@@ -373,6 +375,42 @@ mod tests {
             Some(serde_json::json!({
                 "code": "SESSION_RUNTIME_UNAVAILABLE",
                 "reason": { "kind": "authority_changed" },
+            }))
+        );
+    }
+
+    /// #1813: a session another runtime owner hosts is refused under the
+    /// session-busy code, and its typed kind travels in the details.
+    #[test]
+    fn served_elsewhere_is_session_busy_with_its_typed_kind() {
+        let id = meerkat_core::SessionId::new();
+        let wire = WireError::from(meerkat_core::SessionError::ServedElsewhere { id: id.clone() });
+        assert_eq!(wire.code, ErrorCode::SessionBusy);
+        assert_eq!(
+            wire.details,
+            Some(serde_json::json!({
+                "kind": "session_served_elsewhere",
+                "session_id": id.to_string(),
+            }))
+        );
+    }
+
+    /// #1813: a session whose cross-process hosting claim is unavailable is
+    /// refused under the runtime-unavailable code with its typed kind, and
+    /// no local cause (a path) crosses the wire.
+    #[test]
+    fn hosting_unavailable_is_runtime_unavailable_with_its_typed_kind() {
+        let id = meerkat_core::SessionId::new();
+        let wire =
+            WireError::from(meerkat_core::SessionError::HostingUnavailable { id: id.clone() });
+        assert_eq!(wire.code, ErrorCode::SessionRuntimeUnavailable);
+        assert_eq!(wire.code.jsonrpc_code(), -32032);
+        assert_eq!(wire.code.http_status(), 503);
+        assert_eq!(
+            wire.details,
+            Some(serde_json::json!({
+                "kind": "session_hosting_unavailable",
+                "session_id": id.to_string(),
             }))
         );
     }

@@ -956,6 +956,22 @@ impl ToolCallError {
     }
 }
 
+/// A failed session preparation as a tool error. A session another runtime
+/// owner hosts keeps its typed wire form (session busy, with
+/// `kind = "session_served_elsewhere"`; #1813), as does one whose hosting
+/// claim is unavailable (runtime unavailable, with
+/// `kind = "session_hosting_unavailable"`); anything else is internal.
+fn prepare_session_tool_error(error: SessionError) -> ToolCallError {
+    if matches!(
+        error,
+        SessionError::ServedElsewhere { .. } | SessionError::HostingUnavailable { .. }
+    ) {
+        let wire = meerkat_contracts::WireError::from(error);
+        return ToolCallError::new(wire.code.jsonrpc_code(), wire.message, wire.details);
+    }
+    ToolCallError::internal(format!("Failed to prepare session: {error}"))
+}
+
 fn map_config_runtime_error(err: ConfigRuntimeError) -> ToolCallError {
     match err {
         ConfigRuntimeError::GenerationConflict { expected, current } => ToolCallError::new(
@@ -967,6 +983,13 @@ fn map_config_runtime_error(err: ConfigRuntimeError) -> ToolCallError {
                 "current_generation": current
             })),
         ),
+        // The store refused the caller's candidate config (a new or changed
+        // realm MCP server with an environment reference, or an invalid
+        // written config); document and store failures stay internal.
+        ConfigRuntimeError::Config(
+            error @ (meerkat_core::ConfigError::RealmMcpServerEnvReference(_)
+            | meerkat_core::ConfigError::Validation(_)),
+        ) => ToolCallError::invalid_params(format!("Invalid config: {error}")),
         other => ToolCallError::new(
             -32603,
             other.to_string(),
@@ -1379,6 +1402,9 @@ impl MeerkatMcpState {
             &fs_realm_config_source,
         )
         .await?;
+        // #1813: a realm that declares multi-process hosting refuses to start
+        // when its stores cannot provide it.
+        persistence.require_hosting_mode(config.storage.hosting_mode())?;
         let store_path = persistence
             .store_path()
             .map(std::path::Path::to_path_buf)
@@ -1458,6 +1484,11 @@ impl MeerkatMcpState {
             &builder,
             Some(workgraph_service.namespace_grant().clone()),
         );
+        #[cfg(feature = "mob")]
+        let (runtime_delivery_inbox, continuation_bindings) = (
+            persistence.runtime_delivery_inbox(),
+            persistence.continuation_bindings(),
+        );
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
                 builder,
@@ -1488,6 +1519,14 @@ impl MeerkatMcpState {
                 state = state.with_controlling_acceptor(acceptor);
             }
             let state = state.into_shared();
+            // fork_off and council outcomes are submitted durably to the
+            // service's delivery owner, which resolves members and confirms
+            // jobs through this state.
+            if let Err(error) =
+                state.bind_continuations(runtime_delivery_inbox, &continuation_bindings)
+            {
+                tracing::warn!(%error, "fork_off and council run in the turn: continuation owner not bound");
+            }
             state.start_workgraph_flow_reconciler();
             *mob_tools_slot
                 .write()
@@ -4194,6 +4233,8 @@ async fn handle_meerkat_run(
                 provider_params: input.provider_params.clone(),
                 call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
                 external_tools,
+                // The session service decides hosting when it creates the actor.
+                hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
                 mcp_servers: Vec::new(),
                 recoverable_tool_defs: (!input.tools.is_empty())
                     .then(|| recoverable_callback_tool_defs(&input.tools)),
@@ -4234,6 +4275,7 @@ async fn handle_meerkat_run(
                 additional_instructions: input.additional_instructions.clone(),
                 initial_metadata_entries: std::collections::BTreeMap::new(),
                 initial_tool_filter: None,
+                initial_tool_visibility_state: None,
                 shell_env: input.shell_env.clone(),
                 resume_override_mask: ResumeOverrideMask {
                     model: input.model.is_some(),
@@ -4374,11 +4416,15 @@ async fn handle_meerkat_resume(
     }
 
     // Resume is an attach: resolve a crash-window provisional tail first.
+    let claim = state
+        .service
+        .grant_session_hosting(&session_id)
+        .map_err(prepare_session_tool_error)?;
     state
         .service
-        .prepare_cold_attach(&session_id)
+        .prepare_cold_attach(&session_id, claim)
         .await
-        .map_err(|e| ToolCallError::internal(format!("Failed to prepare session: {e}")))?;
+        .map_err(prepare_session_tool_error)?;
     let session = state
         .service
         .load_authoritative_session(&session_id)
@@ -4629,6 +4675,8 @@ async fn handle_meerkat_resume(
             provider_params: input.provider_params.clone(),
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools,
+            // The session service decides hosting when it creates the actor.
+            hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
             mcp_servers: Vec::new(),
             recoverable_tool_defs: (!input.tools.is_empty())
                 .then(|| recoverable_callback_tool_defs(&input.tools)),
@@ -4680,6 +4728,7 @@ async fn handle_meerkat_resume(
             additional_instructions: input.additional_instructions.clone(),
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
+            initial_tool_visibility_state: None,
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: input.model.is_some(),
@@ -6755,6 +6804,47 @@ mod tests {
             });
             assert_eq!(err.code, rpc_code, "tool code {tool_code:?}");
         }
+    }
+
+    /// Realm MCP servers are literal, judged entry by entry by the store, so
+    /// the commit prevalidator does not veto a document that keeps a legacy
+    /// entry. The store's refusal of the caller's own new or changed entry,
+    /// and its validation refusal, are invalid params; document and store
+    /// failures stay internal.
+    #[test]
+    fn test_realm_mcp_env_references_are_refused_by_the_store_as_invalid_params() {
+        let mut config = Config::default();
+        config.tools.mcp_servers = vec![meerkat_core::McpServerConfig::streamable_http(
+            "legacy",
+            "https://mcp.example.com/${HOST_SECRET}",
+            std::collections::HashMap::new(),
+        )];
+        validate_config_for_commit(&config)
+            .expect("the prevalidator leaves literal-server checks to the store");
+
+        let refused = map_config_runtime_error(ConfigRuntimeError::Config(
+            meerkat_core::ConfigError::RealmMcpServerEnvReference(
+                meerkat_core::mcp_config::McpRealmServerEnvReference {
+                    server: "exfil".to_string(),
+                    field: "url",
+                },
+            ),
+        ));
+        assert_eq!(refused.code, -32602);
+        assert!(
+            refused.message.contains("'exfil'")
+                && refused
+                    .message
+                    .contains("never expanded from the environment"),
+            "{}",
+            refused.message
+        );
+        let invalid = map_config_runtime_error(ConfigRuntimeError::Config(
+            meerkat_core::ConfigError::Validation("max_tokens".to_string()),
+        ));
+        assert_eq!(invalid.code, -32602);
+        let io = map_config_runtime_error(ConfigRuntimeError::Io(std::io::Error::other("disk")));
+        assert_eq!(io.code, -32603);
     }
 
     #[test]

@@ -4,7 +4,7 @@ description: "Optional ABAC for the console: control which users can see which a
 icon: "lock"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 MobKit ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
 
@@ -28,7 +28,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `mob.memory.read` | Read mob-scoped memory records in the Memory panel |
 | `mob.memory.propose` | Propose records into mob scope (future propose surfaces) |
 | `mob.memory.commit` | Reserved for a future direct mob-commit RPC — steward promotions ride the gating flow (`gating.decide`), not this action |
-| `memory.quarantine.review` | Read the quarantine queue and quarantined record bodies |
+| `memory.quarantine.review` | Read the quarantine queue and quarantined record bodies. Together with an identity's memory grants it also decides that identity's quarantined records; on its own it decides nothing |
 | `agent.spawn` | Create members: ensure/spawn/fork helpers, run flows |
 | `agent.respawn` | Respawn the agent |
 | `agent.retire` | Retire / force-cancel / delete the agent |
@@ -148,20 +148,148 @@ mobkit = await (
 
 ## Live administration from the console
 
-Administrators get an **Access** entry in the console workbench (it never appears for anyone else). It edits the live configuration through the `mobkit/access/*` RPC methods — group membership, rules, admins, and the enforcement toggle all apply on the next request, no restart, and persist back to `access.toml`:
+### Configure the owner and the connection
 
-| Method | Purpose |
-|--------|---------|
-| `mobkit/access/status` | Caller's own standing (any caller) |
-| `mobkit/access/get` / `set` | Read / replace the whole config |
-| `mobkit/access/enable` | Toggle enforcement |
-| `mobkit/access/rules/upsert` / `delete` | Edit one rule |
-| `mobkit/access/groups/set` / `delete` | Assign people to groups |
-| `mobkit/access/preview` | Evaluate "would subject X be allowed to ..." |
+Load the file shown under [Configuration](#configuration) through
+`UnifiedRuntime::builder().access_control_file("config/access.toml")`, or the
+existing SDK `accessControl` / `access_control` builder entrypoint. Keep at least
+one admin when enabling enforcement. A file-backed controller saves successful
+changes to its configured TOML path before publishing the new live state; an
+in-memory controller has no file persistence guarantee.
 
-All write methods require `access.admin` (or admin standing) and return the new config revision. Denied operations everywhere surface as JSON-RPC error `-32030` with `data.kind = "access_denied"`, or HTTP `403` on REST/SSE surfaces.
+A disabled controller with no admins lets authenticated callers bootstrap access
+settings. Naming admins closes that bootstrap path.
 
-**Bootstrap:** a fresh controller (disabled, no admins) lets any authenticated console user open the Access panel, name admins, and enable enforcement. The moment admins exist, only they (and `access.admin` grantees) can administer.
+Configure trusted [console authentication](/mobkit/guides/authentication) separately.
+The authenticated token supplies the caller's subject; a `subject` in a preview
+request selects the subject being examined, not the identity making the request.
+For view-only deployments, set server-side `ConsolePolicy.read_only = true`
+(or SDK runtime option `console_read_only`). The URL option
+`?console_read_only=true` only changes presentation and does not protect direct
+RPC calls. See [Console authentication](/mobkit/guides/console#authentication).
+
+### Review and save
+
+Open **Access** with current administrator access. Use **Preview** to check a
+subject, action and optional agent against the current policy before editing.
+Changing the preview inputs or refreshing the configuration invalidates the old
+observation; run Preview again. A preview does not reserve permission for a later
+request.
+
+1. Start an edit in **Overview**, **Groups** or **Rules**. The draft keeps the
+   configuration, owner instance and revision from when the edit began.
+2. Select **Save**. The owner rechecks the caller's current administrator access
+   and the draft's complete edit token in the same serialized mutation. Another
+   administrator's successful save makes an older revision stale.
+3. On a conflict or owner replacement, keep the draft and inspect the refreshed
+   settings. Select **Review and reapply**, then deliberately save again. That
+   review step binds the intended edit to the current configuration; it does not
+   itself write. Refreshing alone never silently rebases or retries the draft.
+
+A loading or failed protected read disables edits until a current read succeeds.
+Missing or unknown checked-save capability also disables edits while permitted
+reads remain available. Losing administrator access or switching connection or
+subject must not expose the previous scope's draft. Server-side read-only mode
+still forbids writes, including administrator writes; authorized configuration
+reads and previews remain available.
+
+### Implement a checked-save client
+
+Use `POST /console/rpc` with the existing console authentication transport.
+Read `mobkit/access/status`, then the protected `mobkit/access/get`. Require
+`conditional_mutations: "checked_v1"`, a nonempty `owner_instance` and a usable
+`revision`; retain the `get` configuration and its complete token with the draft.
+The owner instance identifies this controller lifetime. It is not a permission
+or a durable version number, and a replacement owner can start at revision zero.
+
+Send the complete write payload only inside `params.checked_v1`. For example,
+upsert a rule using the owner instance and revision returned by the read
+(`12` below is illustrative):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "access-save-1",
+  "method": "mobkit/access/rules/upsert",
+  "params": {
+    "checked_v1": {
+      "owner_instance": "<owner_instance from get>",
+      "expected_revision": 12,
+      "rule": {
+        "id": "ops-view-all",
+        "groups": ["ops"],
+        "actions": ["agent.view"]
+      }
+    }
+  }
+}
+```
+
+| Existing method | Payload inside `checked_v1`, in addition to the edit token |
+|-----------------|----------------------------------------------------------|
+| `mobkit/access/set` | `config` |
+| `mobkit/access/enable` | `enabled` |
+| `mobkit/access/rules/upsert` | `rule` |
+| `mobkit/access/rules/delete` | `id` |
+| `mobkit/access/groups/set` | `name`, `group` |
+| `mobkit/access/groups/delete` | `name` |
+
+Successful writes return the new `revision`; refresh before starting a new edit.
+Malformed, mixed or unknown checked envelopes fail without falling back to a
+legacy write. Do not duplicate the payload at the top level or retry without
+`checked_v1`: older handlers reject the nested-only request because the required
+legacy payload is absent. Legacy top-level requests remain compatible but do
+not provide the checked-save concurrency guarantee.
+
+Use the error code together with `data.kind`, rather than matching free-form
+server messages:
+
+| Response | Client action |
+|----------|---------------|
+| `-32009`, `access_revision_conflict` | Retain the draft, refresh, review and explicitly reapply. `expected_revision` and `actual_revision` describe the mismatch. |
+| `-32009`, `access_owner_changed` | Read the replacement owner and explicitly review before another save. |
+| `-32004`, `access_mutation_unavailable` | Keep the draft; do not fall back to an unchecked write. Refresh after availability is restored. |
+| `-32602`, invalid configuration or checked request | Correct the request; do not treat it as a successful save. |
+| `-32000`, `access_persistence_failed` | Report that persistence failed and refresh before an explicit retry. The new live revision was not published. |
+| `-32030`, `access_denied`, or the separate `read_only` error | Respect the current authorization or connection policy; changing the revision cannot authorize the write. |
+
+A transport timeout is not proof of rejection. Read the current owner state
+before deciding whether to retry. UI error notices should remain finite and
+safe, without displaying arbitrary backend diagnostic text.
+
+### Refusal feedback and audit limits
+
+These rules control Console access and administration. They do not grant native
+tool, source or connected-account permissions. In a host-commissioned governed
+Meerkat run, an operation-local tool refusal becomes safe model feedback without
+entering that tool's body; permitted sibling operations can continue. Preserve
+that refusal result rather than turning it into a blanket run failure or silently
+retrying the denied action. Input admission and infrastructure/readiness failures
+are separate typed errors. Ordinary Console access settings do not activate that
+native governed path.
+
+A preview, a saved revision and a visible timeline are different observations.
+Preview evaluates current policy; a save confirms that configuration mutation;
+operation audit records describe the recorded operation boundaries. None proves
+that prompt text caused an action, that all source material was read, or that an
+unrecorded external effect occurred. Observation permissions remain separate
+from mutation permissions. Checked saves add no comprehensive
+configuration-history or native-operation audit viewer.
+
+For implementation work, the existing entrypoints are
+`crates/meerkat-mobkit/src/access/controller.rs` (owner),
+`crates/meerkat-mobkit/src/http_console.rs` (RPC contract),
+`console/src/panels/AccessPanel.tsx` and `console/src/ConsoleApp.tsx` (draft and
+save flow), and `packages/console-core/src/headless.ts` (transport).
+The real-owner browser scenario runs through `console/browser-e2e.cjs` against
+the existing `console_acceptance_fixture` example. Discover it with:
+
+```sh
+node console/browser-e2e.cjs --list --scenario=real-checked-save-recovery
+```
+
+Running it requires the prebuilt fixture binary (`MOBKIT_EXAMPLE_BIN_DIR`) and
+the composed Console bundle; discovery alone is not an E2E result.
 
 ## What gets enforced
 
@@ -169,7 +297,8 @@ All write methods require `access.admin` (or admin standing) and return the new 
 - `/console/timeline`, timeline streams, and `mobkit/console/query_timeline` — frames for hidden identities are filtered out.
 - `mobkit/console/send` and `/console/send` — require `agent.send` on the target.
 - `mobkit/agent_memory/remember` and `mobkit/agent_memory/forget` — require `agent.memory.write` and `agent.memory.delete` respectively on the target identity. `mobkit/agent_memory/recall` and `mobkit/agent_memory/manifest` require **both** `agent.memory.read` and `agent.view` on the identity.
-- `mobkit/memory/panel/*` (the console Memory panel, read-only) — every returned record is filtered by its scope: identity-scoped records need `agent.memory.read` + `agent.view` on that identity, mob-scoped records need `mob.memory.read`, operator-scoped records need `operator.memory.read`, realm-scoped records and `mobkit/memory/panel/dreams` need an unscoped `agent.memory.read` grant, and quarantined records plus `mobkit/memory/panel/quarantine` need `memory.quarantine.review`. The review grant only opens the quarantine surface — each queue record and pending promotion is still filtered by the per-scope read grants above on its (target) scope. Memory content is more sensitive than roster visibility — plain `agent.view` alone no longer reads any of it.
+- `mobkit/memory/panel/*` (the console Memory panel's reads) filters every returned record by its scope: identity-scoped records need `agent.memory.read` + `agent.view` on that identity, mob-scoped records need `mob.memory.read`, operator-scoped records need `operator.memory.read`, realm-scoped records and `mobkit/memory/panel/dreams` need an unscoped `agent.memory.read` grant, and quarantined records (still quarantined, or tombstoned after ever being quarantined) plus `mobkit/memory/panel/quarantine` need `memory.quarantine.review`. The review grant only opens the quarantine surface; each queue record and pending promotion is still filtered by the per-scope read grants above on its (target) scope. Memory content is more sensitive than roster visibility, so plain `agent.view` alone no longer reads any of it.
+- `mobkit/memory/quarantine/decide` (the operator quarantine decision) requires `memory.quarantine.review`, `agent.view` and `agent.memory.read` on the identity, and `agent.memory.write` to release or `agent.memory.delete` to tombstone (any other verdict needs both, then fails validation). Every effect is one the same caller could already cause through `remember`, `update` or `forget` (a released update supersedes its prior, as `update` does); the decision adds the lineage, the trust ceiling, the content binding and the audit trail. An anonymous caller is held to the same grants whenever access control is on. The capabilities list advertises it only to callers holding `memory.quarantine.review`.
 - Lifecycle and runtime RPCs — mapped to `agent.retire` / `agent.respawn` / `agent.reset` / `agent.spawn` / `runtime.admin` per method.
 - Topology control — query visibility requires `agent.view` and
   `topology.view` per endpoint. Connect, disconnect, and reconnect require the

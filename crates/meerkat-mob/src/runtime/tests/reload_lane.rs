@@ -1392,7 +1392,7 @@ async fn stop_waits_for_warm_construction_without_blocking_query_progress() {
         .expect("reload reply");
 }
 
-/// The HomeCore 2026-09-22 wedge on the reload path: the member's committed
+/// The 2026-09-22 production wedge on the reload path: the member's committed
 /// WholeBlob document is refused by the audited-endpoint guard, so the cold
 /// reload's resume verdict fails with meerkat's typed
 /// `SessionError::WholeBlobAuditedEndpointDivergence`. The verdict must reach
@@ -1503,7 +1503,7 @@ async fn reload_carries_the_audited_endpoint_divergence_typed() {
     // registration reload stays refused typed until then.
 }
 
-/// #1248 (HomeCore production): a staged run whose consumer never begins
+/// #1248 (production): a staged run whose consumer never begins
 /// executing trips the execution-start bound, the runtime loop begins
 /// unregister and hands its executor off, and the watcher-owned unregister
 /// fails once in post-stop service cleanup. The failure is retained with

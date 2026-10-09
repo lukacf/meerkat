@@ -84,6 +84,7 @@ impl McpProtocol {
             name,
             args,
             None,
+            || Ok(()),
         )
         .await?;
         convert_tool_result(result, name)

@@ -33,8 +33,8 @@
 import type { ContentBlock, SchemaWarning, SkillKey } from "./types.js";
 import { KNOWN_AGENT_EVENT_TYPES } from "./generated/events.js";
 import { MeerkatError } from "./generated/errors.js";
+import type { ConfinementRefusal } from "./generated/types.js";
 import type {
-  ConfinementRefusal,
   HookFailureReason as NativeHookFailureReason,
   LlmProviderErrorKind,
   LlmProviderErrorRetryability,
@@ -45,13 +45,13 @@ import type {
 // Owner lineage keeps the generated wire shape, including optional/null facts.
 export type {
   TranscriptMessageIdentity,
-  ConfinementRefusal,
   ObjectiveId,
   RunInput,
 } from "./generated/event_types.js";
 // Shared with the transcript-row contract (`WireSessionMessage`), so the
 // generator emits them once in the wire types module.
 export type {
+  ConfinementRefusal,
   RealtimeMessageOrigin,
   LiveContextObservationId,
   LiveChannelId,
@@ -660,6 +660,8 @@ export interface ExternalToolDeltaToolConfigChangeStatus {
   readonly kind: "external_tool_delta";
   readonly phase: ExternalToolDeltaPhase;
   readonly detail?: string;
+  /** Native setup refusal observation; it does not change the lifecycle phase. */
+  readonly confinement_refusal?: ConfinementRefusal;
 }
 
 export type ToolConfigChangeStatus =
@@ -1263,12 +1265,20 @@ function parseToolConfigChangeStatus(raw: unknown): ToolConfigChangeStatus | und
         kind,
         error: String(value.error ?? ""),
       };
-    case "external_tool_delta":
+    case "external_tool_delta": {
+      const refusal = value.confinement_refusal == null
+        ? undefined
+        : requireStringField(value, "confinement_refusal");
+      if (refusal !== undefined && !hasOwn(CONFINEMENT_REFUSAL_MESSAGES, refusal)) {
+        throw new Error("confinement_refusal must be a known native reason");
+      }
       return {
         kind,
         phase: String(value.phase ?? "pending") as ExternalToolDeltaPhase,
         ...(value.detail != null ? { detail: String(value.detail) } : {}),
+        ...(refusal !== undefined ? { confinement_refusal: refusal as ConfinementRefusal } : {}),
       };
+    }
     default:
       return undefined;
   }

@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 const MODEL: &str = "gemini-3.5-flash";
 const PUBLIC_VIDEO_URI: &str =
     "https://storage.googleapis.com/cloud-samples-data/generative-ai/video/pixel8.mp4";
-const HSNS_SAMPLE_VIDEO: &str =
-    "/Users/luka/src/hsns_clean/data/samples/fragment_08_2_20250831193700.mp4";
+/// Path to a local MP4 sample for the uploaded-file smoke. The test skips
+/// when this variable is unset.
+const SAMPLE_VIDEO_ENV: &str = "RKAT_GEMINI_SAMPLE_VIDEO";
 
 fn gemini_api_key() -> Option<String> {
     std::env::var("RKAT_GEMINI_API_KEY")
@@ -79,9 +80,16 @@ async fn live_uploaded_file_video_uri_reference_smoke() -> Result<(), Box<dyn Er
         eprintln!("skipping live smoke: GEMINI_API_KEY is not set");
         return Ok(());
     };
-    let sample = Path::new(HSNS_SAMPLE_VIDEO);
+    let Some(sample_path) = std::env::var(SAMPLE_VIDEO_ENV)
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        eprintln!("skipping live smoke: {SAMPLE_VIDEO_ENV} is not set");
+        return Ok(());
+    };
+    let sample = Path::new(&sample_path);
     if !sample.exists() {
-        eprintln!("skipping live smoke: HSNS sample video not found at {HSNS_SAMPLE_VIDEO}");
+        eprintln!("skipping live smoke: sample video not found at {sample_path}");
         return Ok(());
     }
 

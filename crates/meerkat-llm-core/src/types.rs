@@ -388,6 +388,26 @@ pub trait WebSearchExecutor: Send + Sync {
         &self,
         request: WebSearchRequest,
     ) -> Result<WebSearchResult, LlmError>;
+
+    /// Execute under the admitted work authorization of the calling tool.
+    ///
+    /// The executor's own model request is a separate governed operation: the
+    /// outer tool admission never authorizes the helper's model, account,
+    /// endpoint or hosted search. An executor that sends a model request must
+    /// bind this companion to that exact request and its actual resolved
+    /// target. Executors that cannot do so refuse `Some` rather than send.
+    async fn execute_web_search_authorized(
+        &self,
+        request: WebSearchRequest,
+        authorization: Option<meerkat_core::LlmRequestAuthorization>,
+    ) -> Result<WebSearchResult, LlmError> {
+        if authorization.is_some() {
+            return Err(LlmError::operation_refused(
+                meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+            ));
+        }
+        self.execute_web_search(request).await
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

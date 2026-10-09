@@ -526,3 +526,6 @@ async fn stale_resolved_owner_refuses_before_preparation_after_reload() {
 
 #[path = "call_context_policy_tests.rs"]
 mod policy_tests;
+
+#[path = "call_context_review_tests.rs"]
+mod review_tests;

@@ -690,6 +690,11 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::MapKeys(Box::new(#inner_e)) }
         }
+        ExprDef::MapValue { map, key } => {
+            let map_e = gen_schema_expr(map);
+            let key_e = gen_schema_expr(key);
+            quote! { Expr::MapValue { map: Box::new(#map_e), key: Box::new(#key_e) } }
+        }
         ExprDef::IsSome(inner) => {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::Neq(Box::new(#inner_e), Box::new(Expr::None)) }
@@ -842,6 +847,12 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
                 .filter_map(|g| {
                     let stripped = strip_phase_guards(def, &g.expr);
                     stripped.map(|remaining| {
+                        // An absent strict-read key refuses: conjoin the
+                        // lazy definedness predicate first (#1811).
+                        let remaining = match crate::strict_reads::definedness(&remaining) {
+                            Some(defined) => ExprDef::And(vec![defined, remaining]),
+                            None => remaining,
+                        };
                         let expr = gen_schema_expr_for(def, &remaining);
                         let guard_name_str = &g.name;
                         quote! { Guard { name: #guard_name_str.into(), expr: #expr } }
@@ -1282,6 +1293,10 @@ fn references_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
             key: value,
         }
         | ExprDef::MapGetCloned {
+            map: collection,
+            key: value,
+        }
+        | ExprDef::MapValue {
             map: collection,
             key: value,
         } => {

@@ -100,6 +100,33 @@ pub(super) fn environment(config: &ShellConfig, directory: &Path) -> BTreeMap<Os
     environment
 }
 
+/// The single native entry step for a reviewed shell call, run after every
+/// local launch preparation step (confinement binding, custody reservation)
+/// and immediately before the process spawn. `None` for spawns that are not
+/// a new tool-call effect (recovery, host-only helpers).
+pub(crate) type EntryHook<'a> =
+    Option<&'a (dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync)>;
+
+/// A native entry refusal carried through the io error channel so the shell
+/// tool surface can recover the exact typed tool error.
+#[derive(Debug)]
+pub(crate) struct ReviewedEntryRefused(pub(crate) meerkat_core::ToolError);
+
+impl std::fmt::Display for ReviewedEntryRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for ReviewedEntryRefused {}
+
+pub(super) fn enter_physical(entry: EntryHook<'_>) -> std::io::Result<()> {
+    if let Some(enter) = entry {
+        enter().map_err(|refusal| std::io::Error::other(ReviewedEntryRefused(refusal)))?;
+    }
+    Ok(())
+}
+
 /// Exact launch data assembled from the host configuration and this invocation.
 pub(super) struct ShellLaunch<'a> {
     pub(super) program: &'a OsStr,
@@ -124,6 +151,7 @@ pub(super) async fn spawn_in_custody(
     identity: SpawnIdentity<'_>,
     confinement: &ConfinementBinding,
     launch: ShellLaunch<'_>,
+    entry: EntryHook<'_>,
     make_group: impl FnOnce(&ProcessChild) -> OwnedProcessGroup,
 ) -> std::io::Result<SpawnedInCustody> {
     let ShellLaunch {
@@ -147,7 +175,7 @@ pub(super) async fn spawn_in_custody(
             let prepared = compiled
                 .bind_launch(launch)
                 .map_err(std::io::Error::other)?;
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 if let Some(custody) = binding.custody.as_ref() {
                     let gate = custody
@@ -159,14 +187,15 @@ pub(super) async fn spawn_in_custody(
                         .await
                         .map_err(std::io::Error::other)?;
                     let child = gate.spawn_confined(prepared)?;
-                    return finish_gated_spawn(gate, child, make_group).await;
+                    return finish_gated_spawn(gate, child, entry, make_group).await;
                 }
+                enter_physical(entry)?;
                 let child = prepared.spawn()?.into();
                 Ok(finish_ungated_spawn(child, make_group))
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
-                let _ = (prepared, binding, identity, make_group);
+                let _ = (prepared, binding, identity, entry, make_group);
                 Err(std::io::Error::other(
                     meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement,
                 ))
@@ -187,11 +216,12 @@ pub(super) async fn spawn_in_custody(
                     .map_err(std::io::Error::other)?;
                 configure_trusted(&mut command, directory, environment);
                 let child = command.spawn()?.into();
-                return finish_gated_spawn(gate, child, make_group).await;
+                return finish_gated_spawn(gate, child, entry, make_group).await;
             }
             let mut command = Command::new(program);
             command.args(args);
             configure_trusted(&mut command, directory, environment);
+            enter_physical(entry)?;
             let child = command.spawn()?.into();
             Ok(finish_ungated_spawn(child, make_group))
         }
@@ -218,19 +248,28 @@ fn configure_trusted(
 async fn finish_gated_spawn(
     prepared: super::custody::PreparedCustodySpawn,
     mut child: ProcessChild,
+    entry: EntryHook<'_>,
     make_group: impl FnOnce(&ProcessChild) -> OwnedProcessGroup,
 ) -> std::io::Result<SpawnedInCustody> {
     let mut process_group = make_group(&child);
-    match prepared.spawned_pid(child.id()).await {
+    // The native entry runs after custody recorded the spawned leader and
+    // immediately before the gate release that lets the command run.
+    match prepared
+        .spawned_pid_entering(child.id(), || enter_physical(entry))
+        .await
+    {
         Ok(guard) => Ok(SpawnedInCustody {
             child,
             process_group,
             hold: CustodyHold { guard: Some(guard) },
         }),
-        Err(error) => {
+        Err(failure) => {
             // The gate stayed closed; reap the prologue without running the command.
             let _ = process_group.terminate(&mut child).await;
-            Err(std::io::Error::other(error))
+            Err(match failure {
+                super::custody::GatedSpawnFailure::Custody(error) => std::io::Error::other(error),
+                super::custody::GatedSpawnFailure::Entry(error) => error,
+            })
         }
     }
 }

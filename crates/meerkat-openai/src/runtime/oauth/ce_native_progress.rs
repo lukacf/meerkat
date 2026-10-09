@@ -240,6 +240,7 @@ impl OperationPolicyOwner for ResourceOwner {
             operation_values: values(verb),
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: now + 60_000,
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
 }

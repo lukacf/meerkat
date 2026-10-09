@@ -2,7 +2,7 @@
 
 Verdict: GREEN for architectural coherence and project-owner re-review. This is not implementation approval or evidence of a shipped security guarantee.
 
-Reviewed candidate: `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md`, 904 lines, SHA-256 `a242a21407fbf52d2ca5615edfdd6b5649b40fa6f73c959d4857eddd8e2db87e`.
+Reviewed candidate: `(operator-retained path)/docs/internal/design/adr-001-runtime-security.md`, 904 lines, SHA-256 `a242a21407fbf52d2ca5615edfdd6b5649b40fa6f73c959d4857eddd8e2db87e`.
 
 Scope: full reread, emphasizing the interactions among participating authority fences, generated owner obligations, durable evidence, owner-store loss, snapshot rollback/cloning, fresh-context reset, reserved notification evidence, approvals and relationship authority. Source and doctrine were inspected statically. No ADR/source edits, builds, tests, deployment, or bus messages were performed.
 

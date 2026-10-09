@@ -127,7 +127,7 @@ impl SpawnMemberCustomizer for ChildPolicyCustomizer {
         }
         match &self.policy {
             Ok(binding) => {
-                spec.application_tool_policy = binding.clone();
+                spec.application_tool_policy = Some(binding.clone());
                 Ok(())
             }
             Err(refusal) => Err(MobError::WiringError(refusal.to_string())),

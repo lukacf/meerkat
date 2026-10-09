@@ -125,6 +125,9 @@ pub enum ToolDispatchTerminalErrorKind {
     // Appended so released ordinals stay stable. A plain comment, not a doc
     // comment: a documented unit variant would split this schema enum.
     OutcomeUncertain,
+    ReviewUnsatisfied,
+    ReviewUnavailable,
+    HookLaunchRefused,
 }
 
 impl From<&ToolError> for ToolDispatchTerminalErrorKind {
@@ -142,8 +145,11 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
             ToolError::AuthorizationRefused { .. } => Self::AuthorizationRefused,
             ToolError::ConfinementRefused { .. } => Self::ConfinementRefused,
             ToolError::HookDenied { .. } => Self::HookDenied,
+            ToolError::HookLaunchRefused { .. } => Self::HookLaunchRefused,
             ToolError::OperationObservationUnavailable => Self::OperationObservationUnavailable,
             ToolError::OperationAuthorizationUnavailable => Self::OperationAuthorizationUnavailable,
+            ToolError::ReviewUnsatisfied { .. } => Self::ReviewUnsatisfied,
+            ToolError::ReviewUnavailable { .. } => Self::ReviewUnavailable,
             ToolError::PolicyDenied { .. } => Self::PolicyDenied,
             ToolError::PolicyIndeterminate { .. } => Self::PolicyIndeterminate,
             ToolError::Other(_) => Self::Other,

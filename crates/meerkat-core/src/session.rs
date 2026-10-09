@@ -118,6 +118,7 @@ impl SessionGeneration {
 
 #[cfg(test)]
 mod assistant_message_identity_tests;
+pub mod context_control;
 mod digest_accumulator;
 mod head_metadata;
 mod import_0810;
@@ -1387,6 +1388,8 @@ impl<'de> Deserialize<'de> for Session {
         )
         .map_err(<D::Error as serde::de::Error>::custom)?;
         let mut metadata = serde_repr.metadata;
+        context_control::validate_metadata(&serde_repr.id, &metadata)
+            .map_err(<D::Error as serde::de::Error>::custom)?;
         if import_0810::contains_released_checkpoint_metadata(&metadata) {
             return Err(<D::Error as serde::de::Error>::custom(
                 "embedded released checkpoint metadata requires the explicit one-time 0.8.10 importer",
@@ -1827,6 +1830,7 @@ impl Session {
         model_routing_control: model_routing_control::SessionModelRoutingControlHistory,
         head_canonical_metadata: Option<Arc<SessionHeadMetadataProjection>>,
     ) -> Result<Self, String> {
+        context_control::validate_metadata(&id, &metadata).map_err(|error| error.to_string())?;
         let version =
             session_persistence_version_authority::restore_session_envelope_version(version)
                 .map_err(|err| err.to_string())?;
@@ -2071,10 +2075,11 @@ impl ReservedSessionMetadataKey {
 }
 
 fn is_session_authority_metadata_key(key: &str) -> bool {
-    // Single reserved-key authority: the typed classifier owns the
-    // session-authority key set (the `session_*` state constants).
+    // The typed classifier owns session state keys. Protected observations
+    // share this raw-mutation guard but never supply execution authority.
     key == SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY
         || key == SESSION_AUTHORED_CACHE_BREAKPOINTS_KEY
+        || key.starts_with(context_control::CONTEXT_CONTROL_AUDIT_PREFIX)
         || crate::surface_metadata::ReservedMetadataKey::is_session_authority(key)
 }
 
@@ -3504,6 +3509,13 @@ pub struct SessionToolVisibilityState {
     pub capability_base_filter: ToolFilter,
     #[serde(default, skip_serializing_if = "is_tool_filter_all")]
     pub inherited_base_filter: ToolFilter,
+    /// The tools the session's execution policy makes unreachable by name
+    /// (a deny list, or the complement of an allow list), hidden from the
+    /// visible scope. Recomputed from the policy on every build, like
+    /// `capability_base_filter`; conditional policy (read-only intent,
+    /// consequence policy) never lands here and is refused at call time.
+    #[serde(default, skip_serializing_if = "is_tool_filter_all")]
+    pub policy_base_filter: ToolFilter,
     #[serde(default, skip_serializing_if = "is_tool_filter_all")]
     pub active_filter: ToolFilter,
     #[serde(default, skip_serializing_if = "is_tool_filter_all")]
@@ -3623,10 +3635,91 @@ pub enum DeferredToolResultsIngressError {
 
 /// Fixed engine failure retained while already-dispatched siblings settle.
 /// This is historical execution data, never permission or retry authority.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeferredToolBatchFailureKind {
     OperationObservationUnavailable,
+    /// A mandatory PostTool hook failed for infrastructure reasons after its
+    /// tool entered. The run ends with this exact hook error once the
+    /// already-entered siblings have settled.
+    PostToolHookInfrastructure(DeferredHookInfrastructureFailure),
+}
+
+/// The typed hook-infrastructure error a mandatory PostTool hook raised:
+/// the hook could not launch, timed out, failed while running, or its
+/// configuration was rejected. It is not a denial and grants nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "failure", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum DeferredHookInfrastructureFailure {
+    LaunchRefused {
+        hook_id: crate::hooks::HookId,
+        reason: crate::hooks::HookFailureReason,
+    },
+    Timeout {
+        hook_id: crate::hooks::HookId,
+        timeout_ms: u64,
+    },
+    ExecutionFailed {
+        hook_id: crate::hooks::HookId,
+        reason: String,
+    },
+    ConfigInvalid {
+        reason: String,
+    },
+}
+
+impl DeferredHookInfrastructureFailure {
+    /// The hook-infrastructure classes of `error`; any other error is not a
+    /// hook infrastructure failure.
+    pub(crate) fn from_agent_error(error: &crate::error::AgentError) -> Option<Self> {
+        use crate::error::AgentError;
+        match error {
+            AgentError::HookLaunchRefused { hook_id, reason } => Some(Self::LaunchRefused {
+                hook_id: hook_id.clone(),
+                reason: reason.clone(),
+            }),
+            AgentError::HookTimeout {
+                hook_id,
+                timeout_ms,
+            } => Some(Self::Timeout {
+                hook_id: hook_id.clone(),
+                timeout_ms: *timeout_ms,
+            }),
+            AgentError::HookExecutionFailed { hook_id, reason } => Some(Self::ExecutionFailed {
+                hook_id: hook_id.clone(),
+                reason: reason.clone(),
+            }),
+            AgentError::HookConfigInvalid { reason } => Some(Self::ConfigInvalid {
+                reason: reason.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The original typed agent error.
+    pub(crate) fn to_agent_error(&self) -> crate::error::AgentError {
+        use crate::error::AgentError;
+        match self {
+            Self::LaunchRefused { hook_id, reason } => AgentError::HookLaunchRefused {
+                hook_id: hook_id.clone(),
+                reason: reason.clone(),
+            },
+            Self::Timeout {
+                hook_id,
+                timeout_ms,
+            } => AgentError::HookTimeout {
+                hook_id: hook_id.clone(),
+                timeout_ms: *timeout_ms,
+            },
+            Self::ExecutionFailed { hook_id, reason } => AgentError::HookExecutionFailed {
+                hook_id: hook_id.clone(),
+                reason: reason.clone(),
+            },
+            Self::ConfigInvalid { reason } => AgentError::HookConfigInvalid {
+                reason: reason.clone(),
+            },
+        }
+    }
 }
 
 /// Binds the deferred failure to the exact assistant batch that produced it.
@@ -8143,7 +8236,7 @@ impl Session {
             // Usage is this session's own spend. A fork's prefix was paid for
             // by the source; copying the source's lifetime counters made the
             // child's first turn report the source's whole history as its
-            // own (HomeCore saw 1.76e9 input tokens on a one-word reply).
+            // own (a downstream app saw 1.76e9 input tokens on a one-word reply).
             usage: Usage::default(),
             // A fork is a new session identity with its own run lineage. An
             // owed handoff belongs to the originating session's runtime, so it
@@ -11948,6 +12041,7 @@ mod tests {
                 phase: None,
                 persisted: true,
                 detail: None,
+                confinement_refusal: None,
                 pending_sources: Vec::new(),
             },
         )));
@@ -11972,6 +12066,7 @@ mod tests {
                 phase: None,
                 persisted: true,
                 detail: None,
+                confinement_refusal: None,
                 pending_sources: Vec::new(),
             },
         ));
@@ -15179,7 +15274,7 @@ mod tests {
         assert!(session.updated_at() > initial_updated);
     }
 
-    /// Regression (HomeCore fork_off): a fork inherited the source's lifetime
+    /// Regression (downstream fork_off): a fork inherited the source's lifetime
     /// usage, so the child's first turn reported the source's whole history
     /// (1.76e9 input tokens for a one-word reply). A fork starts at zero.
     #[test]
@@ -15810,6 +15905,50 @@ mod tests {
             )
             .expect("tool visibility state should serialize");
         assert_eq!(session.tool_visibility_state().unwrap(), Some(state));
+    }
+
+    /// #1807: visibility state persisted before `policy_base_filter` existed
+    /// still loads (the filter defaults to `All`), a state without a policy
+    /// filter persists byte-identically to the old shape, and a policy
+    /// filter round-trips.
+    #[test]
+    fn test_session_tool_visibility_state_policy_filter_is_backward_compatible() {
+        let inherited = ToolFilter::Allow(["visible".to_string()].into_iter().collect());
+        let old_format = serde_json::json!({
+            "inherited_base_filter": serde_json::to_value(&inherited).unwrap(),
+            "active_revision": 3,
+        });
+        let mut session = Session::new();
+        session
+            .metadata
+            .insert(SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(), old_format);
+        let loaded = session
+            .tool_visibility_state()
+            .expect("old-format visibility state decodes")
+            .expect("present");
+        assert_eq!(loaded.policy_base_filter, ToolFilter::All);
+        assert_eq!(loaded.inherited_base_filter, inherited);
+        assert_eq!(loaded.active_revision, 3);
+
+        let without_policy = serde_json::to_value(&loaded).unwrap();
+        assert!(
+            without_policy.get("policy_base_filter").is_none(),
+            "an absent policy filter keeps the old persisted shape: {without_policy}"
+        );
+
+        let with_policy = SessionToolVisibilityState {
+            policy_base_filter: ToolFilter::Deny(
+                ["spawn_member".to_string()].into_iter().collect(),
+            ),
+            ..loaded
+        };
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(with_policy.clone()),
+            )
+            .expect("tool visibility state should serialize");
+        assert_eq!(session.tool_visibility_state().unwrap(), Some(with_policy));
     }
 
     #[test]
@@ -17333,7 +17472,46 @@ mod deferred_tool_failure_tests {
             .is_ok()
     }
 
+    /// The PostTool hook infrastructure kind survives the durable callback
+    /// staging record with its exact typed hook error.
+    #[test]
+    fn post_tool_hook_infrastructure_kind_round_trips_in_the_staging_record() {
+        let (session, failure) =
+            pending_failure_with(DeferredToolBatchFailureKind::PostToolHookInfrastructure(
+                DeferredHookInfrastructureFailure::LaunchRefused {
+                    hook_id: crate::hooks::HookId::new("post-tool-guard"),
+                    reason: crate::hooks::HookFailureReason::Timeout { timeout_ms: 7 },
+                },
+            ));
+        let restored: Session =
+            serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+        let restored_failure = restored
+            .pending_callback_tool_batch()
+            .unwrap()
+            .unwrap()
+            .deferred_failure
+            .expect("deferred failure retained");
+        assert_eq!(restored_failure, failure);
+        let DeferredToolBatchFailureKind::PostToolHookInfrastructure(hook) = &restored_failure.kind
+        else {
+            panic!("kind changed in the staging record");
+        };
+        assert!(matches!(
+            hook.to_agent_error(),
+            crate::error::AgentError::HookLaunchRefused {
+                ref hook_id,
+                reason: crate::hooks::HookFailureReason::Timeout { timeout_ms: 7 },
+            } if hook_id == &crate::hooks::HookId::new("post-tool-guard")
+        ));
+    }
+
     fn pending_failure() -> (Session, DeferredToolBatchFailure) {
+        pending_failure_with(DeferredToolBatchFailureKind::OperationObservationUnavailable)
+    }
+
+    fn pending_failure_with(
+        kind: DeferredToolBatchFailureKind,
+    ) -> (Session, DeferredToolBatchFailure) {
         let run_id = RunId::new();
         let mut assistant = BlockAssistantMessage::new(
             ["failed", "callback"]
@@ -17350,7 +17528,7 @@ mod deferred_tool_failure_tests {
         .with_assistant_message_id(AssistantMessageId::mint());
         assistant.identity = assistant.identity.with_run_id(run_id.clone());
         let failure = DeferredToolBatchFailure {
-            kind: DeferredToolBatchFailureKind::OperationObservationUnavailable,
+            kind,
             source_run_id: run_id.clone(),
             assistant_message_id: assistant.assistant_message_id,
             tool_use_order: vec!["failed".into(), "callback".into()],

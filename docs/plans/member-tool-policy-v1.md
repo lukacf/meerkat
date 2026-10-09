@@ -53,7 +53,7 @@ separate proposal.
 
 ## 1. Current truth
 
-The motivating HomeCore proposal identifies a real product problem, but its
+The motivating downstream-app proposal identifies a real product problem, but its
 original Meerkat baseline is stale.
 
 | Fact | Current Meerkat | Remaining gap |
@@ -121,7 +121,7 @@ No precedence rule may discard a constraint.
 
 ### 2.3 Consequence labels do not currently govern dispatch
 
-HomeCore classifies tools into risk tiers and has an approval UX, but its
+The downstream app classifies tools into risk tiers and has an approval UX, but its
 callback dispatch path does not consult those facts. A high-risk label can
 therefore be true in configuration and irrelevant at execution.
 
@@ -169,7 +169,7 @@ V1 must provide:
 
 V1 does not:
 
-- Define household roles, tool assignments, risk tiers, approver routing, or
+- Define team roles, tool assignments, risk tiers, approver routing, or
   product UI.
 - Turn model visibility into an authorization boundary.
 - Make profile reassignment a supported capability-change operation.
@@ -348,7 +348,7 @@ V1 retains Meerkat's existing exact `ToolName` selector contract. It does not
 pretend that a name is a universal authorization resource identity.
 
 Dispatcher composition already owns which live implementation wins a name.
-HomeCore's MCP names include their server namespace. Replacing a same-name
+The downstream app's MCP names include their server namespace. Replacing a same-name
 implementation remains governed by dispatcher catalog and collision rules.
 
 A future cross-resource authorization platform will need typed resource
@@ -653,25 +653,25 @@ activation id. A source-bundle digest may be retained separately as
 provenance.
 
 The product host owns source policy semantics and vocabulary mapping. For the
-first HomeCore adoption, the source of truth is its immutable
+first the downstream app adoption, the source of truth is its immutable
 `shared/data/policy/bundle.N` bundle containing `policy.json` and
-`compiled-gating.toml`, addressed as `hc-policy-v1:sha256:<digest>`, or a
-versioned successor with the same ownership properties. HomeCore's compiler
+`compiled-gating.toml`, addressed as `example-policy-v1:sha256:<digest>`, or a
+versioned successor with the same ownership properties. The downstream app's compiler
 must map that product vocabulary into the closed typed artifact and reject
 unknown actions, ambiguous resource identities, duplicate conflicting rules,
 and non-canonical content.
 
 MobKit owns strict parsing and mechanical lowering of that compiled artifact
 into the Meerkat snapshot contract. It must validate the digest and schema, but
-it cannot infer missing grants, reinterpret HomeCore vocabulary, or retain a
+it cannot infer missing grants, reinterpret the downstream app vocabulary, or retain a
 rival policy store. Meerkat owns the snapshot contract, provider-generation
 fencing, and enforcement. This division names the Phase 0 starting artifact
-without making HomeCore's current file format a Meerkat platform contract.
+without making the downstream app's current file format a Meerkat platform contract.
 
 ### 8.3 Availability
 
 Fail-closed consequence policy is correct, but a network dependency on every
-tool call would be an avoidable household-wide availability hazard.
+tool call would be an avoidable deployment-wide availability hazard.
 
 Meerkat's provider contract requires:
 
@@ -728,7 +728,7 @@ flags, or model capability checks. Those owners decide whether the feature
 exists; the final sanitizer can only remove an otherwise available
 provider-native capability from the effective request.
 
-Downstream adoption reports the exact lost capabilities. In HomeCore this
+Downstream adoption reports the exact lost capabilities. In the downstream app this
 includes profiles where `web_search = inherit` currently enables native search
 for `gpt-5.6-sol`. Certification must surface that change before activation.
 
@@ -780,11 +780,11 @@ types, state machine, permit model, or resource taxonomy.
 None of those concerns is required to make static member tool policy durable
 or to install a narrowing check at dispatch.
 
-## 10. HomeCore adoption
+## 10. Downstream app adoption
 
-HomeCore motivates the proposal, but HomeCore configuration is not Meerkat
+The downstream app motivates the proposal, but the downstream app configuration is not Meerkat
 architecture. Adoption proves the platform contract without importing
-household policy into Meerkat.
+team policy into Meerkat.
 
 ### 10.1 Effective baseline
 
@@ -806,11 +806,11 @@ Each restriction moves to the owner of the fact it constrains:
   sets plus matching execution constraints.
 - The live Google read surface remains a live-feature declaration. It is not
   relabeled as stable member policy merely because both contain tool names.
-- The direct-memory-mutation prohibition remains a named HomeCore-wide
+- The direct-memory-mutation prohibition remains a named downstream-app-wide
   invariant, but it compiles into the application narrowing policy. It must
   not survive as a bypassable post-dispatch filter.
 
-The suffix rule itself remains live policy semantics until HomeCore replaces it
+The suffix rule itself remains live policy semantics until the downstream app replaces it
 with a typed consequence classification. It must not be frozen into an exact
 `DenyNames` snapshot and then falsely presented as future-proof. The migration
 gate proves equality for the current catalog; a separate late-discovery test
@@ -827,16 +827,16 @@ containment that otherwise changes `domain:discovery` from 25 to 44 tools and
 
 ### 10.2 Profile and category migration
 
-HomeCore stops changing profiles merely to change tool capability. Existing
+The downstream app stops changing profiles merely to change tool capability. Existing
 members keep their current profile and comms identity.
 
 Member materialization declarations carry category differences. The
-`domain:home-automation` shell case is therefore in scope: an administrative
+`domain:automation` shell case is therefore in scope: an administrative
 member declaration may enable `shell` while the member remains on its existing
 profile. The usual shell dispatcher and authority requirements still apply,
 and execution constraints remain the final backstop.
 
-If HomeCore actually needs a new role, provider/model template, or comms role,
+If the downstream app actually needs a new role, provider/model template, or comms role,
 that is not a tool-policy update. It requires a new identity or a separately
 designed identity migration.
 
@@ -844,7 +844,7 @@ designed identity migration.
 
 Adoption uses a separate candidate activation:
 
-1. Compile HomeCore's immutable source bundle into member declarations and the
+1. Compile the downstream app's immutable source bundle into member declarations and the
    closed typed `CompiledApplicationToolPolicy` artifact.
 2. Validate the active policy snapshot revision and digest plus every required
    provider binding.
@@ -875,7 +875,7 @@ Adoption uses a separate candidate activation:
 
 A failed dry-run leaves the current activation and identities untouched. The
 member-intent store has no atomic 17-member transaction, so rollout must not
-claim household-wide atomicity. Once rollout begins, committed and uncommitted
+claim deployment-wide atomicity. Once rollout begins, committed and uncommitted
 members are reported explicitly; a failure stops further batches and requires
 an equally revisioned compensating update where rollback is desired. A real
 post-adoption semantic disagreement still fails closed.
@@ -891,7 +891,7 @@ describing a rollback command is insufficient evidence: the rehearsal must
 prove that compensation preserves strict durable cursors and does not replay
 an incident outbox or other already-consumed effects.
 
-The HomeCore activation id may be recorded as provenance. It is not the policy
+The downstream-app activation id may be recorded as provenance. It is not the policy
 revision or digest. `PolicyId` identifies the stable governed policy;
 `PolicyRevision` and `PolicyDigest` identify the exact content installed in the
 provider snapshot. Changed content must advance revision and digest even when
@@ -917,8 +917,8 @@ deployment metadata was copied.
 - Define and validate the closed typed `CompiledApplicationToolPolicy`
   artifact, canonical digest, and source-provenance contract.
 - Deliver the downstream MobKit gateway adapter that strictly parses and
-  lowers HomeCore's compiled artifact into this immutable in-process snapshot.
-  HomeCore owns source vocabulary translation and must not satisfy the seam
+  lowers the downstream app's compiled artifact into this immutable in-process snapshot.
+  The downstream app owns source vocabulary translation and must not satisfy the seam
   with a Python callback on each call.
 
 This phase is independently useful and does not wait for identity-intent API
@@ -959,7 +959,7 @@ work.
   these Meerkat contracts. MobKit adds no member-policy store or mutation
   authority; this is new surface work, not only a dependency repin.
 
-### Phase 4: HomeCore migration
+### Phase 4: downstream app migration
 
 - Compile the measured effective allow sets, including hardcoded frozensets,
   into member declarations.
@@ -1072,7 +1072,7 @@ They are a separate architectural decision with tools as one adapter.
   explicit parameters from re-enabling an ungoverned provider-native tool.
 - `SessionLlmRequestPolicy` is applied by the typed provider-parameter owner at
   the end of `Agent::prepare_calling_llm_request` on every attempt.
-- HomeCore's compiler emits canonical closed artifacts deterministically;
+- The downstream app's compiler emits canonical closed artifacts deterministically;
   unknown actions, ambiguous resources, conflicting duplicates, non-canonical
   content, or digest mismatch fail before provider installation. MobKit
   performs strict parsing and lowering without semantic inference.
@@ -1089,7 +1089,7 @@ They are a separate architectural decision with tools as one adapter.
 - Detached operations resume only through their own existing operation or job
   authority.
 
-### HomeCore migration
+### Downstream app migration
 
 - Dry-run adoption performs no desired-state write and cannot park or
   quarantine an identity.
@@ -1100,7 +1100,7 @@ They are a separate architectural decision with tools as one adapter.
   all 17 members, including all hardcoded frozenset effects. The live-feature
   surface has its own equivalent parity assertion.
 - Diffs are bidirectional and name-by-name; tool counts are diagnostic only.
-- A newly introduced tool matching HomeCore's direct-memory-mutation suffix
+- A newly introduced tool matching the downstream app's direct-memory-mutation suffix
   rule is denied even though it was absent from the migration catalog.
 - Discovery remains at 25 tools and triage remains at 15 as diagnostics unless
   a separately reviewed policy change intentionally changes those sets.
@@ -1125,7 +1125,7 @@ and consequence policy. The member declaration drives the existing specific
 override bits instead.
 
 This variant is not present in the 0.8.25 baseline and must not be introduced
-as a 0.8.26 shortcut. It would not solve HomeCore's per-member capability case,
+as a 0.8.26 shortcut. It would not solve the downstream app's per-member capability case,
 and shipping then removing a generated-SDK enum variant would create
 compatibility debt for no architectural gain.
 

@@ -2,7 +2,7 @@
 
 Verdict: GREEN for architectural acceptance. No remaining material authority finding from this review. This is not implementation approval, deployment approval, or evidence that the proposed guarantees are enforced.
 
-Reviewed artifact: `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md`, 568 lines.
+Reviewed artifact: `(operator-retained path)/docs/internal/design/adr-001-runtime-security.md`, 568 lines.
 
 SHA-256: `44882a1ba3c8ea36d9a44c13df6c4b52b246c459dacc93437ef188ea7ac055ca`.
 

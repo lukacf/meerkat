@@ -1294,7 +1294,7 @@ async fn unprovable_release_blocks_completion_and_retry_converges() {
         .await
         .expect_err("an unprovable release may not publish a completed teardown");
     // The retirement durably started, so it is owned and reported stuck with
-    // its typed cause; the exact retry is an explicit re-drive (OB3).
+    // its typed cause; the exact retry is an explicit re-drive.
     assert!(
         matches!(blocked, MobError::MemberRetirementStuck { .. }),
         "a failed owned retirement is reported stuck, got {blocked:?}"

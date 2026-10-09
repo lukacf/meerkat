@@ -1701,6 +1701,16 @@ pub trait CoreExecutorPostStopCleanupHandle: Send + Sync {
     ) -> Result<(), CoreExecutorError> {
         self.cleanup_after_runtime_stop_terminalized().await
     }
+
+    /// Wait until the exact actor this handle's cleanup removed has exited.
+    ///
+    /// `cleanup_after_runtime_stop_terminalized` already waits for it; the
+    /// boundary-owned variant does not, because the actor may need that
+    /// boundary to drain. When a boundary-owned callback completed cleanup
+    /// first, a later caller that holds no turn-finalization boundary calls
+    /// this instead, so completed cleanup is never mistaken for actor exit.
+    /// Never call it from the actor's own task or while holding the boundary.
+    async fn await_removed_actor_exit(&self) {}
 }
 
 /// Opaque RAII witness that one session actor's turn-finalization interval is

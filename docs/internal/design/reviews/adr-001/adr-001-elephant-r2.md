@@ -2,7 +2,7 @@
 
 Verdict: GREEN for architecture review and sharing with the project owners. No remaining material blocker found in this review's Elephant, distributed-grant, information-provenance and security-audit scope. This is not implementation acceptance or proof that any currently running integration provides the proposed guarantees.
 
-Reviewed exact file: /Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md
+Reviewed exact file: (operator-retained path)/docs/internal/design/adr-001-runtime-security.md
 SHA-256: 44882a1ba3c8ea36d9a44c13df6c4b52b246c459dacc93437ef188ea7ac055ca
 Length: 568 lines.
 Elephant source baseline: 1aefaad2de68535ca5b588f58e8ed1ae1bf5b56a.

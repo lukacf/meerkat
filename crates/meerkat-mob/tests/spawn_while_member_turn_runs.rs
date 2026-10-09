@@ -1,6 +1,6 @@
 //! A spawn completes while another member's turn runs, on the real stack.
 //!
-//! Regression for the OB3 spawn stall: a coordinator spawns workers from a
+//! Regression for the spawn stall: a coordinator spawns workers from a
 //! tool call (its turn stays in flight), while a host-side session-task
 //! command is parked on the coordinator's busy session task. Every stage of the worker spawn,
 //! including `finalize_spawn_admit`'s supervisor private-trust install for a
@@ -38,14 +38,14 @@ use meerkat_mob::{
     Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
 };
 
-const COORDINATOR: &str = "ob3-coordinator";
+const COORDINATOR: &str = "ops-coordinator";
 const WORKERS: [&str; 4] = [
-    "ob3-review-worker-1",
-    "ob3-review-worker-2",
-    "ob3-review-worker-3",
-    "ob3-review-worker-4",
+    "ops-review-worker-1",
+    "ops-review-worker-2",
+    "ops-review-worker-3",
+    "ops-review-worker-4",
 ];
-const FINISHED: &str = "ob3-finished-worker";
+const FINISHED: &str = "ops-finished-worker";
 const HELD_PROMPT: &str = "spawn the review workers";
 /// Bounds a failure only; the passing path never waits for it.
 const FAILURE_BOUND: Duration = Duration::from_secs(60);
@@ -136,7 +136,7 @@ async fn build_service(
 ) {
     let (_manifest, persistence) = meerkat::open_realm_persistence_in(
         root,
-        "ob3-spawn-realm",
+        "ops-spawn-realm",
         Some(meerkat_store::RealmBackend::Sqlite),
         Some(meerkat_store::RealmOrigin::Explicit),
     )
@@ -176,7 +176,7 @@ fn mob_definition() -> MobDefinition {
                 comms: true,
                 ..Default::default()
             },
-            peer_description: "OB3 member".to_string(),
+            peer_description: "ops member".to_string(),
             external_addressable: true,
             backend: None,
             runtime_mode: MobRuntimeMode::TurnDriven,
@@ -186,7 +186,7 @@ fn mob_definition() -> MobDefinition {
         })),
     );
     let mut definition = MobDefinition::explicit(MobId::from(format!(
-        "ob3-spawn-{}",
+        "ops-spawn-{}",
         uuid::Uuid::new_v4().simple()
     )));
     definition.profiles = profiles;

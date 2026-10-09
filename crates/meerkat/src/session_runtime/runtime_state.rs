@@ -422,12 +422,18 @@ mod ops {
         /// - Discard and unregister failures are combined: a discard failure
         ///   alone is returned as-is, an unregister failure alone is wrapped as
         ///   an internal error, and both together are reported in one error.
+        /// - Hosting continuity (#1813): when a live actor is torn down, a
+        ///   lineage clone of the session's hosting claim is taken BEFORE the
+        ///   discard and returned. The caller holds it until its
+        ///   re-materialization (`ensure_runtime_executor`) has taken its own,
+        ///   so this runtime owner never releases and reacquires the session
+        ///   in between. `None` when nothing was torn down.
         ///
         /// [`RuntimeSessionRegistrationWitness`]: meerkat_runtime::RuntimeSessionRegistrationWitness
         pub async fn discard_stale_live_session(
             &self,
             session_id: &SessionId,
-        ) -> Result<(), SessionError> {
+        ) -> Result<Option<meerkat_core::session_hosting::HostingClaim>, SessionError> {
             // Mechanical registry probe: no actor RPC, no durable arbitration,
             // so a turn parked inside the actor cannot stall this check.
             let live_actor_registered =
@@ -438,8 +444,11 @@ mod ops {
                     "stale live-session discard found no live actor; keeping the runtime \
                      registration for in-loop rematerialization from durable authority"
                 );
-                return Ok(());
+                return Ok(None);
             }
+            // #1813: the caller re-materializes the session under this
+            // owner; hold the hosting claim across the discard and unregister.
+            let hosting = self.service.grant_session_hosting(session_id)?;
             let discard_error = match self.discard_live_session(session_id).await {
                 Ok(()) | Err(SessionError::NotFound { .. }) => None,
                 Err(error) => Some(error),
@@ -469,7 +478,7 @@ mod ops {
                 None => None,
             };
             match (discard_error, unregister_error) {
-                (None, None) => Ok(()),
+                (None, None) => Ok(Some(hosting)),
                 (Some(error), None) => Err(error),
                 (None, Some(error)) => Err(SessionError::Agent(
                     meerkat_core::error::AgentError::InternalError(error.to_string()),

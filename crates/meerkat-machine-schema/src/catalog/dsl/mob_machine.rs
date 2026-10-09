@@ -16831,7 +16831,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Stopped
             emit EmitRunLifecycleNotice
-            // Shutdown pauses every member before its interrupts (OB3), with
+            // Shutdown pauses every member before its interrupts, with
             // the Stop's run-start hold (#1500), so an admitted input cannot
             // start a run after the interrupt. With this, every path into
             // Stopped holds member run starts and only Resume releases them.
@@ -16857,7 +16857,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Stopped
             emit EmitRunLifecycleNotice
-            // Shutdown pauses every member before its interrupts (OB3), with
+            // Shutdown pauses every member before its interrupts, with
             // the Stop's run-start hold (#1500), so an admitted input cannot
             // start a run after the interrupt. With this, every path into
             // Stopped holds member run starts and only Resume releases them.
@@ -16883,7 +16883,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Completed
             emit EmitRunLifecycleNotice
-            // Shutdown pauses every member before its interrupts (OB3), with
+            // Shutdown pauses every member before its interrupts, with
             // the Stop's run-start hold (#1500), so an admitted input cannot
             // start a run after the interrupt. With this, every path into
             // Stopped holds member run starts and only Resume releases them.

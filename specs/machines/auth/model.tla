@@ -921,7 +921,7 @@ VerifyOAuthBrowserFlowValid(flow_id, provider, redirect_uri, now_millis) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -932,7 +932,7 @@ VerifyOAuthBrowserFlowExpiring(flow_id, provider, redirect_uri, now_millis) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -943,7 +943,7 @@ VerifyOAuthBrowserFlowExpired(flow_id, provider, redirect_uri, now_millis) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Expired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -954,7 +954,7 @@ VerifyOAuthBrowserFlowRefreshing(flow_id, provider, redirect_uri, now_millis) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -965,7 +965,7 @@ VerifyOAuthBrowserFlowReauthRequired(flow_id, provider, redirect_uri, now_millis
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -976,7 +976,7 @@ ConsumeOAuthBrowserFlowValid(flow_id, provider, redirect_uri, now_millis) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
@@ -992,7 +992,7 @@ ConsumeOAuthBrowserFlowExpiring(flow_id, provider, redirect_uri, now_millis) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
@@ -1008,7 +1008,7 @@ ConsumeOAuthBrowserFlowExpired(flow_id, provider, redirect_uri, now_millis) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Expired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
@@ -1024,7 +1024,7 @@ ConsumeOAuthBrowserFlowRefreshing(flow_id, provider, redirect_uri, now_millis) =
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
@@ -1040,7 +1040,7 @@ ConsumeOAuthBrowserFlowReauthRequired(flow_id, provider, redirect_uri, now_milli
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_providers THEN oauth_browser_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
     /\ ((IF (flow_id \in DOMAIN oauth_browser_flow_redirect_uris) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_redirect_uris THEN oauth_browser_flow_redirect_uris[flow_id] ELSE "None")) ELSE None) = Some(redirect_uri))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_browser_flow_expires_at_millis THEN oauth_browser_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_browser_flow_expires_at_millis) /\ (now_millis <= (oauth_browser_flow_expires_at_millis)[flow_id]))
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
@@ -1310,7 +1310,7 @@ VerifyOAuthDeviceFlowValid(flow_id, provider, now_millis) ==
     /\ phase = "Valid"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -1320,7 +1320,7 @@ VerifyOAuthDeviceFlowExpiring(flow_id, provider, now_millis) ==
     /\ phase = "Expiring"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -1330,7 +1330,7 @@ VerifyOAuthDeviceFlowExpired(flow_id, provider, now_millis) ==
     /\ phase = "Expired"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Expired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -1340,7 +1340,7 @@ VerifyOAuthDeviceFlowRefreshing(flow_id, provider, now_millis) ==
     /\ phase = "Refreshing"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -1350,7 +1350,7 @@ VerifyOAuthDeviceFlowReauthRequired(flow_id, provider, now_millis) ==
     /\ phase = "ReauthRequired"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f87ebf4401320955
@@ -1360,7 +1360,7 @@ BeginOAuthDevicePollValid(flow_id, provider, now_millis) ==
     /\ phase = "Valid"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ ((flow_id \in oauth_device_poll_ids) = FALSE)
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
@@ -1372,7 +1372,7 @@ BeginOAuthDevicePollExpiring(flow_id, provider, now_millis) ==
     /\ phase = "Expiring"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ ((flow_id \in oauth_device_poll_ids) = FALSE)
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
@@ -1384,7 +1384,7 @@ BeginOAuthDevicePollExpired(flow_id, provider, now_millis) ==
     /\ phase = "Expired"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ ((flow_id \in oauth_device_poll_ids) = FALSE)
     /\ phase' = "Expired"
     /\ model_step_count' = model_step_count + 1
@@ -1396,7 +1396,7 @@ BeginOAuthDevicePollRefreshing(flow_id, provider, now_millis) ==
     /\ phase = "Refreshing"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ ((flow_id \in oauth_device_poll_ids) = FALSE)
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
@@ -1408,7 +1408,7 @@ BeginOAuthDevicePollReauthRequired(flow_id, provider, now_millis) ==
     /\ phase = "ReauthRequired"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ ((flow_id \in oauth_device_poll_ids) = FALSE)
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
@@ -1512,7 +1512,7 @@ ConsumeOAuthDeviceFlowValid(flow_id, provider, now_millis) ==
     /\ phase = "Valid"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
@@ -1527,7 +1527,7 @@ ConsumeOAuthDeviceFlowExpiring(flow_id, provider, now_millis) ==
     /\ phase = "Expiring"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
@@ -1542,7 +1542,7 @@ ConsumeOAuthDeviceFlowExpired(flow_id, provider, now_millis) ==
     /\ phase = "Expired"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Expired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
@@ -1557,7 +1557,7 @@ ConsumeOAuthDeviceFlowRefreshing(flow_id, provider, now_millis) ==
     /\ phase = "Refreshing"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
@@ -1572,7 +1572,7 @@ ConsumeOAuthDeviceFlowReauthRequired(flow_id, provider, now_millis) ==
     /\ phase = "ReauthRequired"
     /\ (flow_id \in oauth_device_flow_ids)
     /\ ((IF (flow_id \in DOMAIN oauth_device_flow_providers) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_providers THEN oauth_device_flow_providers[flow_id] ELSE "None")) ELSE None) = Some(provider))
-    /\ (now_millis <= (IF "value" \in DOMAIN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None) THEN (IF (flow_id \in DOMAIN oauth_device_flow_expires_at_millis) THEN Some((IF flow_id \in DOMAIN oauth_device_flow_expires_at_millis THEN oauth_device_flow_expires_at_millis[flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+    /\ ((flow_id \in DOMAIN oauth_device_flow_expires_at_millis) /\ (now_millis <= (oauth_device_flow_expires_at_millis)[flow_id]))
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})

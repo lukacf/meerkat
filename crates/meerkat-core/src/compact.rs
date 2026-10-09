@@ -40,7 +40,7 @@ pub struct CompactionContext {
     /// `crate::agent::compact::estimate_request_bytes`).
     ///
     /// Providers cap requests in BYTES, not tokens. A byte-heavy/token-light
-    /// transcript (2026-07-29 household incident: inline media pushed a
+    /// transcript (2026-07-29 production incident: inline media pushed a
     /// transcript past Anthropic's request-size cap, failing every turn with
     /// `request_too_large` while the token trigger stayed far below its
     /// threshold) must be visible to trigger decisions in the same unit the
@@ -280,7 +280,7 @@ pub struct CompactionConfig {
     /// set, compaction also triggers when the estimated serialized request
     /// size crosses [`CompactionConfig::request_byte_trigger_threshold`]
     /// (4/5 of this cap). The token trigger alone missed the 2026-07-29
-    /// household incident: providers cap requests in bytes, and byte-heavy /
+    /// production incident: providers cap requests in bytes, and byte-heavy /
     /// token-light content (inline media) crosses the byte cap first, after
     /// which every turn fails terminally with `request_too_large`.
     pub max_request_bytes: Option<u64>,

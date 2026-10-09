@@ -3,11 +3,11 @@
 //! A durable fork copies its source's transcript, but not the per-build inputs
 //! the source's host resolved its tools and instructions from: the source's
 //! application context, its application labels, and its retained per-spawn
-//! tool overlay. A child built without them is a different agent. HomeCore saw
-//! a calendar fork built as a generic domain member: 92 of calendar's 150
-//! tools, no calendar, display or picture-schedule tools, no `memory` tool,
-//! and a tools block that differed from the forker's, so the child could not
-//! reuse the forker's cached prefix either.
+//! tool overlay. A child built without them is a different agent: a calendar
+//! fork was once built as a generic domain member, missing most of the
+//! source's tools (including its calendar tools and the `memory` tool), with a
+//! tools block that differed from the forker's, so the child could not reuse
+//! the forker's cached prefix either.
 //!
 //! [`ForkBuildInheritance`] carries those inputs, with the typed
 //! [`meerkat_core::ForkBuildSource`] a host resolves the child by, from the

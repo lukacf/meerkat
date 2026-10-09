@@ -3715,7 +3715,7 @@ const PROVIDER_INPUT_LATENCY_CLOCK_STEP_MS: u64 = 1_000;
 /// input frame at or above it is user speech for the floor rule.
 ///
 /// Derived from the 197 Turbo S provider streams on the 0.8.51 soaks
-/// (/tmp/rb/tsoak, 2026-10-03): of the reflected frames overlapping an input
+/// (operator-retained soak captures, 2026-10-03): of the reflected frames overlapping an input
 /// transcript span, 13861 carry energy, with p2 = -54 dBFS, p5 = -42 dBFS
 /// and the median at -25 dBFS; the rest are inter-word gaps. Of the frames
 /// more than 500 ms from any transcript span, 98.5% are digital silence

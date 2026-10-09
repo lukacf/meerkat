@@ -410,6 +410,7 @@ fn request_only_peer_steer() -> meerkat_runtime::Input {
         sender_taint: None,
         header: meerkat_runtime::InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),

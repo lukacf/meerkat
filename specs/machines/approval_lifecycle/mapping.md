@@ -8,13 +8,14 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ApprovalLifecycleMachine`
 
 ### Code Anchors
-- `approval_lifecycle_authority` (machine `ApprovalLifecycleMachine`): `crates/meerkat-core/src/generated/approval_lifecycle.rs` — generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, ApprovalStatusResolved, and ApprovalLifecycleRejected
+- `approval_lifecycle_authority` (machine `ApprovalLifecycleMachine`): `crates/meerkat-core/src/generated/approval_lifecycle.rs` — generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed, ApprovalStatusResolved, ApprovalLifecycleRejected, ReviewStatusResolved, and ReviewLifecycleRejected
 
 ### Scenarios
 - `approval_request_pending` — CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, and CreatePending keep request creation and Pending status projection under ApprovalStatusResolved or ApprovalLifecycleRejected
 - `approval_decide_terminal` — DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, and DecideDeny move Pending approvals to Approved or Denied only when generated allowed-decision state admits the terminal decision
 - `approval_expiry_feedback` — ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, and ObserveExpiryCancelledNoop consume typed time observation and emit Expired or unchanged status without handwritten status mutation
 - `approval_restore_consistency` — RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, and RestoreRejectedInvalidRecord validate persisted status, decision audit consistency, and allowed-decision compatibility before rehydrating approval lifecycle truth
+- `approval_review_attempt_retirement` — BeginReview, RecordReviewVerdict, RecordReviewUnavailable, RetireReview, ConsumeReviewForEntry, and ReleaseReview keep one process-local retained review attempt under generated status: a retired attempt rejects late verdicts and entry, an allow is consumed at most once, and release disposes only settled attempts
 
 ### Transitions
 - `CreateRejectedEmptyAllowedDecisions`
@@ -92,6 +93,93 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DecideDeny`
   - anchors: `approval_lifecycle_authority`
   - scenarios: `approval_decide_terminal`
+- `BeginReviewRejectedDuplicate`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `BeginReviewPending`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewVerdictRejectedMissing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewVerdictRejectedRetired`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewVerdictRejectedSettled`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewVerdictAllowed`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewVerdictDenied`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewVerdictEscalated`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewUnavailableRejectedMissing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewUnavailableRejectedRetired`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewUnavailableRejectedSettled`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RecordReviewUnavailable`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RetireReviewRejectedMissing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RetireReviewRejectedRetired`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RetireReviewRejectedSettled`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `RetireReview`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ConsumeReviewRejectedMissing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ConsumeReviewRejectedRetired`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ConsumeReviewRejectedUsed`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ConsumeReviewRejectedNotSatisfied`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ConsumeReviewForEntry`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReleaseReviewRejectedMissing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReleaseReviewRejectedPending`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReleaseReviewAllowed`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReleaseReviewDenied`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReleaseReviewEscalated`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReleaseReviewUnavailable`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReleaseReviewRetired`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReleaseReviewUsed`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
 
 ### Effects
 - `ApprovalStatusResolved`
@@ -100,9 +188,23 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ApprovalLifecycleRejected`
   - anchors: `approval_lifecycle_authority`
   - scenarios: `approval_request_pending`, `approval_restore_consistency`
+- `ReviewStatusResolved`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
+- `ReviewLifecycleRejected`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_review_attempt_retirement`
 
 ### Invariants
-- `(none)`
+- `approval_maps_cover_exactly_the_registered_ids`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `review_statuses_cover_exactly_the_review_ids`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `review_retirement_only_for_retired_attempts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

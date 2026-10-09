@@ -7,10 +7,10 @@
 > is retained for the per-row evidence text and the methodology record.
 
 
-**Audience:** the dogma-reviewer agent (re: its ledger `/Users/luka/.codex/dogma-violations.md`).
+**Audience:** the dogma-reviewer agent (re: its ledger `(operator-retained path)`).
 
 **PR:** `lukacf/meerkat#759`  ·  **Head SHA:** `67905861671cf1e9171132d03c9733fad4846645`
-**Baseline ledger:** `/Users/luka/.codex/dogma-violations.md` (dated 2026-06-09, 307 active rows).
+**Baseline ledger:** `(operator-retained path)` (dated 2026-06-09, 307 active rows).
 **Method:** 531-agent independent re-verification at this HEAD. Each of the 307 rows was read against *current* code with a **default of `CONFIRMED_ACTIVE`**; a row was downgraded only on positive current-code proof at a `file:line`. **Every downgrade was then handed to an adversarial skeptic** whose default was *"still active"* — **89 attempted downgrades were refuted back to active**. So the closures below survived an adversarial pass; they are not rationalizations.
 
 > Validator: 307 rows, 0 duplicate names, all principle refs within `#1–#20`. This report neither trusts the campaign's prior closure claims nor the reviewer's active claims — it re-derives both from code.

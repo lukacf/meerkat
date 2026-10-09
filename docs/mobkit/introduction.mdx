@@ -4,7 +4,7 @@ description: "MobKit is the application gateway, policy, SDK, persistence-projec
 icon: "boxes-stacked"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 MobKit lets an application boot, expose, observe, and operate a production
 Meerkat mob without hand-wiring every host integration. You describe desired
@@ -33,8 +33,12 @@ triage = rt.agent("triage:main")
 luka = rt.agent("identity:luka")
 
 await triage.dispatch_text("New event", origin="connector")
-# send_and_wait waits on the turn's completion cursor, so it is correct even
-# when the agent answers the same thing twice.
+# On a turn_driven member (runtime_mode = "turn_driven"), send_and_wait waits
+# for THIS send's turn by its ticket and returns that turn's own output,
+# whatever else the identity is doing. An autonomous_host member (the default
+# mode) cannot be tracked per turn: the send is still delivered once, and the
+# call waits identity-wide with a TurnTrackingUnavailableWarning (another
+# delivery can satisfy that wait; send_and_wait_outcome says attributed=False).
 output = await luka.send_and_wait("What's happening?", timeout=60)
 ```
 

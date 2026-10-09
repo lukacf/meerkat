@@ -475,6 +475,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             objective_id: None,
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

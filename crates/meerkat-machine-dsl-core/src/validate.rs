@@ -5,6 +5,7 @@ use syn::Error;
 use crate::ast::*;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+    "runtime_delivery_recipient_outcomes_after_set",
     "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",
@@ -451,7 +452,8 @@ fn collect_helper_call_names(expr: &ExprDef, calls: &mut HashSet<String>) {
         ExprDef::MapContainsKey { map, key }
         | ExprDef::MapGet { map, key }
         | ExprDef::MapGetCopied { map, key }
-        | ExprDef::MapGetCloned { map, key } => {
+        | ExprDef::MapGetCloned { map, key }
+        | ExprDef::MapValue { map, key } => {
             collect_helper_call_names(map, calls);
             collect_helper_call_names(key, calls);
         }
@@ -664,7 +666,8 @@ fn validate_expr(
         }
         ExprDef::MapGet { map, key }
         | ExprDef::MapGetCopied { map, key }
-        | ExprDef::MapGetCloned { map, key } => {
+        | ExprDef::MapGetCloned { map, key }
+        | ExprDef::MapValue { map, key } => {
             validate_expr(map, fields, bindings, helpers, errors);
             validate_expr(key, fields, bindings, helpers, errors);
         }

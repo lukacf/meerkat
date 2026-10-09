@@ -238,7 +238,7 @@ reference; a late allow cannot replace it. Deny returns local feedback. Escalate
 leaves review unresolved and requires fresh qualified-human judgment before
 entry, or local unsatisfied-review feedback where no human route is selected.
 An unavailable reviewer is a distinct infrastructure outcome, not a denial.
-HomeCore selects an explicit exact-candidate/closed-batch human alternative;
+The downstream app selects an explicit exact-candidate/closed-batch human alternative;
 autonomous hosts may instead refuse only the affected action. Standing consent
 cannot replace that review. Unresolved review settles the attempted call so
 permitted siblings and queued work continue.
@@ -324,9 +324,9 @@ revoked. Existing histories need no fabricated provenance or blanket adoption
 process merely to remain usable.
 
 MobKit supplies domain policy and projects authorized state through its console.
-It does not maintain a parallel runtime permission truth. HomeCore-style gate
+It does not maintain a parallel runtime permission truth. downstream-app-style gate
 workflows remain application compositions over the common enforced route.
-HomeCore's current instruction-only gate is not evidence that mandatory routing
+The downstream app's current instruction-only gate is not evidence that mandatory routing
 already exists. Its callback approval path and native tools need the same shared
 checks, including topology mutation and selected-account binding. A human
 approval, when an application requests one, must derive from the approver's
@@ -344,7 +344,7 @@ rechecks authority. Host-visible typed outcomes let autonomous schedulers count
 requested, unresolved and completed work without parsing model feedback. These
 events and counters are projections, not an additional approval authority.
 
-HomeCore's bounded retry policy for ordinary conversational Telegram replies is
+The downstream app's bounded retry policy for ordinary conversational Telegram replies is
 outside consent-governed effects. It does not apply to approval-required actions
 and does not create a native exception for an unknown physical outcome. The
 ordinary reply's permission checks, explicit reply budget, evidence and incident

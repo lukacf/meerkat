@@ -76,6 +76,7 @@ impl SessionAgent for MockAgent {
 
         let _ = event_tx
             .send(AgentEvent::RunStarted {
+                request_reasoning: None,
                 identity: Default::default(),
                 session_id: self.session_id.clone(),
                 input: meerkat_core::types::RunInput::Content {
@@ -895,7 +896,7 @@ fn runtime_content_turn_req(prompt: &str) -> StartTurnRequest {
 /// A command parked on a session whose turn is in flight (the actor serves no
 /// commands until the turn ends) must not hold the service-wide session map:
 /// creating another session and reading a third must complete while the
-/// first session's turn is still running. Regression for the OB3 spawn stall,
+/// first session's turn is still running. Regression for the spawn stall,
 /// where a child's `create_session` waited out the parent's whole turn.
 ///
 /// The paused clock makes the check deterministic: the runtime advances time

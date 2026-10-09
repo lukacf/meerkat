@@ -39,7 +39,7 @@ AuditPrefix ==
     \/ model_step_count = 0 /\ Initialize
     \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
     \/ model_step_count = 2 /\ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession)
-    \/ model_step_count = 3 /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditChannel, AuditIdentity)
+    \/ model_step_count = 3 /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditChannel, AuditIdentity, None)
     \/ model_step_count = 4 /\ BindLiveExecutionChannelAttached(AuditSession, AuditChannel, AuditRuntime, 1, 1, 0)
     \/ model_step_count = 5 /\ AdmitLiveInteractionDelegationAttached(AuditSession, AuditChannel, AuditRuntime, 1, 1, AuditInteraction, AuditOperation, AuditTurn, TRUE, TRUE, TRUE)
     \/ model_step_count = 6 /\ ReconcileLiveDelegationTranscriptConfirmedAttached(AuditChannel, AuditRuntime, 1, 1, AuditInteraction, AuditOperation, AuditTurn, TRUE, TRUE)

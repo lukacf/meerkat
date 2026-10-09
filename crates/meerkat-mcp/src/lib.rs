@@ -9,6 +9,7 @@ mod context_provider;
 mod error;
 pub mod external_tool_surface_authority;
 pub mod generated;
+mod process_confinement;
 mod protocol;
 mod router;
 mod transport;
@@ -22,6 +23,7 @@ pub use context_provider::{
 };
 pub use error::{McpError, ToolDiscoveryLimit};
 pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};
+pub use process_confinement::McpStdioLaunchProfile;
 pub use protocol::McpProtocol;
 pub use router::{
     McpApplyDelta, McpApplyResult, McpBoundaryRejection, McpLifecycleAction, McpLifecyclePhase,

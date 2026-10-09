@@ -592,6 +592,171 @@ pub struct OAuthFlowRegistrySnapshot {
     pub browser: Vec<PersistedOAuthBrowserFlow>,
     #[serde(default)]
     pub device: Vec<PersistedOAuthDeviceFlow>,
+    /// Persisted flow records this build could not decode (for example a
+    /// newer build's record after a rollback). Kept verbatim and written back
+    /// unchanged, so a build that can decode them still finds them; never
+    /// admitted to the flow owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined: Vec<QuarantinedOAuthFlowRecord>,
+}
+
+/// Which persisted flow list a record belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthFlowRecordKind {
+    Browser,
+    Device,
+}
+
+/// A persisted flow record kept verbatim because it did not decode. Its
+/// content may hold attempt secrets: `Debug` shows only the kind.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantinedOAuthFlowRecord {
+    pub kind: OAuthFlowRecordKind,
+    pub record: Box<serde_json::value::RawValue>,
+}
+
+impl PartialEq for QuarantinedOAuthFlowRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.record.get() == other.record.get()
+    }
+}
+
+impl Eq for QuarantinedOAuthFlowRecord {}
+
+impl std::fmt::Debug for QuarantinedOAuthFlowRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuarantinedOAuthFlowRecord")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a persisted flow record did not decode, without its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthFlowDecodeFailure {
+    /// Well-formed JSON of the wrong shape (an unknown, missing or
+    /// differently typed field).
+    Shape,
+    /// Malformed JSON.
+    Syntax,
+}
+
+/// One quarantined record, reported by kind and position only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OAuthFlowQuarantine {
+    pub kind: OAuthFlowRecordKind,
+    /// Index in the snapshot's quarantine list.
+    pub position: usize,
+    pub failure: OAuthFlowDecodeFailure,
+}
+
+/// The snapshot envelope itself (not one record) did not decode. Carries the
+/// failure category and location only, never content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "oauth flow snapshot envelope is undecodable ({failure:?} at line {line}, column {column})"
+)]
+pub struct OAuthFlowSnapshotEnvelopeError {
+    pub failure: OAuthFlowDecodeFailure,
+    pub line: usize,
+    pub column: usize,
+}
+
+fn decode_failure(error: &serde_json::Error) -> OAuthFlowDecodeFailure {
+    match error.classify() {
+        serde_json::error::Category::Data => OAuthFlowDecodeFailure::Shape,
+        serde_json::error::Category::Syntax
+        | serde_json::error::Category::Eof
+        | serde_json::error::Category::Io => OAuthFlowDecodeFailure::Syntax,
+    }
+}
+
+/// A decoded snapshot plus the records it quarantined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedOAuthFlowSnapshot {
+    pub snapshot: OAuthFlowRegistrySnapshot,
+    pub quarantined: Vec<OAuthFlowQuarantine>,
+}
+
+impl OAuthFlowRegistrySnapshot {
+    /// Decode persisted snapshot bytes, isolating per-record failures: a
+    /// record that does not decode is quarantined verbatim instead of
+    /// failing the whole snapshot, so other flows load and new logins
+    /// proceed. A quarantined record that this build can decode is restored
+    /// to its list. Only an undecodable envelope fails.
+    pub fn decode(
+        bytes: &[u8],
+    ) -> Result<DecodedOAuthFlowSnapshot, OAuthFlowSnapshotEnvelopeError> {
+        #[derive(Deserialize)]
+        struct Envelope<'a> {
+            #[serde(default, borrow)]
+            browser: Vec<&'a serde_json::value::RawValue>,
+            #[serde(default, borrow)]
+            device: Vec<&'a serde_json::value::RawValue>,
+            #[serde(default)]
+            quarantined: Vec<QuarantinedOAuthFlowRecord>,
+        }
+        let envelope: Envelope<'_> =
+            serde_json::from_slice(bytes).map_err(|error| OAuthFlowSnapshotEnvelopeError {
+                failure: decode_failure(&error),
+                line: error.line(),
+                column: error.column(),
+            })?;
+        let mut snapshot = Self::default();
+        let mut failures = Vec::new();
+        let mut quarantine = |kind,
+                              record: &serde_json::value::RawValue,
+                              error: serde_json::Error,
+                              snapshot: &mut Self| {
+            failures.push(OAuthFlowQuarantine {
+                kind,
+                position: snapshot.quarantined.len(),
+                failure: decode_failure(&error),
+            });
+            snapshot.quarantined.push(QuarantinedOAuthFlowRecord {
+                kind,
+                record: record.to_owned(),
+            });
+        };
+        let records = envelope
+            .browser
+            .into_iter()
+            .map(|record| (OAuthFlowRecordKind::Browser, record))
+            .chain(
+                envelope
+                    .device
+                    .into_iter()
+                    .map(|record| (OAuthFlowRecordKind::Device, record)),
+            )
+            .chain(
+                envelope
+                    .quarantined
+                    .iter()
+                    .map(|carried| (carried.kind, carried.record.as_ref())),
+            );
+        for (kind, record) in records {
+            match kind {
+                OAuthFlowRecordKind::Browser => {
+                    match serde_json::from_str::<PersistedOAuthBrowserFlow>(record.get()) {
+                        Ok(flow) => snapshot.browser.push(flow),
+                        Err(error) => quarantine(kind, record, error, &mut snapshot),
+                    }
+                }
+                OAuthFlowRecordKind::Device => {
+                    match serde_json::from_str::<PersistedOAuthDeviceFlow>(record.get()) {
+                        Ok(flow) => snapshot.device.push(flow),
+                        Err(error) => quarantine(kind, record, error, &mut snapshot),
+                    }
+                }
+            }
+        }
+        Ok(DecodedOAuthFlowSnapshot {
+            snapshot,
+            quarantined: failures,
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -667,6 +832,29 @@ pub enum OAuthFlowError {
         operation: &'static str,
         detail: String,
     },
+}
+
+impl OAuthFlowError {
+    /// Whether this refuses the caller's attempt (unknown, mismatched or
+    /// expired state) rather than reporting a flow-owner persistence or
+    /// lifecycle failure.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            Self::Missing
+            | Self::BrowserIdentityMismatch
+            | Self::Connector(_)
+            | Self::ProviderMismatch { .. }
+            | Self::RedirectUriMismatch
+            | Self::TargetMismatch { .. }
+            | Self::DevicePollInProgress
+            | Self::DeviceCodeAlreadyAdmitted
+            | Self::DeviceExpiryOutOfRange => true,
+            Self::RegistryProjectionMissing { .. }
+            | Self::StateGenerationFailed
+            | Self::LifecycleRejected { .. }
+            | Self::PersistenceFailed { .. } => false,
+        }
+    }
 }
 
 pub trait OAuthDevicePollLifecycle: Send + Sync {
@@ -1333,7 +1521,11 @@ impl OAuthFlowRegistry {
             })
             .collect();
 
-        OAuthFlowRegistrySnapshot { browser, device }
+        OAuthFlowRegistrySnapshot {
+            browser,
+            device,
+            quarantined: Vec::new(),
+        }
     }
 
     /// Re-insert a restored browser attempt under `state`, exactly as it
@@ -2886,6 +3078,25 @@ mod legacy_browser_row_test {
         pkce_verifier: String,
         created_at_millis: u64,
         expires_at_millis: u64,
+    }
+
+    #[test]
+    fn a_snapshot_without_quarantine_keeps_its_bytes() {
+        let row = include_str!("../tests/fixtures/oauth-browser-pre-connector.json").trim_end();
+        let original = format!(r#"{{"browser":[{row}],"device":[]}}"#);
+        let decoded = OAuthFlowRegistrySnapshot::decode(original.as_bytes()).unwrap();
+        assert!(decoded.quarantined.is_empty());
+        assert_eq!(serde_json::to_string(&decoded.snapshot).unwrap(), original);
+    }
+
+    #[test]
+    fn a_quarantined_record_this_build_can_decode_is_restored() {
+        let row = include_str!("../tests/fixtures/oauth-browser-pre-connector.json").trim_end();
+        let carried = format!(r#"{{"quarantined":[{{"kind":"browser","record":{row}}}]}}"#);
+        let decoded = OAuthFlowRegistrySnapshot::decode(carried.as_bytes()).unwrap();
+        assert!(decoded.quarantined.is_empty());
+        assert_eq!(decoded.snapshot.browser.len(), 1);
+        assert!(decoded.snapshot.quarantined.is_empty());
     }
 
     #[test]

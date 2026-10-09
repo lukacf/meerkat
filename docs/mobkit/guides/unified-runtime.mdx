@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with MobKit modules into a single managed ru
 icon: "layer-group"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 The unified runtime is the production entry point for MobKit. It bootstraps a Meerkat mob and MobKit's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -138,6 +138,17 @@ identity-first runtime fails rather than bypassing that authority.
 In the mob/module teardown sequence, graceful shutdown quiesces and stops the
 mob while its router and module dependencies remain alive. It then closes the
 event router and shuts down the modules:
+
+- **Flow runs:** the mob stop settles active flow runs first, because
+  meerkat's Stop refuses while a flow run is active. It cancels each one,
+  awaits its terminal on the mob event ledger, and then stops the mob.
+- **Bound:** the stop is bounded by `MOB_STOP_FLOW_SETTLE_BUDGET`. A run
+  that does not end in time is reported as
+  `MobRuntimeError::MobStopFlowRunsUnsettled`, naming the runs and the last
+  stop refusal.
+- **Other refusals:** any other refusal is returned as is. Teardown never
+  re-sends the stop on a timer and never cancels member work, because
+  meerkat's Stop settles member runs itself.
 
 ```rust
 let report: UnifiedRuntimeShutdownReport = runtime.shutdown().await;
@@ -328,7 +339,7 @@ let runtime = UnifiedRuntime::builder()
 | `rediscover_failure` | `error` | `rediscover` failed |
 | `event_log_flush_failure` | `error` | the operational event log could not flush |
 | `identity_materialization_failure` | `identity`, `initiator?`, `operation`, `error` | identity-first hydration skipped a member |
-| `mob_stop_proceeded_without_interrupt` | `waited_ms`, `member?`, `error` | teardown gave up waiting for runtime-attach readiness and continued without interrupting the member |
+| `mob_stop_proceeded_without_interrupt` | `waited_ms`, `member?`, `error` | not produced since MobKit 0.8.46 (meerkat 0.8.51's Stop no longer refuses on runtime-attach readiness); kept for wire compatibility |
 
 `actor_loop_terminated` is terminal, not an `actor_loop_recovered` event.
 It can occur without a prior stall (`stall_id` is then absent). The probe

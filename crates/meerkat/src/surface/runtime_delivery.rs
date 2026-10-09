@@ -14,8 +14,9 @@ use meerkat_core::service::SessionServiceControlExt;
 use meerkat_runtime::{MeerkatMachine, RuntimeDeliveryOwnerAlreadyArmed};
 
 use crate::{
-    DetachedJobService, JobAwaitCoordinator, JobAwaitDeliverySink, JobDeliveryApplication,
-    JobDeliverySink, RuntimeDeliveryHost, RuntimeDeliveryOwner, RuntimeDeliveryOwnerHandle,
+    DeliveryRoute, DetachedJobService, JobAwaitCoordinator, JobAwaitDeliverySink,
+    JobDeliveryApplication, JobDeliverySink, RuntimeDeliveryHost, RuntimeDeliveryOwner,
+    RuntimeDeliveryOwnerHandle,
 };
 
 /// Applies job deliveries through a session service and its runtime.
@@ -41,7 +42,10 @@ impl<S> JobDeliverySink for SessionServiceDeliverySink<S>
 where
     S: SessionServiceControlExt + Send + Sync + 'static,
 {
-    async fn apply(&self, application: JobDeliveryApplication) -> Result<(), String> {
+    async fn apply(
+        &self,
+        application: JobDeliveryApplication,
+    ) -> Result<(), crate::JobDeliveryApplyError> {
         match application {
             JobDeliveryApplication::Record { .. } => Ok(()),
             JobDeliveryApplication::Notification {
@@ -62,7 +66,24 @@ where
                 )
                 .await
                 .map(|_| ())
-                .map_err(|error| error.to_string()),
+                .map_err(|error| match error {
+                    meerkat_core::SessionControlError::Authorization(error) => {
+                        crate::JobDeliveryApplyError::Authorization(error)
+                    }
+                    meerkat_core::SessionControlError::Review(error) => {
+                        crate::JobDeliveryApplyError::Review(error)
+                    }
+                    // Another runtime owner hosts the recipient (#1813): its
+                    // store-only write was refused; a skip, never a block.
+                    meerkat_core::SessionControlError::Session(
+                        meerkat_core::SessionError::ServedElsewhere { id },
+                    ) => crate::JobDeliveryApplyError::ServedElsewhere { session_id: id },
+                    // Its claim is unavailable: nothing was written unclaimed.
+                    meerkat_core::SessionControlError::Session(
+                        meerkat_core::SessionError::HostingUnavailable { id },
+                    ) => crate::JobDeliveryApplyError::HostingUnavailable { session_id: id },
+                    other => crate::JobDeliveryApplyError::Infrastructure(other.to_string()),
+                }),
             JobDeliveryApplication::Event {
                 job_id,
                 delivery_sequence,
@@ -85,7 +106,25 @@ where
                 )
                 .await
                 .map(|_| ())
-                .map_err(|error| error.to_string()),
+                .map_err(|error| match error {
+                    meerkat_runtime::RuntimeDriverError::InputRefused { refusal } => {
+                        crate::JobDeliveryApplyError::Authorization(refusal.into())
+                    }
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        ..
+                    } => crate::JobDeliveryApplyError::Authorization(
+                        meerkat_core::OperationAuthorizationError::Unavailable,
+                    ),
+                    // Another runtime owner hosts the recipient (#1813): its
+                    // registration was refused; a skip, never a block.
+                    meerkat_runtime::RuntimeDriverError::ServedElsewhere { session_id } => {
+                        crate::JobDeliveryApplyError::ServedElsewhere { session_id }
+                    }
+                    meerkat_runtime::RuntimeDriverError::HostingUnavailable { session_id } => {
+                        crate::JobDeliveryApplyError::HostingUnavailable { session_id }
+                    }
+                    other => crate::JobDeliveryApplyError::Infrastructure(other.to_string()),
+                }),
         }
     }
 }
@@ -97,6 +136,7 @@ pub struct SessionServiceDeliveryHost<S> {
     runtime: Weak<MeerkatMachine>,
     jobs: DetachedJobService,
     realm_id: Option<String>,
+    continuations: Arc<crate::ContinuationHostBindings>,
 }
 
 impl<S> SessionServiceDeliveryHost<S> {
@@ -113,7 +153,19 @@ impl<S> SessionServiceDeliveryHost<S> {
             runtime: Arc::downgrade(runtime),
             jobs,
             realm_id,
+            continuations: Arc::default(),
         }
+    }
+
+    /// Resolve member addresses and confirm retained completions through
+    /// `continuations`, bound by the host once its mob runtime exists.
+    #[must_use]
+    pub fn with_continuation_bindings(
+        mut self,
+        continuations: Arc<crate::ContinuationHostBindings>,
+    ) -> Self {
+        self.continuations = continuations;
+        self
     }
 }
 
@@ -122,22 +174,62 @@ impl<S> RuntimeDeliveryHost for SessionServiceDeliveryHost<S>
 where
     S: SessionServiceControlExt + Send + Sync + 'static,
 {
-    async fn delivery_sink(&self, session_id: &SessionId) -> Option<Arc<dyn JobDeliverySink>> {
+    async fn continuation_sink(
+        &self,
+        _session_id: &SessionId,
+    ) -> Option<Arc<dyn crate::ContinuationDeliverySink>> {
+        let runtime = self.runtime.upgrade()?;
+        Some(Arc::new(crate::MachineContinuationSink::new(runtime)))
+    }
+
+    async fn resolve_address(
+        &self,
+        address: &meerkat_runtime::LogicalRuntimeId,
+    ) -> crate::AddressResolution {
+        self.continuations.resolve_address(address).await
+    }
+
+    fn retained_job_source(&self) -> Option<Arc<dyn crate::RetainedJobSource>> {
+        self.continuations.job_source()
+    }
+
+    async fn delivery_route(&self, session_id: &SessionId) -> Option<DeliveryRoute> {
         let service = self.service.upgrade()?;
         let runtime = self.runtime.upgrade()?;
+        // #1813: routed from this runtime owner's claim registry only. A
+        // session another runtime owner of this process hosts is that
+        // owner's to deliver.
+        let serving = runtime.session_serving(session_id);
+        if serving == meerkat_runtime::SessionServing::HeldByAnotherLocalOwner {
+            return Some(DeliveryRoute::ServedElsewhere);
+        }
         let operations = match &self.realm_id {
             Some(_) => runtime.ops_lifecycle_registry(session_id).await,
             None => None,
         };
         let base: Arc<dyn JobDeliverySink> =
             Arc::new(SessionServiceDeliverySink { service, runtime });
-        Some(match (operations, &self.realm_id) {
+        let sink: Arc<dyn JobDeliverySink> = match (operations, &self.realm_id) {
             (Some(operations), Some(realm_id)) => Arc::new(JobAwaitDeliverySink::new(
                 JobAwaitCoordinator::new(realm_id.clone(), self.jobs.clone(), operations),
                 base,
             )),
             _ => base,
+        };
+        Some(match serving {
+            meerkat_runtime::SessionServing::HeldHere => DeliveryRoute::ServedHere(sink),
+            meerkat_runtime::SessionServing::NotHeldInThisProcess => DeliveryRoute::Unserved(sink),
+            meerkat_runtime::SessionServing::HeldByAnotherLocalOwner => {
+                DeliveryRoute::ServedElsewhere
+            }
         })
+    }
+
+    async fn claim_cold_delivery(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Result<meerkat_runtime::HostingClaim, meerkat_runtime::HostingRefused>> {
+        Some(self.runtime.upgrade()?.grant_session_hosting(session_id))
     }
 }
 
@@ -149,6 +241,7 @@ pub(crate) fn arm_default_runtime_delivery<S>(
     service: &Arc<S>,
     runtime: &Arc<MeerkatMachine>,
     realm_id: Option<String>,
+    continuations: Arc<crate::ContinuationHostBindings>,
 ) where
     S: SessionServiceControlExt + Send + Sync + 'static,
 {
@@ -159,9 +252,10 @@ pub(crate) fn arm_default_runtime_delivery<S>(
         return;
     }
     let jobs = DetachedJobService::new(owner.job_store());
-    let host = Arc::new(SessionServiceDeliveryHost::new(
-        service, runtime, jobs, realm_id,
-    ));
+    let host = Arc::new(
+        SessionServiceDeliveryHost::new(service, runtime, jobs, realm_id)
+            .with_continuation_bindings(continuations),
+    );
     match owner.arm(host) {
         Ok(handle) => RuntimeDeliveryOwnerHandle::detach(handle),
         Err(RuntimeDeliveryOwnerAlreadyArmed) => {

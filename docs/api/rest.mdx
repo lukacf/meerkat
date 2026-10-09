@@ -1278,6 +1278,8 @@ target, `{"connector": {"slot", "issuer", "client", "resource", "scopes",
 [Host-driven OAuth](/api/mcp#host-driven-oauth) and
 [Connector OAuth](/guides/auth#connector-oauth).
 
+Auth endpoint errors return `{"error": "<text>", "reason": "<WireAuthErrorReason>"}`. Branch on `reason` (for example `slot_occupied`, `account_mismatch`, `attempt_missing`, `reauth_required`, `infrastructure`), not on the text; status codes are unchanged.
+
 ### POST /auth/login/cancel
 
 Retire a pending MCP or connector OAuth attempt by its state. An MCP server

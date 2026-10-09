@@ -178,6 +178,15 @@ impl From<NativeAdmissionError> for RuntimeDriverError {
 /// fresh retry authentication observation need not equal the original retained
 /// authentication reference.
 pub trait NativeWorkAuthorizationHost: Send + Sync {
+    /// Compose actual authenticated non-input control through this installed
+    /// host. Unsupported owners must not borrow a current/completed run.
+    fn context_control_authorization(
+        &self,
+        _control: Arc<meerkat_core::service::SystemContextControlRequest>,
+    ) -> Result<WorkAuthorizationContext, meerkat_core::OperationAuthorizationError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+
     /// Preserve controller setup/readiness failures for the native boundary.
     /// Ordinary policy refusal retains the exact canonical refusal kind.
     fn authenticate_association(
@@ -206,6 +215,34 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
         &self,
         batch: &NativeWorkBatch,
     ) -> Result<WorkAuthorizationContext, NativeWorkContextError>;
+
+    /// Validate a governed resume of retained work: an internal completion
+    /// (a fork_off or council outcome) admitted to the runtime that staged
+    /// the original run, with no fresh transport authentication. The runtime
+    /// has already checked destination custody and that every original
+    /// contributor row is present and exact in its ledger. The host validates
+    /// the internal evidence, then the current original invocation/mandate,
+    /// controller grant, account, model and operation ceilings through its
+    /// existing owners, and returns the usable controller client it supplies
+    /// itself, whose selection must equal the retained one; the evidence's
+    /// selection is data. A stale or copied identity is never sufficient.
+    /// Actual verdicts are typed: a denial is `Refused(Denied)`, malformed
+    /// evidence `Refused(MalformedFacts)`, an actual authorization
+    /// unavailability `AuthorizationUnavailable`; anything not decidable now
+    /// is `Readiness`. The default refuses as unsupported: a host that does
+    /// not implement it admits no retained-work resume.
+    fn authenticate_retained_resume(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input: &Input,
+        evidence: &crate::retained_work::RetainedResumeEvidence,
+    ) -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
+    {
+        let _ = (runtime_id, input, evidence);
+        Err(crate::retained_work::RetainedResumeError::Readiness(
+            crate::traits::ControllerReadinessFailure::UnsupportedScope,
+        ))
+    }
 }
 
 /// A construction failure, never an ordinary operation permission refusal.
@@ -296,6 +333,9 @@ impl RetainedInputAuthority {
     pub fn association(&self) -> &InputAuthorityAssociation {
         &self.association
     }
+    pub(crate) fn replay_digest(&self) -> &[u8; 32] {
+        &self.replay_digest
+    }
 
     pub(crate) fn from_input(input: &Input) -> Result<Option<Self>, RuntimeDriverError> {
         input
@@ -345,6 +385,16 @@ fn hex(bytes: &[u8]) -> String {
 pub(crate) fn generated_binding(
     input: &Input,
 ) -> Result<(Option<String>, Option<String>), RuntimeDriverError> {
+    // A resume of retained work is bound under its canonical original
+    // contributor; it has no association of its own.
+    if let Some(grant) = input.header().retained_resume.as_ref() {
+        let canonical = grant
+            .evidence
+            .contributors
+            .first()
+            .ok_or_else(unavailable)?;
+        return association_binding(canonical.association());
+    }
     input
         .header()
         .authority_association
@@ -385,7 +435,7 @@ pub(crate) fn qualified_idempotency_key(
     ))))
 }
 
-fn replay_digest(input: &Input) -> Result<[u8; 32], RuntimeDriverError> {
+pub(crate) fn replay_digest(input: &Input) -> Result<[u8; 32], RuntimeDriverError> {
     let mut replay = input.clone();
     // A retry gets a fresh submission ID/time but must carry the same exact
     // original work, qualified requester/target, content, and authority claims.
@@ -400,6 +450,23 @@ pub(crate) fn verify_retained_replay(
     state: &crate::input_state::InputState,
     input: &Input,
 ) -> Result<(), RuntimeDriverError> {
+    // A resume of retained work replays only with custody for the same
+    // retained work: same identity and the same original contributors.
+    if let Some(record) = state.retained_resume.as_ref() {
+        return match input.header().retained_resume.as_ref() {
+            Some(grant)
+                if grant.evidence.identity == record.identity
+                    && grant.evidence.delivery == record.delivery
+                    && grant.evidence.contributors == state.authority_contributors
+                    && input.header().authority_association.is_none() =>
+            {
+                Ok(())
+            }
+            _ => Err(RuntimeDriverError::InputIdempotencyConflict {
+                existing_id: state.input_id.clone(),
+            }),
+        };
+    }
     let own = state
         .authority_contributors
         .iter()
@@ -683,6 +750,7 @@ pub(crate) mod tests {
                     source_name: "replay-fixture".into(),
                 },
                 ingress_context: None,
+                retained_resume: None,
                 ..original.header().clone()
             },
             event_type: "record-updated".into(),
@@ -914,6 +982,8 @@ pub(crate) mod tests {
     }
     pub(crate) struct TestIngress {
         selection: meerkat_core::ControllerModelSelection,
+        retained_resume_verdict:
+            std::sync::Mutex<Option<crate::retained_work::RetainedResumeError>>,
     }
     impl TestIngress {
         pub(crate) fn new(authority: meerkat_core::handles::GeneratedAuthLeaseHandle) -> Self {
@@ -941,7 +1011,30 @@ pub(crate) mod tests {
                 &meerkat_core::auth::PersistedTokens::api_key("synthetic-ingress-fixture"),
             )
             .expect("actual initial credential owner");
-            Self { selection }
+            Self {
+                selection,
+                retained_resume_verdict: std::sync::Mutex::new(None),
+            }
+        }
+        /// The native owner's current verdict on any retained-work resume
+        /// becomes an actual denial.
+        pub(crate) fn deny_retained_resume(&self) {
+            self.refuse_retained_resume(crate::retained_work::RetainedResumeError::Refused(
+                meerkat_core::OperationRefused::new(meerkat_core::OperationRefusalKind::Denied),
+            ));
+        }
+        /// The native owner's current verdict on any retained-work resume.
+        pub(crate) fn refuse_retained_resume(
+            &self,
+            verdict: crate::retained_work::RetainedResumeError,
+        ) {
+            *self
+                .retained_resume_verdict
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(verdict);
+        }
+        pub(crate) fn selection(&self) -> &meerkat_core::ControllerModelSelection {
+            &self.selection
         }
         pub(crate) fn input(&self, requester: &str) -> Input {
             input_with_controller(requester, self.selection.clone())
@@ -973,6 +1066,41 @@ pub(crate) mod tests {
                     ),
                 ))
             }
+        }
+        fn authenticate_retained_resume(
+            &self,
+            _runtime: &LogicalRuntimeId,
+            _input: &Input,
+            evidence: &crate::retained_work::RetainedResumeEvidence,
+        ) -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
+        {
+            if let Some(verdict) = self
+                .retained_resume_verdict
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return Err(verdict);
+            }
+            // A static test owner: the retained originals must have been
+            // admitted under this owner's pinned controller.
+            if evidence.identity().controller() != Some(&self.selection)
+                || evidence.contributors().is_empty()
+                || evidence.contributors().iter().any(|original| {
+                    original.association().candidate().controller_model.as_ref()
+                        != Some(&self.selection)
+                })
+            {
+                return Err(crate::retained_work::RetainedResumeError::Refused(
+                    meerkat_core::OperationRefused::new(
+                        meerkat_core::OperationRefusalKind::MalformedFacts,
+                    ),
+                ));
+            }
+            Ok(meerkat_core::ControllerModelClient::new(
+                self.selection.clone(),
+                Arc::new(TestController(self.selection.clone())),
+            ))
         }
         fn work_context(
             &self,
@@ -1121,6 +1249,452 @@ pub(crate) mod tests {
             prompt.injected_context.push("new hidden context".into());
         }
         assert!(verify_retained_replay(&decoded.state, &altered).is_err());
+    }
+
+    /// #1497 2a-2: a continuation carries no native work binding yet, so a
+    /// governed host refuses it even if it reached admission, and an
+    /// accepted governed row matches a replay only with the exact content and
+    /// the exact retained authority.
+    #[tokio::test]
+    async fn governed_rows_refuse_authority_free_continuations_and_inexact_replays() {
+        let mut driver = driver(true);
+        assert!(
+            driver
+                .accept_input(Input::Prompt(crate::input::PromptInput::continuation(
+                    InputId::new(),
+                    "continuation:unbound",
+                    "the task finished".into(),
+                    meerkat_core::types::HandlingMode::Queue,
+                )))
+                .await
+                .is_err(),
+            "a governed host never admits a continuation without a work binding"
+        );
+
+        let original = driver.input("caller-a");
+        let other = driver.input("caller-b");
+        let AcceptOutcome::Accepted { state: row, .. } = driver
+            .accept_input(original.clone())
+            .await
+            .expect("governed admission")
+        else {
+            panic!("the original is admitted");
+        };
+        let mut replay = original.clone();
+        replay.header_mut().id = InputId::new();
+        replay.header_mut().timestamp = chrono::Utc::now();
+        crate::input_state::verify_exact_replay(&row, &replay).expect("an exact replay matches");
+
+        let mut changed_content = replay.clone();
+        if let Input::Prompt(prompt) = &mut changed_content {
+            prompt.content = "another result".into();
+        }
+        let mut changed_authority = replay.clone();
+        changed_authority.header_mut().authority_association =
+            other.header().authority_association.clone();
+        let mut missing_authority = replay.clone();
+        missing_authority.header_mut().authority_association = None;
+        for (changed, what) in [
+            (changed_content, "a changed result"),
+            (changed_authority, "another requester's authority"),
+            (missing_authority, "a missing authority"),
+        ] {
+            assert!(
+                matches!(
+                    crate::input_state::verify_exact_replay(&row, &changed),
+                    Err(RuntimeDriverError::InputIdempotencyConflict { .. })
+                ),
+                "{what} is never an exact replay"
+            );
+        }
+        let legacy = crate::input_state::InputState::new_accepted(row.input_id.clone());
+        assert!(
+            crate::input_state::verify_exact_replay(&legacy, &replay).is_err(),
+            "a row without a recorded identity never matches by key alone"
+        );
+    }
+
+    /// The retained authority an accepted row records for itself.
+    fn own_authority(state: &crate::input_state::InputState) -> RetainedInputAuthority {
+        state
+            .authority_contributors
+            .iter()
+            .find(|retained| retained.input_id() == &state.input_id)
+            .cloned()
+            .expect("the original retains its association")
+    }
+
+    fn accepted_state(outcome: AcceptOutcome) -> crate::input_state::InputState {
+        let AcceptOutcome::Accepted { state, .. } = outcome else {
+            panic!("expected an accepted row, got {outcome:?}");
+        };
+        state
+    }
+
+    fn retained_identity(
+        runtime: &LogicalRuntimeId,
+        originals: &[RetainedInputAuthority],
+        selection: &meerkat_core::ControllerModelSelection,
+    ) -> meerkat_core::retained_work::RetainedWorkIdentity {
+        let selected = originals
+            .iter()
+            .map(|original| {
+                let (binding, batch) =
+                    association_binding(original.association()).expect("binding");
+                (
+                    original.input_id().to_string(),
+                    (binding.expect("binding"), batch.expect("batch key")),
+                )
+            })
+            .collect();
+        crate::retained_work::identity_from(
+            runtime,
+            meerkat_core::lifecycle::RunId::new(),
+            originals,
+            &selected,
+            Some(selection.clone()),
+        )
+        .expect("identity")
+    }
+
+    fn continuation_input(body: &str) -> Input {
+        Input::Prompt(crate::input::PromptInput::continuation(
+            InputId::new(),
+            "continuation:resume",
+            body.into(),
+            meerkat_core::types::HandlingMode::Queue,
+        ))
+    }
+
+    /// Runtime-minted custody for `input` resuming `originals`, as
+    /// `MeerkatMachine::accept_retained_resume` mints it.
+    fn with_grant(
+        mut input: Input,
+        identity: meerkat_core::retained_work::RetainedWorkIdentity,
+        originals: &[RetainedInputAuthority],
+        selection: &meerkat_core::ControllerModelSelection,
+    ) -> Input {
+        let grant = crate::retained_work::RetainedResumeGrant {
+            evidence: crate::retained_work::RetainedResumeEvidence {
+                identity,
+                delivery: crate::retained_work::RetainedResumeDelivery {
+                    address: LogicalRuntimeId::new("native-test"),
+                    delivery_id: crate::delivery_inbox::RuntimeDeliveryId::new("continuation:test")
+                        .expect("delivery id"),
+                    delivery_sequence: 1,
+                    submission_digest: "submission".into(),
+                },
+                contributors: originals.to_vec(),
+            },
+            submitted_input_id: input.id().clone(),
+            replay_digest: replay_digest(&input).expect("digest"),
+            controller_client: meerkat_core::ControllerModelClient::new(
+                selection.clone(),
+                Arc::new(TestController(selection.clone())),
+            ),
+        };
+        input.header_mut().retained_resume = Some(Arc::new(grant));
+        input
+    }
+
+    /// #1497 2a-3: a resume of retained work is admitted with the originals
+    /// it resumes, never an unrelated current input's authority, bound under
+    /// its canonical original, and with no association of its own.
+    #[tokio::test]
+    async fn a_retained_resume_admits_with_its_originals_only() {
+        let mut driver = driver(true);
+        let selection = driver.host.selection().clone();
+        let a = driver.input("caller-a");
+        let b = driver.input("caller-b");
+        let a = own_authority(&accepted_state(driver.accept_input(a).await.expect("a")));
+        let b = own_authority(&accepted_state(driver.accept_input(b).await.expect("b")));
+        let runtime = LogicalRuntimeId::new("native-test");
+        let identity = retained_identity(&runtime, std::slice::from_ref(&a), &selection);
+        let resume = with_grant(
+            continuation_input("the fork finished"),
+            identity.clone(),
+            std::slice::from_ref(&a),
+            &selection,
+        );
+        let resume_id = resume.id().clone();
+        let state = accepted_state(driver.accept_input(resume).await.expect("resume admitted"));
+        assert_eq!(state.authority_contributors, vec![a.clone()]);
+        assert!(
+            !state.authority_contributors.contains(&b),
+            "never B's authority"
+        );
+        assert_eq!(
+            state.retained_resume.map(|record| record.identity),
+            Some(identity)
+        );
+        let (binding, batch) = association_binding(a.association()).expect("binding");
+        driver.with_dsl_state(|dsl| {
+            assert_eq!(
+                dsl.input_authority_bindings.get(&resume_id.to_string()),
+                binding.as_ref()
+            );
+            assert_eq!(
+                dsl.input_authority_batch_keys.get(&resume_id.to_string()),
+                batch.as_ref()
+            );
+        });
+    }
+
+    /// Custody is bound to one exact input and one runtime: a grant copied
+    /// onto another input, retargeted at another runtime, or carried next to
+    /// an association or ingress of the input's own never admits.
+    #[tokio::test]
+    async fn a_copied_or_retargeted_grant_never_admits() {
+        let mut driver = driver(true);
+        let selection = driver.host.selection().clone();
+        let original = driver.input("caller-a");
+        let a = own_authority(&accepted_state(
+            driver.accept_input(original).await.expect("a"),
+        ));
+        let runtime = LogicalRuntimeId::new("native-test");
+        let identity = retained_identity(&runtime, std::slice::from_ref(&a), &selection);
+
+        let granted = with_grant(
+            continuation_input("the fork finished"),
+            identity.clone(),
+            std::slice::from_ref(&a),
+            &selection,
+        );
+        let mut copied = continuation_input("another result");
+        copied.header_mut().retained_resume = granted.header().retained_resume.clone();
+        assert!(
+            driver.accept_input(copied).await.is_err(),
+            "custody copied onto another input"
+        );
+
+        let elsewhere = retained_identity(
+            &LogicalRuntimeId::new("another-runtime"),
+            std::slice::from_ref(&a),
+            &selection,
+        );
+        let retargeted = with_grant(
+            continuation_input("the fork finished"),
+            elsewhere,
+            std::slice::from_ref(&a),
+            &selection,
+        );
+        assert!(
+            driver.accept_input(retargeted).await.is_err(),
+            "custody for another runtime"
+        );
+
+        let with_own_authority = with_grant(
+            driver.input("caller-a"),
+            identity,
+            std::slice::from_ref(&a),
+            &selection,
+        );
+        assert!(
+            driver.accept_input(with_own_authority).await.is_err(),
+            "a resume never also carries authority of its own"
+        );
+    }
+
+    /// The native owner's actual denial is the terminal AuthorityDenied
+    /// outcome, distinct from an unavailable owner.
+    #[tokio::test]
+    async fn an_actual_denial_refuses_the_resume() {
+        let mut driver = driver(true);
+        let selection = driver.host.selection().clone();
+        let original = driver.input("caller-a");
+        let a = own_authority(&accepted_state(
+            driver.accept_input(original).await.expect("a"),
+        ));
+        let runtime = LogicalRuntimeId::new("native-test");
+        driver.host.deny_retained_resume();
+        let resume = with_grant(
+            continuation_input("the fork finished"),
+            retained_identity(&runtime, std::slice::from_ref(&a), &selection),
+            std::slice::from_ref(&a),
+            &selection,
+        );
+        assert!(matches!(
+            driver.accept_input(resume).await,
+            Err(RuntimeDriverError::RetainedResumeRefused {
+                reason: crate::retained_work::RetainedResumeRefusal::AuthorityDenied
+            })
+        ));
+    }
+
+    /// Only actual verdicts are terminal: a malformed-evidence refusal is an
+    /// invalid binding and an actual authorization unavailability settles as
+    /// such; a reprepare or readiness answer stays retryable.
+    #[tokio::test]
+    async fn only_actual_host_verdicts_refuse_the_resume() {
+        use crate::retained_work::{RetainedResumeError, RetainedResumeRefusal};
+        let cases = [
+            (
+                RetainedResumeError::Refused(meerkat_core::OperationRefused::new(
+                    meerkat_core::OperationRefusalKind::MalformedFacts,
+                )),
+                Some(RetainedResumeRefusal::NoAdmissibleWorkBinding),
+            ),
+            (
+                RetainedResumeError::AuthorizationUnavailable,
+                Some(RetainedResumeRefusal::OperationAuthorizationUnavailable),
+            ),
+            (
+                RetainedResumeError::Refused(meerkat_core::OperationRefused::new(
+                    meerkat_core::OperationRefusalKind::ReprepareRequired,
+                )),
+                None,
+            ),
+            (
+                RetainedResumeError::Readiness(
+                    crate::traits::ControllerReadinessFailure::PolicyUnavailable,
+                ),
+                None,
+            ),
+        ];
+        for (verdict, expected) in cases {
+            let mut driver = driver(true);
+            let selection = driver.host.selection().clone();
+            let original = driver.input("caller-a");
+            let a = own_authority(&accepted_state(
+                driver.accept_input(original).await.expect("a"),
+            ));
+            driver.host.refuse_retained_resume(verdict.clone());
+            let resume = with_grant(
+                continuation_input("the fork finished"),
+                retained_identity(
+                    &LogicalRuntimeId::new("native-test"),
+                    std::slice::from_ref(&a),
+                    &selection,
+                ),
+                std::slice::from_ref(&a),
+                &selection,
+            );
+            match (driver.accept_input(resume).await, expected) {
+                (Err(RuntimeDriverError::RetainedResumeRefused { reason }), Some(expected)) => {
+                    assert_eq!(reason, expected, "{verdict:?}");
+                }
+                (Err(RuntimeDriverError::ControllerReadinessUnavailable { .. }), None) => {}
+                (other, _) => panic!("{verdict:?} gave {other:?}"),
+            }
+        }
+        assert_eq!(
+            RetainedResumeError::from(meerkat_core::OperationAuthorizationError::Unavailable),
+            RetainedResumeError::AuthorizationUnavailable,
+            "an actual authorization unavailability stays distinct"
+        );
+    }
+
+    /// Restart: a recovered resume row keeps its originals and identity and
+    /// is bound again under its canonical original; process custody is gone.
+    #[tokio::test]
+    async fn a_recovered_retained_resume_keeps_its_originals_and_binding() {
+        let mut original_driver = driver(true);
+        let selection = original_driver.host.selection().clone();
+        let original = original_driver.input("caller-a");
+        let a = own_authority(&accepted_state(
+            original_driver.accept_input(original).await.expect("a"),
+        ));
+        let runtime = LogicalRuntimeId::new("native-test");
+        let identity = retained_identity(&runtime, std::slice::from_ref(&a), &selection);
+        let resume = with_grant(
+            continuation_input("the fork finished"),
+            identity.clone(),
+            std::slice::from_ref(&a),
+            &selection,
+        );
+        let resume_id = resume.id().clone();
+        original_driver.accept_input(resume).await.expect("resume");
+        let stored = original_driver
+            .stored_input_state(&resume_id)
+            .expect("resume row");
+        let decoded: crate::input_state::StoredInputState =
+            serde_json::from_slice(&serde_json::to_vec(&stored).expect("bytes")).expect("row");
+        let mut recovered = driver(true);
+        recovered
+            .recover_input_state_persistence_record(decoded)
+            .expect("recover the resume row");
+        let row = recovered.ledger().get(&resume_id).expect("recovered row");
+        assert_eq!(row.authority_contributors, vec![a.clone()]);
+        assert_eq!(
+            row.retained_resume.as_ref().map(|record| &record.identity),
+            Some(&identity)
+        );
+        assert!(
+            row.persisted_input
+                .as_ref()
+                .expect("input")
+                .header()
+                .retained_resume
+                .is_none(),
+            "process custody never survives persistence"
+        );
+        let (binding, _) = association_binding(a.association()).expect("binding");
+        recovered.with_dsl_state(|dsl| {
+            assert_eq!(
+                dsl.input_authority_bindings.get(&resume_id.to_string()),
+                binding.as_ref()
+            );
+        });
+    }
+
+    /// Resolution takes only exact original rows: the passive digests select
+    /// and compare, the rows supply the authority.
+    #[tokio::test]
+    async fn resolution_takes_only_exact_original_rows() {
+        use crate::retained_work::{RetainedResumeRefusal, resolve_contributors};
+        let mut driver = driver(true);
+        let selection = driver.host.selection().clone();
+        let original = driver.input("caller-a");
+        let state = accepted_state(driver.accept_input(original).await.expect("a"));
+        let a = own_authority(&state);
+        let runtime = LogicalRuntimeId::new("native-test");
+        let identity = retained_identity(&runtime, std::slice::from_ref(&a), &selection);
+        let rows =
+            |state: Option<crate::input_state::InputState>| move |_: &InputId| Ok(state.clone());
+        assert_eq!(
+            resolve_contributors(&runtime, &identity, rows(Some(state.clone())))
+                .expect("exact row"),
+            vec![a.clone()]
+        );
+        let no_binding = |result: Result<Vec<RetainedInputAuthority>, RuntimeDriverError>| {
+            matches!(
+                result,
+                Err(RuntimeDriverError::RetainedResumeRefused {
+                    reason: RetainedResumeRefusal::NoAdmissibleWorkBinding
+                })
+            )
+        };
+        assert!(
+            no_binding(resolve_contributors(&runtime, &identity, rows(None))),
+            "a missing row"
+        );
+        assert!(
+            no_binding(resolve_contributors(
+                &LogicalRuntimeId::new("another-runtime"),
+                &identity,
+                rows(Some(state.clone()))
+            )),
+            "another runtime"
+        );
+        let other = driver.input("caller-b");
+        let other_state = accepted_state(driver.accept_input(other).await.expect("b"));
+        assert!(
+            no_binding(resolve_contributors(
+                &runtime,
+                &identity,
+                rows(Some(other_state))
+            )),
+            "a row that is not the original"
+        );
+        assert!(
+            matches!(
+                resolve_contributors(&runtime, &identity, |_: &InputId| Err(
+                    crate::input_authority::unavailable()
+                )),
+                Err(RuntimeDriverError::ValidationFailed { .. })
+            ),
+            "a failure to read is retryable, never a refusal"
+        );
     }
 
     #[tokio::test]

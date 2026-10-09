@@ -196,13 +196,14 @@ council. How the sealed result reaches the caller depends on the host:
   recorded once in the convener's transcript as a durable `BackgroundJob`
   system notice (the header "Background council job `<job_id>` finished
   (`completed` or `failed`):", with the outcome as the typed block's `detail`
-  and `persisted: true`). It is delivered as a runtime input with the
-  idempotency key `council:<job_id>`: a convener in the middle of a turn sees
+  and `persisted: true`). It is committed once on the council's custody
+  record and submitted as a continuation, durable from submission, then
+  applied as a runtime input with the idempotency key `council:<job_id>`: a convener in the middle of a turn sees
   it at that turn's next model call, saved once and with no second turn (one
   follow-up turn only if the turn ends before another model call), and an
   idle convener runs one wake turn that sees it. A
   convener that is no longer live (the runtime retired its idle executor) is
-  revived first: through its mob when it is a mob member, or through the
+  revived when the continuation is applied: through its mob when it is a mob member, or through the
   host's `DetachedOwnerHost` when it is a plain session. The status is
   **`failed`** when the exit reason is a failure (`participant_seating_failed`,
   `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
@@ -215,7 +216,8 @@ council. How the sealed result reaches the caller depends on the host:
   `host_declared_unavailable` on a host that may exit when the turn ends (the
   `rkat` CLI unless it stays alive, such as `rkat run` without
   `--keep-alive`); `no_runtime_adapter` for a host that declares delivery
-  without a runtime; or `no_owner_revival_host` for a convener that is a plain
+  without a runtime; `no_continuation_owner` for a host that never bound its
+  runtime delivery inbox; or `no_owner_revival_host` for a convener that is a plain
   session on a host without a `DetachedOwnerHost` (a top-level REST,
   MCP-server, or `rkat run --keep-alive` session). No detached job is owed,
   so no result can be lost.

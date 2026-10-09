@@ -408,6 +408,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireConnectorAccountSelection": schema_for!(crate::wire::WireConnectorAccountSelection),
         "WireConnectorVerifiedAccount": schema_for!(crate::wire::WireConnectorVerifiedAccount),
         "WireScopeEvidence": schema_for!(crate::wire::WireScopeEvidence),
+        "WireAuthErrorReason": schema_for!(crate::wire::WireAuthErrorReason),
+        "WireAuthErrorData": schema_for!(crate::wire::WireAuthErrorData),
+        "WireAuthErrorBody": schema_for!(crate::wire::WireAuthErrorBody),
         "WireConnectorAuthStatus": schema_for!(crate::wire::WireConnectorAuthStatus),
         "WireAuthStatusResult": schema_for!(crate::wire::WireAuthStatusResult),
         "WireDeviceStart": schema_for!(crate::wire::WireDeviceStart),
@@ -1454,11 +1457,11 @@ mod tests {
             serde_json::json!({ "kind": "inherit" }),
             serde_json::json!({
                 "kind": "provider",
-                "provider_id": "homecore",
-                "policy_id": "household-tools"
+                "provider_id": "example",
+                "policy_id": "team-tools"
             }),
-            serde_json::json!({ "kind": "unmanaged", "provider_id": "homecore" }),
-            serde_json::json!({ "kind": "inherit", "policy_id": "household-tools" }),
+            serde_json::json!({ "kind": "unmanaged", "provider_id": "example" }),
+            serde_json::json!({ "kind": "inherit", "policy_id": "team-tools" }),
         ] {
             let schema_accepts = validator.is_valid(&instance);
             let runtime_accepts = serde_json::from_value::<

@@ -5,7 +5,7 @@
 //! refusal of an unwired `[agent] provider_params` table) instead of replacing
 //! the whole head document with `Config::default()` and serving on a
 //! configuration the operator never wrote. The observable is the real binary:
-//! a non-zero exit before the server loop and the `ConfigError::Validation`
+//! a non-zero exit before the server loop and the stored-document fault
 //! text on stderr. The failure mode has its own positive observable: a server
 //! that booted on defaults answers the `initialize` request written to its
 //! stdin, and that answer fails the test immediately.
@@ -26,7 +26,7 @@ max_tokens_per_turn = 256\n\
 provider_params = { provider_tag = { provider = \"anthropic\", cache_control = \"disabled\" } }\n";
 
 /// Substring of `Config::reject_unwired_agent_provider_params`'s
-/// `ConfigError::Validation` payload.
+/// refusal message, which a persisted document reports as a stored fault.
 const REFUSAL_TEXT: &str = "[agent] provider_params is not applied to any session";
 
 const REALM_ID: &str = "rpc-realm-config-ingress-refused";
@@ -182,8 +182,8 @@ fn head_config_with_agent_provider_params_refuses_rkat_rpc_startup() {
         exit.stderr
     );
     assert!(
-        exit.stderr.contains("Validation error"),
-        "rkat-rpc stderr must surface the typed ConfigError::Validation; stderr:\n{}",
+        exit.stderr.contains("persisted config document is invalid"),
+        "rkat-rpc stderr must surface the stored-document fault; stderr:\n{}",
         exit.stderr
     );
     assert!(

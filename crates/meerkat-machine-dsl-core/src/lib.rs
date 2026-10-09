@@ -7,6 +7,7 @@ mod gen_phase;
 mod gen_schema;
 mod gen_state;
 mod parse;
+mod strict_reads;
 #[cfg(test)]
 mod test_machines;
 mod validate;
@@ -126,6 +127,7 @@ fn fix_updates_remove_types(
 pub fn expand_machine(input: TokenStream) -> Result<TokenStream, Error> {
     let mut def = parse::parse_machine(input)?;
     expand_per_phase(&mut def);
+    strict_reads::normalize_guard_value_reads(&mut def);
     fix_remove_types(&mut def);
     validate::validate(&def)?;
 

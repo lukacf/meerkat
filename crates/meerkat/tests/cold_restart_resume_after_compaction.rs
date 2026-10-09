@@ -9,19 +9,23 @@
 //! Any `TranscriptContinuityViolation` / `MonotonicityViolation` /
 //! `InvalidTranscriptRewrite` in the resume or post-resume persist is the bug.
 //!
-//! SAME-PROCESS CAVEAT: every "host lifetime" in this file is reconstructed
-//! inside ONE OS process, and several first lifetimes deliberately settle
-//! state before "dying" (e.g. `wait_for_canonical_unregister_completion`
-//! joins the unregister saga a killed host would abandon mid-flight).
+//! SAME-PROCESS CAVEAT: apart from
+//! `failed_compaction_attempt_pressure_retry_survives_cold_restart`, which
+//! runs each lifetime as its own process, every "host lifetime" in this file
+//! is reconstructed inside ONE OS process and ends with `stand_down` (its
+//! runtime registrations unregistered to terminal and its service shut
+//! down), and several first lifetimes deliberately settle state before
+//! "dying" (e.g. `wait_for_canonical_unregister_completion` joins the
+//! unregister saga a killed host would abandon mid-flight).
 //! Process-global state also survives each "restart": the validated
 //! transcript-graph decode memo, the slim-materialization substitution memo,
 //! and the byte-bound digest-accumulator memo (all honor
 //! `MEERKAT_DISABLE_GRAPH_DECODE_MEMO`) can serve host 2 proofs minted by
 //! host 1, so a defect confined to the true cold-start decode path (full
 //! graph validation, revision-body digest checks, accumulator reseeding) can
-//! pass here while failing a real restart. These lifetimes spawn no
-//! subprocess and the kill switch cannot be set in-process (the env read is
-//! process-global; `std::env::set_var` races sibling test threads).
+//! pass here while failing a real restart. The in-process lifetimes cannot
+//! set the kill switch (the env read is process-global; `std::env::set_var`
+//! races sibling test threads).
 //! TODO(evidence): port the memo-free re-exec child idiom — see
 //! `cold_restart_resume_continues_persisted_history_without_process_memos`
 //! in `crates/meerkat/tests/cold_restart_resume.rs` — to at least the
@@ -329,6 +333,69 @@ mod tests {
             });
             Err(meerkat_core::ToolError::callback_pending(call.name, args))
         }
+    }
+
+    /// Run `child_test` (an exact test name in this binary) as a "write"
+    /// process and then a "read" process over one temporary realm root. Each
+    /// is a real process, so the writer's exit is a true host death: its
+    /// hosting claims, file locks and process-global memos are all gone.
+    fn run_process_phases(child_test: &str) {
+        let executable = std::env::current_exe().expect("test binary path");
+        let temp = tempfile::tempdir().expect("cross-process realm tempdir");
+        for phase in ["write", "read"] {
+            let output = std::process::Command::new(&executable)
+                .arg("--exact")
+                .arg(child_test)
+                .arg("--nocapture")
+                .env("MEERKAT_COLD_RESTART_PHASE", phase)
+                .env("MEERKAT_COLD_RESTART_ROOT", temp.path())
+                .env("MEERKAT_DISABLE_GRAPH_DECODE_MEMO", "1")
+                .output()
+                .map_err(|error| (phase, error))
+                .expect("spawn cold-restart child process");
+            assert!(
+                output.status.success(),
+                "cold-restart {phase} process failed: {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
+    /// The phase and realm root of a process child, or `None` in the
+    /// ordinary test binary run.
+    fn process_child_phase() -> Option<(String, std::path::PathBuf)> {
+        let phase = std::env::var("MEERKAT_COLD_RESTART_PHASE").ok()?;
+        let root = std::env::var_os("MEERKAT_COLD_RESTART_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("process child requires MEERKAT_COLD_RESTART_ROOT");
+        Some((phase, root))
+    }
+
+    /// End an in-process host lifetime the way a same-process successor
+    /// requires: every runtime registration is unregistered to terminal (which
+    /// joins its session actor) and the service shuts down, so the lifetime's
+    /// session hosting claims are released. A dropped in-process host keeps
+    /// them, because its registrations' executors hold the service and the
+    /// runtime.
+    async fn stand_down(
+        service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        adapter: &Arc<MeerkatMachine>,
+    ) {
+        for registration in adapter.current_session_registration_witnesses().await {
+            assert!(
+                adapter
+                    .unregister_session_registration_until_terminal_if_current(&registration)
+                    .await
+                    .expect("unregister the lifetime's runtime registration"),
+                "the lifetime's current registration is torn down"
+            );
+        }
+        service
+            .try_shutdown()
+            .await
+            .expect("shut the lifetime's session service down");
     }
 
     async fn build_service(
@@ -1456,7 +1523,8 @@ mod tests {
                 rewrite_commit_count(&compacted) >= 1,
                 "test setup failed: compaction left no TranscriptRewriteCommit"
             );
-            // Cold stop: the host dies without archiving or retiring anything.
+            // The host stops without archiving or retiring anything.
+            stand_down(&service, &adapter).await;
             session_id
         };
 
@@ -2024,18 +2092,30 @@ mod tests {
 
     /// A failed compaction attempt is durable across restart, but an actively
     /// oversized history must retry immediately because cadence is only a cost
-    /// guard and cannot veto capacity recovery.
-    #[tokio::test]
-    async fn failed_compaction_attempt_pressure_retry_survives_cold_restart() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let first_lifetime_attempts = Arc::new(AtomicUsize::new(0));
+    /// guard and cannot veto capacity recovery. Each lifetime is its own
+    /// process, so the writer really dies with its failed attempt recorded.
+    #[test]
+    fn failed_compaction_attempt_pressure_retry_survives_cold_restart() {
+        run_process_phases(
+            "tests::failed_compaction_attempt_pressure_retry_survives_cold_restart_process_child",
+        );
+    }
 
-        let session_id = {
+    /// Exact-filtered child entrypoint for the parent above; a no-op during
+    /// the ordinary test binary run.
+    #[tokio::test]
+    async fn failed_compaction_attempt_pressure_retry_survives_cold_restart_process_child() {
+        let Some((phase, root)) = process_child_phase() else {
+            return;
+        };
+        let session_id_path = root.join("cross-process-session-id");
+        if phase == "write" {
+            let first_lifetime_attempts = Arc::new(AtomicUsize::new(0));
             let client: Arc<dyn LlmClient> = Arc::new(CompactionFailureTrackingClient::new(
                 true,
                 Arc::clone(&first_lifetime_attempts),
             ));
-            let (service, adapter) = build_service_with_client(temp.path(), client).await;
+            let (service, adapter) = build_service_with_client(root.as_path(), client).await;
             let session = Session::new();
             let session_id = session.id().clone();
             materialize(&service, &adapter, session).await;
@@ -2045,7 +2125,7 @@ mod tests {
             assert_eq!(
                 first_lifetime_attempts.load(Ordering::SeqCst),
                 1,
-                "the first process lifetime must execute exactly one failed compaction attempt"
+                "the writer process must execute exactly one failed compaction attempt"
             );
             let persisted = service
                 .load_authoritative_session(&session_id)
@@ -2056,15 +2136,24 @@ mod tests {
             assert_eq!(cadence.session_boundary_index, 2);
             assert_eq!(cadence.last_compaction_boundary_index, None);
             assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
-            session_id
-        };
+            // The writer process exits without archiving or retiring anything.
+            std::fs::write(&session_id_path, format!("{session_id}\n"))
+                .expect("record the session id for the reader process");
 
+            return;
+        }
+        let session_id = meerkat::SessionId::parse(
+            std::fs::read_to_string(&session_id_path)
+                .expect("read the writer's session id")
+                .trim(),
+        )
+        .expect("the writer recorded a valid session id");
         let restarted_attempts = Arc::new(AtomicUsize::new(0));
         let client: Arc<dyn LlmClient> = Arc::new(CompactionFailureTrackingClient::new(
             false,
             Arc::clone(&restarted_attempts),
         ));
-        let (service, adapter) = build_service_with_client(temp.path(), client).await;
+        let (service, adapter) = build_service_with_client(root.as_path(), client).await;
         let resume_source = service
             .load_authoritative_session(&session_id)
             .await
@@ -2189,7 +2278,7 @@ mod tests {
     }
 
     /// Incremental-store cold-resume equality through the real sqlite store:
-    /// create, turn, compact, kill, resume, turn. Pins the OB3 ask-11
+    /// create, turn, compact, kill, resume, turn. Pins the incremental-persistence
     /// contract end to end — the session never writes a legacy whole-blob
     /// row, the persisted head SHRINKS across the compaction, cold resume
     /// reads are head + one strand range, and the resumed transcript is
@@ -2386,6 +2475,7 @@ mod tests {
                 "test setup failed: expected at least two compaction rewrite commits, got {}",
                 rewrite_commit_count(&compacted)
             );
+            stand_down(&service, &adapter).await;
             session_id
         };
 

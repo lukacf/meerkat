@@ -1112,6 +1112,8 @@ pub struct McpRouter {
     mcp_auth_mode: McpAuthMode,
     mcp_auth_resolver: Option<Arc<dyn McpAuthResolver>>,
     client_service_factory: Option<Arc<dyn crate::McpClientServiceFactory>>,
+    /// Immutable for this router, including all later add and reload attempts.
+    stdio_launch_profile: crate::McpStdioLaunchProfile,
     call_context_provider: Option<Arc<dyn crate::McpCallContextProvider>>,
     /// Bumped whenever the router makes progress a waiter could be blocked
     /// on: a tool call finishing (a draining server's in-flight count drops)
@@ -1171,6 +1173,16 @@ impl McpProgressWait {
 
 impl McpRouter {
     fn with_surface_owner(surface_owner: SurfaceOwner) -> Self {
+        Self::with_surface_owner_and_stdio_profile(
+            surface_owner,
+            crate::McpStdioLaunchProfile::trusted_host(),
+        )
+    }
+
+    fn with_surface_owner_and_stdio_profile(
+        surface_owner: SurfaceOwner,
+        stdio_launch_profile: crate::McpStdioLaunchProfile,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
         Self {
             surface_owner,
@@ -1190,6 +1202,7 @@ impl McpRouter {
             mcp_auth_mode: McpAuthMode::Stored,
             mcp_auth_resolver: None,
             client_service_factory: None,
+            stdio_launch_profile,
             call_context_provider: None,
             progress: Arc::new(tokio::sync::watch::Sender::new(0)),
             connect_attempts_spawned: 0,
@@ -1285,6 +1298,16 @@ impl McpRouter {
     /// Create a new empty router with a runtime-backed surface handle.
     pub fn new_with_surface_handle(surface_handle: Arc<dyn ExternalToolSurfaceHandle>) -> Self {
         Self::with_surface_owner(SurfaceOwner::runtime(surface_handle))
+    }
+
+    /// Create a router with an immutable host requirement for every local
+    /// process. It cannot be downgraded after activation or through reload.
+    /// The profile neither authorizes callers nor confines remote servers.
+    pub fn new_with_surface_handle_and_stdio_profile(
+        surface_handle: Arc<dyn ExternalToolSurfaceHandle>,
+        profile: crate::McpStdioLaunchProfile,
+    ) -> Self {
+        Self::with_surface_owner_and_stdio_profile(SurfaceOwner::runtime(surface_handle), profile)
     }
 
     pub fn with_mcp_auth(
@@ -1706,6 +1729,7 @@ impl McpRouter {
         let auth_mode = self.mcp_auth_mode;
         let auth_resolver = self.mcp_auth_resolver.clone();
         let client_factory = self.client_service_factory.clone();
+        let stdio_profile = self.stdio_launch_profile.clone();
         // Reap tasks that already finished so the owned set stays bounded.
         while self.connect_tasks.try_join_next().is_some() {}
         self.connect_tasks.spawn(async move {
@@ -1715,6 +1739,7 @@ impl McpRouter {
                 auth_resolver,
                 client_factory,
                 stdio_custody,
+                &stdio_profile,
             )
             .await;
             let sent = tx.send(PendingResult { obligation, result }).await;
@@ -1930,6 +1955,13 @@ impl McpRouter {
                     }
                 };
 
+                // Only the accepted completion can publish this observation.
+                // Generic transport errors and diagnostic lookalikes stay generic.
+                let confinement_refusal = match &err {
+                    McpError::Confinement(refusal) => Some(*refusal),
+                    _ => None,
+                };
+
                 tracing::warn!(
                     server = %server_name,
                     error = %err,
@@ -1949,7 +1981,8 @@ impl McpRouter {
                         operation,
                         McpLifecyclePhase::Failed,
                     )
-                    .with_detail(Some(detail)),
+                    .with_detail(Some(detail))
+                    .with_confinement_refusal(confinement_refusal),
                 });
                 snapshot_alignment
             }
@@ -2069,13 +2102,18 @@ impl McpRouter {
             }
         };
 
-        let result = McpConnection::connect_and_enumerate_with_services(
+        let result = McpConnection::connect_and_enumerate_with_services_and_stdio_profile(
             &config,
             self.mcp_auth_mode,
             self.mcp_auth_resolver.clone(),
             self.client_service_factory.clone(),
+            &self.stdio_launch_profile,
         )
         .await;
+        let confinement_error = result.as_ref().err().and_then(|error| match error {
+            McpError::Confinement(refusal) => Some(*refusal),
+            _ => None,
+        });
         let connect_error = result.as_ref().err().map(ToString::to_string);
         let snapshot_alignment = self.process_pending_result(PendingResult { obligation, result });
 
@@ -2086,6 +2124,9 @@ impl McpRouter {
             self.align_snapshot_if_requested(obligation);
         }
 
+        if let Some(refusal) = confinement_error {
+            return Err(McpError::Confinement(refusal));
+        }
         if let Some(message) = connect_error {
             return Err(McpError::ProtocolError { message });
         }
@@ -2646,8 +2687,17 @@ impl McpRouter {
                 }
                 None => (None, None),
             };
+            // The native entry step runs inside the connection, after its
+            // final request preparation and immediately before the local
+            // transport handoff. The preparation lease (`_lease`) stays held
+            // until the call completes.
             let result = conn
-                .call_tool_result(&route.raw_operation, args, metadata)
+                .call_tool_result_entering(&route.raw_operation, args, metadata, || {
+                    context
+                        .enter_reviewed_effect(call, None)
+                        .map(drop)
+                        .map_err(|error| McpError::EntryRefused(Box::new(error)))
+                })
                 .await?;
             project(result)
         }
@@ -2810,6 +2860,20 @@ impl AgentToolDispatcher for McpRouter {
             })
     }
 
+    /// Routed MCP tools carry review to their local transport handoff: the
+    /// connection runs `enter_reviewed_effect` exactly once, after
+    /// call-context and request preparation, immediately before the send.
+    fn review_entry_support(
+        &self,
+        tool_name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        if self.projection.tool_routes.contains_key(tool_name) {
+            meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
+        } else {
+            meerkat_core::approval::review::ReviewEntrySupport::Unsupported
+        }
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
@@ -2857,10 +2921,14 @@ impl Default for McpRouter {
     }
 }
 
-/// The tool-surface error of a failed MCP `tools/call`.
+/// The tool-surface error of a failed MCP `tools/call`. A native entry
+/// refusal keeps its exact typed tool error instead of being flattened into an
+/// execution string.
 fn tool_call_error(tool: &str, error: McpError) -> ToolError {
     match error {
         McpError::ToolNotFound(name) => ToolError::NotFound { name },
+        McpError::EntryRefused(error) => *error,
+        McpError::Confinement(refusal) => ToolError::ConfinementRefused { refusal },
         // Its own session 404, or a redirect shown by its own response, then
         // a failure: neither success nor denial. Nothing is re-sent and the
         // session is not re-initialized; a redirected call can have been
@@ -2876,6 +2944,48 @@ fn tool_call_error(tool: &str, error: McpError) -> ToolError {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_entry_refusal_survives_the_router_error_mapping() {
+        let refusals = [
+            ToolError::ReviewUnavailable {
+                kind: meerkat_core::ReviewUnavailableKind::DeadlineExpired,
+            },
+            ToolError::ReviewUnsatisfied {
+                kind: meerkat_core::ReviewUnsatisfiedKind::ContextChanged,
+            },
+            ToolError::AuthorizationRefused {
+                refusal: meerkat_core::authorization::OperationRefused::new(
+                    meerkat_core::authorization::OperationRefusalKind::Denied,
+                ),
+            },
+        ];
+        for refusal in refusals {
+            let mapped = tool_call_error("tool", McpError::EntryRefused(Box::new(refusal.clone())));
+            assert_eq!(mapped, refusal, "typed entry refusal is not laundered");
+        }
+        assert_eq!(
+            tool_call_error(
+                "tool",
+                McpError::Confinement(
+                    meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement,
+                )
+            ),
+            ToolError::ConfinementRefused {
+                refusal: meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement,
+            },
+        );
+        assert!(matches!(
+            tool_call_error(
+                "tool",
+                McpError::ToolCallFailed {
+                    tool: "t".into(),
+                    reason: "transport".into(),
+                }
+            ),
+            ToolError::ExecutionFailed { .. }
+        ));
+    }
     use crate::connection::McpConnection;
     use meerkat_core::ExternalToolSurfaceFailureCause;
     use meerkat_core::event::ToolConfigChangeOperation;
@@ -3200,6 +3310,94 @@ mod tests {
                 applied_at_turn: TurnNumber(staged_sequence),
             })
             .expect("add success");
+    }
+
+    #[test]
+    fn setup_refusal_projection_requires_accepted_completion_and_exact_error_type() {
+        use meerkat_core::confinement::ConfinementRefusal;
+        for reload in [false, true] {
+            for typed_refusal in [false, true] {
+                let mut router = generated_handle_owner_router();
+                let server = "projection-target";
+                let surface_id = SurfaceId::from(server);
+                if reload {
+                    complete_add(&mut router, server);
+                }
+                let stage = if reload {
+                    ExternalToolSurfaceInput::StageReload {
+                        surface_id: surface_id.clone(),
+                    }
+                } else {
+                    ExternalToolSurfaceInput::StageAdd {
+                        surface_id: surface_id.clone(),
+                    }
+                };
+                router
+                    .surface_owner
+                    .apply(stage)
+                    .expect("stage actual owner");
+                let sequence = router
+                    .surface_owner
+                    .surface_snapshot(server)
+                    .unwrap()
+                    .staged_intent_sequence
+                    .unwrap();
+                let transition = router
+                    .surface_owner
+                    .apply(ExternalToolSurfaceInput::ApplyBoundary {
+                        surface_id,
+                        staged_intent_sequence: sequence,
+                        applied_at_turn: TurnNumber(sequence),
+                    })
+                    .expect("owner mints actual completion obligation");
+                let effects = core_surface_effects(&transition.effects);
+                let obligation = protocol_surface_completion::extract_obligations(&effects)
+                    .pop()
+                    .expect("completion obligation");
+                let error = if typed_refusal {
+                    McpError::Confinement(ConfinementRefusal::UnsupportedRequirement)
+                } else {
+                    McpError::Io(std::io::Error::other(
+                        ConfinementRefusal::UnsupportedRequirement.to_string(),
+                    ))
+                };
+                router.process_pending_result(PendingResult {
+                    obligation: obligation.clone(),
+                    result: Err(error),
+                });
+                let notice = router
+                    .completed_updates
+                    .pop_front()
+                    .expect("accepted failed notice")
+                    .action;
+                assert_eq!(notice.phase, McpLifecyclePhase::Failed);
+                assert_eq!(
+                    notice.operation,
+                    if reload {
+                        ToolConfigChangeOperation::Reload
+                    } else {
+                        ToolConfigChangeOperation::Add
+                    }
+                );
+                let host = serde_json::to_value(notice.to_tool_config_changed_payload()).unwrap();
+                if typed_refusal {
+                    assert_eq!(
+                        host["status_info"]["confinement_refusal"],
+                        "unsupported_requirement"
+                    );
+                } else {
+                    assert!(host["status_info"].get("confinement_refusal").is_none());
+                }
+                assert!(router.completed_updates.is_empty());
+                // The settled obligation is now stale. Even a typed error on
+                // its replay cannot publish a second refusal notice.
+                router.process_pending_result(PendingResult {
+                    obligation,
+                    result: Err(McpError::Confinement(ConfinementRefusal::InvalidLaunch)),
+                });
+                assert!(router.completed_updates.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -4333,10 +4531,7 @@ mod tests {
         assert_eq!(result.delta.removed_servers, vec!["eof-ignoring"]);
         router.shutdown().await;
 
-        assert!(
-            process_exited(wrapper),
-            "removed stdio server {wrapper} outlived router shutdown"
-        );
+        crate::connection::tests::assert_child_reaped(wrapper);
         assert!(
             process_exited(server),
             "removed stdio server's grandchild {server} outlived router shutdown"

@@ -1739,6 +1739,8 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             // or forge it through turn-metadata wire payloads.
             directed_interaction_ids: Vec::new(),
             transcript_identity: Default::default(),
+            request_reasoning: None,
+            request_reasoning_disposition: None,
         }
     }
 }

@@ -1923,7 +1923,10 @@ fn occurrence_transition_refusal_evidence(
         )),
         occ_dsl::OccurrenceLifecycleMachineTransitionError::RecoveredStateInvariantRejected {
             ..
-        } => Err(error.clone()),
+        }
+        | occ_dsl::OccurrenceLifecycleMachineTransitionError::AbsentMapKey { .. } => {
+            Err(error.clone())
+        }
     }
 }
 

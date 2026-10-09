@@ -159,6 +159,10 @@ impl PhysicalExecutionClaim {
     pub(super) fn is_governed(&self) -> bool {
         matches!(self.state, PhysicalClaimState::Governed)
     }
+
+    pub(super) fn belongs_to(&self, owner: &Arc<PhysicalExecutionCustody>) -> bool {
+        Arc::ptr_eq(&self.owner, owner)
+    }
 }
 
 fn lock_path(database: &Path, suffix: &str) -> PathBuf {

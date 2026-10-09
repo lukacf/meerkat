@@ -294,6 +294,7 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -410,6 +411,7 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -559,6 +561,7 @@ async fn choke_004_completion_during_running_defers_wake() {
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -711,6 +714,7 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
         injected_context: Vec::new(),
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),

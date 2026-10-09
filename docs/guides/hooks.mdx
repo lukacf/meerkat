@@ -159,6 +159,32 @@ are never converted into warning-only success or a hook-local `Deny` decision.
 Every background hook is required to be `Observe`, because asynchronous work
 cannot safely publish a guardrail decision after loop progression.
 
+### Native command confinement
+
+Rust hosts can install an existing `ExecutionConfinement` requirement with
+`AgentFactory::with_command_hook_confinement(requirement, absolute_working_directory)`.
+The factory retains the compiled requirement for its command custody adapter.
+Command configuration must then use an absolute program path; argv, cwd and the
+exact configured environment are bound before launch. Required commands do not
+inherit ambient environment variables.
+
+Required launches need the factory's native runtime-root custody on a supported
+platform. Missing custody, unsupported isolation and invalid launch data refuse
+the attempt without trusted-host fallback. At `PreToolExecution`, this refusal
+blocks the affected tool and returns local model feedback, so the model can
+continue. It does not skip a guardrail or permit the guarded tool. Failure
+dispositions at other lifecycle points are unchanged and can still fail a run.
+
+Required confinement cannot be combined with an opaque `hook_engine_override`;
+the factory rejects that configuration before constructing an agent. Without
+the factory setting, command hooks retain legacy trusted-host compatibility,
+including ambient environment inheritance. This default is not OS confinement.
+
+Hosts implementing `CommandHookProcessCustody` must implement its closed `spawn`
+method. The default refuses with typed `UnsupportedRequirement`; implementing
+only the legacy mutable-command `prepare` method no longer enables execution.
+This keeps custom adapters from silently bypassing the final launch boundary.
+
 ## Decisions and patches
 
 <Accordion title="HookDecision">

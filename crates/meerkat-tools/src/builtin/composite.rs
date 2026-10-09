@@ -652,10 +652,14 @@ impl CompositeDispatcher {
                 BuiltinToolError::OperationAuthorizationUnavailable => {
                     ToolError::OperationAuthorizationUnavailable
                 }
+                BuiltinToolError::OperationRefused { refusal } => {
+                    ToolError::AuthorizationRefused { refusal }
+                }
                 BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
                 BuiltinToolError::ConfinementRefused { refusal } => {
                     ToolError::ConfinementRefused { refusal }
                 }
+                BuiltinToolError::EntryRefused(error) => *error,
             })?;
         let async_ops = tool.async_ops_for_output(&output);
         match output {
@@ -796,6 +800,23 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 .map(|external| external.live_bridge_effect_kind(tool_name))
                 .unwrap_or(meerkat_core::LiveBridgeEffectKind::ExternalIo),
             _ => meerkat_core::LiveBridgeEffectKind::ExternalIo,
+        }
+    }
+
+    /// Built-ins declare for themselves; skills cannot carry review to a
+    /// physical entry; external dispatchers declare for their own tools.
+    fn review_entry_support(
+        &self,
+        tool_name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        match self.resolve_tool_owner(tool_name) {
+            ResolvedToolOwner::Builtin(tool) => tool.review_entry_support(),
+            ResolvedToolOwner::External => self
+                .external
+                .as_ref()
+                .map(|external| external.review_entry_support(tool_name))
+                .unwrap_or_default(),
+            _ => meerkat_core::approval::review::ReviewEntrySupport::Unsupported,
         }
     }
 
@@ -3501,5 +3522,66 @@ mod tests {
         );
         assert_eq!(error.error_code(), "operation_observation_unavailable");
         assert_eq!(error.settlement_failures().count(), 0);
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn refused_helper_search_is_an_authorization_refusal_and_siblings_continue() {
+        struct RefusedHelper;
+        #[async_trait]
+        impl meerkat_llm_core::WebSearchExecutor for RefusedHelper {
+            async fn execute_web_search(
+                &self,
+                _request: meerkat_core::web_search::WebSearchRequest,
+            ) -> Result<meerkat_core::web_search::WebSearchResult, meerkat_llm_core::LlmError>
+            {
+                Err(meerkat_llm_core::LlmError::operation_refused(
+                    meerkat_core::authorization::OperationRefusalKind::Denied,
+                ))
+            }
+        }
+
+        let root = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(root.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        dispatcher.register_web_search_tool(Arc::new(RefusedHelper), ToolCategoryOverride::Enable);
+        let args = serde_json::value::RawValue::from_string(
+            json!({"query": "fixed test query"}).to_string(),
+        )
+        .unwrap();
+        let error = dispatcher
+            .dispatch(ToolCallView {
+                id: "refused-helper",
+                name: "web_search",
+                args: &args,
+            })
+            .await
+            .expect_err("a refused helper operation is not a search result");
+        assert_eq!(
+            error.primary_error(),
+            &ToolError::AuthorizationRefused {
+                refusal: meerkat_core::authorization::OperationRefused::new(
+                    meerkat_core::authorization::OperationRefusalKind::Denied,
+                ),
+            },
+            "stringifying into ExecutionFailed would hide the typed refusal"
+        );
+        assert_eq!(error.error_code(), "operation_refused");
+
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "sibling search",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        let sibling = dispatch_json(&dispatcher, "web_search", json!({"query": "sibling"})).await;
+        assert_eq!(sibling["answer"], "sibling search");
     }
 }

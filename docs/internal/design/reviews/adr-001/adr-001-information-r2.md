@@ -2,7 +2,7 @@
 
 Verdict: GREEN. The reviewed architecture closes this scope without a material remaining design gap. There are no new I-series RED findings. This is design closure for the declared operating profiles, not implementation acceptance or a claim about deployed enforcement.
 
-Reviewed artifact: `/Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md`, 568 lines.
+Reviewed artifact: `(operator-retained path)/docs/internal/design/adr-001-runtime-security.md`, 568 lines.
 
 Verified SHA-256: `44882a1ba3c8ea36d9a44c13df6c4b52b246c459dacc93437ef188ea7ac055ca`.
 

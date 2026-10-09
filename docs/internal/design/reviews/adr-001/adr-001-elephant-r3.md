@@ -4,7 +4,7 @@ Verdict: GREEN for returning this architecture candidate to the project reviewer
 
 Reviewed candidate:
 
-- File: /Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md
+- File: (operator-retained path)/docs/internal/design/adr-001-runtime-security.md
 - Lines: 904
 - SHA-256: a242a21407fbf52d2ca5615edfdd6b5649b40fa6f73c959d4857eddd8e2db87e
 - Read all 904 lines. Hash was checked again after review and remained unchanged.

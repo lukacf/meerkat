@@ -66,7 +66,7 @@ The dogma-pure shapes are:
 ### 6. Worktree discipline
 
 - The coordinator pre-creates a worktree for your task. cd there at session start. Do NOT push commits from a different worktree or to a different branch.
-- If your task has an obvious worktree path `/Users/luka/src/meerkat/.claude/worktrees/wave-<letter>-<task-slug>`, use it. If it doesn't exist, ping the coordinator.
+- If your task has an obvious worktree path `(operator-retained path)/.claude/worktrees/wave-<letter>-<task-slug>`, use it. If it doesn't exist, ping the coordinator.
 - Don't reuse a warm worktree from a previous task for a new task — the merge graph gets messy. One task, one branch, one worktree.
 
 ### 7. Integration-branch audit discipline

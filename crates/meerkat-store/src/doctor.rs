@@ -97,6 +97,12 @@ pub const FINDING_BACKUP_ARTIFACT: &str = "backup-artifact";
 /// A `*.mfence` maintenance-fence lock file (inventory; created by normal
 /// per-operation guards).
 pub const FINDING_MAINTENANCE_FENCE_LOCK: &str = "maintenance-fence-lock";
+/// Session hosting lock files under `hosting/` (inventory; derived runtime
+/// files held by the process hosting each session, never durable state).
+pub const FINDING_SESSION_HOSTING_LOCKS: &str = "session-hosting-locks";
+/// Delivery coordination files under `delivery/` (inventory; the cold-delivery
+/// owner lock, a derived runtime file).
+pub const FINDING_DELIVERY_COORDINATION_FILES: &str = "delivery-coordination-files";
 /// A `.realm_manifest.lock` older than the 30s staleness window.
 pub const FINDING_STALE_MANIFEST_LOCK: &str = "stale-manifest-lock";
 /// A quarantined corrupt index (`*.corrupt-<timestamp>`).
@@ -2765,6 +2771,46 @@ fn sweep_artifacts(realm_dir: &Path, realm: &str, diagnosis: &mut StorageDiagnos
         }
     }
 
+    // Derived runtime coordination files: reported as an inventory, never as
+    // corruption. One finding per directory (a realm can host many sessions).
+    for (dir_name, code, description) in [
+        (
+            crate::realm::SESSION_HOSTING_LOCK_DIR,
+            FINDING_SESSION_HOSTING_LOCKS,
+            "session hosting lock file(s): derived runtime files, each OS-locked by the \
+             process hosting that session while it runs; not durable state, and never \
+             removed while the realm is online",
+        ),
+        (
+            crate::realm::DELIVERY_COORDINATION_DIR,
+            FINDING_DELIVERY_COORDINATION_FILES,
+            "delivery coordination file(s): the cold-delivery owner lock; derived \
+             runtime files, not durable state",
+        ),
+    ] {
+        let dir = realm_dir.join(dir_name);
+        if !dir.is_dir() {
+            continue;
+        }
+        let count = std::fs::read_dir(&dir).map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().is_file())
+                .count()
+        });
+        if count > 0 {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Info,
+                    code,
+                    format!("{count} {description}"),
+                )
+                .with_path(dir)
+                .with_realm(realm),
+            );
+        }
+    }
+
     // Filesystem artifacts next to the databases (one level: realm root plus
     // the known database subdirectories).
     let scan_dirs = [
@@ -3552,6 +3598,46 @@ mod tests {
             .expect("undecodable finding");
         assert_eq!(finding.severity, FindingSeverity::Error);
         assert!(diagnosis.has_errors());
+    }
+
+    /// Hosting locks and delivery coordination files are reported as derived
+    /// runtime inventory (one Info finding per directory), never as errors.
+    #[tokio::test]
+    async fn hosting_and_delivery_coordination_files_are_derived_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "coordination", "sqlite");
+        let paths = crate::realm::realm_paths_in(&root, "coordination");
+        assert_eq!(paths.root, realm_dir);
+        std::fs::create_dir_all(paths.session_hosting_lock_dir()).unwrap();
+        for index in 0..3 {
+            std::fs::write(
+                paths
+                    .session_hosting_lock_dir()
+                    .join(format!("session-{index}.lock")),
+                b"",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(paths.delivery_coordination_dir()).unwrap();
+        std::fs::write(paths.cold_delivery_lock_path(), b"").unwrap();
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let hosting = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_SESSION_HOSTING_LOCKS)
+            .expect("hosting inventory finding");
+        assert_eq!(hosting.severity, FindingSeverity::Info);
+        assert!(hosting.message.starts_with("3 "), "{}", hosting.message);
+        let delivery = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.code == FINDING_DELIVERY_COORDINATION_FILES)
+            .expect("delivery inventory finding");
+        assert_eq!(delivery.severity, FindingSeverity::Info);
+        assert!(delivery.message.starts_with("1 "), "{}", delivery.message);
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
     }
 
     #[tokio::test]

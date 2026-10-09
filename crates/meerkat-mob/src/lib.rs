@@ -63,6 +63,8 @@ pub mod tokio {
 pub mod adaptive;
 pub mod backend;
 mod build;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod continuation;
 pub mod control_policy;
 pub mod coordination;
 pub mod definition;
@@ -122,7 +124,8 @@ pub use error::{
     MobError, MobFailureClass, RuntimeEffectKind,
 };
 pub use event::{
-    AttributedEvent, FlowCancelClass, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent,
+    AttributedEvent, FlowCancelClass, ForkJobTerminalEvent, MemberWireEdge, MobEvent, MobEventKind,
+    NewMobEvent, detached_outcome_digest,
 };
 pub use forked_participant::ForkedParticipantSourceRuntime;
 pub use identity::{
@@ -283,9 +286,9 @@ pub use runtime::{
     DelegationTurnTerminal, DurableBoundedMemberState, DurableBoundedWorkRecovery,
     DurableBoundedWorkState, ExternalPeerBindingSpec, FlowRunHandle, FlowRunWaitError,
     FlowTargetProvisioner, ForkBuildInheritance, ForkChildRun, ForkChildRunOutcome, ForkJobBinding,
-    ForkJobRecord, ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult,
-    ForkOverlayOrigin, HELPER_RESULT_TRUNCATION_MARKER, HelperOptions, HelperResult,
-    HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,
+    ForkJobRecord, ForkJobTerminalError, ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome,
+    ForkMemberResult, ForkOverlayOrigin, HELPER_RESULT_TRUNCATION_MARKER, HelperOptions,
+    HelperResult, HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
     IdentityLocalMaterializationKey, InitializeAdaptiveRunRequest, LiveDelegationTerminalEvidence,
     LiveDurableSourceObservation, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,

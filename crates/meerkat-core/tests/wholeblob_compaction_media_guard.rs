@@ -1,4 +1,4 @@
-//! Reproduction probe for the HomeCore WholeBlob wedge: a compaction that
+//! Reproduction probe for a field WholeBlob wedge: a compaction that
 //! rebuilt its retained rows from the model-hydrated (inline image) copies,
 //! followed by the checkpoint's media externalization, must still decode
 //! through the current-envelope ingress guard.

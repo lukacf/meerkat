@@ -608,6 +608,258 @@ async fn web_search_fallback_is_not_added_to_native_search_models() {
     );
 }
 
+#[tokio::test]
+async fn restricted_enable_offers_governed_web_search_on_a_native_search_model() {
+    // A non-unrestricted effective policy disables provider-native tools, so
+    // native search is not available and the explicit Enable must reach the
+    // model as the ordinary governed `web_search` tool.
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).builtins(true);
+    let tool_names = build_and_capture_visible_tool_names(
+        factory,
+        AgentBuildConfig {
+            web_search_executor_override: Some(Arc::new(NoopWebSearchExecutor)),
+            override_web_search: ToolCategoryOverride::Enable,
+            tool_access_policy: Some(deny_list_policy(&["shell"])),
+            ..AgentBuildConfig::new("gpt-5.4")
+        },
+    )
+    .await;
+
+    assert!(
+        tool_names.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+        "restricted native-search model must receive the governed fallback; saw {tool_names:?}"
+    );
+}
+
+/// Records, per request, whether provider-native search rode the request and
+/// which ordinary tools were offered.
+struct NativeSearchCapture {
+    inner: TestClient,
+    seen: Mutex<Vec<(bool, Vec<String>)>>,
+}
+
+#[async_trait]
+impl LlmClient for NativeSearchCapture {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>>
+    {
+        let native = matches!(
+            &request.provider_params,
+            Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(openai))
+                if openai.web_search.is_some()
+        );
+        self.seen.lock().expect("capture lock").push((
+            native,
+            request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect(),
+        ));
+        self.inner.stream(request)
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        self.inner.provider()
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        self.inner.health_check().await
+    }
+}
+
+#[tokio::test]
+async fn native_search_and_governed_fallback_are_one_exclusive_composition() {
+    // Unrestricted control: native search rides the request and the ordinary
+    // tool stays hidden. Restricted: native search is removed and the explicit
+    // Enable is offered as the ordinary governed tool instead. Never both.
+    let temp = tempfile::tempdir().unwrap();
+    for (restriction, expect_native) in [(None, true), (Some(deny_list_policy(&["shell"])), false)]
+    {
+        let capture = Arc::new(NativeSearchCapture {
+            inner: TestClient::for_provider(Provider::OpenAI),
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut agent = temp_factory(&temp)
+            .builtins(true)
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(capture.clone()),
+                    web_search_executor_override: Some(Arc::new(NoopWebSearchExecutor)),
+                    override_web_search: ToolCategoryOverride::Enable,
+                    tool_access_policy: restriction,
+                    ..AgentBuildConfig::new("gpt-5.4")
+                },
+                &Config::default(),
+            )
+            .await
+            .unwrap();
+        agent.run("inspect tools".to_string().into()).await.unwrap();
+        let seen = capture.seen.lock().expect("capture lock");
+        let (native, tools) = seen.first().expect("one model request");
+        assert_eq!(*native, expect_native, "native search; tools {tools:?}");
+        assert_eq!(
+            tools.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+            !expect_native,
+            "ordinary web_search offered exactly when native search is not; saw {tools:?}"
+        );
+    }
+}
+
+/// Counts the searches it executes; answers each as unavailable.
+struct CountingWebSearchExecutor(AtomicUsize);
+
+#[async_trait]
+impl WebSearchExecutor for CountingWebSearchExecutor {
+    async fn execute_web_search(
+        &self,
+        request: WebSearchRequest,
+    ) -> Result<WebSearchResult, meerkat_llm_core::LlmError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(WebSearchResult::unavailable(request.query, "test executor"))
+    }
+}
+
+/// Tool families that an explicit web-search fallback must not open when
+/// builtins, shell and image generation are all off.
+const CLOSED_WITHOUT_BUILTINS: &[&str] = &[
+    "task_list",
+    "apply_patch",
+    "browse_skills",
+    "shell",
+    "generate_image",
+    "blob_save_file",
+    "blob_load_file",
+    "blob_inspect",
+];
+
+fn builtin_free_web_search_build(
+    executor: Arc<CountingWebSearchExecutor>,
+    override_web_search: ToolCategoryOverride,
+) -> AgentBuildConfig {
+    AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        web_search_executor_override: Some(executor),
+        override_web_search,
+        override_builtins: ToolCategoryOverride::Disable,
+        override_shell: ToolCategoryOverride::Disable,
+        ..AgentBuildConfig::new("gpt-realtime-2")
+    }
+}
+
+#[tokio::test]
+async fn explicit_web_search_fallback_is_composed_without_other_builtins() {
+    // Builtins, shell and image generation are all off; web search is
+    // explicitly enabled for a model without native search. The fallback is
+    // still composed, and nothing else opens.
+    let temp = tempfile::tempdir().unwrap();
+    let executor = Arc::new(CountingWebSearchExecutor(AtomicUsize::new(0)));
+    let mut agent = temp_factory(&temp)
+        .builtins(false)
+        .build_agent(
+            builtin_free_web_search_build(executor.clone(), ToolCategoryOverride::Enable),
+            &Config::default(),
+        )
+        .await
+        .unwrap();
+    let visible: Vec<String> = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(
+        visible.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+        "the explicit fallback must be offered; saw {visible:?}"
+    );
+    for closed in CLOSED_WITHOUT_BUILTINS {
+        assert!(
+            !visible.iter().any(|name| name == closed),
+            "{closed} must stay closed; saw {visible:?}"
+        );
+    }
+
+    let outcome = agent
+        .dispatch_external_tool_call(meerkat_core::ToolCall::new(
+            "call-search".to_string(),
+            WEB_SEARCH_TOOL_NAME.to_string(),
+            json!({"query": "fixture query"}),
+        ))
+        .await
+        .expect("web_search dispatches");
+    assert_eq!(
+        executor.0.load(Ordering::SeqCst),
+        1,
+        "the composed tool reaches the supplied executor; result {}",
+        outcome.result.text_content()
+    );
+}
+
+#[tokio::test]
+async fn builtin_free_build_without_explicit_web_search_offers_no_fallback() {
+    // Paired control: the same build with web search left at Inherit keeps
+    // the early return, so no fallback and no other family is offered.
+    let temp = tempfile::tempdir().unwrap();
+    let executor = Arc::new(CountingWebSearchExecutor(AtomicUsize::new(0)));
+    let agent = temp_factory(&temp)
+        .builtins(false)
+        .build_agent(
+            builtin_free_web_search_build(executor.clone(), ToolCategoryOverride::Inherit),
+            &Config::default(),
+        )
+        .await
+        .unwrap();
+    let visible: Vec<String> = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(
+        !visible.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+        "Inherit must not offer the fallback; saw {visible:?}"
+    );
+    for closed in CLOSED_WITHOUT_BUILTINS {
+        assert!(
+            !visible.iter().any(|name| name == closed),
+            "{closed} must stay closed; saw {visible:?}"
+        );
+    }
+    assert_eq!(executor.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn restricted_without_enable_offers_no_web_search() {
+    let temp = tempfile::tempdir().unwrap();
+    for override_web_search in [ToolCategoryOverride::Inherit, ToolCategoryOverride::Disable] {
+        let tool_names = build_and_capture_visible_tool_names(
+            temp_factory(&temp).builtins(true),
+            AgentBuildConfig {
+                web_search_executor_override: Some(Arc::new(NoopWebSearchExecutor)),
+                override_web_search,
+                tool_access_policy: Some(deny_list_policy(&["shell"])),
+                ..AgentBuildConfig::new("gpt-5.4")
+            },
+        )
+        .await;
+
+        assert!(
+            !tool_names.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+            "{override_web_search:?} must not offer the fallback; saw {tool_names:?}"
+        );
+    }
+}
+
 fn create_test_authority() -> MobToolAuthorityContext {
     let authority = meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
         .expect("generated create-only mob authority should be accepted");
@@ -4221,6 +4473,15 @@ impl AgentToolDispatcher for PolicyProbeDispatcher {
     }
 }
 
+fn visible_tool_names(agent: &meerkat::DynAgent) -> Vec<String> {
+    agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect()
+}
+
 fn allow_list_policy(names: &[&str]) -> meerkat_core::ops::ToolAccessPolicy {
     meerkat_core::ops::ToolAccessPolicy::AllowList(names.iter().copied().collect())
 }
@@ -4228,8 +4489,10 @@ fn allow_list_policy(names: &[&str]) -> meerkat_core::ops::ToolAccessPolicy {
 /// The factory applies the resolved tool access policy as the OUTERMOST
 /// dispatcher composition: a denied call surfaces as an ordinary
 /// `access_denied` is_error result and never reaches the inner dispatcher,
-/// the LLM-visible tool list is preserved (list-preserving gate), and the
-/// effective policy is persisted into the session metadata tooling section.
+/// and the effective policy is persisted into the session metadata tooling
+/// section. A tool outside the allow list is unreachable by name, so session
+/// visibility hides it (#1807); the gate itself stays list-preserving and
+/// still refuses the call.
 #[tokio::test]
 async fn build_agent_gates_dispatch_and_persists_tool_access_policy() {
     let temp = tempfile::tempdir().unwrap();
@@ -4258,19 +4521,17 @@ async fn build_agent_gates_dispatch_and_persists_tool_access_policy() {
         .expect("session metadata must be set");
     assert_eq!(metadata.tooling.tool_access_policy, Some(policy));
 
-    // List-preserving: the denied tool stays LLM-visible (the prompt-cache
-    // prefix is unchanged); only execution is gated.
-    let visible: Vec<String> = agent
-        .tool_scope()
-        .visible_tools()
-        .iter()
-        .map(|tool| tool.name.to_string())
-        .collect();
+    // The allow list's complement is unreachable by name: hidden from the
+    // visible scope (and so from the model's tool array).
+    let visible = visible_tool_names(&agent);
     assert!(
         visible.iter().any(|name| name == "alpha"),
         "saw {visible:?}"
     );
-    assert!(visible.iter().any(|name| name == "beta"), "saw {visible:?}");
+    assert!(
+        !visible.iter().any(|name| name == "beta"),
+        "a tool outside the allow list is hidden; saw {visible:?}"
+    );
 
     // Denied call: ordinary is_error result, inner dispatcher never reached.
     let outcome = agent
@@ -4306,6 +4567,109 @@ async fn build_agent_gates_dispatch_and_persists_tool_access_policy() {
         .expect("allowed call must dispatch");
     assert!(!outcome.result.is_error);
     assert_eq!(*dispatched.lock().unwrap(), vec!["alpha".to_string()]);
+}
+
+/// #1807: a deny-listed tool is hidden from the visible scope and the
+/// model's tool array, and a call to it is still refused by the gate.
+#[tokio::test]
+async fn deny_listed_tool_is_hidden_and_still_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(capture.clone()),
+                tool_dispatcher_override: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["alpha", "spawn_member"],
+                    Arc::clone(&dispatched),
+                ))),
+                tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+                    ["spawn_member"].into_iter().collect(),
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("gated build must succeed");
+
+    let visible = visible_tool_names(&agent);
+    assert!(
+        visible.iter().any(|name| name == "alpha"),
+        "saw {visible:?}"
+    );
+    assert!(
+        !visible.iter().any(|name| name == "spawn_member"),
+        "a deny-listed tool is hidden; saw {visible:?}"
+    );
+    agent.run("inspect tools".to_string().into()).await.unwrap();
+    let offered = capture.tool_names();
+    assert!(
+        !offered.iter().any(|name| name == "spawn_member"),
+        "the model is not offered a deny-listed tool; offered {offered:?}"
+    );
+
+    let outcome = agent
+        .dispatch_external_tool_call(meerkat_core::ToolCall::new(
+            "call-denied".to_string(),
+            "spawn_member".to_string(),
+            json!({}),
+        ))
+        .await
+        .expect("policy denial is a tool result, not a dispatch fault");
+    assert!(outcome.result.is_error);
+    assert!(
+        outcome
+            .result
+            .text_content()
+            .contains("\"error\":\"access_denied\""),
+        "{}",
+        outcome.result.text_content()
+    );
+    assert!(dispatched.lock().unwrap().is_empty());
+}
+
+/// #1807: read-only intent is conditional (it decides per call on each
+/// tool's declared mutation class), so it hides nothing: the undeclared
+/// tools stay visible and are refused at call time.
+#[tokio::test]
+async fn read_only_intent_leaves_tools_visible_and_refuses_at_call_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                tool_dispatcher_override: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["alpha", "beta"],
+                    Arc::clone(&dispatched),
+                ))),
+                tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("read-only build must succeed");
+    let visible = visible_tool_names(&agent);
+    assert!(
+        visible.iter().any(|name| name == "alpha") && visible.iter().any(|name| name == "beta"),
+        "read-only intent hides nothing; saw {visible:?}"
+    );
+    let outcome = agent
+        .dispatch_external_tool_call(meerkat_core::ToolCall::new(
+            "call-undeclared".to_string(),
+            "beta".to_string(),
+            json!({}),
+        ))
+        .await
+        .expect("policy denial is a tool result, not a dispatch fault");
+    assert!(
+        outcome.result.is_error,
+        "an undeclared tool is refused at call time"
+    );
+    assert!(dispatched.lock().unwrap().is_empty());
 }
 
 /// An unresolved `Inherit` reaching the factory is a wiring fault (the spawn
@@ -4384,6 +4748,13 @@ async fn resumed_session_restores_persisted_tool_access_policy_gate() {
         metadata.tooling.tool_access_policy,
         Some(policy),
         "persisted effective policy must survive resume"
+    );
+
+    let visible = visible_tool_names(&resumed);
+    assert!(
+        !visible.iter().any(|name| name == "beta"),
+        "a resumed session recomputes the policy filter: the gated tool stays hidden; \
+         saw {visible:?}"
     );
 
     let outcome = resumed
@@ -4520,6 +4891,14 @@ async fn declared_deny_gates_dispatch_and_persists_launch_part_separately() {
         Some(recorded_launch(Some(launch)))
     );
 
+    // #1807: both statically unreachable tools are hidden.
+    let visible = visible_tool_names(&agent);
+    assert!(visible.contains(&"alpha".to_string()), "saw {visible:?}");
+    assert!(
+        !visible.contains(&"beta".to_string()) && !visible.contains(&"gamma".to_string()),
+        "saw {visible:?}"
+    );
+
     assert!(gate_admits(&mut agent, "alpha").await);
     assert!(!gate_admits(&mut agent, "beta").await, "declared deny");
     assert!(!gate_admits(&mut agent, "gamma").await, "launch allow list");
@@ -4569,6 +4948,10 @@ async fn declared_deny_changes_take_effect_on_resume_and_reach_new_children() {
         .await
         .expect("resume without the deny entry");
     assert!(
+        visible_tool_names(&resumed).contains(&"beta".to_string()),
+        "the policy filter is recomputed on resume, never restored: a removed deny unhides"
+    );
+    assert!(
         gate_admits(&mut resumed, "beta").await,
         "removed deny entry"
     );
@@ -4590,6 +4973,11 @@ async fn declared_deny_changes_take_effect_on_resume_and_reach_new_children() {
         )
         .await
         .expect("resume with a new deny entry");
+    let visible = visible_tool_names(&resumed);
+    assert!(
+        !visible.contains(&"alpha".to_string()) && visible.contains(&"beta".to_string()),
+        "an added deny hides the tool after resume; saw {visible:?}"
+    );
     assert!(
         !gate_admits(&mut resumed, "alpha").await,
         "added deny entry"
@@ -4923,8 +5311,8 @@ async fn declared_deny_of_a_known_unmounted_tool_is_inert() {
 }
 
 /// A declared MCP server's exposed tool is deniable: the build accepts the
-/// name, the tool stays listed, and calling it is an `access_denied` result
-/// that never reaches the server.
+/// name, the tool is hidden from the visible scope (#1807), and calling it is
+/// still an `access_denied` result that never reaches the server.
 #[tokio::test]
 async fn declared_deny_refuses_a_mounted_declared_mcp_tool() {
     let temp = tempfile::tempdir().unwrap();
@@ -4956,7 +5344,8 @@ async fn declared_deny_refuses_a_mounted_declared_mcp_tool() {
         .iter()
         .map(|tool| tool.name.to_string())
         .collect();
-    assert!(visible.iter().any(|name| name == "lookup"), "{visible:?}");
+    assert!(!visible.iter().any(|name| name == "lookup"), "{visible:?}");
+    assert!(visible.iter().any(|name| name == "echo"), "{visible:?}");
     assert!(!gate_admits(&mut agent, "lookup").await);
     assert!(gate_admits(&mut agent, "echo").await);
     assert_eq!(*dispatched.lock().unwrap(), ["echo"]);

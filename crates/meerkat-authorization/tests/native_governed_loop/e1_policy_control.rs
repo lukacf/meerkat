@@ -24,9 +24,19 @@ const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 struct Receiver {
     bodies: Mutex<Vec<Value>>,
     first_responses: Vec<String>,
+    api_key: Option<&'static str>,
+    controlled_review_replies: HashMap<&'static str, Arc<ControlledReviewReply>>,
+    model: Option<&'static str>,
     second_request: Notify,
     finish: Notify,
     authorized_requests: AtomicUsize,
+}
+
+#[derive(Default)]
+struct ControlledReviewReply {
+    arrived: Notify,
+    release: Notify,
+    response: Mutex<Option<String>>,
 }
 
 struct Server {
@@ -42,6 +52,10 @@ impl Drop for Server {
     }
 }
 impl Server {
+    fn model(&self) -> &'static str {
+        self.receiver.model.unwrap_or(E1_MODEL)
+    }
+
     async fn start() -> Self {
         Self::start_with_tool_response(sibling_response()).await
     }
@@ -49,11 +63,23 @@ impl Server {
         Self::start_with_tool_responses(vec![first_response]).await
     }
     async fn start_with_tool_responses(first_responses: Vec<String>) -> Self {
+        Self::start_with_model_and_tool_responses(E1_MODEL, first_responses).await
+    }
+
+    async fn start_with_model_and_tool_responses(
+        model: &'static str,
+        first_responses: Vec<String>,
+    ) -> Self {
         assert!(!first_responses.is_empty());
-        let receiver = Arc::new(Receiver {
+        Self::start_with_receiver(Receiver {
             first_responses,
+            model: Some(model),
             ..Receiver::default()
-        });
+        })
+        .await
+    }
+    async fn start_with_receiver(receiver: Receiver) -> Self {
+        let receiver = Arc::new(receiver);
         let app = Router::new()
             .route("/v1/messages", post(receive))
             .with_state(receiver.clone());
@@ -89,13 +115,19 @@ fn sse(events: Vec<Value>) -> String {
     encoded
 }
 fn start_message() -> Value {
-    json!({"type":"message_start","message":{"id":"e1-response","type":"message","role":"assistant","model":E1_MODEL,"content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}})
+    start_message_for_model(E1_MODEL)
+}
+fn start_message_for_model(model: &str) -> Value {
+    json!({"type":"message_start","message":{"id":"e1-response","type":"message","role":"assistant","model":model,"content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}})
 }
 fn sibling_response() -> String {
     sibling_response_with_ids(DENIED_CALL, PERMITTED_CALL)
 }
 fn sibling_response_with_ids(denied_call: &str, permitted_call: &str) -> String {
-    let mut events = vec![start_message()];
+    sibling_response_for_model(E1_MODEL, denied_call, permitted_call)
+}
+fn sibling_response_for_model(model: &str, denied_call: &str, permitted_call: &str) -> String {
+    let mut events = vec![start_message_for_model(model)];
     for (index, id, name) in [
         (0, denied_call, "delete_record"),
         (1, permitted_call, "read_record"),
@@ -113,8 +145,11 @@ fn sibling_response_with_ids(denied_call: &str, permitted_call: &str) -> String 
     sse(events)
 }
 fn final_response() -> String {
+    final_response_for_model(E1_MODEL)
+}
+fn final_response_for_model(model: &str) -> String {
     sse(vec![
-        start_message(),
+        start_message_for_model(model),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
         json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":FINISHED}}),
         json!({"type":"content_block_stop","index":0}),
@@ -127,20 +162,68 @@ async fn receive(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    let review_call = if receiver.controlled_review_replies.is_empty() {
+        None
+    } else {
+        body["messages"]
+            .as_array()
+            .and_then(|messages| messages.first())
+            .and_then(|message| serde_json::from_str::<Value>(&wire_text(&message["content"])).ok())
+            .and_then(|request| {
+                request["proposed_operation"]["call_id"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+    };
     let count = {
         let mut bodies = receiver.bodies.lock().unwrap();
         bodies.push(body);
         bodies.len()
     };
-    if headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        != Some("Bearer synthetic-e1-loopback-only")
-    {
+    let authorized = match receiver.api_key {
+        Some(expected) => {
+            headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                == Some(expected)
+        }
+        None => {
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer synthetic-e1-loopback-only")
+        }
+    };
+    if !authorized {
         return (
             StatusCode::UNAUTHORIZED,
             [("content-type", "application/json")],
             "missing fixture authorization".into(),
+        );
+    }
+    if !receiver.controlled_review_replies.is_empty() {
+        let Some(reply) = review_call
+            .as_deref()
+            .and_then(|call| receiver.controlled_review_replies.get(call))
+        else {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                "unexpected review candidate".into(),
+            );
+        };
+        reply.arrived.notify_one();
+        reply.release.notified().await;
+        let response = reply
+            .response
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("test releases one explicit response");
+        return (
+            StatusCode::OK,
+            [("content-type", "text/event-stream")],
+            response,
         );
     }
     let Some(first_response) = receiver.first_responses.get((count - 1) / 2) else {
@@ -162,7 +245,7 @@ async fn receive(
     (
         StatusCode::OK,
         [("content-type", "text/event-stream")],
-        final_response(),
+        final_response_for_model(receiver.model.unwrap_or(E1_MODEL)),
     )
 }
 
@@ -194,8 +277,9 @@ fn http_client(server: &Server) -> Arc<dyn LlmClient> {
     http_client_with_binding(server, binding)
 }
 fn http_client_with_binding(server: &Server, binding: AuthBindingRef) -> Arc<dyn LlmClient> {
+    let model = server.model();
     let identity = SessionLlmIdentity {
-        model: E1_MODEL.into(),
+        model: model.into(),
         provider: Provider::Anthropic,
         self_hosted_server_id: None,
         provider_params: None,
@@ -204,7 +288,7 @@ fn http_client_with_binding(server: &Server, binding: AuthBindingRef) -> Arc<dyn
     let models =
         ModelRegistry::from_config(&Config::default(), meerkat_models::canonical()).unwrap();
     let profile = models
-        .profile_witness_for_provider(Provider::Anthropic, E1_MODEL)
+        .profile_witness_for_provider(Provider::Anthropic, model)
         .unwrap();
     let connection = ResolvedConnection {
         provider: Provider::Anthropic,
@@ -262,7 +346,7 @@ impl OperationPolicyOwner for HttpRecordOwner {
         if association.candidate().controller_model.as_ref() != Some(&self.selection)
             || facts.selection() != &self.selection
             || facts.endpoint() != self.endpoint
-            || facts.wire_model() != E1_MODEL
+            || facts.wire_model() != self.selection.model()
         {
             return Err(denied().into());
         }
@@ -287,7 +371,7 @@ impl OperationPolicyOwner for HttpRecordOwner {
         if purpose != LocalPolicyPurpose::Controller
             || !self.selection.matches_model_facts(facts)
             || facts.endpoint.as_ref() != self.endpoint
-            || facts.wire_model.as_ref() != E1_MODEL
+            || facts.wire_model.as_ref() != self.selection.model()
             || !facts.hosted_capabilities.is_empty()
             || facts.live_channel.is_some()
         {
@@ -297,6 +381,7 @@ impl OperationPolicyOwner for HttpRecordOwner {
             operation_values: self.values(),
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: now_ms + 60_000,
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
 }
@@ -785,6 +870,9 @@ mod a3_queued_work;
 
 #[path = "e1_policy_control/stock_persistent.rs"]
 mod stock_persistent;
+
+#[path = "e1_policy_control/model_reviewer.rs"]
+mod model_reviewer;
 
 #[cfg(all(target_os = "macos", feature = "integration-real-tests"))]
 #[path = "e1_policy_control/shell_confinement.rs"]

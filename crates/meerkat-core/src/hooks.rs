@@ -391,8 +391,21 @@ impl HookObservation {
 
 #[derive(Clone)]
 struct PostCommitHookRegistration {
+    namespace: uuid::Uuid,
+    source_id: Option<HookBackgroundSourceId>,
+    tasks: Arc<std::sync::atomic::AtomicUsize>,
     engine: Arc<dyn HookEngine>,
     overrides: crate::config::HookRunOverrides,
+}
+
+impl PostCommitHookRegistration {
+    fn matches_engine(
+        &self,
+        engine: &Arc<dyn HookEngine>,
+        source_id: Option<HookBackgroundSourceId>,
+    ) -> bool {
+        Arc::ptr_eq(&self.engine, engine) || self.source_id.is_some_and(|id| Some(id) == source_id)
+    }
 }
 
 struct TrackedPostCommitHookTask {
@@ -400,11 +413,17 @@ struct TrackedPostCommitHookTask {
     finished: Arc<std::sync::atomic::AtomicBool>,
 }
 
-struct PostCommitHookTaskCompletion(Arc<std::sync::atomic::AtomicBool>);
+struct PostCommitHookTaskCompletion {
+    finished: Arc<std::sync::atomic::AtomicBool>,
+    registration_tasks: Arc<std::sync::atomic::AtomicUsize>,
+}
 
 impl Drop for PostCommitHookTaskCompletion {
     fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Release);
+        self.finished
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.registration_tasks
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -416,10 +435,20 @@ impl Drop for PostCommitHookTaskCompletion {
 pub struct PostCommitHookDispatcher {
     session_id: SessionId,
     state: std::sync::Mutex<PostCommitHookDispatcherState>,
+    changed: tokio::sync::Notify,
+    flush: tokio::sync::Mutex<()>,
+}
+
+#[derive(Clone)]
+struct PendingBackgroundNotice {
+    fact: HookRegisteredBackgroundCompletion,
+    record: crate::types::SystemNoticeRecord,
 }
 
 struct PostCommitHookDispatcherState {
     registration: Option<PostCommitHookRegistration>,
+    retained: Vec<PostCommitHookRegistration>,
+    pending: Vec<PendingBackgroundNotice>,
     inflight: Vec<TrackedPostCommitHookTask>,
     shutdown: bool,
 }
@@ -431,17 +460,162 @@ impl PostCommitHookDispatcher {
             session_id,
             state: std::sync::Mutex::new(PostCommitHookDispatcherState {
                 registration: None,
+                retained: Vec::new(),
+                pending: Vec::new(),
                 inflight: Vec::new(),
                 shutdown: false,
             }),
+            changed: tokio::sync::Notify::new(),
+            flush: tokio::sync::Mutex::new(()),
         }
     }
 
+    /// Install a host configuration without dropping outstanding observations.
+    /// A full retained-source set rejects this proposed activation atomically.
+    /// The host must stop invoking a replaced engine for this session; already
+    /// entered engine calls and their background work remain retained.
+    /// Native ledger clones retain one passive source namespace. Custom engines
+    /// without that optional identity use same-Arc matching. To replace such an
+    /// engine, it must report its actual lifecycle; a custom engine with no
+    /// background work may report supported empty status. Unknown status refuses
+    /// the proposed configuration and leaves the installed engine unchanged.
     pub fn configure(
         &self,
         engine: Option<Arc<dyn HookEngine>>,
         overrides: crate::config::HookRunOverrides,
-    ) {
+    ) -> Result<(), HookEngineError> {
+        const MAX_RETAINED_ENGINES: usize = 64;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown {
+            return Err(HookEngineError::InvalidConfiguration(
+                "hook dispatcher is shut down".to_owned(),
+            ));
+        }
+        let source_id = engine
+            .as_ref()
+            .and_then(|engine| engine.background_completion_source_id());
+        if let Some(current) = &state.registration {
+            let same_source = engine
+                .as_ref()
+                .is_some_and(|engine| current.matches_engine(engine, source_id));
+            if !same_source
+                && current
+                    .engine
+                    .background_session_status(&self.session_id)
+                    .is_none()
+            {
+                return Err(HookEngineError::InvalidConfiguration(
+                    "installed hook engine cannot currently provide the lifecycle status required for replacement".to_owned(),
+                ));
+            }
+        }
+        self.prune_registrations(&mut state);
+        let registration = if let Some(engine) = engine {
+            if let Some(existing) = state
+                .retained
+                .iter()
+                .find(|entry| entry.matches_engine(&engine, source_id))
+            {
+                Some(PostCommitHookRegistration {
+                    engine,
+                    overrides,
+                    ..existing.clone()
+                })
+            } else {
+                if state.retained.len() >= MAX_RETAINED_ENGINES {
+                    return Err(HookEngineError::InvalidConfiguration(
+                        "hook configuration cannot replace retained background sources until they settle".to_owned(),
+                    ));
+                }
+                let registration = PostCommitHookRegistration {
+                    namespace: source_id.map_or_else(uuid::Uuid::new_v4, |id| id.0),
+                    source_id,
+                    tasks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    engine,
+                    overrides,
+                };
+                state.retained.push(registration.clone());
+                Some(registration)
+            }
+        } else {
+            None
+        };
+        state.registration = registration;
+        drop(state);
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    fn prune_registrations(&self, state: &mut PostCommitHookDispatcherState) {
+        let current = state.registration.as_ref().map(|entry| entry.namespace);
+        let pending = &state.pending;
+        state.retained.retain(|entry| {
+            Some(entry.namespace) == current
+                || entry.tasks.load(std::sync::atomic::Ordering::Acquire) != 0
+                || pending
+                    .iter()
+                    .any(|item| item.fact.registration_id == entry.namespace)
+                || entry.engine.background_session_status(&self.session_id)
+                    != Some(HookBackgroundSessionStatus::default())
+        });
+    }
+
+    /// The active consumer uses the same passive namespace as late persistence.
+    /// No engine or run is substituted when the requested source is absent.
+    pub fn take_active_background_completions(
+        &self,
+        engine: &Arc<dyn HookEngine>,
+        run_id: &crate::RunId,
+        limit: usize,
+    ) -> Vec<HookRegisteredBackgroundCompletion> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown {
+            return Vec::new();
+        }
+        let source_id = engine.background_completion_source_id();
+        let Some(registration) = state
+            .retained
+            .iter()
+            .find(|entry| entry.matches_engine(engine, source_id))
+        else {
+            return Vec::new();
+        };
+        registration
+            .engine
+            .take_background_completions(&self.session_id, Some(run_id), limit.min(32))
+            .into_iter()
+            .map(|completion| HookRegisteredBackgroundCompletion {
+                registration_id: registration.namespace,
+                completion,
+            })
+            .collect()
+    }
+
+    /// Cheap readiness inspection only. The real writer still runs under the
+    /// current attachment and idle boundary, never under this passive fact.
+    pub fn has_ready_background_completions(&self) -> bool {
+        let Ok(state) = self.state.try_lock() else {
+            return false;
+        };
+        !state.shutdown
+            && (!state.pending.is_empty()
+                || state.retained.iter().any(|entry| {
+                    entry
+                        .engine
+                        .background_session_status(&self.session_id)
+                        .is_some_and(|status| status.ready != 0)
+                }))
+    }
+
+    /// Move a bounded ready batch into this session owner even when its writer
+    /// is temporarily unavailable. This does not claim persistence or receipt.
+    pub fn retain_ready_background_completions(&self) {
         let mut state = self
             .state
             .lock()
@@ -449,7 +623,118 @@ impl PostCommitHookDispatcher {
         if state.shutdown {
             return;
         }
-        state.registration = engine.map(|engine| PostCommitHookRegistration { engine, overrides });
+        let mut remaining = 32usize.saturating_sub(state.pending.len());
+        for registration in state.retained.clone() {
+            if remaining == 0 {
+                break;
+            }
+            let ready = registration
+                .engine
+                .take_session_background_completions(&self.session_id, remaining);
+            remaining = remaining.saturating_sub(ready.len());
+            state.pending.extend(ready.into_iter().map(|completion| {
+                let fact = HookRegisteredBackgroundCompletion {
+                    registration_id: registration.namespace,
+                    completion,
+                };
+                let record = fact.system_notice_record();
+                PendingBackgroundNotice { fact, record }
+            }));
+        }
+    }
+
+    /// Persist fixed facts while the caller owns the current attachment's idle
+    /// turn-finalization boundary. No model call, input admission or work
+    /// authorization is performed. Pending records survive cancellation and
+    /// writer failure; a successful duplicate is the existing writer's no-op.
+    pub async fn flush_background_completions_under_turn_finalization_boundary(
+        &self,
+        writer: &dyn crate::lifecycle::CoreExecutorTranscriptNoticeHandle,
+    ) -> Result<usize, crate::lifecycle::CoreExecutorError> {
+        let _flush = self.flush.lock().await;
+        self.retain_ready_background_completions();
+        let mut persisted = 0;
+        loop {
+            let pending = {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.shutdown {
+                    return Ok(persisted);
+                }
+                state.pending.first().cloned()
+            };
+            let Some(pending) = pending else {
+                break;
+            };
+            writer
+                .append_system_notice_under_turn_finalization_boundary(pending.record.clone())
+                .await?;
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.pending.first().is_some_and(|item| {
+                item.fact.registration_id == pending.fact.registration_id
+                    && item.fact.completion.ordinal == pending.fact.completion.ordinal
+            }) {
+                state.pending.remove(0);
+                persisted += 1;
+            }
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.prune_registrations(&mut state);
+        Ok(persisted)
+    }
+
+    /// Non-consuming readiness for the existing idle loop. Failed writes stay
+    /// pending and wait for its bounded retry delay, avoiding a ready-spin.
+    /// Registration changes rebuild the waits; no polling worker is spawned.
+    pub async fn wait_for_background_completion(&self, retry_delay: std::time::Duration) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let (registrations, pending, shutdown) = {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    state.retained.clone(),
+                    !state.pending.is_empty(),
+                    state.shutdown,
+                )
+            };
+            if shutdown {
+                std::future::pending::<()>().await;
+            }
+            if pending {
+                tokio::time::sleep(retry_delay.max(std::time::Duration::from_millis(25))).await;
+                return;
+            }
+            let mut waits = futures::stream::FuturesUnordered::new();
+            for registration in &registrations {
+                waits.push(
+                    registration
+                        .engine
+                        .wait_for_session_background_completion(&self.session_id),
+                );
+            }
+            if waits.is_empty() {
+                changed.await;
+            } else {
+                use futures::StreamExt;
+                tokio::select! {
+                    () = &mut changed => {},
+                    _ = waits.next() => return,
+                }
+            }
+        }
     }
 
     pub fn dispatch(&self, observation: HookObservation) {
@@ -467,14 +752,32 @@ impl PostCommitHookDispatcher {
         let invocation = HookInvocation::committed(self.session_id.clone(), observation);
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let task_finished = Arc::clone(&finished);
+        registration
+            .tasks
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // Own the counter before spawn so dropping a never-polled future also
+        // retires this exact dispatch task.
+        let completion = PostCommitHookTaskCompletion {
+            finished: task_finished,
+            registration_tasks: Arc::clone(&registration.tasks),
+        };
         let task = async move {
-            let _completion = PostCommitHookTaskCompletion(task_finished);
+            let _completion = completion;
             match registration
                 .engine
                 .execute_post_commit(invocation.clone(), Some(&registration.overrides))
                 .await
             {
                 Ok(report) => {
+                    for refusal in &report.launch_refusals {
+                        tracing::warn!(
+                            session_id = %invocation.session_id,
+                            hook_id = %refusal.hook_id,
+                            point = ?refusal.point,
+                            refusal = %refusal.refusal,
+                            "post-commit observer launch refused; the committed fact is unchanged"
+                        );
+                    }
                     if matches!(report.decision, Some(HookDecision::Deny { .. })) {
                         tracing::warn!(
                             point = ?invocation.point,
@@ -483,6 +786,23 @@ impl PostCommitHookDispatcher {
                     }
                 }
                 Err(error) => {
+                    let mut retained_error = &error;
+                    while let HookEngineError::WithReport {
+                        report,
+                        error: inner,
+                    } = retained_error
+                    {
+                        for refusal in &report.launch_refusals {
+                            tracing::warn!(
+                                session_id = %invocation.session_id,
+                                hook_id = %refusal.hook_id,
+                                point = ?refusal.point,
+                                refusal = %refusal.refusal,
+                                "post-commit observer launch refused; the committed fact is unchanged"
+                            );
+                        }
+                        retained_error = inner.as_ref();
+                    }
                     tracing::warn!(
                         point = ?invocation.point,
                         error = %error,
@@ -514,6 +834,17 @@ impl PostCommitHookDispatcher {
         }
         state.shutdown = true;
         state.registration = None;
+        // Explicit process-local disposal. Aborting a future does not prove
+        // target non-entry or child exit; existing process custody owns that.
+        let disposed = state.pending.len();
+        let retained_sources = state.retained.len();
+        state.pending.clear();
+        state.retained.clear();
+        if disposed != 0 || retained_sources != 0 {
+            tracing::warn!(session_id = %self.session_id, disposed, retained_sources,
+                "session shutdown disposed background feedback custody; task cancellation is not child-exit evidence");
+        }
+        self.changed.notify_waiters();
         for task in state.inflight.drain(..) {
             task.abort.abort();
         }
@@ -614,6 +945,7 @@ impl HookFailureReason {
     #[must_use]
     pub fn from_engine_error(error: &HookEngineError) -> Self {
         match error {
+            HookEngineError::WithReport { error, .. } => Self::from_engine_error(error),
             HookEngineError::LaunchRefused { reason, .. } => reason.clone(),
             HookEngineError::InvalidConfiguration(reason) => Self::ConfigInvalid {
                 message: reason.clone(),
@@ -1025,12 +1357,158 @@ impl HookOutcome {
     }
 }
 
+/// A confinement refusal before a foreground or post-commit Observe hook entered.
+///
+/// This is a no-entry fact, not an executed outcome or a hook decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct HookLaunchRefusal {
+    pub hook_id: HookId,
+    pub point: HookPoint,
+    pub refusal: crate::confinement::ConfinementRefusal,
+}
+
+/// Passive identifiers of an original committed observation, without its content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HookBackgroundObservation {
+    Input {
+        input_id: crate::lifecycle::InputId,
+        existing_input_id: Option<crate::lifecycle::InputId>,
+    },
+    PeerIngress {
+        peer_id: Option<crate::comms::PeerId>,
+        request_id: Option<String>,
+    },
+    PeerEgress {
+        envelope_id: uuid::Uuid,
+    },
+    Interaction {
+        interaction_id: crate::interaction::InteractionId,
+    },
+}
+
+impl HookBackgroundObservation {
+    pub(crate) fn from_observation(observation: &HookObservation) -> Self {
+        match observation {
+            HookObservation::RuntimeInputAccepted(value) => HookBackgroundObservation::Input {
+                input_id: value.input_id.clone(),
+                existing_input_id: None,
+            },
+            HookObservation::RuntimeInputRejected(value) => HookBackgroundObservation::Input {
+                input_id: value.input_id.clone(),
+                existing_input_id: None,
+            },
+            HookObservation::RuntimeInputDeduplicated(value) => HookBackgroundObservation::Input {
+                input_id: value.input_id.clone(),
+                existing_input_id: Some(value.existing_input_id.clone()),
+            },
+            HookObservation::PeerIngressCommitted(value) => {
+                HookBackgroundObservation::PeerIngress {
+                    peer_id: value.peer.as_ref().map(|peer| peer.id),
+                    request_id: value.request_id.clone(),
+                }
+            }
+            HookObservation::PeerEgressCommitted(value) => HookBackgroundObservation::PeerEgress {
+                envelope_id: value.envelope_id,
+            },
+            HookObservation::InteractionCompleted(value) => {
+                HookBackgroundObservation::Interaction {
+                    interaction_id: value.interaction_id,
+                }
+            }
+        }
+    }
+}
+
+/// Original ownership coordinates, never a recovered producer capability.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookBackgroundAttribution {
+    pub session_id: SessionId,
+    pub run_id: Option<crate::RunId>,
+    pub turn_number: Option<u32>,
+    pub hook_id: HookId,
+    pub point: HookPoint,
+    pub tool_use_id: Option<String>,
+    pub observation: Option<HookBackgroundObservation>,
+}
+
+impl HookBackgroundAttribution {
+    pub fn from_invocation(hook_id: HookId, invocation: &HookInvocation) -> Self {
+        let observation = invocation
+            .observation
+            .as_ref()
+            .map(HookBackgroundObservation::from_observation);
+        Self {
+            session_id: invocation.session_id.clone(),
+            run_id: invocation.run_id.clone(),
+            turn_number: invocation.turn_number,
+            hook_id,
+            point: invocation.point,
+            tool_use_id: invocation
+                .tool_call
+                .as_ref()
+                .map(|call| call.tool_use_id.clone())
+                .or_else(|| {
+                    invocation
+                        .tool_result
+                        .as_ref()
+                        .map(|result| result.tool_use_id.clone())
+                }),
+            observation,
+        }
+    }
+
+    pub fn matches_scope(&self, session_id: &SessionId, run_id: Option<&crate::RunId>) -> bool {
+        &self.session_id == session_id && self.run_id.as_ref() == run_id
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "status", content = "result", rename_all = "snake_case")]
+pub enum HookBackgroundResult {
+    /// Actual completed observation. It proves neither publication nor delivery.
+    Completed(HookOutcome),
+    /// Exact no-entry disposition from the launch owner.
+    LaunchRefused(HookFailureReason),
+    /// Entry/effects cannot be inferred from timeout or other runtime failure.
+    Failed(HookFailureReason),
+}
+
+/// One ready process-local task result. Transfer is not a durable delivery ACK.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HookBackgroundCompletion {
+    /// Distinguishes repeated invocations in this engine only, not durable identity.
+    pub ordinal: u64,
+    pub attribution: HookBackgroundAttribution,
+    pub result: HookBackgroundResult,
+    /// A bounded retained diagnostic is a prefix, not the complete original text.
+    pub diagnostic_truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookBackgroundSkipReason {
+    ConcurrencyFull,
+    RetentionFull,
+    AttributionTooLarge,
+    OrdinalExhausted,
+}
+
+/// A scheduling refusal, with no implication that any target entered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookBackgroundSkip {
+    pub hook_id: HookId,
+    pub point: HookPoint,
+    pub reason: HookBackgroundSkipReason,
+}
+
 /// Aggregate result used by the core loop to apply hook decisions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct HookExecutionReport {
-    /// Hook ids the engine actually began executing — foreground entries it ran
-    /// and background entries it acquired a permit for and spawned. This is the
+    /// Hook ids the engine actually began executing. Background scheduling is
+    /// excluded: its eventual completion retains the entry disposition. This is the
     /// authoritative basis for `HookStarted` events: a hook only appears here
     /// once execution began, never merely because it matched the invocation
     /// point (a foreground deny short-circuit and a saturated background queue
@@ -1039,6 +1517,14 @@ pub struct HookExecutionReport {
     pub started: Vec<HookId>,
     #[serde(default)]
     pub outcomes: Vec<HookOutcome>,
+    /// Observe hooks refused before entry. These ids must not also appear in
+    /// `started` or `outcomes` for the same attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_refusals: Vec<HookLaunchRefusal>,
+    /// Background attempts not scheduled. This remains distinct from entry,
+    /// completion, or a Guardrail decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_skips: Vec<HookBackgroundSkip>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<HookDecision>,
 }
@@ -1086,6 +1572,15 @@ impl HookExecutionReport {
 /// Engine-level failures that prevented hook execution.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum HookEngineError {
+    /// Preserve only prior facts when a later hook fails after a local Observe
+    /// refusal. The failing hook is represented solely by `error`; classification
+    /// and run disposition remain those of that original error.
+    #[error("{error}")]
+    WithReport {
+        report: Box<HookExecutionReport>,
+        #[source]
+        error: Box<HookEngineError>,
+    },
     #[error("Hook configuration invalid: {0}")]
     InvalidConfiguration(String),
     #[error("Hook runtime execution failed for '{hook_id}': {reason}")]
@@ -1104,6 +1599,7 @@ pub enum HookEngineError {
 impl HookEngineError {
     pub fn hook_id(&self) -> Option<&HookId> {
         match self {
+            Self::WithReport { error, .. } => error.hook_id(),
             Self::InvalidConfiguration(_) | Self::LaunchRefused { .. } => None,
             Self::ExecutionFailed { hook_id, .. } | Self::Timeout { hook_id, .. } => Some(hook_id),
         }
@@ -1111,6 +1607,7 @@ impl HookEngineError {
 
     pub fn into_agent_error(self) -> AgentError {
         match self {
+            Self::WithReport { error, .. } => error.into_agent_error(),
             Self::LaunchRefused { hook_id, reason } => {
                 AgentError::HookLaunchRefused { hook_id, reason }
             }
@@ -1129,10 +1626,160 @@ impl HookEngineError {
     }
 }
 
+/// Passive process-local namespace owned once by a completion ledger. Clones
+/// and wrappers of that same ledger must retain this value. Construction grants
+/// no permission and supplies no durable delivery or session authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookBackgroundSourceId(uuid::Uuid);
+
+impl HookBackgroundSourceId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for HookBackgroundSourceId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Counts from the actual engine owner, never inferred from its ready queue.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HookBackgroundSessionStatus {
+    pub running: usize,
+    pub ready: usize,
+}
+
+/// Passive process-local pairing. This namespace is minted once for the actual
+/// installed engine and cannot grant permission or act as a durable receipt.
+#[derive(Debug, Clone)]
+pub struct HookRegisteredBackgroundCompletion {
+    pub registration_id: uuid::Uuid,
+    pub completion: HookBackgroundCompletion,
+}
+
+impl HookRegisteredBackgroundCompletion {
+    /// The same safe fixed block is used for active projection and writer retry.
+    /// It accounts for no new user request and retains the original optional run.
+    pub fn system_notice_record(&self) -> crate::types::SystemNoticeRecord {
+        let completion = &self.completion;
+        let (disposition, body) = match &completion.result {
+            HookBackgroundResult::Completed(outcome) if outcome.failure_reason.is_none() => (
+                "completed",
+                "A background observation hook completed. This is an observation result, not a permission decision.",
+            ),
+            HookBackgroundResult::LaunchRefused(_) => (
+                "launch_refused",
+                "A background observation hook could not enter. Continue with permitted work; this notice grants no permission.",
+            ),
+            _ => (
+                "failed",
+                "A background observation hook did not complete successfully. Entry or side effects cannot be inferred from this notice.",
+            ),
+        };
+        let mut payload = serde_json::json!({
+            "registration_id": self.registration_id,
+            "ordinal": completion.ordinal,
+            "attribution": completion.attribution,
+            "disposition": disposition,
+        });
+        let reason = match &completion.result {
+            HookBackgroundResult::Completed(outcome) => outcome.failure_reason.as_ref(),
+            HookBackgroundResult::LaunchRefused(reason) | HookBackgroundResult::Failed(reason) => {
+                Some(reason)
+            }
+        };
+        if let Some(reason) = reason {
+            payload["reason"] = serde_json::json!(background_feedback_reason(reason));
+            if let HookBackgroundResult::LaunchRefused(HookFailureReason::ConfinementRefused {
+                refusal,
+            }) = &completion.result
+            {
+                payload["refusal"] = serde_json::json!(refusal);
+            }
+        }
+        crate::types::SystemNoticeMessage::with_block(
+            crate::types::SystemNoticeKind::Generic,
+            Some(body.to_owned()),
+            crate::types::SystemNoticeBlock::RuntimeNotice {
+                category: "background_hook_completion".to_owned(),
+                detail: Some(payload.to_string()),
+                payload: Some(payload),
+            },
+        )
+        .into()
+    }
+}
+
+pub(crate) fn background_feedback_reason(reason: &HookFailureReason) -> HookFailureReason {
+    match reason {
+        HookFailureReason::ExecutionFailed { .. } => HookFailureReason::ExecutionFailed {
+            message: "background hook execution failed".to_owned(),
+        },
+        HookFailureReason::ConfigInvalid { .. } => HookFailureReason::ConfigInvalid {
+            message: "background hook configuration was rejected".to_owned(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Runtime-independent engine interface.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait HookEngine: Send + Sync + 'static {
+    /// Optional passive identity of the actual background ledger. The same
+    /// ledger must keep one identity across clones and wrapper Arcs; distinct
+    /// ledgers must not share it. This is correlation only, never authority.
+    /// Without it, dispatcher configuration recognizes only the same Arc.
+    fn background_completion_source_id(&self) -> Option<HookBackgroundSourceId> {
+        None
+    }
+
+    /// Transfer at most `limit` ready items from this exact original scope.
+    /// `None` matches only an originally unbound run, never all runs. This must
+    /// not wait for running hooks or lock contention. Other scopes remain owned
+    /// by the engine for a separately authorized host consumer. Default engines
+    /// without background work need no additional state.
+    fn take_background_completions(
+        &self,
+        _session_id: &SessionId,
+        _run_id: Option<&crate::RunId>,
+        _limit: usize,
+    ) -> Vec<HookBackgroundCompletion> {
+        Vec::new()
+    }
+
+    /// Actual in-flight engine calls plus scheduled tasks and ready facts for
+    /// this session. None means unsupported or temporarily unavailable, never
+    /// supported quiescence. A source with no background work can return empty
+    /// status to permit replacement. The native source may return None while
+    /// its nonblocking ledger observation is contended.
+    fn background_session_status(
+        &self,
+        _session_id: &SessionId,
+    ) -> Option<HookBackgroundSessionStatus> {
+        None
+    }
+
+    /// Bounded transfer for the same session across its original run scopes.
+    /// This explicit late-owner method never treats an absent run as a wildcard.
+    fn take_session_background_completions(
+        &self,
+        _session_id: &SessionId,
+        _limit: usize,
+    ) -> Vec<HookBackgroundCompletion> {
+        Vec::new()
+    }
+
+    /// Non-consuming, cancellation-safe session readiness. Implementations must
+    /// register the wake before checking ready state. No background support
+    /// means no wake, not an immediately completed empty result.
+    async fn wait_for_session_background_completion(&self, _session_id: &SessionId) {
+        std::future::pending::<()>().await;
+    }
+
     fn matching_hooks(
         &self,
         _invocation: &HookInvocation,
@@ -1214,10 +1861,12 @@ mod tests {
             release: tokio::sync::Notify::new(),
         });
         let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
-        dispatcher.configure(
-            Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
-            crate::config::HookRunOverrides::default(),
-        );
+        dispatcher
+            .configure(
+                Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
+                crate::config::HookRunOverrides::default(),
+            )
+            .expect("install hook engine");
 
         dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
             HookRuntimeInputAccepted {
@@ -1276,10 +1925,12 @@ mod tests {
             aborted: std::sync::Mutex::new(Some(aborted_tx)),
         });
         let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
-        dispatcher.configure(
-            Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
-            crate::config::HookRunOverrides::default(),
-        );
+        dispatcher
+            .configure(
+                Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
+                crate::config::HookRunOverrides::default(),
+            )
+            .expect("install hook engine");
         dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
             HookRuntimeInputAccepted {
                 input_id: crate::lifecycle::InputId::new(),
@@ -1323,10 +1974,12 @@ mod tests {
             completed: std::sync::atomic::AtomicUsize::new(0),
         });
         let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
-        dispatcher.configure(
-            Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
-            crate::config::HookRunOverrides::default(),
-        );
+        dispatcher
+            .configure(
+                Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
+                crate::config::HookRunOverrides::default(),
+            )
+            .expect("install hook engine");
         for _ in 0..32 {
             dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
                 HookRuntimeInputAccepted {
@@ -1358,6 +2011,194 @@ mod tests {
         );
     }
 
+    struct SharedSourceObserveEngine {
+        source_id: HookBackgroundSourceId,
+        completed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl HookEngine for SharedSourceObserveEngine {
+        fn background_completion_source_id(&self) -> Option<HookBackgroundSourceId> {
+            Some(self.source_id)
+        }
+        fn background_session_status(
+            &self,
+            _session_id: &SessionId,
+        ) -> Option<HookBackgroundSessionStatus> {
+            Some(HookBackgroundSessionStatus::default())
+        }
+        async fn execute(
+            &self,
+            _invocation: HookInvocation,
+            _overrides: Option<&crate::config::HookRunOverrides>,
+        ) -> Result<HookExecutionReport, HookEngineError> {
+            self.completed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(HookExecutionReport::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn same_background_source_installs_the_new_execution_wrapper() {
+        let source_id = HookBackgroundSourceId::new();
+        let old_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let new_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
+        dispatcher
+            .configure(
+                Some(Arc::new(SharedSourceObserveEngine {
+                    source_id,
+                    completed: old_calls.clone(),
+                })),
+                Default::default(),
+            )
+            .expect("old wrapper");
+        dispatcher
+            .configure(
+                Some(Arc::new(SharedSourceObserveEngine {
+                    source_id,
+                    completed: new_calls.clone(),
+                })),
+                Default::default(),
+            )
+            .expect("new wrapper, same passive source");
+        dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
+            HookRuntimeInputAccepted {
+                input_id: crate::lifecycle::InputId::new(),
+                input_kind: HookRuntimeInputKind::Prompt,
+                handling_mode: HandlingMode::Queue,
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while new_calls.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("new execution wrapper used");
+        assert_eq!(old_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(dispatcher.state.lock().unwrap().retained.len(), 1);
+    }
+
+    struct KnownBackgroundLifecycleEngine(HookBackgroundSessionStatus);
+
+    #[async_trait::async_trait]
+    impl HookEngine for KnownBackgroundLifecycleEngine {
+        fn background_session_status(
+            &self,
+            _session_id: &SessionId,
+        ) -> Option<HookBackgroundSessionStatus> {
+            Some(self.0)
+        }
+
+        async fn execute(
+            &self,
+            _invocation: HookInvocation,
+            _overrides: Option<&crate::config::HookRunOverrides>,
+        ) -> Result<HookExecutionReport, HookEngineError> {
+            Ok(HookExecutionReport::empty())
+        }
+    }
+
+    #[test]
+    fn full_retained_background_set_refuses_only_the_proposed_configuration() {
+        let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
+        let mut last: Option<Arc<dyn HookEngine>> = None;
+        for _ in 0..64 {
+            let engine: Arc<dyn HookEngine> = Arc::new(KnownBackgroundLifecycleEngine(
+                HookBackgroundSessionStatus {
+                    running: 1,
+                    ready: 0,
+                },
+            ));
+            dispatcher
+                .configure(Some(engine.clone()), Default::default())
+                .expect("bounded slot");
+            last = Some(engine);
+        }
+        let proposed: Arc<dyn HookEngine> = Arc::new(KnownBackgroundLifecycleEngine(
+            HookBackgroundSessionStatus::default(),
+        ));
+        assert!(matches!(
+            dispatcher.configure(Some(proposed), Default::default()),
+            Err(HookEngineError::InvalidConfiguration(_))
+        ));
+        let current = last.expect("at least one installed engine");
+        {
+            let state = dispatcher.state.lock().unwrap();
+            assert_eq!(state.retained.len(), 64);
+            assert!(Arc::ptr_eq(
+                &state.registration.as_ref().unwrap().engine,
+                &current
+            ));
+        }
+        dispatcher
+            .configure(Some(current), Default::default())
+            .expect("reuse needs no new slot");
+    }
+
+    #[test]
+    fn custom_supported_empty_lifecycle_can_be_replaced_without_retained_growth() {
+        let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
+        for _ in 0..128 {
+            dispatcher
+                .configure(
+                    Some(Arc::new(KnownBackgroundLifecycleEngine(
+                        HookBackgroundSessionStatus::default(),
+                    ))),
+                    Default::default(),
+                )
+                .expect("known-empty source can be replaced");
+            assert!(dispatcher.state.lock().unwrap().retained.len() <= 2);
+        }
+        dispatcher
+            .configure(None, Default::default())
+            .expect("known-empty source can be disabled");
+    }
+
+    #[tokio::test]
+    async fn unsupported_background_lifecycle_replacement_preserves_current_registration() {
+        let current = Arc::new(ImmediateObserveEngine {
+            completed: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let proposed = Arc::new(ImmediateObserveEngine {
+            completed: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
+        dispatcher
+            .configure(Some(current.clone()), Default::default())
+            .expect("initial configuration");
+        dispatcher
+            .configure(Some(current.clone()), Default::default())
+            .expect("same Arc remains installed");
+        assert!(matches!(
+            dispatcher.configure(Some(proposed.clone()), Default::default()),
+            Err(HookEngineError::InvalidConfiguration(_))
+        ));
+        assert!(matches!(
+            dispatcher.configure(None, Default::default()),
+            Err(HookEngineError::InvalidConfiguration(_))
+        ));
+        dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
+            HookRuntimeInputAccepted {
+                input_id: crate::lifecycle::InputId::new(),
+                input_kind: HookRuntimeInputKind::Prompt,
+                handling_mode: HandlingMode::Queue,
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while current.completed.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the original registration remains usable");
+        assert_eq!(
+            proposed.completed.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_dispatch_and_shutdown_leave_no_owned_task() {
         let engine = Arc::new(AbortObservedEngine {
@@ -1365,10 +2206,12 @@ mod tests {
             aborted: std::sync::Mutex::new(None),
         });
         let dispatcher = Arc::new(PostCommitHookDispatcher::new(SessionId::new()));
-        dispatcher.configure(
-            Some(engine as Arc<dyn HookEngine>),
-            crate::config::HookRunOverrides::default(),
-        );
+        dispatcher
+            .configure(
+                Some(engine as Arc<dyn HookEngine>),
+                crate::config::HookRunOverrides::default(),
+            )
+            .expect("install hook engine");
 
         let mut dispatches = Vec::new();
         for _ in 0..32 {

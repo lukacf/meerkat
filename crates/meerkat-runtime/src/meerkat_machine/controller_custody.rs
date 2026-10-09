@@ -14,17 +14,98 @@ use crate::tokio::sync::{OwnedMutexGuard, RwLockReadGuard};
 
 /// Actual machine map and driver custody, never a reusable "no users" token.
 ///
-/// This currently supports a closed storeless machine. A host sharing grants
+/// This supports a closed storeless machine or its actual governed memory or SQLite owner.
+/// A host sharing grants
 /// with another machine or detached owner must compose complete custody before
-/// calling the grant owner. Persistent scope is explicitly unavailable until
-/// its existing durable owners and cross-process fences are included.
+/// calling the grant owner. Persistent custody retains the backend's writer
+/// and observes detached inputs as well as every attached native driver.
 pub struct NativeControllerGrantMutation<'a> {
+    // Drop the physical writer before releasing native admission custody.
+    durable: Option<Box<dyn crate::store::RuntimeStoreControllerCustody + 'a>>,
     _sessions: RwLockReadGuard<'a, HashMap<SessionId, RuntimeSessionEntry>>,
     _mutations: Vec<OwnedMutexGuard<()>>,
     drivers: Vec<OwnedMutexGuard<DriverEntry>>,
 }
 
 impl NativeControllerGrantMutation<'_> {
+    fn driver(entry: &DriverEntry) -> &crate::driver::ephemeral::EphemeralRuntimeDriver {
+        match entry {
+            DriverEntry::Ephemeral(driver) => driver,
+            DriverEntry::Persistent(driver) => driver.inner_ref(),
+        }
+    }
+
+    /// Interpret stored native lifecycle/input witnesses under the retained
+    /// transaction. This is only a veto check; it restores no process client or
+    /// permission. Unknown/torn authority requires recovery before mutation.
+    fn visit_durable_unfinished(
+        &self,
+        mut visit: impl FnMut(
+            &crate::identifiers::LogicalRuntimeId,
+            &crate::input_state::StoredInputState,
+        ) -> Result<bool, crate::traits::RuntimeDriverError>,
+    ) -> Result<bool, crate::traits::RuntimeDriverError> {
+        let Some(durable) = &self.durable else {
+            return Ok(false);
+        };
+        let mut failure = None;
+        let result = durable.visit_runtimes(&mut |runtime| {
+            let checked = (|| {
+                let crate::store::MachineLifecycleObservation::Decoded { record, .. } =
+                    &runtime.lifecycle
+                else {
+                    return Err(crate::input_authority::unavailable());
+                };
+                let phase = record
+                    .runtime_state()
+                    .ok_or_else(crate::input_authority::unavailable)?;
+                let run = record.run().current_run_id();
+                if (phase == crate::RuntimeState::Running) != run.is_some() {
+                    return Err(crate::input_authority::unavailable());
+                }
+                let mut run_has_original = false;
+                for row in &runtime.input_states {
+                    let in_run = run.is_some() && row.seed.last_run_id.as_ref() == run;
+                    run_has_original |= in_run;
+                    if !crate::store::input_state_is_recovery_nonterminal(row) && !in_run {
+                        continue;
+                    }
+                    if row.state.authority_contributors.is_empty() {
+                        return Err(crate::input_authority::unavailable());
+                    }
+                    for original in &row.state.authority_contributors {
+                        let candidate = original.association().candidate();
+                        if candidate.target.logical_runtime.as_str()
+                            != runtime.runtime_id.to_string()
+                            || candidate.controller_model.is_none()
+                            || candidate.controller_grant_lineage.is_empty()
+                        {
+                            return Err(crate::input_authority::unavailable());
+                        }
+                    }
+                    if visit(&runtime.runtime_id, row)? {
+                        return Ok(true);
+                    }
+                }
+                if run.is_some() && !run_has_original {
+                    return Err(crate::input_authority::unavailable());
+                }
+                Ok(false)
+            })();
+            match checked {
+                Ok(found) => found,
+                Err(error) => {
+                    failure = Some(error);
+                    true
+                }
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        result.map_err(|_| crate::input_authority::unavailable())
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn references_credential(
         &self,
@@ -33,9 +114,7 @@ impl NativeControllerGrantMutation<'_> {
         use crate::meerkat_machine::credential_custody::unavailable;
         use crate::traits::ControllerReadinessFailure;
         for driver in &self.drivers {
-            let DriverEntry::Ephemeral(driver) = &**driver else {
-                return Err(unavailable(ControllerReadinessFailure::UnsupportedScope));
-            };
+            let driver = Self::driver(driver);
             if driver.visit_unfinished_controller_inputs(|row| {
                 let controller = row
                     .controller_client
@@ -58,13 +137,28 @@ impl NativeControllerGrantMutation<'_> {
                 return Ok(true);
             }
         }
-        Ok(false)
+        self.visit_durable_unfinished(|_, row| {
+            Ok(row.state.authority_contributors.iter().any(|original| {
+                original
+                    .association()
+                    .candidate()
+                    .controller_model
+                    .as_ref()
+                    .is_some_and(|selection| {
+                        key.is_none_or(|key| {
+                            key == &meerkat_core::handles::LeaseKey::from_credential_identity(
+                                selection.credential(),
+                            )
+                        })
+                    })
+            }))
+        })
     }
 }
 
 impl NativeControllerGrantMutation<'_> {
     /// Check a proposed policy against every original contributor still owned
-    /// by this closed storeless machine, then commit once under the same custody.
+    /// by this native owner, then commit once under the same custody.
     /// A terminal input in an unfinished run still protects its controller.
     ///
     /// The trusted callback must check the actual proposed state against the
@@ -82,9 +176,7 @@ impl NativeControllerGrantMutation<'_> {
         commit: impl FnOnce() -> T,
     ) -> Result<T, ControllerCustodyRefusal> {
         for driver in &self.drivers {
-            let DriverEntry::Ephemeral(driver) = &**driver else {
-                return Err(ControllerCustodyRefusal::Unavailable);
-            };
+            let driver = Self::driver(driver);
             let mut refusal = None;
             driver
                 .visit_unfinished_controller_inputs(|row| {
@@ -121,6 +213,53 @@ impl NativeControllerGrantMutation<'_> {
                 return Err(refusal);
             }
         }
+        let mut refusal = None;
+        self.visit_durable_unfinished(|runtime_id, stored| {
+            // A detached retained association can veto mutation, but cannot
+            // stand in for the immutable actual client needed to validate a
+            // proposed policy. Require its exact still-attached native owner.
+            let live = self
+                .drivers
+                .iter()
+                .map(|driver| Self::driver(driver))
+                .find(|driver| driver.runtime_id() == runtime_id)
+                .and_then(|driver| driver.ledger().get(&stored.state.input_id))
+                .ok_or_else(crate::input_authority::unavailable)?;
+            let pin = live
+                .controller_client
+                .as_ref()
+                .ok_or_else(crate::input_authority::unavailable)?;
+            if pin.client().controller_model_selection().as_ref() != Some(pin.selection()) {
+                return Err(crate::input_authority::unavailable());
+            }
+            for original in &stored.state.authority_contributors {
+                if original.association().candidate().controller_model.as_ref()
+                    != Some(pin.selection())
+                    || !live.authority_contributors.iter().any(|current| {
+                        current.input_id() == original.input_id()
+                            && current.association() == original.association()
+                    })
+                {
+                    return Err(crate::input_authority::unavailable());
+                }
+                if let Err(error) = check_proposed(original.association(), pin) {
+                    refusal = Some(match error {
+                        meerkat_core::OperationAuthorizationError::Refused(error)
+                            if error.kind() == meerkat_core::OperationRefusalKind::Denied =>
+                        {
+                            ControllerCustodyRefusal::ControllerInUse
+                        }
+                        _ => ControllerCustodyRefusal::Unavailable,
+                    });
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+        .map_err(|_| ControllerCustodyRefusal::Unavailable)?;
+        if let Some(refusal) = refusal {
+            return Err(refusal);
+        }
         Ok(commit())
     }
 }
@@ -132,16 +271,26 @@ impl ControllerGrantMutationCustody for NativeControllerGrantMutation<'_> {
         mutate: impl FnOnce() -> Result<T, E>,
     ) -> Result<Result<T, E>, ControllerCustodyRefusal> {
         for driver in &self.drivers {
-            let referenced = match &**driver {
-                DriverEntry::Ephemeral(driver) => {
-                    driver.unfinished_work_references_controller(reference)
-                }
-                DriverEntry::Persistent(_) => return Err(ControllerCustodyRefusal::Unavailable),
-            }
-            .map_err(|_| ControllerCustodyRefusal::Unavailable)?;
+            let referenced = Self::driver(driver)
+                .unfinished_work_references_controller(reference)
+                .map_err(|_| ControllerCustodyRefusal::Unavailable)?;
             if referenced {
                 return Err(ControllerCustodyRefusal::ControllerInUse);
             }
+        }
+        if self
+            .visit_durable_unfinished(|_, row| {
+                Ok(row.state.authority_contributors.iter().any(|original| {
+                    original
+                        .association()
+                        .candidate()
+                        .controller_grant_lineage
+                        .contains(reference)
+                }))
+            })
+            .map_err(|_| ControllerCustodyRefusal::Unavailable)?
+        {
+            return Err(ControllerCustodyRefusal::ControllerInUse);
         }
         // All same-machine admission and registration remains excluded until
         // after the synchronous callback publishes its grant owner mutation.
@@ -166,11 +315,7 @@ impl MeerkatMachine {
     pub(super) fn try_controller_custody_for_readiness(
         &self,
     ) -> Result<NativeControllerGrantMutation<'_>, crate::traits::RuntimeDriverError> {
-        if self.store.is_some() {
-            return Err(crate::meerkat_machine::credential_custody::unavailable(
-                crate::traits::ControllerReadinessFailure::UnsupportedScope,
-            ));
-        }
+        self.require_governed_execution_custody()?;
         let sessions = self.sessions.try_read().map_err(|_| {
             crate::meerkat_machine::credential_custody::unavailable(
                 crate::traits::ControllerReadinessFailure::Busy,
@@ -199,7 +344,23 @@ impl MeerkatMachine {
             })?);
         }
         drop(ordered);
+        let durable = self
+            .store
+            .as_ref()
+            .map(|store| {
+                let claim = self
+                    .execution_custody
+                    .as_deref()
+                    .ok_or_else(crate::input_authority::unavailable)?;
+                store.try_controller_mutation_custody(claim).map_err(|_| {
+                    crate::meerkat_machine::credential_custody::unavailable(
+                        crate::traits::ControllerReadinessFailure::AuthorityUnavailable,
+                    )
+                })
+            })
+            .transpose()?;
         Ok(NativeControllerGrantMutation {
+            durable,
             _sessions: sessions,
             _mutations: mutations,
             drivers,

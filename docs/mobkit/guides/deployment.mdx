@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
+*Mirrored from MobKit main at [29f6b2218762](https://github.com/lukacf/meerkat-mobkit/commit/29f6b2218762002247be3985014014bc60468330) on 2026-10-08; MobKit workspace version 0.8.49 at that commit.*
 
 Both bundled gateways, the console/admin `mobkit_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -371,11 +371,21 @@ base64_text)` over the base64 form, so meerkat's read-back verification
 written through MobKit's native `BinaryBlobStore::put_bytes` (non-image
 `mobkit/blob/*` objects), and image blobs written by MobKit builds that
 predate this rule, carry MobKit's own address, `sha256(media_type || 0x00 ||
-raw_bytes)` over the decoded bytes (`meerkat-mobkit/src/blob_store.rs`,
+raw_bytes)` over the decoded bytes (`crates/meerkat-mobkit/src/blob_store.rs`,
 `compute_blob_id`). Both render as `sha256:<64 hex digits>`, so the same PNG
 under the two recipes carries two visually indistinguishable ids. The store
 resolves both forms through both faces, so references written before the rule
-keep hydrating; still, compare ids only within one recipe. The side by side
+keep hydrating; still, compare ids only within one recipe. When meerkat's
+read-back verification meets an image reference whose meerkat content address
+differs, it asks the store through `BlobStore::attest_address`;
+`Base64BlobStoreAdapter` recomputes MobKit's own recipe over the returned
+payload and attests only an exact match. The attestation covers the media
+type stored beside the bytes, not the media type a transcript block declares
+for the reference; binding the two is the caller's side of the check. A
+durable fork of a transcript that holds such a reference then stores the image
+under its meerkat content address and points the child at it, leaving the
+source transcript and object in place, and realtime history hydration accepts
+the reference. The side by side
 recipe, provenance rules and the planned unification are documented in the
 meerkat storage operations runbook under "Blob digests in meerkat and MobKit".
 

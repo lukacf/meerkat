@@ -2336,6 +2336,9 @@ pub enum SystemNoticeBlock {
         persisted: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// Bounded setup diagnostic supplied by the accepted lifecycle result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confinement_refusal: Option<crate::confinement::ConfinementRefusal>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pending_sources: Vec<String>,
     },
@@ -2443,6 +2446,8 @@ enum SystemNoticeBlockKnown {
         #[serde(default)]
         detail: Option<String>,
         #[serde(default)]
+        confinement_refusal: Option<crate::confinement::ConfinementRefusal>,
+        #[serde(default)]
         pending_sources: Vec<String>,
     },
     BackgroundJob {
@@ -2542,6 +2547,7 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 phase,
                 persisted,
                 detail,
+                confinement_refusal,
                 pending_sources,
             } => Self::Mcp {
                 server_id,
@@ -2549,6 +2555,7 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 phase,
                 persisted,
                 detail,
+                confinement_refusal,
                 pending_sources,
             },
             SystemNoticeBlockKnown::BackgroundJob {

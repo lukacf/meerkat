@@ -120,6 +120,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
             system_prompts: system_prompt.into_iter().collect(),
             header: InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

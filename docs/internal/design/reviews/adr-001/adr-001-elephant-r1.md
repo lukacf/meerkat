@@ -2,8 +2,8 @@
 
 Verdict: RED. The direction is sound, but the current-source authorization contract and the privileged service-handoff contract need explicit decisions before the federation can be implemented consistently. Two additional precision fixes are required to support the stated semantic-preservation claim.
 
-Reviewed ADR: /Users/luka/.codex/worktrees/security-adr/meerkat/docs/internal/design/adr-001-runtime-security.md, r1, 444 lines.
-Reviewed Elephant: /Users/luka/src/Elephant at 1aefaad2de68535ca5b588f58e8ed1ae1bf5b56a.
+Reviewed ADR: (operator-retained path)/docs/internal/design/adr-001-runtime-security.md, r1, 444 lines.
+Reviewed Elephant: (operator-retained path) at 1aefaad2de68535ca5b588f58e8ed1ae1bf5b56a.
 Review mode: static source and design inspection only. No source or ADR edits; no builds/tests. This review file is the sole output mutation.
 
 ## E1 - P1 - Historical provenance versions can outlive current source restrictions

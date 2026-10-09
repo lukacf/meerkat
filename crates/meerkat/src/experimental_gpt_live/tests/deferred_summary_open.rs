@@ -38,7 +38,7 @@ use meerkat_core::{
 
 /// Rows seeded before the open. Roughly `SEEDED_TURNS * SEED_TURN_BYTES` of
 /// committed transcript, in the range the console voice open sees on a
-/// long-lived household member.
+/// long-lived team member.
 const SEEDED_TURNS: usize = 240;
 const SEED_TURN_BYTES: usize = 4 * 1024;
 
@@ -421,7 +421,7 @@ struct DeferredSummaryEnvironment {
 
 fn seeded_turn_text(index: usize) -> String {
     let mut text = format!("Historical turn {index}: ");
-    let filler = "the household reviewed the day's plans and confirmed the next steps. ";
+    let filler = "the team reviewed the day's plans and confirmed the next steps. ";
     while text.len() < SEED_TURN_BYTES {
         text.push_str(filler);
     }

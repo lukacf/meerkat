@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use meerkat_auth_core::oauth_flow::{
     OAuthBrowserActionRef, OAuthBrowserFlowCompletion, OAuthBrowserFlowIdentity,
     OAuthDeviceFlowRecord, OAuthDevicePollLease, OAuthDevicePollLifecycle, OAuthFlowAuthority,
-    OAuthFlowError, OAuthFlowRecord, OAuthFlowRegistry, OAuthFlowRegistrySnapshot,
-    OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow, PersistedOAuthDeviceFlow,
+    OAuthFlowError, OAuthFlowQuarantine, OAuthFlowRecord, OAuthFlowRegistry,
+    OAuthFlowRegistrySnapshot, OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow,
+    PersistedOAuthDeviceFlow,
 };
 use meerkat_core::AuthCredentialIdentity;
 use meerkat_core::handles::{DslTransitionError, LeaseKey};
@@ -66,8 +67,8 @@ fn load_oauth_snapshot_for_release(
     else {
         return Ok(None);
     };
-    serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&bytes)
-        .map(Some)
+    OAuthFlowRegistrySnapshot::decode(&bytes)
+        .map(|decoded| Some(decoded.snapshot))
         .map_err(|err| DslTransitionError::no_matching(operation, err.to_string()))
 }
 
@@ -78,6 +79,9 @@ pub struct RuntimeOAuthFlowHandle {
     store: StoreSlot,
     payload_lock: PayloadLock,
     _release_observer: Option<Arc<OAuthPayloadReleaseObserver>>,
+    /// Persisted flow records the last decode quarantined (kind and position
+    /// only; contents never leave the snapshot).
+    flow_quarantine: Arc<Mutex<Vec<OAuthFlowQuarantine>>>,
 }
 
 #[derive(Debug)]
@@ -394,6 +398,7 @@ impl RuntimeOAuthFlowHandle {
             store,
             payload_lock,
             _release_observer: Some(release_observer),
+            flow_quarantine: Arc::new(Mutex::new(Vec::new())),
         };
         handle.rehydrate_persisted_payloads();
         handle
@@ -414,6 +419,7 @@ impl RuntimeOAuthFlowHandle {
             store: Arc::clone(&self.store),
             payload_lock: Arc::clone(&self.payload_lock),
             _release_observer: self._release_observer.clone(),
+            flow_quarantine: Arc::clone(&self.flow_quarantine),
         }
     }
 
@@ -761,6 +767,35 @@ impl RuntimeOAuthFlowHandle {
             .insert_restored_browser_flow(state.to_string(), record.clone())
     }
 
+    /// Persisted flow records the last snapshot decode quarantined: records
+    /// this build could not decode, kept verbatim in the snapshot and never
+    /// admitted. Reported by kind and position only.
+    pub fn quarantined_flows(&self) -> Vec<OAuthFlowQuarantine> {
+        self.flow_quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record_flow_quarantine(&self, quarantined: Vec<OAuthFlowQuarantine>) {
+        let mut current = self
+            .flow_quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current != quarantined {
+            for record in &quarantined {
+                tracing::warn!(
+                    target: "meerkat::auth::oauth",
+                    kind = ?record.kind,
+                    position = record.position,
+                    failure = ?record.failure,
+                    "persisted OAuth flow record quarantined: this build cannot decode it"
+                );
+            }
+            *current = quarantined;
+        }
+    }
+
     fn rehydrate_persisted_payloads(&self) {
         let Some(store) = self.store() else {
             return;
@@ -768,9 +803,11 @@ impl RuntimeOAuthFlowHandle {
         let Ok(Some(bytes)) = store.load_auth_oauth_flow_snapshot() else {
             return;
         };
-        let Ok(snapshot) = serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&bytes) else {
+        let Ok(decoded) = OAuthFlowRegistrySnapshot::decode(&bytes) else {
             return;
         };
+        self.record_flow_quarantine(decoded.quarantined);
+        let snapshot = decoded.snapshot;
         let now_millis = current_time_millis();
         let now_instant = Instant::now();
 
@@ -814,20 +851,24 @@ impl RuntimeOAuthFlowHandle {
         let Some(store) = self.store() else {
             return Ok(false);
         };
-        let snapshot =
-            match store.load_auth_oauth_flow_snapshot().map_err(|err| {
-                OAuthFlowError::PersistenceFailed {
-                    operation,
-                    detail: err.to_string(),
-                }
-            })? {
-                Some(bytes) => serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&bytes)
-                    .map_err(|err| OAuthFlowError::PersistenceFailed {
+        let snapshot = match store.load_auth_oauth_flow_snapshot().map_err(|err| {
+            OAuthFlowError::PersistenceFailed {
+                operation,
+                detail: err.to_string(),
+            }
+        })? {
+            Some(bytes) => {
+                let decoded = OAuthFlowRegistrySnapshot::decode(&bytes).map_err(|err| {
+                    OAuthFlowError::PersistenceFailed {
                         operation,
                         detail: err.to_string(),
-                    })?,
-                None => OAuthFlowRegistrySnapshot::default(),
-            };
+                    }
+                })?;
+                self.record_flow_quarantine(decoded.quarantined);
+                decoded.snapshot
+            }
+            None => OAuthFlowRegistrySnapshot::default(),
+        };
         let now_millis = current_time_millis();
         let now_instant = Instant::now();
         let durable_browser = snapshot
@@ -1323,8 +1364,13 @@ fn merge_oauth_registry_snapshot(
     policy: SnapshotPersistPolicy<'_>,
 ) -> Result<OAuthFlowRegistrySnapshot, OAuthSnapshotMergeError> {
     let mut merged = match current {
-        Some(bytes) => serde_json::from_slice::<OAuthFlowRegistrySnapshot>(bytes)
-            .map_err(|err| crate::store::RuntimeStoreError::WriteFailed(err.to_string()))?,
+        // Quarantined records ride along in `merged` and are written back
+        // unchanged.
+        Some(bytes) => {
+            OAuthFlowRegistrySnapshot::decode(bytes)
+                .map_err(|err| crate::store::RuntimeStoreError::WriteFailed(err.to_string()))?
+                .snapshot
+        }
         None => OAuthFlowRegistrySnapshot::default(),
     };
     let removed_browser = removed_browser.iter().cloned().collect::<BTreeSet<_>>();
@@ -1973,6 +2019,155 @@ pub(crate) mod tests {
 
     fn alternate_target() -> AuthCredentialIdentity {
         target_with_binding("secondary_openai")
+    }
+
+    const QUARANTINE_CANARY: &str = "pkce-canary-quarantine-7731";
+
+    fn memory_store() -> Arc<dyn RuntimeStore> {
+        Arc::new(crate::store::memory::InMemoryRuntimeStore::new())
+    }
+
+    fn persisted_bytes(store: &Arc<dyn RuntimeStore>) -> Vec<u8> {
+        store.load_auth_oauth_flow_snapshot().unwrap().unwrap()
+    }
+
+    fn write_bytes(store: &Arc<dyn RuntimeStore>, bytes: Vec<u8>) {
+        store
+            .update_auth_oauth_flow_snapshot(&mut |_| Ok(bytes.clone()))
+            .unwrap();
+    }
+
+    fn owner(store: &Arc<dyn RuntimeStore>) -> RuntimeOAuthFlowHandle {
+        RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(600),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            store,
+        )
+    }
+
+    /// A record from a build with a different record shape: it carries a
+    /// secret-looking value and does not decode here.
+    fn undecodable_record() -> serde_json::Value {
+        serde_json::json!({
+            "state": "future-state",
+            "pkce_verifier": QUARANTINE_CANARY,
+            "future_only_field": {"shape": "unknown to this build"},
+        })
+    }
+
+    /// Persist one valid browser flow, then plant an undecodable record in
+    /// `list` next to it, as a rollback would leave the snapshot.
+    fn snapshot_with_undecodable(list: &str) -> (Arc<dyn RuntimeStore>, String, String) {
+        let store = memory_store();
+        let first = owner(&store);
+        let valid = first
+            .start(
+                target(),
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1:41001/callback".into(),
+                "valid-verifier".into(),
+            )
+            .unwrap();
+        drop(first);
+        let mut json: serde_json::Value = serde_json::from_slice(&persisted_bytes(&store)).unwrap();
+        let entries = json
+            .as_object_mut()
+            .unwrap()
+            .entry(list)
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        entries.as_array_mut().unwrap().push(undecodable_record());
+        let bad_text = serde_json::to_string(&undecodable_record()).unwrap();
+        write_bytes(&store, serde_json::to_vec(&json).unwrap());
+        (store, valid, bad_text)
+    }
+
+    fn assert_quarantine_isolated(
+        list: &str,
+        kind: meerkat_auth_core::oauth_flow::OAuthFlowRecordKind,
+    ) {
+        let (store, valid, bad_text) = snapshot_with_undecodable(list);
+        let restarted = owner(&store);
+        // The valid flow restored; the undecodable one is reported by kind
+        // and position only.
+        restarted
+            .verify(
+                &valid,
+                &target(),
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1:41001/callback",
+            )
+            .expect("the decodable flow survives its quarantined neighbour");
+        let reported = restarted.quarantined_flows();
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert_eq!(reported[0].kind, kind);
+        assert_eq!(reported[0].position, 0);
+        assert!(!format!("{reported:?}").contains(QUARANTINE_CANARY));
+        // A new login of another target starts and completes.
+        let fresh = restarted
+            .start(
+                alternate_target(),
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1:41002/callback".into(),
+                "fresh-verifier".into(),
+            )
+            .expect("new logins proceed past a quarantined record");
+        restarted
+            .consume(
+                &fresh,
+                &alternate_target(),
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1:41002/callback",
+            )
+            .expect("the new login completes");
+        // The quarantined record is written back byte-identical.
+        let persisted = String::from_utf8(persisted_bytes(&store)).unwrap();
+        assert!(
+            persisted.contains(&bad_text),
+            "the quarantined record must survive the merge verbatim"
+        );
+    }
+
+    #[test]
+    fn an_undecodable_browser_record_is_quarantined_and_other_logins_proceed() {
+        assert_quarantine_isolated(
+            "browser",
+            meerkat_auth_core::oauth_flow::OAuthFlowRecordKind::Browser,
+        );
+    }
+
+    #[test]
+    fn an_undecodable_device_record_is_quarantined_and_other_logins_proceed() {
+        assert_quarantine_isolated(
+            "device",
+            meerkat_auth_core::oauth_flow::OAuthFlowRecordKind::Device,
+        );
+    }
+
+    #[test]
+    fn a_corrupted_snapshot_envelope_still_fails_closed_without_content() {
+        let store = memory_store();
+        write_bytes(
+            &store,
+            serde_json::to_vec(
+                &serde_json::json!({"browser": {"pkce_verifier": QUARANTINE_CANARY}}),
+            )
+            .unwrap(),
+        );
+        let handle = owner(&store);
+        let error = handle
+            .start(
+                target(),
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1:41001/callback".into(),
+                "verifier".into(),
+            )
+            .expect_err("an undecodable envelope fails closed");
+        assert!(
+            matches!(error, OAuthFlowError::PersistenceFailed { .. }),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains(QUARANTINE_CANARY));
+        assert!(!format!("{error:?}").contains(QUARANTINE_CANARY));
     }
 
     #[derive(Debug, Default)]

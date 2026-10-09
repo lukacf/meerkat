@@ -59,6 +59,7 @@ impl MeerkatMachine {
         meerkat_core::ToolScope::compose(&[
             visibility_state.capability_base_filter.clone(),
             visibility_state.inherited_base_filter.clone(),
+            visibility_state.policy_base_filter.clone(),
             visibility_state.active_filter.clone(),
         ])
         .allows(tool_name)

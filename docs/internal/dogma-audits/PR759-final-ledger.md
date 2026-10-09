@@ -1,6 +1,6 @@
 # PR #759 — Canonical Dogma Ledger (one row, one verdict)
 
-**PR:** `lukacf/meerkat#759` · **Head:** `2568493f831e3fb3561654f73f632cceae3e65b0` · **Baseline:** `/Users/luka/.codex/dogma-violations.md` (2026-06-09, 307 rows)
+**PR:** `lukacf/meerkat#759` · **Head:** `2568493f831e3fb3561654f73f632cceae3e65b0` · **Baseline:** `(operator-retained path)` (2026-06-09, 307 rows)
 
 **This document supersedes the counts in `PR759-reverification-report.md`** and satisfies the reviewer's 7-point repair spec: every baseline row appears exactly once with a stable ID (R001–R307, codex order); one final verdict each; conflicts resolved by explicit tiebreak adjudication; all recalibrations folded in (not appended); headline recomputed from unique rows.
 

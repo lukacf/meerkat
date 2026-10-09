@@ -559,6 +559,9 @@ The legacy flat `error` wire remains accepted with `reason` absent. A present
 required fields in a known cause still produce `MalformedEvent` with the raw
 payload preserved, without falling back to the legacy error.
 
+`request_reasoning_lowered` is likewise recognized through the generated
+inventory and preserved by the raw-event path.
+
 `hook_launch_refused` is recognized through the current generated inventory
 and preserved by the existing raw-event path, including `reason` and the exact
 optional `tool_use_id`. This mechanical prelaunch fact is separate from a

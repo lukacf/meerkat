@@ -10,7 +10,13 @@
 //! [`ExecutionPolicyGatedDispatcher`] enforces the resolved policy at
 //! dispatch time while leaving the LLM-visible tool list
 //! (`tools()`/`tool_catalog()`) byte-identical, so gating never changes the
-//! prompt-cache prefix. A denied call surfaces as an ordinary
+//! prompt-cache prefix. The gate stays list-preserving: tools the policy
+//! makes unreachable by name alone ([`ToolExecutionPolicy::static_visibility_filter`])
+//! are removed earlier, by session visibility (the tool scope's
+//! `policy_base_filter`, fixed for the session's build), so the model is not
+//! offered them; the gate still refuses every denied call, and conditional
+//! policy (read-only intent, consequence policy, dispatch admission) leaves
+//! the visible list alone. A denied call surfaces as an ordinary
 //! `access_denied` [`ToolError`] which the agent loop converts into an
 //! `is_error` tool result via `terminal_tool_outcome_for_error` — the run
 //! continues. Provider-native server tools never traverse
@@ -250,6 +256,36 @@ impl ToolExecutionPolicy {
     #[must_use]
     pub fn permits(&self, name: &str) -> bool {
         self.permits_call(name, ToolMutationClass::Unknown)
+    }
+
+    /// The visibility filter for the tools this policy makes unreachable by
+    /// name alone: the complement of an allow list (minus any denied names)
+    /// or a deny list. Read-only intent decides per call on the owning
+    /// dispatcher's declaration, so it contributes nothing here and its
+    /// tools stay visible; so do tools gated by consequence policy or
+    /// dispatch admission. The gate still refuses every denied call.
+    #[must_use]
+    pub fn static_visibility_filter(&self) -> crate::ToolFilter {
+        let mut allow: Option<&ToolNameSet> = None;
+        let mut deny: Option<&ToolNameSet> = None;
+        for constraint in &self.constraints {
+            match constraint {
+                crate::ops::ToolAccessConstraint::AllowNames(names) => allow = Some(names),
+                crate::ops::ToolAccessConstraint::DenyNames(names) => deny = Some(names),
+                crate::ops::ToolAccessConstraint::ReadOnly => {}
+            }
+        }
+        match (allow, deny) {
+            (Some(allow), deny) => {
+                let mut visible = allow.clone();
+                if let Some(deny) = deny {
+                    visible.retain(|name| !deny.contains(name.as_str()));
+                }
+                crate::ToolFilter::Allow(visible)
+            }
+            (None, Some(deny)) => crate::ToolFilter::Deny(deny.clone()),
+            (None, None) => crate::ToolFilter::All,
+        }
     }
 }
 
@@ -504,6 +540,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
 
     fn live_bridge_effect_kind(&self, tool_name: &str) -> crate::LiveBridgeEffectKind {
         self.inner.live_bridge_effect_kind(tool_name)
+    }
+
+    fn review_entry_support(&self, tool_name: &str) -> crate::approval::review::ReviewEntrySupport {
+        self.inner.review_entry_support(tool_name)
     }
 
     fn execution_binding_epoch(&self, tool_name: &str) -> u64 {
@@ -837,6 +877,61 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn name_set(names: &[&str]) -> ToolNameSet {
+        names.iter().copied().collect()
+    }
+
+    fn resolved(policy: ToolAccessPolicy) -> ToolExecutionPolicy {
+        ToolExecutionPolicy::resolve(policy).expect("resolvable policy")
+    }
+
+    /// #1807: the names a policy makes unreachable by name alone become a
+    /// visibility filter; read-only intent, decided per call on the owning
+    /// dispatcher's declaration, contributes nothing.
+    #[test]
+    fn static_visibility_filter_covers_only_name_decidable_constraints() {
+        assert_eq!(
+            ToolExecutionPolicy::unrestricted().static_visibility_filter(),
+            crate::ToolFilter::All
+        );
+        assert_eq!(
+            resolved(ToolAccessPolicy::DenyList(name_set(&[
+                "spawn_member",
+                "wire_members"
+            ])))
+            .static_visibility_filter(),
+            crate::ToolFilter::Deny(name_set(&["spawn_member", "wire_members"]))
+        );
+        assert_eq!(
+            resolved(ToolAccessPolicy::AllowList(name_set(&["alpha", "beta"])))
+                .static_visibility_filter(),
+            crate::ToolFilter::Allow(name_set(&["alpha", "beta"]))
+        );
+        assert_eq!(
+            resolved(ToolAccessPolicy::ReadOnly).static_visibility_filter(),
+            crate::ToolFilter::All,
+            "read-only intent is conditional: its tools stay visible"
+        );
+        assert_eq!(
+            resolved(ToolAccessPolicy::Constraints(vec![
+                crate::ops::ToolAccessConstraint::AllowNames(name_set(&["alpha", "beta"])),
+                crate::ops::ToolAccessConstraint::DenyNames(name_set(&["beta"])),
+                crate::ops::ToolAccessConstraint::ReadOnly,
+            ]))
+            .static_visibility_filter(),
+            crate::ToolFilter::Allow(name_set(&["alpha"])),
+            "an allow list minus its denied names; read-only adds nothing"
+        );
+        assert_eq!(
+            resolved(ToolAccessPolicy::Constraints(vec![
+                crate::ops::ToolAccessConstraint::DenyNames(name_set(&["beta"])),
+                crate::ops::ToolAccessConstraint::ReadOnly,
+            ]))
+            .static_visibility_filter(),
+            crate::ToolFilter::Deny(name_set(&["beta"]))
+        );
+    }
 
     struct BlockingAdmission {
         released: AtomicBool,
@@ -1561,6 +1656,10 @@ mod tests {
             }
         }
         impl PreparedOperationAuthorization for Prepared {
+            fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+                crate::authorization::OperationReviewTier::R1
+            }
+
             fn check_current(
                 &self,
                 binding: &PreparedAuthorizationBinding,

@@ -102,11 +102,23 @@ pub(crate) fn sweep_realm_once(runtime_root: &Path) {
 /// Command-hook custody backed by the session's process custody.
 pub(crate) struct HookProcessCustody {
     custody: Arc<ProcessCustody>,
+    confinement: Option<Arc<crate::command_hook_confinement::CommandHookConfinement>>,
 }
 
 impl HookProcessCustody {
     pub(crate) fn new(custody: Arc<ProcessCustody>) -> Self {
-        Self { custody }
+        Self {
+            custody,
+            confinement: None,
+        }
+    }
+
+    pub(crate) fn with_confinement(
+        mut self,
+        confinement: Arc<crate::command_hook_confinement::CommandHookConfinement>,
+    ) -> Self {
+        self.confinement = Some(confinement);
+        self
     }
 }
 
@@ -120,8 +132,99 @@ fn hook_custody_error(error: ProcessCustodyError) -> CommandHookCustodyError {
     }
 }
 
+fn hook_spawn_error(error: std::io::Error) -> meerkat_core::HookFailureReason {
+    match error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<meerkat_core::confinement::ConfinementRefusal>())
+    {
+        Some(refusal) => meerkat_core::HookFailureReason::ConfinementRefused { refusal: *refusal },
+        None => {
+            meerkat_core::HookFailureReason::execution_failed("confined command hook spawn failed")
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl CommandHookProcessCustody for HookProcessCustody {
+    async fn spawn(
+        &self,
+        hook_id: &meerkat_core::HookId,
+        run_id: Option<&meerkat_core::RunId>,
+        command: &meerkat_core::config::CommandRuntimeConfig,
+    ) -> Result<meerkat_sandbox::ProcessChild, meerkat_core::HookFailureReason> {
+        use meerkat_core::HookFailureReason;
+        use meerkat_sandbox::{ProcessChild, SpawnIo, StdioMode};
+
+        let spawner = ToolProcessSpawner::CommandHook {
+            hook_id: hook_id.to_string(),
+        };
+        let (gate, mut child): (PreparedCustodySpawn, ProcessChild) = match &self.confinement {
+            Some(confinement) => {
+                // All launch data is final before binding. Neither the engine
+                // nor the custody gate receives a mutable required command.
+                let launch = confinement
+                    .prepare(command)
+                    .map_err(|refusal| HookFailureReason::ConfinementRefused { refusal })?;
+                let gate = self
+                    .custody
+                    .prepare_gated_spawn(spawner, None, run_id)
+                    .await
+                    .map_err(|_| {
+                        HookFailureReason::execution_failed(
+                            "command hook custody preparation failed",
+                        )
+                    })?;
+                let child = gate
+                    .spawn_confined_with_io(
+                        launch,
+                        SpawnIo {
+                            stdin: StdioMode::Piped,
+                            stdout: StdioMode::Piped,
+                            stderr: StdioMode::Piped,
+                        },
+                    )
+                    .map_err(hook_spawn_error)?;
+                (gate, child)
+            }
+            None => {
+                // Compatibility only: no host confinement was requested.
+                let args = command.args.iter().map(OsString::from).collect::<Vec<_>>();
+                let (gate, mut builder) = self
+                    .custody
+                    .prepare_spawn(spawner, None, run_id, OsStr::new(&command.command), &args)
+                    .await
+                    .map_err(|_| {
+                        HookFailureReason::execution_failed(
+                            "command hook custody preparation failed",
+                        )
+                    })?;
+                builder
+                    .envs(&command.env)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                let child = builder.spawn().map_err(|_| {
+                    HookFailureReason::execution_failed("command hook spawn failed")
+                })?;
+                (gate, child.into())
+            }
+        };
+        match gate.spawned_process(&child).await {
+            Ok(guard) => guard.settle_when_exited(),
+            Err(_) => {
+                // No target entered: a failed custody commit never releases
+                // the gate. Retain the child through termination and reap.
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(HookFailureReason::execution_failed(
+                    "command hook custody activation failed",
+                ));
+            }
+        }
+        Ok(child)
+    }
+
     async fn prepare(
         &self,
         hook_id: &meerkat_core::HookId,
@@ -130,6 +233,11 @@ impl CommandHookProcessCustody for HookProcessCustody {
         args: &[OsString],
     ) -> Result<(Box<dyn CommandHookCustodySpawn>, tokio::process::Command), CommandHookCustodyError>
     {
+        if self.confinement.is_some() {
+            return Err(CommandHookCustodyError {
+                reason: "required command hooks use the immutable spawn boundary".into(),
+            });
+        }
         let (prepared, command) = self
             .custody
             .prepare_spawn(
@@ -172,6 +280,35 @@ mod tests {
     use meerkat_core::HookId;
     use meerkat_core::{HookAdapterConfig, HookEntryConfig, HookRuntimeKind, HooksConfig};
     use meerkat_core::{HookEngine, HookInvocation, HookPoint};
+
+    #[test]
+    fn confined_hook_spawn_preserves_only_typed_confinement_refusals() {
+        use meerkat_core::HookFailureReason;
+        use meerkat_core::confinement::ConfinementRefusal;
+
+        for refusal in [
+            ConfinementRefusal::InvalidRequirement,
+            ConfinementRefusal::InvalidLaunch,
+            ConfinementRefusal::UnsupportedRequirement,
+            ConfinementRefusal::BackendUnavailable,
+            ConfinementRefusal::PreparationFailed,
+        ] {
+            assert_eq!(
+                hook_spawn_error(std::io::Error::other(refusal)),
+                HookFailureReason::ConfinementRefused { refusal }
+            );
+        }
+        for error in [
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            std::io::Error::other(ConfinementRefusal::BackendUnavailable.to_string()),
+            std::io::Error::other("private command /host/private"),
+        ] {
+            assert_eq!(
+                hook_spawn_error(error),
+                HookFailureReason::execution_failed("confined command hook spawn failed")
+            );
+        }
+    }
 
     fn record_count(dir: &Path) -> usize {
         std::fs::read_dir(dir)
@@ -266,5 +403,104 @@ mod tests {
         })
         .await;
         assert!(settled.is_ok(), "the hook's custody record is settled");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+    )]
+    async fn required_command_hook_enters_only_with_its_durable_custody_record() {
+        use meerkat_core::confinement::{
+            ConfinementSpec, FilesystemAccess, IpNetworkAccess, PathAccess, PlatformBaseline,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let work = root.join("work");
+        std::fs::create_dir(&work).unwrap();
+        let session_id = SessionId::new();
+        let custody = open_session_custody(&root, &session_id).await.unwrap();
+        let scope_dir = custody_root(&root).join(session_id.to_string());
+        let requirement = ConfinementSpec {
+            baseline: PlatformBaseline::CommandRuntimeV1,
+            read: FilesystemAccess::Paths(vec![PathAccess::Subtree(work.clone())]),
+            write: FilesystemAccess::Paths(vec![PathAccess::Subtree(work.clone())]),
+            deny_read: vec![],
+            deny_write: vec![],
+            network: IpNetworkAccess::Denied,
+            unix_connect: vec![],
+            require_descendant_termination: false,
+        }
+        .try_into()
+        .unwrap();
+        let adapter = HookProcessCustody::new(custody).with_confinement(Arc::new(
+            crate::command_hook_confinement::CommandHookConfinement::new(&requirement, work),
+        ));
+        let hook_id = HookId::new("required-custody-hook");
+        let command = meerkat_core::config::CommandRuntimeConfig {
+            command: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf 'entered\n'; IFS= read -r finish; test \"$finish\" = finish".into(),
+            ],
+            env: Default::default(),
+        };
+        let mut child = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            adapter.spawn(&hook_id, None, &command),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut stdout = BufReader::new(child.take_stdout().unwrap());
+        let mut stdin = child.take_stdin().unwrap();
+        let mut entered = String::new();
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stdout.read_line(&mut entered),
+        )
+        .await;
+        let records = std::fs::read_dir(&scope_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+            })
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+            .collect::<Vec<_>>();
+        // Release and reap before asserting captured state. No sleep decides
+        // whether target entry preceded the durable custody publication.
+        stdin.write_all(b"finish\n").await.unwrap();
+        drop(stdin);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while record_count(&scope_dir) > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(ready.is_ok_and(|result| result.is_ok()));
+        assert_eq!(entered, "entered\n");
+        assert!(status.success());
+        assert_eq!(records.len(), 1);
+        let record: serde_json::Value = serde_json::from_str(&records[0]).unwrap();
+        assert_eq!(
+            record["spawner"],
+            serde_json::to_value(ToolProcessSpawner::CommandHook {
+                hook_id: hook_id.to_string(),
+            })
+            .unwrap()
+        );
+        assert_eq!(record["scope"], session_id.to_string());
+        assert_eq!(record["phase"], "spawned");
+        assert!(
+            settled.is_ok(),
+            "actual child exit must settle the custody record"
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! OB3 on the real runtime-backed stack: a graceful mob Shutdown with a
+//! Owned retirement on the real runtime-backed stack: a graceful mob Shutdown with a
 //! member turn held in its provider call across the Shutdown, plus an owned
 //! retirement settled before it, completes and accounts for every member.
 
@@ -23,7 +23,7 @@ use meerkat_mob::{
 /// Bound for test steps that must happen promptly; it only turns a hang into
 /// a failure.
 const STEP: Duration = Duration::from_secs(60);
-const BUSY_PROMPT: &str = "OB3-BUSY";
+const BUSY_PROMPT: &str = "OPS-BUSY";
 
 /// The busy prompt's provider call never answers (its turn is held across
 /// the Shutdown); every other request answers at once.
@@ -99,7 +99,7 @@ async fn build_service(
 ) {
     let (_manifest, persistence) = meerkat::open_realm_persistence_in(
         root,
-        "ob3-shutdown-realm",
+        "ops-shutdown-realm",
         Some(meerkat_store::RealmBackend::Sqlite),
         Some(meerkat_store::RealmOrigin::Explicit),
     )
@@ -149,7 +149,7 @@ fn definition() -> MobDefinition {
         })),
     );
     let mut definition = MobDefinition::explicit(MobId::from(format!(
-        "ob3-shutdown-{}",
+        "ops-shutdown-{}",
         uuid::Uuid::new_v4().simple()
     )));
     definition.profiles = profiles;

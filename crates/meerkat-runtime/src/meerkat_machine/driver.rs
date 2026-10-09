@@ -6167,7 +6167,7 @@ pub(crate) enum FailedRunContributorDisposition {
     /// The run never began executing and the loop dropped an `apply` whose
     /// in-flight fate it cannot observe. A contributor returned to its lane
     /// here could be executed a second time by a consumer that drains late,
-    /// and for a household instruction that means an action taken twice. The
+    /// and for a user instruction that means an action taken twice. The
     /// machine terminalizes the contributors instead: refuse the release
     /// rather than risk it.
     Terminalized,
@@ -8742,6 +8742,7 @@ mod tests {
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -8901,6 +8902,7 @@ mod tests {
             objective_id: None,
             header: crate::input::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -9144,7 +9146,7 @@ pub(crate) async fn machine_recycle_preserving_work(
 /// or terminalized at the retry cap), and the run has been returned. The caller
 /// must keep draining - the field class this variant closes is a fifo head the
 /// machine refuses forever while the wake is dropped, which starved every input
-/// behind it (0.8.22, two household members down ~4h).
+/// behind it (0.8.22, two members down ~4h).
 ///
 /// `#[must_use]`: discarding the outcome silently accepts a refusal where the
 /// caller believes it staged, which is exactly what two test fixtures did when

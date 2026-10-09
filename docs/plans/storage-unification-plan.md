@@ -41,8 +41,8 @@ busy-timeout definition beyond the plan's count (mob's realm-profile
 store) was found and folded in.
 
 **Revision 4.** Revision 2 incorporated three reviews of the original draft:
-the ob3 validator team (remote/BigQuery downstream on ephemeral disk), the
-HomeCore operators (tuple-world state-generation deployment on local
+a production deployment team (remote/BigQuery downstream on ephemeral disk), the
+downstream app operators (tuple-world state-generation deployment on local
 SQLite), and an independent static review that corrected two stale inventory
 claims and identified safety defects in the original migration design.
 Revision 3 incorporates the second review round on both this document and
@@ -112,8 +112,8 @@ severity story and the remedy.
 
 ### Downstream constraints
 
-**Ephemeral disk / remote stores (ob3 validator).** Cloud Run / GKE
-deployments run with no durable disk. ob3 replaces meerkat's stores with
+**Ephemeral disk / remote stores (production deployment).** Cloud Run / GKE
+deployments run with no durable disk. That deployment replaces meerkat's stores with
 hand-rolled BigQuery implementations of `SessionStore`, mobkit's
 `ContinuityStore`, and `EventLogStore` — but has no public seam for a
 `RuntimeStore` or `ScheduleStore`, so it runs a shadow scheduler. Its session
@@ -127,7 +127,7 @@ stale). A mobkit blob store silently defaulting to an in-memory implementation
 on GKE cost a user a month-broken agent — silent fallback for durable slots is
 a proven production hazard, not a hypothetical.
 
-**Immutable state generations (HomeCore).** Full deploys byte-clone the state
+**Immutable state generations (downstream app).** Full deploys byte-clone the state
 directory and boot a candidate against the clone; rollback keeps the previous
 generation untouched. Migration-at-open inside the candidate boot is
 compatible with this model — but backup files written by migration land
@@ -193,16 +193,16 @@ Coverage, by chapter:
   wrappers and trait erasure — its default returns `None` and the runtime
   silently degrades to whole-blob persistence when a wrapper swallows the
   capability. A conformance test makes that silent downgrade loud.
-- **Append-only media** (new, from ob3's zombie incident): pin what a
+- **Append-only media** (new, from the zombie-member incident): pin what a
   revision guard *means* for backends that emulate CAS with windowed reads;
   who owns deduplication of superseded sibling rows; that checkpoint
   monotonicity survives generation rebinds. Also pin the non-atomic
   projection-vs-authority recovery protocol (quarantine → Broken → repair) as
   a *tested contract* — disk backends with transactional co-commit must not
   let everyone forget that remote backends never have it.
-- **Legacy data** (new, from HomeCore): "open a store written by version
-  N−1" is a first-class axis, seeded with real dumps (HomeCore has offered a
-  371-message / 82 MB session corpus with genuine version scar tissue) — every
+- **Legacy data** (new, from a downstream app): "open a store written by version
+  N−1" is a first-class axis, seeded with real dumps (the downstream app has offered a
+  real session corpus with genuine version scar tissue) — every
   release-day incident so far has been a legacy-data-shape issue, none were
   fresh-store bugs.
 - **Blobs** (new): a session-referenced blob survives provider
@@ -323,7 +323,7 @@ the shared machinery cannot live there):
   execute the pending migrations and the ledger update atomically in it; and
   reject a future version before any mutation. MobKit consumes this protocol
   unchanged (its M3).
-- **Store error taxonomy** (from ob3's incident review): classify store
+- **Store error taxonomy** (from the operator deployment's incident review): classify store
   errors at the boundary as transient / stale / corrupt, so callers can
   retry transient failures instead of terminalizing every store error into
   executor-stop + quarantine. The error class alone does not authorize a
@@ -501,7 +501,7 @@ Migration cases:
 (`*.pre-<version>-<timestamp>`), never deletes — and those artifacts are
 *registered*: doctor lists them, `rkat storage prune` owns their lifecycle,
 and their naming is documented so external retention tooling
-(state-generation cloning, HomeCore-style prune jobs) can recognize them
+(state-generation cloning, downstream-app-style prune jobs) can recognize them
 instead of treating them as unknown files that bloat every clone.
 
 **Downstream migration.** The exported `StorageMigrator` hook currently
@@ -547,20 +547,20 @@ result (P1); fail-closed durable slots (P1); manifest v2 old-reader rejection
 (P1); CI gate rescoped to ambient-root resolution (P2); conformance
 capability profiles + `as_incremental` discovery test (P2).
 
-Accepted from ob3: hotfix pulled forward with exported stamping helper;
+Accepted from the operator deployment: hotfix pulled forward with exported stamping helper;
 append-only conformance chapter (revision-guard semantics, sibling dedup
 ownership, checkpoint monotonicity, recovery protocol as tested contract);
 mobkit companion arc; scheduler feature-parity audit framing; manifest
 placement on ephemeral disk; blob conformance + doctor dangling-ref repair;
 store error taxonomy; provider diagnose hook in doctor.
 
-Accepted from HomeCore: hotfix priority; legacy-data conformance axis with
+Accepted from the downstream app: hotfix priority; legacy-data conformance axis with
 real-dump fixtures; typed health-visible `SchemaFromTheFuture` (refuse at
 certification, no crash-loop); split-brain detection scoped to resolved
 roots; machine-readable durability classes (durable-only clones); registered
 backup/retention discipline; doctor read-only-safe on live realms; boot-time
 expectations documented for adoption migration; changelog policy for any
-table moves. Note: HomeCore's endorsement of the busy-timeout fix as "Bug
+table moves. Note: the downstream app's endorsement of the busy-timeout fix as "Bug
 K's grandfather" rested on the v1 claim that review disproved — the defect is
 already fixed on main; their observed texture likely predates that or stems
 from the remaining divergent openers.
@@ -582,14 +582,14 @@ per-mob storage); the pinned ledger transaction protocol (P2); method-level
 retryability with outcome reconciliation for indeterminate writes (P2); and
 the filename-ownership boundary — layout owns roots and canonical top-level
 locators, feature crates own relative filenames (P2, applied in both gates).
-Accepted from HomeCore: the independently-adopted byte-divergent
+Accepted from the downstream app: the independently-adopted byte-divergent
 canonical/projection pair as a named joint acceptance case for the hotfix
-pair, validated against their real dump; HomeCore also retracted the "Bug
+pair, validated against their real dump; the downstream app also retracted the "Bug
 K's grandfather" attribution after independently confirming v0.7.31 already
-used the shared opener. Accepted from ob3: the lazy-at-restore adoption
+used the shared opener. Accepted from the operator deployment: the lazy-at-restore adoption
 variant as a sanctioned H3 mechanism for always-on single-replica
 deployments (applied in the companion); the disposition-ledger pattern
-propagated to the companion doc. Out of scope by agreement: ob3's
+propagated to the companion doc. Out of scope by agreement: the operator deployment's
 "explosion #3" (run_flow → identity-first dispatch producing zero turns) is
 a 0.8 runtime/flow defect, not storage — it needs its own issue and must not
 hide under this arc.
@@ -599,7 +599,7 @@ auto-migration at the committed-authority resolver, with one operator-
 confirmed override of this plan recorded in place: lazy per-session
 adoption at first authority touch instead of an explicit quiescent step
 (observability, idempotency, and the Phase 6 bulk/fenced verb preserved
-from the original requirement — and the lazy shape is the one ob3's review
+from the original requirement — and the lazy shape is the one the operator deployment's review
 had argued for). The exported helpers are `meerkat_core::adopt_legacy_session`
 and `legacy_session_transcript_relation`. The divergent-pair authority rule
 is superseded by the machine's typed dispositions (extension adopted, stale

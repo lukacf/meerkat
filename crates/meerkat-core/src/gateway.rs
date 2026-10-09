@@ -412,6 +412,12 @@ impl AgentToolDispatcher for ToolGateway {
             .unwrap_or(crate::LiveBridgeEffectKind::ExternalIo)
     }
 
+    fn review_entry_support(&self, tool_name: &str) -> crate::approval::review::ReviewEntrySupport {
+        self.declaring_owner(tool_name)
+            .map(|dispatcher| dispatcher.review_entry_support(tool_name))
+            .unwrap_or_default()
+    }
+
     fn resolve_execution_plan(
         &self,
         call: ToolCallView<'_>,
@@ -853,6 +859,12 @@ impl AgentToolDispatcher for DynamicToolComposite {
         self.declaring_owner(tool_name)
             .map(|dispatcher| dispatcher.live_bridge_effect_kind(tool_name))
             .unwrap_or(crate::LiveBridgeEffectKind::ExternalIo)
+    }
+
+    fn review_entry_support(&self, tool_name: &str) -> crate::approval::review::ReviewEntrySupport {
+        self.declaring_owner(tool_name)
+            .map(|dispatcher| dispatcher.review_entry_support(tool_name))
+            .unwrap_or_default()
     }
 
     fn resolve_execution_plan(

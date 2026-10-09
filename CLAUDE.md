@@ -231,7 +231,11 @@ rkat mcp list
 rkat mcp remove <name>
 ```
 
-Config stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user).
+Config stored in `.rkat/mcp.toml` (project), `~/.rkat/mcp.toml` (user), or the
+selected realm's own config (`--scope realm`, `[[tools.mcp_servers]]`, inherited
+by child realms). A realm server and a file server with the same name must be
+defined identically. Realm servers are literal: `${VAR}` expands only in
+`mcp.toml`, and realm writes refuse it.
 
 **Connection behavior:** MCP servers connect in parallel in the background. Tools become available as each server completes its handshake. The `[MCP_PENDING]` system notice informs the LLM while servers are still connecting.
 

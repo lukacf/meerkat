@@ -187,7 +187,7 @@ LiveBridgeEffectOutcome = Literal['committed', 'failed', 'unknown']
 ToolDispatchAdmissionSource = Literal['configured_gate', 'context_gate', 'authorization_audit']
 
 # Tool result companion contract for ToolDispatchTerminalErrorKind.
-ToolDispatchTerminalErrorKind = Literal['not_found', 'unavailable', 'invalid_arguments', 'execution_failed', 'timeout', 'access_denied', 'authorization_refused', 'operation_observation_unavailable', 'operation_authorization_unavailable', 'policy_denied', 'policy_indeterminate', 'other', 'callback_pending', 'confinement_refused', 'hook_denied', 'outcome_uncertain']
+ToolDispatchTerminalErrorKind = Literal['not_found', 'unavailable', 'invalid_arguments', 'execution_failed', 'timeout', 'access_denied', 'authorization_refused', 'operation_observation_unavailable', 'operation_authorization_unavailable', 'policy_denied', 'policy_indeterminate', 'other', 'callback_pending', 'confinement_refused', 'hook_denied', 'outcome_uncertain', 'review_unsatisfied', 'review_unavailable', 'hook_launch_refused']
 
 @dataclass
 class ToolDispatchSettlementFailure:
@@ -749,6 +749,25 @@ class WireScopeEvidenceRetainedOnRefresh(TypedDict, total=False):
     kind: Required[Literal['retained_on_refresh']]
 
 WireScopeEvidence = WireScopeEvidenceTokenEndpointResponse | WireScopeEvidenceRetainedOnRefresh
+
+# Typed reason of an auth error on the RPC and REST surfaces: RPC
+# `error.data.reason`, REST body `reason`. Hosts branch on it, never on the
+# error text. One native mapping (`HostAuthError::reason`) owns it; the
+# existing status codes and RPC error codes are unchanged.
+WireAuthErrorReason = Literal['realm_not_found', 'binding_not_found', 'mcp_server_not_configured', 'account_selection_required', 'unknown_strategy', 'device_poll_in_progress', 'device_code_already_admitted', 'device_expiry_invalid', 'missing_scopes', 'slot_occupied', 'slot_account_mismatch', 'slot_context_mismatch', 'slot_mode_mismatch', 'unverified_connector_publication', 'reauth_required', 'configuration_invalid'] | Literal['invalid_target'] | Literal['binding_invalid'] | Literal['binding_inherited'] | Literal['flow_unsupported'] | Literal['mcp_server_mismatch'] | Literal['attempt_missing'] | Literal['attempt_mismatch'] | Literal['account_mismatch'] | Literal['credential_mismatch'] | Literal['verification_unavailable'] | Literal['authorization_required'] | Literal['callback_unavailable'] | Literal['upstream_failure'] | Literal['infrastructure']
+
+@dataclass
+class WireAuthErrorData:
+    """`error.data` of an auth RPC error."""
+    reason: WireAuthErrorReason
+
+
+@dataclass
+class WireAuthErrorBody:
+    """Body of a REST auth endpoint error."""
+    error: str
+    reason: WireAuthErrorReason
+
 
 # Wire payload for InstructionActivationDisposition.
 InstructionActivationDisposition = Any
@@ -4875,6 +4894,10 @@ ToolConfigChangeOperation = Literal['add', 'remove', 'reload']
 # Canonical lifecycle phase for external-tool boundary deltas.
 ExternalToolDeltaPhase = Literal['pending', 'applied', 'draining', 'forced', 'failed']
 
+# Bounded operation-local diagnostics. Never expose an environment value,
+# credential path, gate token, or secret-bearing command line in this error.
+ConfinementRefusal = Literal['invalid_requirement', 'invalid_launch', 'unsupported_requirement', 'backend_unavailable', 'preparation_failed']
+
 # Structured status data for live tool configuration change notifications.
 class ToolConfigChangeStatusBoundaryApplied(TypedDict, total=False):
     base_changed: Required[bool]
@@ -4893,6 +4916,7 @@ class ToolConfigChangeStatusWarningFailedClosed(TypedDict, total=False):
     kind: Required[Literal['warning_failed_closed']]
 
 class ToolConfigChangeStatusExternalToolDelta(TypedDict, total=False):
+    confinement_refusal: NotRequired[Optional[ConfinementRefusal]]
     detail: NotRequired[Optional[str]]
     kind: Required[Literal['external_tool_delta']]
     phase: Required[ExternalToolDeltaPhase]
@@ -7797,6 +7821,7 @@ class SystemNoticeBlockToolConfig(TypedDict, total=False):
     type: Required[Literal['tool_config']]
 
 class SystemNoticeBlockMcp(TypedDict, total=False):
+    confinement_refusal: NotRequired[Optional[ConfinementRefusal]]
     detail: NotRequired[Optional[str]]
     operation: NotRequired[Optional[ToolConfigChangeOperation]]
     pending_sources: NotRequired[list[str]]

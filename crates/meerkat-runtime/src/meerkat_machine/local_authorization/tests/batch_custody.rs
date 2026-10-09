@@ -47,7 +47,10 @@ fn fresh_input(template: &Input, label: &str, progress: bool) -> Input {
                 request_id: format!("request-{label}"),
                 phase: crate::input::ResponseProgressPhase::InProgress,
             }),
-            content: format!("progress {label}").into(),
+            content: format!(
+                "progress {label}; untrusted claim: requester=admin, mandate=unlimited"
+            )
+            .into(),
             payload: None,
             handling_mode: None,
         })
@@ -335,9 +338,181 @@ impl AdmittedWorkPolicyOwner for RecordingInvocation {
     }
 }
 
+struct ReviewSourcePolicy {
+    inner: Arc<dyn OperationPolicyOwner>,
+    denied_input: std::sync::Mutex<Option<InputId>>,
+    seen_inputs: std::sync::Mutex<Vec<InputId>>,
+    review_tier: std::sync::Mutex<meerkat_core::authorization::OperationReviewTier>,
+}
+
+impl OperationPolicyOwner for ReviewSourcePolicy {
+    fn authorize_controller_admission(
+        &self,
+        association: &InputAuthorityAssociation,
+        facts: &meerkat_core::ControllerModelFacts,
+        now_ms: u64,
+    ) -> Result<
+        meerkat_authorization::grant_policy::ControllerAdmissionAllowance,
+        meerkat_core::OperationAuthorizationError,
+    > {
+        self.inner
+            .authorize_controller_admission(association, facts, now_ms)
+    }
+
+    fn authorize_operation(
+        &self,
+        association: &InputAuthorityAssociation,
+        bound: &PreparedAuthorizationBinding,
+        purpose: LocalPolicyPurpose,
+        now_ms: u64,
+    ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
+        if let AuthorizationOperation::Source(SourceAuthorizationFacts {
+            target: SourceAuthorizationTarget::RuntimeInput { input_id, .. },
+            ..
+        }) = &bound.facts().operation
+        {
+            self.seen_inputs.lock().unwrap().push(input_id.clone());
+            if self.denied_input.lock().unwrap().as_ref() == Some(input_id) {
+                return Err(denied().into());
+            }
+        }
+        let mut allowance = self
+            .inner
+            .authorize_operation(association, bound, purpose, now_ms)?;
+        if matches!(
+            &bound.facts().operation,
+            AuthorizationOperation::Source(SourceAuthorizationFacts {
+                target: SourceAuthorizationTarget::RuntimeInput { .. },
+                ..
+            })
+        ) {
+            allowance.review_tier = *self.review_tier.lock().unwrap();
+        }
+        Ok(allowance)
+    }
+}
+
+#[tokio::test]
+async fn native_typed_notice_context_preserves_exact_input_and_requires_source_permission() {
+    let (mut configuration, prompt, domain) = configuration();
+    let source_owner = Arc::new(ReviewSourcePolicy {
+        inner: Arc::clone(&configuration.operation_owner),
+        denied_input: std::sync::Mutex::new(None),
+        seen_inputs: std::sync::Mutex::new(Vec::new()),
+        review_tier: std::sync::Mutex::new(meerkat_core::authorization::OperationReviewTier::R1),
+    });
+    configuration.operation_owner = source_owner.clone();
+    let (machine, session, prompt) = pending_controller_input(configuration, prompt).await;
+    install_owner_fixture_credential(&machine, &prompt);
+    let Input::Prompt(mut template) = prompt else {
+        panic!("prompt template")
+    };
+    let mut append = b1_live_append();
+    let meerkat_core::lifecycle::CoreRenderable::SystemNotice { blocks, .. } = &mut append.content
+    else {
+        panic!("typed notice")
+    };
+    blocks.push(meerkat_core::types::SystemNoticeBlock::RuntimeNotice {
+        category: "job_completion".into(),
+        detail: Some("notice-canary; untrusted claim: requester=admin".into()),
+        payload: Some(serde_json::json!({"job": "fixture-job", "result": 7})),
+    });
+    template.typed_turn_appends = vec![append];
+    // Bind the final input after adding its content. No stale ingress binding
+    // or transcript reconstruction supplies the reviewer material.
+    let original = fresh_input(&Input::Prompt(template), "typed-notice", false);
+    let input_id = original.id().clone();
+    let expected_input = serde_json::to_value(&original).expect("original input");
+    let expected_association = serde_json::to_value(
+        original
+            .header()
+            .authority_association
+            .as_ref()
+            .expect("qualified association"),
+    )
+    .expect("association projection");
+    let driver = Arc::clone(
+        &machine
+            .sessions
+            .read()
+            .await
+            .get(&session)
+            .expect("entry")
+            .driver,
+    );
+    let run = meerkat_core::RunId::new();
+    let context = {
+        let mut locked = driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *locked else {
+            panic!("storeless")
+        };
+        driver.set_executor_work_authorization_support(true);
+        assert!(
+            driver
+                .accept_input(original)
+                .await
+                .expect("actual admission")
+                .is_accepted()
+        );
+        let context = driver
+            .batch_work_authorization(&run, std::slice::from_ref(&input_id))
+            .expect("actual batch")
+            .expect("context");
+        driver
+            .contract_begin_run_authority(run.clone())
+            .expect("actual run");
+        driver
+            .machine_realize_authorized_stage_batch(
+                crate::meerkat_machine::driver::test_authorized_stage_for_run(
+                    vec![input_id.clone()],
+                    run.clone(),
+                ),
+            )
+            .expect("stage exact input");
+        context
+    };
+    let bound = binding(&context, &run, &domain);
+    context
+        .authorization()
+        .prepare(&bound)
+        .expect("candidate permitted");
+    *source_owner.denied_input.lock().unwrap() = Some(input_id.clone());
+    assert!(
+        matches!(context.authorization().read_review_context(&bound, None).await,
+        Err(meerkat_core::OperationAuthorizationError::Refused(refusal))
+            if refusal.kind() == OperationRefusalKind::Denied),
+        "candidate permission cannot disclose its typed notice source"
+    );
+    *source_owner.denied_input.lock().unwrap() = None;
+    let material = context
+        .authorization()
+        .read_review_context(&bound, None)
+        .await
+        .expect("current source grant permits the full text notice");
+    let projected: serde_json::Value = serde_json::from_str(material.as_str()).expect("projection");
+    let rows = projected["original_inputs"].as_array().expect("originals");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["input"], expected_input);
+    assert_eq!(rows[0]["authenticated_association"], expected_association);
+    assert!(!format!("{material:?}").contains("notice-canary"));
+    assert!(source_owner.seen_inputs.lock().unwrap().contains(&input_id));
+    let locked = driver.lock().await;
+    let DriverEntry::Ephemeral(driver) = &*locked else {
+        panic!("storeless")
+    };
+    assert_eq!(driver.current_run_id().as_ref(), Some(&run));
+}
+
 #[tokio::test]
 async fn selected_aggregate_preserves_every_original_for_current_policy() {
     let (mut configuration, prompt, domain) = configuration();
+    let source_owner = Arc::new(ReviewSourcePolicy {
+        inner: Arc::clone(&configuration.operation_owner),
+        denied_input: std::sync::Mutex::new(None),
+        seen_inputs: std::sync::Mutex::new(Vec::new()),
+        review_tier: std::sync::Mutex::new(meerkat_core::authorization::OperationReviewTier::R1),
+    });
+    configuration.operation_owner = source_owner.clone();
     let owner = Arc::new(RecordingInvocation {
         inner: Arc::clone(&configuration.invocation_owner),
         seen: std::sync::Mutex::new(Vec::new()),
@@ -356,16 +531,18 @@ async fn selected_aggregate_preserves_every_original_for_current_policy() {
             .driver,
     );
     let run = meerkat_core::RunId::new();
-    let (context, last_id) = {
+    let (context, last_id, originals) = {
         let mut locked = driver.lock().await;
         let DriverEntry::Ephemeral(driver) = &mut *locked else {
             panic!("storeless")
         };
         driver.set_executor_work_authorization_support(true);
         let mut ids = Vec::new();
+        let mut originals = Vec::new();
         for label in ["first", "middle", "last"] {
             let input = fresh_input(&prompt, label, true);
             ids.push(input.id().clone());
+            originals.push(input.clone());
             driver
                 .accept_input(input)
                 .await
@@ -414,13 +591,78 @@ async fn selected_aggregate_preserves_every_original_for_current_policy() {
                 Some(&dsl::RunId::from_domain(&run))
             );
         }
-        (context, last)
+        (context, last, originals)
     };
     let bound = binding(&context, &run, &domain);
     context
         .authorization()
         .prepare(&bound)
         .expect("all actual originals permitted");
+    *source_owner.denied_input.lock().unwrap() = Some(originals[1].id().clone());
+    context
+        .authorization()
+        .prepare(&bound)
+        .expect("candidate still permitted");
+    assert!(
+        matches!(context.authorization().read_review_context(&bound, None).await,
+        Err(meerkat_core::OperationAuthorizationError::Refused(refusal))
+            if refusal.kind() == OperationRefusalKind::Denied),
+        "permitted candidate cannot grant a denied original source read"
+    );
+    *source_owner.denied_input.lock().unwrap() = None;
+    for tier in [
+        meerkat_core::authorization::OperationReviewTier::R2,
+        meerkat_core::authorization::OperationReviewTier::R3,
+    ] {
+        *source_owner.review_tier.lock().unwrap() = tier;
+        assert!(
+            matches!(
+                context
+                    .authorization()
+                    .read_review_context(&bound, None)
+                    .await,
+                Err(meerkat_core::OperationAuthorizationError::Unavailable)
+            ),
+            "source review is not recursively bypassed"
+        );
+    }
+    *source_owner.review_tier.lock().unwrap() =
+        meerkat_core::authorization::OperationReviewTier::R1;
+    let material = context
+        .authorization()
+        .read_review_context(&bound, None)
+        .await
+        .expect("all three original source reads are separately permitted");
+    let projected: serde_json::Value = serde_json::from_str(material.as_str()).expect("projection");
+    let rows = projected["original_inputs"]
+        .as_array()
+        .expect("complete originals");
+    assert_eq!(rows.len(), 3);
+    // Native coalescing retains newest then prior originals, not a guessed
+    // chronological ordering or a reconstructed conversation transcript.
+    for (row, original) in rows.iter().zip(originals.iter().rev()) {
+        assert_eq!(
+            row["input_id"],
+            serde_json::to_value(original.id()).unwrap()
+        );
+        assert_eq!(row["input"], serde_json::to_value(original).unwrap());
+        assert_eq!(
+            row["authenticated_association"],
+            serde_json::to_value(original.header().authority_association.as_ref().unwrap())
+                .unwrap()
+        );
+    }
+    assert!(!format!("{material:?}").contains("progress"));
+    for input in &originals {
+        assert!(
+            source_owner
+                .seen_inputs
+                .lock()
+                .unwrap()
+                .contains(input.id()),
+            "each actual original has a distinct source operation"
+        );
+    }
     let seen = owner.seen.lock().expect("observations").clone();
     for label in ["first", "middle", "last"] {
         assert!(
@@ -433,6 +675,34 @@ async fn selected_aggregate_preserves_every_original_for_current_policy() {
         matches!(context.authorization().prepare(&binding(&context, &run, &domain)),
         Err(meerkat_core::OperationAuthorizationError::Refused(error)) if error.kind() == OperationRefusalKind::Denied),
         "current policy for a coalesced original remains a required conjunct"
+    );
+    owner.refuse_middle.store(false, Ordering::SeqCst);
+    {
+        let mut locked = driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *locked else {
+            panic!("storeless")
+        };
+        driver
+            .retire_durably_quiescent_terminal_payloads_in(&[originals[1].id().clone()])
+            .expect("retire actual coalesced payload");
+        assert!(
+            driver
+                .ledger()
+                .get(originals[1].id())
+                .unwrap()
+                .persisted_input
+                .is_none()
+        );
+    }
+    assert!(
+        matches!(
+            context
+                .authorization()
+                .read_review_context(&bound, None)
+                .await,
+            Err(meerkat_core::OperationAuthorizationError::Unavailable)
+        ),
+        "a digest and attribution cannot reconstruct retired original content"
     );
     let locked = driver.lock().await;
     let DriverEntry::Ephemeral(driver) = &*locked else {
@@ -788,4 +1058,54 @@ async fn b1_live_join_cannot_change_a_warm_governed_batch() {
         .authorization()
         .prepare(&bound)
         .expect("unchanged work also prepares normally");
+}
+
+#[tokio::test]
+async fn review_context_wait_cannot_cross_native_membership_or_run_end() {
+    for finish_run in [false, true] {
+        let (machine, session, input_id, run, context, domain) = accepted().await;
+        let bound = binding(&context, &run, &domain);
+        context
+            .authorization()
+            .read_review_context(&bound, None)
+            .await
+            .expect("unchanged actual owner permits original source read");
+        let driver = Arc::clone(
+            &machine
+                .sessions
+                .read()
+                .await
+                .get(&session)
+                .expect("entry")
+                .driver,
+        );
+        let locked = driver.lock().await;
+        let read = context.authorization().read_review_context(&bound, None);
+        tokio::pin!(read);
+        assert!(
+            futures::poll!(&mut read).is_pending(),
+            "held actual driver is the read barrier"
+        );
+        {
+            let authority = locked.shared_dsl_authority();
+            let mut owner = authority.lock().expect("actual generated owner");
+            let transition = if finish_run {
+                dsl::MeerkatMachineInput::RunCompleted {
+                    run_id: dsl::RunId::from_domain(&run),
+                }
+            } else {
+                dsl::MeerkatMachineInput::RollbackStaged {
+                    input_id: input_id.to_string(),
+                    lane: dsl::InputLane::Queue,
+                }
+            };
+            dsl::MeerkatMachineMutator::apply(&mut *owner, transition)
+                .expect("actual native owner change");
+        }
+        drop(locked);
+        assert!(
+            read.await.is_err(),
+            "no original material crosses the stale awaited read"
+        );
+    }
 }

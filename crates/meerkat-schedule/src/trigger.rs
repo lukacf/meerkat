@@ -45,7 +45,7 @@ impl CronAuthoringSpec {
 /// or compares must live on the same grid. Comparing a full-precision
 /// (sub-ms) due against the ms-truncated cursor re-yields an
 /// already-planned due forever: once its occurrence went terminal, the
-/// planner regenerated it every tick (the HomeCore 223-misfires-in-2-min
+/// planner regenerated it every tick (a field 223-misfires-in-2-min
 /// runaway). One semantic fact, one representation.
 fn truncate_to_millis(value: DateTime<Utc>) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(value.timestamp_millis())

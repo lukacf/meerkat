@@ -7,7 +7,8 @@ icon: "shield-check"
 Use local governed authorization when an embedding application needs different
 agents and callers to have different tool, source, account, or communication
 permissions. Start with the [authorization concepts](/concepts/authorization).
-For the fixed-host, single-connection, in-memory Rust path, use
+For explicit Rust owner composition, completed-turn SQLite restoration, and the
+separate fixed-host, single-connection JSONL profile, use
 [Native governed embedding](/rust/native-authorization).
 
 <Note>
@@ -27,7 +28,7 @@ governed profile.
 | Model/provider and infrastructure errors | Focused tests exercise primary infrastructure-error classification through three provider adapters, native deferred siblings, and live/fallback fixtures. They do not certify every production route, retry, hosted capability, or live mode. |
 | Controller continuity | Actual controller selection and retained work references exist; the qualified cold case pins the reconstructed actor and issues current host grants. Storeless grant mutation uses actual native custody and vetoes unfinished controller lineages. Persistent controller administration remains unavailable; complete account-policy, credential-removal and concurrent-admission coverage remains open. |
 | Durable operation audit | Completed-turn SQLite acceptance preserves committed input-row audit and the original transcript prefix through cold reconstruction and fresh work. The fixed-host JSONL cases also assert native audit. These results do not prove crash-safe pre-effect evidence, interrupted recovery, every observation-failure path or complete commit-race coverage. |
-| Human consent | The existing approval owner has exact-candidate, authenticated-host, expiry, cancellation, and one-use APIs. End-to-end presentation, late decision delivery, and real sink consumption remain integration work. |
+| Human consent | The existing approval owner maintains request, decision, and expiry audit records. Authenticated action-bound consent, conditional use consumption, presentation, and later decision delivery remain proposed integration work. |
 | OS confinement | Local macOS tests cover shell launch, bootstrap, foreground/background execution and recovered monitors. A native foreground scenario also verifies a blocked syscall, permitted sibling, continued model turn and input-row audit. Command hooks, restart, Linux, Windows, containers and browser/WASM retain their separate integration and acceptance requirements. |
 | Console access administration | Access refresh and typed local feedback have component, browser and published Console CI qualification. The Access panel edits MobKit console ABAC, not native tool, source or account grants. Console projection does not activate native governance or establish an integrated native-plus-Console route. |
 | Publication and overhead | The explicit native and fixed-host JSONL profiles have normal publication and recorded CI qualification. Completed measurements have not met the cheap-default target: the representative study's six conditional mean comparisons missed their threshold. Full-platform and per-operation p99 acceptance remain open; the implementation checkpoint retains the exact measurements and their limits. |
@@ -146,22 +147,32 @@ that condition. Audit failures do not authorize retrying an effect.
 
 ### Human consent
 
-The current `ApprovalService` action workflow exposes `request_action`,
-`decide_action`, `cancel_action`, and `consume_action`, with a trusted
-`ActionApprovalHost`. The host authenticates the decision event, checks current
-approver eligibility, and binds the presented facts to the exact retained
-candidate. The older audit-only actor string is not an approval credential.
+The current `ApprovalService` exposes `request`, `get`, `list`, and `decide` for
+approval audit records. These methods do not authenticate supplied actor
+identities or gate or execute effects. The
+[model-review and consent amendment](/internal/design/adr-001-model-review-and-consent)
+describes the proposed action-bound workflow; it is not implemented end to end.
+
+For that proposed integration, the host authenticates the decision event, checks
+current approver eligibility, and binds the presented facts to the exact retained
+candidate. An audit actor string is not an approval credential.
 
 Present the action, target, recipient, account, arguments, requester, agent, and
 expiry to an eligible audience. Return **Approval required** while other permitted
 work continues. Deliver later authenticated decisions through ordinary native
 admission without replaying the action or changing its requester.
 
-On a later explicit attempt, resolve the retained candidate, prepare current
-authorization, and consume consent once after waits at the real entry boundary.
-Changed or lost bindings need fresh consent. A failed final check does not undo
-consumption, and an audit record cannot recreate executable consent. Test the
-presentation, delivery, and sink integration before advertising this workflow.
+On a later explicit attempt, resolve the retained candidate and complete host
+validation, preparation, and cancellation checks before consumption. Recheck
+current authorization and conditionally consume consent at the physical-entry
+boundary. Changed or lost bindings need fresh consent. A failure known to precede
+the consumption commit leaves otherwise-valid consent spendable; an ambiguous
+commit result must be resolved through the same owner before reuse. After a
+committed use, cancellation or failure does not refund it. Reconciliation or
+applicable operation idempotency is required before repeating an uncertain
+effect; fresh consent alone does not establish non-delivery. An audit record
+cannot recreate executable consent. Test presentation, delivery, and sink
+integration before advertising this workflow.
 
 ### Process confinement
 

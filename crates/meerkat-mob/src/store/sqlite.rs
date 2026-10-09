@@ -86,7 +86,7 @@ use crate::temporary_council::TemporaryCouncilId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meerkat_core::SessionId;
-use notify::{RecursiveMode, Watcher};
+use meerkat_sqlite::watch::{SqliteChangeWatch, SqliteWatchControl, SqliteWatchTick};
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -95,15 +95,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
 const EVENT_WATCH_CATCH_UP_LIMIT: usize = 1024;
 const EVENT_WATCH_SAFETY_SWEEP_MS: u64 = 5_000;
-const EVENT_WATCH_RECOVERY_BACKOFF_MIN_MS: u64 = 100;
-const EVENT_WATCH_RECOVERY_BACKOFF_MAX_MS: u64 = 30_000;
 const IDENTITY_STORE_INSTANCE_KEY: &str = "store_instance_id";
 const IDENTITY_RECEIPT_SLOT_KEY_VERSION: i64 = 1;
 
@@ -2524,7 +2521,7 @@ struct SqliteMobEventBus {
     event_tx: broadcast::Sender<MobEvent>,
     latest_broadcast_cursor: Mutex<u64>,
     catch_up_lock: Mutex<()>,
-    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    watcher: Mutex<Option<SqliteChangeWatch>>,
     definition_resume_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
@@ -2631,155 +2628,40 @@ impl SqliteMobEventBus {
     }
 
     fn start_external_watch(self: &Arc<Self>) {
-        let Some(parent) = self.path.parent().map(Path::to_path_buf) else {
-            return;
-        };
-        let watched_paths = sqlite_watch_paths(&self.path);
-        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
         let thread_bus = Arc::downgrade(self);
-        let thread_builder = thread::Builder::new().name("sqlite-mob-event-watch".to_string());
-        if let Err(error) = thread_builder.spawn(move || {
-            let recovery_backoff_min = Duration::from_millis(EVENT_WATCH_RECOVERY_BACKOFF_MIN_MS);
-            let recovery_backoff_max = Duration::from_millis(EVENT_WATCH_RECOVERY_BACKOFF_MAX_MS);
-            let mut recovery_backoff = recovery_backoff_min;
-            let mut recovery_deadline = None;
-            loop {
-                let wait = recovery_deadline
-                    .map(|deadline: Instant| deadline.saturating_duration_since(Instant::now()))
-                    .unwrap_or_else(|| Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS));
-                let received_wake = match wake_rx.recv_timeout(wait) {
-                    Ok(()) => true,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                };
-                if received_wake {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                while wake_rx.try_recv().is_ok() {}
+        let watch = meerkat_sqlite::watch::start_sqlite_change_watch(
+            &self.path,
+            "sqlite-mob-event-watch",
+            Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS),
+            move |tick| {
                 let Some(bus) = thread_bus.upgrade() else {
-                    break;
+                    return SqliteWatchControl::Stop;
                 };
-                if recovery_deadline.is_some_and(|deadline| Instant::now() < deadline) {
-                    // Filesystem notification storms must not bypass a failed
-                    // storage read's recovery deadline. The next loop still
-                    // waits on the same absolute deadline while coalescing
-                    // every intervening causal wake.
-                    continue;
-                }
-                if !received_wake && bus.event_tx.receiver_count() == 0 {
-                    recovery_deadline = None;
-                    recovery_backoff = recovery_backoff_min;
-                    continue;
+                if tick == SqliteWatchTick::Sweep && bus.event_tx.receiver_count() == 0 {
+                    return SqliteWatchControl::Handled;
                 }
                 match bus.publish_available_from_storage() {
-                    Ok(()) => {
-                        recovery_deadline = None;
-                        recovery_backoff = recovery_backoff_min;
-                    }
+                    Ok(()) => SqliteWatchControl::Handled,
                     Err(error) => {
                         tracing::warn!(
                             error = %error,
                             path = %bus.path.display(),
-                            retry_after_ms = recovery_backoff.as_millis(),
                             "sqlite mob event watch catch-up failed",
                         );
-                        recovery_deadline = Some(Instant::now() + recovery_backoff);
-                        recovery_backoff =
-                            recovery_backoff.saturating_mul(2).min(recovery_backoff_max);
+                        SqliteWatchControl::Failed
                     }
                 }
-            }
-        }) {
-            tracing::warn!(
+            },
+        );
+        match watch {
+            Ok(watch) => *lock_unpoisoned(&self.watcher) = Some(watch),
+            Err(error) => tracing::warn!(
                 error = %error,
                 path = %self.path.display(),
-                "failed to start sqlite mob event watch thread",
-            );
-            return;
+                "failed to start the sqlite mob event watch",
+            ),
         }
-
-        let callback_wake_tx = wake_tx.clone();
-        let callback_parent = parent.clone();
-        let mut watcher =
-            match notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                match result {
-                    Ok(event)
-                        if sqlite_watch_event_relevant(
-                            &event,
-                            &callback_parent,
-                            &watched_paths,
-                        ) =>
-                    {
-                        let _ = callback_wake_tx.send(());
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "sqlite mob event filesystem watch reported an error",
-                        );
-                    }
-                }
-            }) {
-                Ok(watcher) => watcher,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        path = %self.path.display(),
-                        "failed to create sqlite mob event filesystem watcher",
-                    );
-                    return;
-                }
-            };
-
-        if let Err(error) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
-            tracing::warn!(
-                error = %error,
-                path = %parent.display(),
-                "failed to watch sqlite mob event directory",
-            );
-            return;
-        }
-
-        *lock_unpoisoned(&self.watcher) = Some(watcher);
     }
-}
-
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
-}
-
-fn sqlite_watch_paths(path: &Path) -> Vec<PathBuf> {
-    vec![
-        path.to_path_buf(),
-        sqlite_sidecar_path(path, "-wal"),
-        sqlite_sidecar_path(path, "-shm"),
-    ]
-}
-
-fn sqlite_watch_event_relevant(
-    event: &notify::Event,
-    parent: &Path,
-    watched_paths: &[PathBuf],
-) -> bool {
-    if matches!(event.kind, notify::EventKind::Access(_)) {
-        return false;
-    }
-
-    if event.paths.is_empty() {
-        return true;
-    }
-
-    event.paths.iter().any(|path| {
-        path == parent
-            || watched_paths.iter().any(|watched| {
-                path == watched
-                    || (path.parent() == watched.parent()
-                        && path.file_name() == watched.file_name())
-            })
-    })
 }
 
 /// Shared bundle that produces event/run/spec stores all pointing to the same db file.
@@ -8205,6 +8087,61 @@ impl MobEventStore for SqliteMobEventStore {
             }
             drop(stmt);
             if exact_replay {
+                return Ok(None);
+            }
+
+            let cursor = next_event_cursor(&tx)?;
+            let stored = MobEvent {
+                cursor,
+                timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                mob_id: event.mob_id,
+                kind: event.kind,
+            };
+            let encoded = encode_stored_mob_event(&stored)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
+            )
+            .map_err(se)?;
+            set_next_cursor(&tx, checked_event_cursor_successor(cursor)?)?;
+            tx.commit().map_err(se)?;
+            Ok(Some(stored))
+        })
+        .await?;
+        if let Some(stored) = stored.as_ref() {
+            self.event_bus.publish_committed(stored.clone());
+        }
+        Ok(stored)
+    }
+
+    async fn append_fork_job_terminal_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        validate_mob_event_write_authority(&event.kind)?;
+        // Fail before opening a transaction when the event is not a terminal.
+        super::ForkJobTerminalScan::new(&event)?;
+
+        let path = self.path.clone();
+        let stored = run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let mut stmt = tx
+                .prepare("SELECT event_json FROM mob_events ORDER BY cursor")
+                .map_err(se)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut scan = super::ForkJobTerminalScan::new(&event)?;
+            for row in rows {
+                let bytes = row.map_err(se)?;
+                let existing = decode_stored_mob_event(&bytes)
+                    .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
+                scan.observe(&existing);
+            }
+            drop(stmt);
+            if scan.finish()? {
                 return Ok(None);
             }
 

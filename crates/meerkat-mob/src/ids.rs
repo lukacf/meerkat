@@ -503,6 +503,13 @@ pub struct WorkSpec {
     /// Durable objective correlation propagated through the work lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+    /// The reasoning-effort preference a live delegation's sealed admission
+    /// carries for this member turn (#1823). Set only inside this crate from
+    /// that admission; never accepted from a caller or a wire. The admitted
+    /// runtime input persists it.
+    #[serde(skip)]
+    pub(crate) request_reasoning:
+        Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
 }
 
 impl WorkSpec {
@@ -518,7 +525,18 @@ impl WorkSpec {
             transient_turn_context: None,
             interaction_id: None,
             objective_id: None,
+            request_reasoning: None,
         }
+    }
+
+    /// Carry a live delegation admission's reasoning preference.
+    #[must_use]
+    pub(crate) fn with_request_reasoning(
+        mut self,
+        preference: Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
+    ) -> Self {
+        self.request_reasoning = preference;
+        self
     }
 
     /// Attach one ordinary System message to this exact member turn.

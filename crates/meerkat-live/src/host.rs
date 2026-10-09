@@ -285,6 +285,7 @@ impl LiveChannelCloseCommitAuthority {
                 session_id: session_id.to_string(),
                 channel_id: channel_id_string.clone(),
                 llm_identity: generated_test_llm_identity(),
+                member_turn_reasoning: None,
             },
         )
         .expect("generated MeerkatMachine live-open admission");
@@ -1045,6 +1046,8 @@ impl LiveProjectionError {
             | SessionError::WholeBlobAuditedEndpointDivergence { .. }
             | SessionError::ExternalWriteFenceConflict { .. }
             | SessionError::ExternalWriteFenceBackoff { .. }
+            | SessionError::ServedElsewhere { .. }
+            | SessionError::HostingUnavailable { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
     }
@@ -1512,6 +1515,7 @@ impl LiveChannelOpenAuthority {
                 session_id: session_id.to_string(),
                 channel_id: channel_id_string.clone(),
                 llm_identity: generated_test_llm_identity(),
+                member_turn_reasoning: None,
             },
         )
         .expect("generated MeerkatMachine live-open admission");
@@ -1881,6 +1885,8 @@ impl LiveToolDispatchError {
             | SessionError::WholeBlobAuditedEndpointDivergence { .. }
             | SessionError::ExternalWriteFenceConflict { .. }
             | SessionError::ExternalWriteFenceBackoff { .. }
+            | SessionError::ServedElsewhere { .. }
+            | SessionError::HostingUnavailable { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
     }
@@ -3672,6 +3678,7 @@ impl LiveAdapterHost {
                 session_id: session_id.to_string(),
                 channel_id: channel_id_string.clone(),
                 llm_identity: generated_test_llm_identity(),
+                member_turn_reasoning: None,
             },
         )
         .expect("generated MeerkatMachine live-open admission");

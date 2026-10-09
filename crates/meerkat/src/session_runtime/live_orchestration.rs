@@ -458,9 +458,42 @@ pub struct RealtimeSessionOpenProjection {
     owner_session_id: SessionId,
     #[cfg(feature = "openai-live")]
     summary: Option<super::live_summary::LiveContextSummary>,
+    /// The reasoning-effort preference the open authority seals for the
+    /// member turns this channel's delegations start (#1823).
+    #[cfg(feature = "openai-live")]
+    member_turn_reasoning:
+        Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
 }
 
 impl RealtimeSessionOpenProjection {
+    /// Seal `preference` for the member turns this channel's delegations
+    /// start; the open's machine admission records it on the channel.
+    #[cfg(feature = "openai-live")]
+    pub(crate) fn set_member_turn_reasoning(
+        &mut self,
+        preference: Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
+    ) {
+        self.member_turn_reasoning = preference;
+    }
+
+    // Read only by the live orchestrator, which needs `session-store` and `live`.
+    #[cfg_attr(
+        not(all(feature = "session-store", feature = "live")),
+        allow(dead_code)
+    )]
+    fn member_turn_reasoning(
+        &self,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference> {
+        #[cfg(feature = "openai-live")]
+        {
+            self.member_turn_reasoning
+        }
+        #[cfg(not(feature = "openai-live"))]
+        {
+            None
+        }
+    }
+
     #[cfg(feature = "openai-live")]
     pub(crate) fn context_summary(&self) -> Option<&super::live_summary::LiveContextSummary> {
         self.summary.as_ref()
@@ -1888,6 +1921,8 @@ mod orchestrator {
                 owner_session_id: session_id.clone(),
                 #[cfg(feature = "openai-live")]
                 summary: None,
+                #[cfg(feature = "openai-live")]
+                member_turn_reasoning: None,
             })
         }
 
@@ -1943,6 +1978,7 @@ mod orchestrator {
                 seed_status: LiveSeedProjectionStatus::Summarized,
                 owner_session_id: session_id.clone(),
                 summary: Some(summary),
+                member_turn_reasoning: None,
             })
         }
 
@@ -1996,6 +2032,7 @@ mod orchestrator {
                     seed_status: LiveSeedProjectionStatus::ContextPending,
                     owner_session_id: session_id.clone(),
                     summary: None,
+                    member_turn_reasoning: None,
                 },
                 boundary,
             ))
@@ -3797,6 +3834,7 @@ mod orchestrator {
                 }
             }
             let seed_status = prepared_projection.seed_status;
+            let member_turn_reasoning = prepared_projection.member_turn_reasoning();
             let prepared_open_config = prepared_projection.open_config;
             let live_open_identity = prepared_open_config.llm_identity.clone();
 
@@ -3816,7 +3854,12 @@ mod orchestrator {
                 sealed_candidate_channel_id.unwrap_or_else(LiveChannelId::random_uuid);
             let open_authority = self
                 .runtime_adapter
-                .resolve_live_open_admission(session_id, &candidate_channel_id, &live_open_identity)
+                .resolve_live_open_admission_with_member_turn_reasoning(
+                    session_id,
+                    &candidate_channel_id,
+                    &live_open_identity,
+                    member_turn_reasoning,
+                )
                 .await
                 .map_err(LiveOpenError::AdmissionAuthority)?;
             if !open_authority.admitted() {

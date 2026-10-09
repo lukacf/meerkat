@@ -79,8 +79,18 @@ For an agent build in a given realm, effective precedence is:
 The agent build path on every surface (CLI, REST, RPC, MCP server) composes this
 effective config over the head realm, so model/MCP/hook/skill/limit inheritance
 applies on every build, not just the auth path. `config get` / `config set`
-operate on the **raw head doc** (a read/write split), so an inherited entry is
-read through composition but never flattened into the child's own doc on write.
+operate on the **raw head doc** (a read/write split): an inherited entry is
+read through composition and never copied into the child's own doc. This does
+not make a `config get` then `config set` round trip safe in a child realm:
+`config get` returns the head doc as a typed config with every default filled
+in, and `config set` writes all of it back as the child's own values. Use
+`config patch` for partial edits.
+
+This shared configuration path does not install native permission owners or
+select OS confinement. Native governance requires explicit trusted-host
+composition; shell confinement is a separate host setting. See
+[authorization integration](/guides/authorization-integration) for the supported
+profiles and [native governed embedding](/rust/native-authorization) for setup.
 
 Environment variables still matter, but they are primarily part of **runtime credential resolution**, not a general config layer that mutates the loaded realm config. In practice:
 
@@ -128,6 +138,20 @@ Meerkat uses three update models:
 
 Use `config/set` when replacing the whole config intentionally, and `config/patch` for surgical updates.
 
+<Warning>
+`config/set` (and `rkat config set`, including any partial `--toml`, `--json`
+or FILE payload) writes a full typed config: every key the request leaves out
+is written with its default. The MCP server's `meerkat_config` set refuses a
+partial payload, but a complete one has the same effect. In a child realm
+each of those keys becomes the child's own override, so the realm stops
+inheriting it, and capabilities the parent disabled whose defaults are on
+(`tools.schedule_enabled`, provider web search, Gemini Google search,
+`skills.enabled`) are enabled again. A `config get` then `config set` round
+trip has the same effect. `config/patch` writes only the keys it names and
+keeps the rest of the document as written; a `null` value removes a key so
+the realm inherits it again.
+</Warning>
+
 ### Presence-based override (Option fields)
 
 `Config.max_tokens` and `agent.max_tokens_per_turn` are optional. `None` means
@@ -167,6 +191,18 @@ by CLI/RPC/REST/MCP runtime composition.
 
 Session backend is pinned per realm in `realm_manifest.json` (`sqlite`, `jsonl`, or `memory`).
 `--realm-backend` only matters on first creation of a realm.
+
+`[storage] hosting` declares how many processes may serve the realm at once:
+
+```toml
+[storage]
+hosting = "multiprocess"   # default: "single_process"
+```
+
+It is layered like every realm option (a child realm's explicit value, including
+`single_process`, wins). With `multiprocess`, every surface refuses to start when the
+realm's stores cannot provide trusted cross-process hosting. See
+[Realms: multi-process hosting](/concepts/realms#multi-process-hosting).
 
 ## Compaction settings
 

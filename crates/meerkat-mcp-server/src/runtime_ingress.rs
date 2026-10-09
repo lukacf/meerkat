@@ -4227,6 +4227,7 @@ mod tests {
         let input = Input::Operation(meerkat_runtime::OperationInput {
             header: meerkat_runtime::InputHeader {
                 ingress_context: None,
+                retained_resume: None,
                 authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: meerkat_core::types::message_timestamp_now(),

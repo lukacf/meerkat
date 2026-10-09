@@ -4691,11 +4691,11 @@ mod tests {
 
     #[test]
     fn authority_digest_seals_tombstone_and_cleanup_targets() {
-        let identity = AgentIdentity::from("parent-1");
+        let identity = AgentIdentity::from("lead-1");
         let intent = IdentityIntent::Absent { identity };
         let mut record = IdentityIntentRecord {
             schema_version: IDENTITY_INTENT_SCHEMA_VERSION,
-            mob_id: MobId::from("homecore"),
+            mob_id: MobId::from("example"),
             intent_revision: 7,
             declaration_scope: None,
             declaration_revision: None,
@@ -4744,8 +4744,8 @@ mod tests {
     #[test]
     fn permit_requires_scope_incarnation_and_unexpired_claim() {
         let permit = IdentityActuationPermit {
-            mob_id: MobId::from("homecore"),
-            identity: AgentIdentity::from("parent-1"),
+            mob_id: MobId::from("example"),
+            identity: AgentIdentity::from("lead-1"),
             target: IdentityActuatorTarget::Runtime,
             intent_revision: 4,
             intent_digest: format!("sha256:{}", "1".repeat(64)),

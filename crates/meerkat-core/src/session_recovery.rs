@@ -564,6 +564,8 @@ pub fn resolve_effective_turn_config(
             None => metadata.provider_params.clone(),
         },
         external_tools: context.external_tools,
+        // The owning service decides hosting when it creates the actor.
+        hosting: crate::session_hosting::SessionHostingIntent::default(),
         // Caller-scoped build input, same treatment as `custom_models`: the
         // owning surface re-supplies declarative MCP servers on resume (mob
         // members re-derive them from the durable profile).
@@ -662,6 +664,7 @@ pub fn resolve_effective_turn_config(
         additional_instructions: build_state.additional_instructions.clone(),
         initial_metadata_entries: std::collections::BTreeMap::new(),
         initial_tool_filter: None,
+        initial_tool_visibility_state: None,
         // Effective call-level tool access policy is durable session truth:
         // carry it forward verbatim so a restricted session cannot escape its
         // gate by being recovered.

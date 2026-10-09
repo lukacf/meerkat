@@ -960,6 +960,11 @@ pub struct ExperimentalGptLiveOpenAuthority {
     /// Bound once when the host composes its delegation owner
     /// ([`ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source`]).
     post_close_work: std::sync::OnceLock<Arc<dyn LivePostCloseWorkSource>>,
+    /// The reasoning-effort preference every open of this authority seals
+    /// for its delegated member turns (#1823); `None` leaves them as the
+    /// member's profile has them.
+    member_turn_reasoning:
+        Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
 }
 
 impl ExperimentalGptLiveOpenAuthority {
@@ -1013,6 +1018,21 @@ impl ExperimentalGptLiveOpenAuthority {
             config.transport,
             config.voice,
         ))
+    }
+
+    /// Seal `preference` for the member turns that this authority's voice
+    /// channels delegate (#1823): each open records it on the admitted
+    /// channel and each delegated worker's request carries it, lowered per
+    /// provider attempt where the member's model accepts the level. Typed and
+    /// other turns keep the member's profile. An open already made keeps the
+    /// preference it sealed.
+    #[must_use]
+    pub fn with_member_turn_reasoning(
+        mut self,
+        preference: meerkat_core::lifecycle::run_primitive::RequestReasoningPreference,
+    ) -> Self {
+        self.member_turn_reasoning = Some(preference);
+        self
     }
 
     /// Opt in to an observation-only lifecycle for continuous public Live
@@ -1129,6 +1149,7 @@ impl ExperimentalGptLiveOpenAuthority {
             pending_context_recovery: Arc::new(Mutex::new(HashMap::new())),
             pending_result_recovery: Arc::new(Mutex::new(HashMap::new())),
             post_close_work: std::sync::OnceLock::new(),
+            member_turn_reasoning: None,
         }
     }
 
@@ -1567,10 +1588,10 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
                 .and_then(|pending| pending.with_provisional_caption_sink(caption_sink.clone()))
                 .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?,
         };
-        Ok(Box::new(ExperimentalGptLivePreparedOpen::new(
-            pending,
-            Arc::clone(&self.transport),
-        )))
+        Ok(Box::new(
+            ExperimentalGptLivePreparedOpen::new(pending, Arc::clone(&self.transport))
+                .with_member_turn_reasoning(self.member_turn_reasoning),
+        ))
     }
 
     async fn unbind_channel(
@@ -4689,6 +4710,30 @@ impl ExperimentalGptLiveDeferredAdapter {
             .map_err(|_| ProviderWebrtcBrokerError::Unavailable)
     }
 
+    /// What the pump has not taken off this adapter yet, measured without
+    /// waiting: sealed unmeasured segments awaiting release, and unread
+    /// ingress items (provider observations and their markers, plus local
+    /// observations). The two never overlap: a seal is cut from ingress the
+    /// pump already took. A count that cannot be read coherently (a lock
+    /// held elsewhere or poisoned) is `None`, never a guessed zero.
+    fn unapplied_backlog(&self) -> (Option<usize>, Option<usize>) {
+        // `try_lock` throughout: a lock held elsewhere (WouldBlock) or
+        // poisoned is an unknown count, never a wait.
+        let seals = self
+            .unmeasured_seals
+            .try_lock()
+            .ok()
+            .map(|seals| seals.len());
+        let ingress = match (
+            self.observation_rx.try_lock(),
+            self.pending_local_observations.try_lock(),
+        ) {
+            (Ok(rx), Ok(local)) => Some(rx.len() + local.len()),
+            _ => None,
+        };
+        (seals, ingress)
+    }
+
     fn push_speech_boundary(&self) -> Result<(), ProviderWebrtcBrokerError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(ProviderWebrtcBrokerError::Rejected);
@@ -5828,6 +5873,8 @@ impl ExperimentalGptLiveGate0AdapterFeeder {
 pub struct ExperimentalGptLivePreparedOpen {
     pending: ExperimentalGptLivePendingChannel,
     transport: Arc<ExperimentalGptLiveWebrtcTransport>,
+    member_turn_reasoning:
+        Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
 }
 
 impl ExperimentalGptLivePreparedOpen {
@@ -5836,7 +5883,21 @@ impl ExperimentalGptLivePreparedOpen {
         pending: ExperimentalGptLivePendingChannel,
         transport: Arc<ExperimentalGptLiveWebrtcTransport>,
     ) -> Self {
-        Self { pending, transport }
+        Self {
+            pending,
+            transport,
+            member_turn_reasoning: None,
+        }
+    }
+
+    /// The member-turn reasoning preference this open seals (#1823).
+    #[must_use]
+    pub(crate) fn with_member_turn_reasoning(
+        mut self,
+        preference: Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
+    ) -> Self {
+        self.member_turn_reasoning = preference;
+        self
     }
 }
 
@@ -5844,6 +5905,7 @@ impl ExperimentalGptLivePreparedOpen {
 impl ExperimentalLivePendingOpen for ExperimentalGptLivePreparedOpen {
     fn apply_execution_identity(&self, projection: &mut RealtimeSessionOpenProjection) {
         self.pending.apply_execution_identity(projection);
+        projection.set_member_turn_reasoning(self.member_turn_reasoning);
     }
 
     fn set_context_summary(
@@ -8080,6 +8142,41 @@ fn spawn_sideband_actors(
             }
         }
         let _settle_continuations = SettleContinuationsOnExit(Arc::clone(&pump_adapter));
+        // However the pump ends (a forced close aborts it), anything it never
+        // applied is gone from this channel: say so, with counts, instead of
+        // dropping it silently.
+        struct ReportUnappliedOnExit {
+            adapter: Arc<ExperimentalGptLiveDeferredAdapter>,
+            channel: meerkat_live::LiveChannelId,
+            pending_projection: AtomicBool,
+        }
+        impl Drop for ReportUnappliedOnExit {
+            fn drop(&mut self) {
+                let pending_projection =
+                    usize::from(self.pending_projection.load(Ordering::Acquire));
+                let (unmeasured_seals, unread_ingress) = self.adapter.unapplied_backlog();
+                let known = pending_projection
+                    + unmeasured_seals.unwrap_or_default()
+                    + unread_ingress.unwrap_or_default();
+                let unknown = unmeasured_seals.is_none() || unread_ingress.is_none();
+                if known > 0 || unknown {
+                    // Diagnostic only: an unmeasurable count is reported as
+                    // unknown (`None`), never as zero.
+                    tracing::warn!(
+                        channel = %self.channel,
+                        pending_projection,
+                        unmeasured_seals = ?unmeasured_seals,
+                        unread_ingress = ?unread_ingress,
+                        "live adapter pump retired with unapplied observations; they are dropped from this channel's transcript"
+                    );
+                }
+            }
+        }
+        let unapplied = ReportUnappliedOnExit {
+            adapter: Arc::clone(&pump_adapter),
+            channel: pump_binding.channel_id().clone(),
+            pending_projection: AtomicBool::new(false),
+        };
         let Some(activation) = pump_gate.wait_for_commit().await else {
             return;
         };
@@ -8182,6 +8279,7 @@ fn spawn_sideband_actors(
                     break;
                 }
                 pending_projection = Some((observation, None));
+                unapplied.pending_projection.store(true, Ordering::Release);
             }
             if pump_adapter.has_unmeasured_seals() {
                 // Every seal queued while lowering precedes the observation
@@ -8355,6 +8453,7 @@ fn spawn_sideband_actors(
                     ),
                 }
                 pending_projection = None;
+                unapplied.pending_projection.store(false, Ordering::Release);
                 continue;
             }
             if let Err(error) = apply_result {
@@ -8373,6 +8472,7 @@ fn spawn_sideband_actors(
                 continue;
             }
             pending_projection = None;
+            unapplied.pending_projection.store(false, Ordering::Release);
         }
         if pump_drain
             .projection
@@ -16952,6 +17052,76 @@ mod tests {
             !test_deferred_adapter().snapshot_cuts,
             "legacy/private adapters do not acquire public snapshot semantics by default"
         );
+    }
+
+    /// T6 (#1821): a forced retirement aborts the projection pump. Whatever it
+    /// had not applied yet is lost from the channel's transcript, and that
+    /// loss is reported at WARN with its counts, never silent.
+    #[tokio::test]
+    async fn a_retired_pump_reports_the_observations_it_drops() {
+        #[derive(Clone)]
+        struct SharedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = SharedLog(Arc::clone(&log));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let transport = ExperimentalGptLiveWebrtcTransport::new();
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("forced-retirement-with-backlog"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let adapter = test_deferred_adapter();
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            Arc::new(ControlledAmbiguousSideband::new()),
+            Arc::clone(&adapter),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        // Two ingress items the pump has not taken yet.
+        adapter
+            .push_speech_boundary()
+            .expect("queue the first item");
+        adapter
+            .push_speech_boundary()
+            .expect("queue the second item");
+        retire_sideband_actors(active, SidebandActorRetirement::Immediate).await;
+
+        let text = String::from_utf8(
+            log.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("utf-8 log");
+        assert!(
+            text.contains("live adapter pump retired with unapplied observations"),
+            "the dropped backlog must be reported: {text:?}"
+        );
+        assert!(text.contains("unread_ingress=Some(2)"), "{text:?}");
+        assert!(text.contains("unmeasured_seals=Some(0)"), "{text:?}");
+        assert!(text.contains("pending_projection=0"), "{text:?}");
+        assert!(text.contains("forced-retirement-with-backlog"), "{text:?}");
     }
 
     /// #1821 diagnostics: a watched live await that stays pending is reported

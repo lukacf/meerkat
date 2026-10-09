@@ -42,6 +42,19 @@ impl MonitorStartTool {
         tool_call_id: Option<&str>,
         run_id: Option<&meerkat_core::RunId>,
     ) -> Result<ToolOutput, BuiltinToolError> {
+        self.call_with_entry(args, tool_call_id, run_id, None).await
+    }
+
+    /// The single native entry step runs immediately before the durable job
+    /// handoff, after every local validation step; a refusal publishes no
+    /// monitor job.
+    async fn call_with_entry(
+        &self,
+        args: Value,
+        tool_call_id: Option<&str>,
+        run_id: Option<&meerkat_core::RunId>,
+        entry: super::custody_spawn::EntryHook<'_>,
+    ) -> Result<ToolOutput, BuiltinToolError> {
         let input: MonitorStartInput = serde_json::from_value(args)
             .map_err(|error| BuiltinToolError::invalid_args(error.to_string()))?;
         let timeout_secs = input
@@ -90,26 +103,28 @@ impl MonitorStartTool {
         let job_id = match tool_call_id {
             Some(tool_call_id) => {
                 self.job_manager
-                    .spawn_monitor_for_call_in_run(
+                    .spawn_monitor_for_call_in_run_entering(
                         &input.command,
                         working_dir.as_deref(),
                         timeout_secs,
                         tool_call_id,
                         run_id,
                         options,
+                        entry,
                     )
                     .await
             }
             None => {
                 let nonce = meerkat_core::time_compat::new_uuid_v7().to_string();
                 self.job_manager
-                    .spawn_monitor_for_call_in_run(
+                    .spawn_monitor_for_call_in_run_entering(
                         &input.command,
                         working_dir.as_deref(),
                         timeout_secs,
                         &nonce,
                         run_id,
                         options,
+                        entry,
                     )
                     .await
             }
@@ -309,8 +324,14 @@ impl BuiltinTool for MonitorStartTool {
     ) -> Result<ToolOutput, BuiltinToolError> {
         // The owning run id travels into the monitor's process custody, so a
         // run interrupted by an abrupt host stop is settled, not replayed.
-        self.call_with_tool_call_id(args, Some(call.id), context.run_id())
+        let enter: &(dyn Fn() -> Result<(), meerkat_core::ToolError> + Send + Sync) =
+            &|| context.enter_reviewed_effect(call, None).map(drop);
+        self.call_with_entry(args, Some(call.id), context.run_id(), Some(enter))
             .await
+    }
+
+    fn review_entry_support(&self) -> meerkat_core::approval::review::ReviewEntrySupport {
+        meerkat_core::approval::review::ReviewEntrySupport::ConsumesAtEntry
     }
 
     fn async_ops_for_output(&self, output: &ToolOutput) -> Vec<meerkat_core::ops::AsyncOpRef> {

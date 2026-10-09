@@ -306,6 +306,8 @@ impl HookEngine for TestHookEngine {
         Ok(HookExecutionReport {
             started,
             outcomes,
+            launch_refusals: Vec::new(),
+            background_skips: Vec::new(),
             decision,
         })
     }

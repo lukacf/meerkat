@@ -305,6 +305,7 @@ impl OperationPolicyOwner for RecordOwner {
             }],
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: now_ms + 60_000,
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
 }

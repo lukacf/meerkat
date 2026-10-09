@@ -691,6 +691,7 @@ impl OperationPolicyOwner for HttpRecordOwner {
             operation_values: values(action),
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: now + 60_000,
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
 }

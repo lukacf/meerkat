@@ -22,7 +22,7 @@ authority and conformance evidence. Absence of support refuses the operation;
 it cannot silently select trusted-embedded behavior. Anonymous-human, physical,
 dynamic-membership and live-voice profiles remain unavailable initially.
 
-The examples explain Homecore, OB3 and Toolkit requirements without assigning
+The examples explain downstream-app, operator-deployment and Toolkit requirements without assigning
 those products' policy semantics to Meerkat. Applications choose concrete
 principals, audiences, source classes, relationship rules and transformation
 grants; the common runtime verifies and preserves their declared authority.
@@ -64,8 +64,8 @@ as a new resource; this does not claim inference of every source in a human's
 external knowledge.
 
 The ADR's audience-bound admission gate runs before a contribution enters the
-shared context. In a household calendar, an adults-only item must be refused or
-routed to an adults-only partition before a context shared with children sees
+shared context. In a team calendar, a leads-only item must be refused or
+routed to a leads-only partition before a context shared with all members sees
 it. The same logical calendar agent can retain its identity across partitions
 and fresh context generations, under the existing binding owner.
 
@@ -213,7 +213,7 @@ the warehouse, imported-attribute or other applicable conformance cases.
 | Core | Live attachment, cache or old provider session during reset/bootstrap | Initial live profile refuses before connect; absent complete authorized context inventory, no provider invocation. |
 | Core | Different evaluator/application versions | Shared vectors and semantic negotiation reject incompatible obligations; no forced lockstep application upgrade or silent weakening. |
 | Core | Legacy origin or mapped control principal | Retain immediate origin while authority is explicitly unavailable; no implicit governed Owner/admin privilege. |
-| [Profile: conversation](#conversation-and-shared-contexts) | Shared household context receives a private input; mixed triage batch | Refuse or partition before hydration/transcript write/inference; broad-audience work remains usable after compaction; post-inference splitting cannot erase dependencies. |
+| [Profile: conversation](#conversation-and-shared-contexts) | Shared team context receives a private input; mixed triage batch | Refuse or partition before hydration/transcript write/inference; broad-audience work remains usable after compaction; post-inference splitting cannot erase dependencies. |
 | [Profile: adoption](#classification-and-legacy-adoption) | Adopt an ungoverned history bundle, then revoke it | Only explicit authorized adoption enables its stated audience; historical requester remains unknown; new bytes and revoked bundle uses refuse. |
 | [Profile: classifier](#classification-and-legacy-adoption) | Inject an instruction to classify private input broadly | Hard outcome bounds hold; measure semantic misclassification separately. A permitted broad label is not proof of correct confidentiality classification. |
 | [Profile: exposure](#identity-assurance-and-exposure) | Guest uses authenticated device; visitor sees display | No implicit owner identity or private hydration; unsupported physical/anonymous profile refuses. |

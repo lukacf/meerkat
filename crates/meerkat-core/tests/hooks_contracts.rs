@@ -460,6 +460,95 @@ fn hook_launch_refused_event_retains_typed_identity_cause_and_call()
 }
 
 #[test]
+fn observe_launch_refusal_report_keeps_legacy_shape_and_no_entry_facts()
+-> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_core::confinement::ConfinementRefusal;
+    use meerkat_core::{HookExecutionReport, HookLaunchRefusal};
+
+    let legacy = json!({"started": [], "outcomes": []});
+    let mut report: HookExecutionReport = serde_json::from_value(legacy.clone())?;
+    assert!(report.launch_refusals.is_empty());
+    assert_eq!(serde_json::to_value(&report)?, legacy);
+    report.launch_refusals.push(HookLaunchRefusal {
+        hook_id: HookId::new("optional-observer"),
+        point: HookPoint::PreLlmRequest,
+        refusal: ConfinementRefusal::UnsupportedRequirement,
+    });
+    let encoded = serde_json::to_value(&report)?;
+    assert_eq!(
+        encoded["launch_refusals"],
+        json!([{
+            "hook_id": "optional-observer",
+            "point": "pre_llm_request",
+            "refusal": "unsupported_requirement",
+        }])
+    );
+    let decoded: HookExecutionReport = serde_json::from_value(encoded)?;
+    assert_eq!(decoded, report);
+    assert!(decoded.started.is_empty());
+    assert!(decoded.outcomes.is_empty());
+    assert!(decoded.decision.is_none());
+    Ok(())
+}
+
+#[test]
+fn retained_observe_facts_do_not_reclassify_the_later_engine_error() {
+    use meerkat_core::confinement::ConfinementRefusal;
+    use meerkat_core::event::AgentErrorReason;
+    use meerkat_core::{
+        HookEngineError, HookExecutionReport, HookFailureReason, HookLaunchRefusal,
+    };
+
+    let report = HookExecutionReport {
+        launch_refusals: vec![HookLaunchRefusal {
+            hook_id: HookId::new("optional-observer"),
+            point: HookPoint::PreLlmRequest,
+            refusal: ConfinementRefusal::UnsupportedRequirement,
+        }],
+        ..HookExecutionReport::empty()
+    };
+    let later_id = HookId::new("mandatory-guardrail");
+    for error in [
+        HookEngineError::InvalidConfiguration("invalid handler".into()),
+        HookEngineError::ExecutionFailed {
+            hook_id: later_id.clone(),
+            reason: "handler IO".into(),
+        },
+        HookEngineError::Timeout {
+            hook_id: later_id.clone(),
+            timeout_ms: 7,
+        },
+        HookEngineError::LaunchRefused {
+            hook_id: later_id,
+            reason: HookFailureReason::ConfinementRefused {
+                refusal: ConfinementRefusal::BackendUnavailable,
+            },
+        },
+    ] {
+        let wrapped = HookEngineError::WithReport {
+            report: Box::new(report.clone()),
+            error: Box::new(error.clone()),
+        };
+        assert_eq!(wrapped.to_string(), error.to_string());
+        assert_eq!(wrapped.hook_id(), error.hook_id());
+        assert_eq!(
+            HookFailureReason::from_engine_error(&wrapped),
+            HookFailureReason::from_engine_error(&error)
+        );
+        let expected = error.into_agent_error();
+        let actual = wrapped.into_agent_error();
+        assert_eq!(
+            AgentErrorClass::from(&actual),
+            AgentErrorClass::from(&expected)
+        );
+        assert_eq!(
+            AgentErrorReason::from_agent_error(&actual),
+            AgentErrorReason::from_agent_error(&expected)
+        );
+    }
+}
+
+#[test]
 fn explicit_pre_tool_policy_denial_retains_hook_denied_contract() {
     use meerkat_core::error::AgentError;
     use meerkat_core::hooks::HookExecutionReport;
@@ -672,5 +761,22 @@ fn hook_denied_event_transport_keeps_absent_null_and_structured_payload()
         );
         assert_eq!(serde_json::to_value(&decoded)?, wire);
     }
+    Ok(())
+}
+
+#[test]
+fn legacy_hook_report_without_background_skips_remains_readable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let legacy = serde_json::json!({
+        "started": [], "outcomes": [], "launch_refusals": [], "decision": null,
+    });
+    let report: meerkat_core::HookExecutionReport = serde_json::from_value(legacy)?;
+    assert!(report.background_skips.is_empty());
+    assert!(report.started.is_empty());
+    assert!(
+        serde_json::to_value(report)?
+            .get("background_skips")
+            .is_none()
+    );
     Ok(())
 }

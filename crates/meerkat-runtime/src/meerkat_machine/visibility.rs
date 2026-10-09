@@ -291,6 +291,8 @@ pub(super) fn mirror_visibility_projection_from_state(
     );
     projection.inherited_base_filter =
         meerkat_core::ToolFilter::from(authority_state.inherited_base_filter.clone());
+    projection.policy_base_filter =
+        meerkat_core::ToolFilter::from(authority_state.policy_base_filter.clone());
     projection.active_filter =
         meerkat_core::ToolFilter::from(authority_state.active_filter.clone());
     projection.staged_filter =
@@ -379,6 +381,9 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
                 ),
                 inherited_base_filter: super::dsl::ToolFilter::from(
                     &visibility_state.inherited_base_filter,
+                ),
+                policy_base_filter: super::dsl::ToolFilter::from(
+                    &visibility_state.policy_base_filter,
                 ),
                 active_filter: super::dsl::ToolFilter::from(&visibility_state.active_filter),
                 staged_filter: super::dsl::ToolFilter::from(&visibility_state.staged_filter),

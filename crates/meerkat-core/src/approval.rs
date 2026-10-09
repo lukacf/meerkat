@@ -3,15 +3,24 @@
 //! Generated approval lifecycle authority owns approval status transitions.
 //! Public surfaces may request, list, read, and decide approvals; the service
 //! stores and projects the generated lifecycle decisions.
+//!
+//! The same generated owner also holds process-local review attempts for
+//! retained native operations (see [`review`]). Review attempts are never
+//! persisted or restored, so a stored approval record can never reconstruct
+//! a review allow or spendable consent.
+
+pub mod review;
 
 use crate::generated::approval_lifecycle::{
-    ApprovalLifecycleDecision, ApprovalLifecycleMachineAuthority, ApprovalLifecycleOutcome,
-    ApprovalLifecycleRejectionReason, ApprovalLifecycleStatus,
+    ApprovalLifecycleDecision, ApprovalLifecycleError, ApprovalLifecycleMachineAuthority,
+    ApprovalLifecycleOutcome, ApprovalLifecycleRejectionReason, ApprovalLifecycleStatus,
+    ReviewAttemptStatus, ReviewRetirementReason, ReviewVerdict,
 };
 use crate::lifecycle::identifiers::RunId;
 use crate::{SessionId, SurfaceMetadata, ToolCallId};
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use review::{ReservedReviewError, ReviewAttemptHandle, ReviewOwnerError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -479,7 +488,10 @@ fn lifecycle_rejection_error(
             ApprovalError::EmptyAllowedDecisions
         }
         ApprovalLifecycleRejectionReason::AlreadyExists
-        | ApprovalLifecycleRejectionReason::InvalidRestoredRecord => ApprovalError::Store(format!(
+        | ApprovalLifecycleRejectionReason::InvalidRestoredRecord
+        | ApprovalLifecycleRejectionReason::ReviewRetired
+        | ApprovalLifecycleRejectionReason::ReviewNotSatisfied
+        | ApprovalLifecycleRejectionReason::ReviewPending => ApprovalError::Store(format!(
             "generated approval lifecycle authority rejected {approval_id} with {reason:?}"
         )),
     }
@@ -495,6 +507,19 @@ fn lifecycle_status_from_outcome(
         ApprovalLifecycleOutcome::Rejected(reason) => {
             Err(lifecycle_rejection_error(approval_id, reason, decision))
         }
+        ApprovalLifecycleOutcome::ReviewStatus(status) => Err(ApprovalError::Store(format!(
+            "generated approval lifecycle emitted review status {status:?} for approval {approval_id}"
+        ))),
+    }
+}
+
+fn review_status_from_outcome(
+    outcome: Result<ApprovalLifecycleOutcome, ApprovalLifecycleError>,
+) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+    match outcome {
+        Ok(ApprovalLifecycleOutcome::ReviewStatus(status)) => Ok(status),
+        Ok(ApprovalLifecycleOutcome::Rejected(reason)) => Err(ReviewOwnerError::Rejected(reason)),
+        Ok(ApprovalLifecycleOutcome::Status(_)) | Err(_) => Err(ReviewOwnerError::Unavailable),
     }
 }
 
@@ -546,6 +571,16 @@ pub struct ApprovalService {
     state: Arc<RwLock<ApprovalServiceState>>,
     store: Arc<dyn ApprovalStore>,
     unavailable_reason: Option<Arc<str>>,
+    /// Test-only signal: a reserved review commit passed every pre-check and
+    /// is about to take the commit reservation.
+    /// Review attempt disposals handed over without waiting; settled under
+    /// the owner's next review commit. Never held while waiting for `state`.
+    queued_disposals: Arc<parking_lot::Mutex<Vec<QueuedReviewDisposal>>>,
+    #[cfg(test)]
+    reservation_probe: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test-only count of review-path acquisitions of `state`.
+    #[cfg(test)]
+    review_lock_acquisitions: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ApprovalService {
@@ -555,6 +590,11 @@ impl ApprovalService {
             state: Arc::new(RwLock::new(ApprovalServiceState::empty())),
             store: Arc::new(InMemoryApprovalStore::new()),
             unavailable_reason: None,
+            queued_disposals: Arc::default(),
+            #[cfg(test)]
+            reservation_probe: None,
+            #[cfg(test)]
+            review_lock_acquisitions: Arc::default(),
         }
     }
 
@@ -564,6 +604,11 @@ impl ApprovalService {
             state: Arc::new(RwLock::new(state)),
             store,
             unavailable_reason: None,
+            queued_disposals: Arc::default(),
+            #[cfg(test)]
+            reservation_probe: None,
+            #[cfg(test)]
+            review_lock_acquisitions: Arc::default(),
         })
     }
 
@@ -573,6 +618,11 @@ impl ApprovalService {
             state: Arc::new(RwLock::new(ApprovalServiceState::empty())),
             store: Arc::new(InMemoryApprovalStore::new()),
             unavailable_reason: Some(Arc::from(reason.into())),
+            queued_disposals: Arc::default(),
+            #[cfg(test)]
+            reservation_probe: None,
+            #[cfg(test)]
+            review_lock_acquisitions: Arc::default(),
         }
     }
 
@@ -598,8 +648,21 @@ impl ApprovalService {
         request.metadata.validate_public()?;
         let now = Utc::now();
         let approval_id = ApprovalId::new();
-        let (approve_allowed, deny_allowed) = allowed_decision_flags(&request.allowed_decisions);
         let mut state = self.state.write();
+        let result = self.request_locked(&mut state, request, approval_id, now);
+        // Settles queued review disposals as the lock is released.
+        self.release_state(state).run();
+        result
+    }
+
+    fn request_locked(
+        &self,
+        state: &mut ApprovalServiceState,
+        request: ApprovalRequest,
+        approval_id: ApprovalId,
+        now: DateTime<Utc>,
+    ) -> Result<ApprovalRecord, ApprovalError> {
+        let (approve_allowed, deny_allowed) = allowed_decision_flags(&request.allowed_decisions);
         let mut authority = state.authority.clone();
         let outcome = authority
             .create_approval(
@@ -638,27 +701,27 @@ impl ApprovalService {
     pub fn get(&self, approval_id: &ApprovalId) -> Result<ApprovalRecord, ApprovalError> {
         self.ensure_available()?;
         self.refresh_expiry(approval_id)?;
-        self.state
-            .read()
-            .records
-            .get(approval_id)
-            .cloned()
-            .ok_or_else(|| ApprovalError::NotFound {
-                approval_id: approval_id.clone(),
-            })
+        let record = self.state.read().records.get(approval_id).cloned();
+        // A reader may have made a disposer's try-lock fail; settle after it.
+        self.settle_queued_disposals_now().run();
+        record.ok_or_else(|| ApprovalError::NotFound {
+            approval_id: approval_id.clone(),
+        })
     }
 
     pub fn list(&self, filter: ApprovalListFilter) -> Result<Vec<ApprovalRecord>, ApprovalError> {
         self.ensure_available()?;
         self.refresh_all_expiry()?;
-        Ok(self
+        let records = self
             .state
             .read()
             .records
             .values()
             .filter(|record| filter.status.is_none_or(|status| record.status == status))
             .cloned()
-            .collect())
+            .collect();
+        self.settle_queued_disposals_now().run();
+        Ok(records)
     }
 
     pub fn decide(
@@ -675,6 +738,32 @@ impl ApprovalService {
         }
         let now = Utc::now();
         let mut state = self.state.write();
+        let result = self.decide_locked(
+            &mut state,
+            approval_id,
+            decision,
+            actor,
+            reason,
+            provenance,
+            now,
+        );
+        // Settles review disposals queued before or during this commit as
+        // the lock is released, so none waits for a later owner call.
+        self.release_state(state).run();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decide_locked(
+        &self,
+        state: &mut ApprovalServiceState,
+        approval_id: &ApprovalId,
+        decision: ApprovalDecision,
+        actor: ApprovalPrincipalId,
+        reason: Option<String>,
+        provenance: Option<serde_json::Value>,
+        now: DateTime<Utc>,
+    ) -> Result<ApprovalRecord, ApprovalError> {
         if !state.records.contains_key(approval_id) {
             let mut authority = state.authority.clone();
             let outcome = authority
@@ -692,10 +781,15 @@ impl ApprovalService {
                 ApprovalLifecycleOutcome::Status(status) => Err(ApprovalError::Store(format!(
                     "generated approval lifecycle emitted {status:?} for missing approval {approval_id}"
                 ))),
+                ApprovalLifecycleOutcome::ReviewStatus(status) => {
+                    Err(ApprovalError::Store(format!(
+                        "generated approval lifecycle emitted review status {status:?} for missing approval {approval_id}"
+                    )))
+                }
             };
         }
 
-        self.refresh_expiry_locked(&mut state, approval_id, now)?;
+        self.refresh_expiry_locked(state, approval_id, now)?;
         let record =
             state
                 .records
@@ -732,10 +826,367 @@ impl ApprovalService {
         Ok(decided_record)
     }
 
+    /// Test adapter: apply one raw review input in place under an unbounded
+    /// lock. Production review inputs go through the non-blocking reservation or
+    /// the non-blocking disposal. Review inputs never touch the store: review
+    /// attempts are memory-only by contract.
+    #[cfg(test)]
+    fn apply_review(
+        &self,
+        apply: impl FnOnce(
+            &mut ApprovalLifecycleMachineAuthority,
+        ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError>,
+    ) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+        self.ensure_available()
+            .map_err(|_| ReviewOwnerError::Unavailable)?;
+        let mut state = self.state.write();
+        self.count_review_lock();
+        let result = review_status_from_outcome(apply(&mut state.authority));
+        self.release_state(state).run();
+        result
+    }
+
+    /// Commit one review input that admits an effect (a verdict, or the spend
+    /// at entry) under ONE commit reservation, the same state lock `decide`
+    /// and expiry hold through `ApprovalStore::put`:
+    ///
+    /// 0. first settle already queued disposals and carry their reports
+    ///    back to the caller (they run arbitrary observers, so the caller
+    ///    delivers them only outside its locks, and for a spend after the
+    ///    effect);
+    /// 1. take the reservation WITHOUT waiting (callers run on async
+    ///    threads; a timed wait would still block them): contention refuses
+    ///    locally at once and queues this attempt's disposal;
+    /// 2. under it, check the attempt's identity binding and run
+    ///    `final_check` (deadline and currentness) immediately before the
+    ///    conditional commit;
+    /// 3. commit, and for a spend also dispose the attempt in the same
+    ///    reservation, so nothing waits on this owner and no queued report
+    ///    runs between the spend and the leaf's effect; a refusal retires and
+    ///    disposes the attempt in the same reservation.
+    ///
+    /// On refusal the returned disposal is the owner's settled result, or
+    /// `None` when it was queued (`on_queued` then reports it once settled).
+    /// `final_check` runs under the reservation and must not re-enter this
+    /// owner; policy owners never consult approval state.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_review_reserved<E>(
+        &self,
+        handle: &ReviewAttemptHandle,
+        bound: Option<(
+            &crate::authorization::PreparedOperationCheck,
+            &crate::authorization::WorkAuthorizationContext,
+        )>,
+        final_check: impl FnOnce() -> Result<(), E>,
+        commit: impl FnOnce(
+            &mut ApprovalLifecycleMachineAuthority,
+        ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError>,
+        dispose_on_commit: bool,
+        retirement: impl FnOnce(&ReservedReviewError<E>) -> ReviewRetirementReason,
+        on_queued: impl FnOnce() -> QueuedDisposalReport,
+    ) -> Result<(ReviewAttemptStatus, SettledReports), RefusedReviewCommit<E>> {
+        if self.ensure_available().is_err() {
+            return Err(RefusedReviewCommit {
+                error: ReservedReviewError::Owner(ReviewOwnerError::Unavailable),
+                disposal: None,
+                reports: SettledReports::default(),
+            });
+        }
+        // Settle queued disposals before the reservation and final check;
+        // their reports go back to the caller, which runs them only after it
+        // released its own locks (and, for a spend, after the effect).
+        let mut reports = self.settle_queued_disposals_now();
+        #[cfg(test)]
+        if let Some(probe) = &self.reservation_probe {
+            probe();
+        }
+        let Some(mut state) = self.state.try_write() else {
+            let error = ReservedReviewError::Contended;
+            let reason = retirement(&error);
+            let (disposal, more) = self.dispose_review(handle.id(), Some(reason), on_queued);
+            reports.absorb(more);
+            return Err(RefusedReviewCommit {
+                error,
+                disposal,
+                reports,
+            });
+        };
+        self.count_review_lock();
+        let refused = if bound.is_some_and(|(check, work)| !handle.bound_to(check.binding(), work))
+        {
+            Some(ReservedReviewError::Owner(ReviewOwnerError::Mismatch))
+        } else if let Err(failure) = final_check() {
+            Some(ReservedReviewError::FinalCheck(failure))
+        } else {
+            None
+        };
+        let result = match refused {
+            Some(error) => Err(error),
+            None => match review_status_from_outcome(commit(&mut state.authority)) {
+                Ok(status) => {
+                    if dispose_on_commit {
+                        // Same reservation: no second acquisition before the effect.
+                        let _ = review_status_from_outcome(
+                            state.authority.release_review(handle.id().to_owned()),
+                        );
+                    }
+                    Ok(status)
+                }
+                Err(error) => Err(ReservedReviewError::Owner(error)),
+            },
+        };
+        let result = result.map_err(|error| {
+            let reason = retirement(&error);
+            let disposal = dispose_locked(&mut state.authority, handle.id(), Some(reason));
+            RefusedReviewCommit {
+                error,
+                disposal: Some(disposal),
+                reports: SettledReports::default(),
+            }
+        });
+        // Disposals queued during this commit are settled as the lock is
+        // released. Every report goes back to the caller, which runs them
+        // only after releasing its own locks: after the effect for a spend,
+        // otherwise at once.
+        reports.absorb(self.release_state(state));
+        match result {
+            Ok(status) => Ok((status, reports)),
+            Err(mut refused) => {
+                refused.reports = reports;
+                Err(refused)
+            }
+        }
+    }
+
+    /// Settle and report queued disposals now if the owner is free, without
+    /// waiting; reports run after the lock is released.
+    #[must_use = "run the reports once outside every lock"]
+    fn settle_queued_disposals_now(&self) -> SettledReports {
+        if self.queued_disposals.lock().is_empty() {
+            return SettledReports::default();
+        }
+        match self.state.try_write() {
+            Some(state) => {
+                self.count_review_lock();
+                self.release_state(state)
+            }
+            None => SettledReports::default(),
+        }
+    }
+
+    /// Retire (when `retire` is set) and dispose an attempt WITHOUT waiting
+    /// for the owner: settled now when the state lock is free (the result is
+    /// returned), otherwise queued for the owner's next commit and reported
+    /// through `on_queued` once settled (`None` is returned). Reports of
+    /// other disposals settled here are returned, never run: the caller may
+    /// hold its own locks and runs them after releasing those.
+    pub(crate) fn dispose_review(
+        &self,
+        id: &str,
+        retire: Option<ReviewRetirementReason>,
+        on_queued: impl FnOnce() -> QueuedDisposalReport,
+    ) -> (
+        Option<Result<ReviewAttemptStatus, ReviewOwnerError>>,
+        SettledReports,
+    ) {
+        if self.ensure_available().is_err() {
+            return (
+                Some(Err(ReviewOwnerError::Unavailable)),
+                SettledReports::default(),
+            );
+        }
+        if let Some(mut state) = self.state.try_write() {
+            self.count_review_lock();
+            let result = dispose_locked(&mut state.authority, id, retire);
+            return (Some(result), self.release_state(state));
+        }
+        self.queued_disposals.lock().push(QueuedReviewDisposal {
+            id: id.to_owned(),
+            retire,
+            report: on_queued(),
+        });
+        // Every lock holder settles the queue as it releases (writers under
+        // the queue mutex, readers right after), so an entry pushed while the
+        // lock was held is never stranded. If the holder already released,
+        // settle now, still without waiting.
+        match self.state.try_write() {
+            Some(state) => {
+                self.count_review_lock();
+                (None, self.release_state(state))
+            }
+            None => (None, SettledReports::default()),
+        }
+    }
+
+    /// Release the state lock, settling every queued disposal first UNDER
+    /// the queue mutex and unlocking while still holding it: a disposer that
+    /// failed its try-lock pushes under that mutex, so its entry is either
+    /// in this final drain or pushed after the unlock (when its own retry can
+    /// take the lock). No entry is lost between the last drain and the
+    /// unlock. The reports run later, outside both locks.
+    fn release_state(
+        &self,
+        mut state: parking_lot::RwLockWriteGuard<'_, ApprovalServiceState>,
+    ) -> SettledReports {
+        let mut queue = self.queued_disposals.lock();
+        let settled = std::mem::take(&mut *queue)
+            .into_iter()
+            .map(|disposal| {
+                let result = dispose_locked(&mut state.authority, &disposal.id, disposal.retire);
+                (disposal.report, result)
+            })
+            .collect();
+        drop(state);
+        drop(queue);
+        SettledReports(settled)
+    }
+
+    #[inline]
+    fn count_review_lock(&self) {
+        #[cfg(test)]
+        self.review_lock_acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn with_reservation_probe(mut self, probe: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.reservation_probe = Some(probe);
+        self
+    }
+
+    /// Issue a fresh, never-reused attempt bound to the exact operation and
+    /// its original admitted work, through the same non-blocking reservation:
+    /// a held owner refuses locally (`Contended`) at once with no attempt
+    /// created, so nothing needs cleanup and no async thread is blocked.
+    pub(crate) fn try_begin_review(
+        &self,
+        binding: &crate::authorization::PreparedAuthorizationBinding,
+        work: &crate::authorization::WorkAuthorizationContext,
+    ) -> Result<ReviewAttemptHandle, ReservedReviewError<std::convert::Infallible>> {
+        self.ensure_available()
+            .map_err(|_| ReservedReviewError::Owner(ReviewOwnerError::Unavailable))?;
+        let id: Arc<str> = Arc::from(crate::time_compat::new_uuid_v7().to_string());
+        let Some(mut state) = self.state.try_write() else {
+            return Err(ReservedReviewError::Contended);
+        };
+        self.count_review_lock();
+        let status = review_status_from_outcome(state.authority.begin_review(id.to_string()));
+        self.release_state(state).run();
+        match status {
+            Ok(ReviewAttemptStatus::Pending) => {
+                Ok(ReviewAttemptHandle::new(id, binding.clone(), work.clone()))
+            }
+            Ok(_) => Err(ReservedReviewError::Owner(ReviewOwnerError::Unavailable)),
+            Err(error) => Err(ReservedReviewError::Owner(error)),
+        }
+    }
+
+    /// Owner-transition tests: begin on an uncontended owner.
+    #[cfg(test)]
+    pub(crate) fn begin_review(
+        &self,
+        binding: &crate::authorization::PreparedAuthorizationBinding,
+        work: &crate::authorization::WorkAuthorizationContext,
+    ) -> Result<ReviewAttemptHandle, ReviewOwnerError> {
+        self.try_begin_review(binding, work)
+            .map_err(|error| match error {
+                ReservedReviewError::Owner(error) => error,
+                _ => ReviewOwnerError::Unavailable,
+            })
+    }
+
+    /// Accept a verdict under the single commit reservation, after
+    /// `final_check`; a refusal retires and disposes the attempt there.
+    pub(crate) fn record_review_verdict<E>(
+        &self,
+        handle: &ReviewAttemptHandle,
+        verdict: ReviewVerdict,
+        final_check: impl FnOnce() -> Result<(), E>,
+        retirement: impl FnOnce(&ReservedReviewError<E>) -> ReviewRetirementReason,
+        on_queued: impl FnOnce() -> QueuedDisposalReport,
+    ) -> Result<(ReviewAttemptStatus, SettledReports), RefusedReviewCommit<E>> {
+        self.commit_review_reserved(
+            handle,
+            None,
+            final_check,
+            |authority| authority.record_review_verdict(handle.id().to_owned(), verdict),
+            false,
+            retirement,
+            on_queued,
+        )
+    }
+
+    /// Record a reviewer failure under the non-blocking commit reservation;
+    /// this is a refusal path, so it never waits on the owner.
+    pub(crate) fn record_review_unavailable(
+        &self,
+        handle: &ReviewAttemptHandle,
+        retirement: impl FnOnce(
+            &ReservedReviewError<std::convert::Infallible>,
+        ) -> ReviewRetirementReason,
+        on_queued: impl FnOnce() -> QueuedDisposalReport,
+    ) -> Result<(ReviewAttemptStatus, SettledReports), RefusedReviewCommit<std::convert::Infallible>>
+    {
+        self.commit_review_reserved(
+            handle,
+            None,
+            || Ok(()),
+            |authority| authority.record_review_unavailable(handle.id().to_owned()),
+            false,
+            retirement,
+            on_queued,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_review(
+        &self,
+        handle: &ReviewAttemptHandle,
+        reason: ReviewRetirementReason,
+    ) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+        self.apply_review(|authority| authority.retire_review(handle.id().to_owned(), reason))
+    }
+
+    /// Spend the allow once, only for the exact operation binding and work
+    /// association the attempt was issued for, and dispose the attempt, all
+    /// under the single commit reservation after `final_check`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn consume_review_for_entry<E>(
+        &self,
+        handle: &ReviewAttemptHandle,
+        check: &crate::authorization::PreparedOperationCheck,
+        work: &crate::authorization::WorkAuthorizationContext,
+        final_check: impl FnOnce() -> Result<(), E>,
+        retirement: impl FnOnce(&ReservedReviewError<E>) -> ReviewRetirementReason,
+        on_queued: impl FnOnce() -> QueuedDisposalReport,
+    ) -> Result<(ReviewAttemptStatus, SettledReports), RefusedReviewCommit<E>> {
+        self.commit_review_reserved(
+            handle,
+            Some((check, work)),
+            final_check,
+            |authority| authority.consume_review_for_entry(handle.id().to_owned()),
+            true,
+            retirement,
+            on_queued,
+        )
+    }
+
+    /// Dispose a settled attempt. A pending attempt must be retired first.
+    #[cfg(test)]
+    pub(crate) fn release_review(
+        &self,
+        handle: ReviewAttemptHandle,
+    ) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+        self.apply_review(|authority| authority.release_review(handle.id().to_owned()))
+    }
+
     fn refresh_expiry(&self, approval_id: &ApprovalId) -> Result<(), ApprovalError> {
         let now = Utc::now();
         let mut state = self.state.write();
-        self.refresh_expiry_locked(&mut state, approval_id, now)
+        let result = self.refresh_expiry_locked(&mut state, approval_id, now);
+        // An expiry put is an owner commit too: settle queued disposals.
+        self.release_state(state).run();
+        result
     }
 
     fn refresh_expiry_locked(
@@ -776,10 +1227,77 @@ impl ApprovalService {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
+        self.settle_queued_disposals_now().run();
         for id in ids {
             self.refresh_expiry(&id)?;
         }
         Ok(())
+    }
+}
+
+/// Reports a queued review disposal's settled result once the owner settles
+/// it (on its next commit). Runs after the state lock is released.
+pub(crate) type QueuedDisposalReport =
+    Box<dyn FnOnce(Result<ReviewAttemptStatus, ReviewOwnerError>) + Send>;
+
+type SettledReviewDisposal = (
+    QueuedDisposalReport,
+    Result<ReviewAttemptStatus, ReviewOwnerError>,
+);
+
+/// A review attempt disposal handed to the owner without waiting for it.
+struct QueuedReviewDisposal {
+    id: String,
+    retire: Option<ReviewRetirementReason>,
+    report: QueuedDisposalReport,
+}
+
+/// A refused reserved review commit: the typed refusal and the attempt's
+/// disposal, settled under the same reservation, or `None` when queued.
+pub(crate) struct RefusedReviewCommit<E> {
+    pub(crate) error: ReservedReviewError<E>,
+    pub(crate) disposal: Option<Result<ReviewAttemptStatus, ReviewOwnerError>>,
+    /// Reports of unrelated disposals settled along the way; the caller
+    /// runs them only after releasing its own locks.
+    pub(crate) reports: SettledReports,
+}
+
+/// Retire (when set) and release one attempt under a reservation already
+/// held. Release is best-effort cleanup of memory-only state; the reported
+/// result is the retirement's when there is one.
+fn dispose_locked(
+    authority: &mut ApprovalLifecycleMachineAuthority,
+    id: &str,
+    retire: Option<ReviewRetirementReason>,
+) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+    let retired = retire
+        .map(|reason| review_status_from_outcome(authority.retire_review(id.to_owned(), reason)));
+    let released = review_status_from_outcome(authority.release_review(id.to_owned()));
+    retired.unwrap_or(released)
+}
+
+/// Settled review disposal reports, run outside every lock. Dropping runs
+/// any report not yet run, so none is lost.
+#[must_use = "run the reports once outside every lock"]
+#[derive(Default)]
+pub(crate) struct SettledReports(Vec<SettledReviewDisposal>);
+
+impl SettledReports {
+    pub(crate) fn run(self) {
+        drop(self);
+    }
+
+    /// Carry `other`'s reports with these, to run together later.
+    pub(crate) fn absorb(&mut self, mut other: SettledReports) {
+        self.0.append(&mut other.0);
+    }
+}
+
+impl Drop for SettledReports {
+    fn drop(&mut self) {
+        for (report, result) in self.0.drain(..) {
+            report(result);
+        }
     }
 }
 
@@ -1120,5 +1638,288 @@ mod tests {
             err,
             ApprovalError::InvalidMetadata(crate::SurfaceMetadataError::ReservedLabelKey { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod review_owner_tests {
+    //! Generated review attempt ownership: identity binding, single use,
+    //! retirement ordering and memory-only state.
+
+    use super::*;
+    use crate::authorization::{
+        AuthorizationOperation, OperationAuthorizationError, OperationAuthorizationFacts,
+        PreparedAuthorizationBinding, PreparedOperationAuthorization, PreparedOperationCheck,
+        SourceAuthorizationFacts, SourceAuthorizationTarget, SourceAuthorizationUse,
+        WorkAuthorization, WorkAuthorizationContext,
+    };
+    use crate::exact_operation::OperationExecutionScope;
+    use crate::memory::MemorySearchScope;
+    use crate::ops::OperationId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Raw generated owner transitions, without the reserved-commit
+    /// settlement policy (which retires refused commits); these tests pin
+    /// the transitions themselves. The binding check is the production one.
+    fn record(
+        approvals: &ApprovalService,
+        handle: &ReviewAttemptHandle,
+        verdict: ReviewVerdict,
+    ) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+        approvals.apply_review(|authority| {
+            authority.record_review_verdict(handle.id().to_owned(), verdict)
+        })
+    }
+
+    fn spend(
+        approvals: &ApprovalService,
+        handle: &ReviewAttemptHandle,
+        check: &PreparedOperationCheck,
+        work: &WorkAuthorizationContext,
+    ) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+        if !handle.bound_to(check.binding(), work) {
+            return Err(ReviewOwnerError::Mismatch);
+        }
+        approvals
+            .apply_review(|authority| authority.consume_review_for_entry(handle.id().to_owned()))
+    }
+
+    fn binding() -> PreparedAuthorizationBinding {
+        PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
+            operation_id: OperationId(Uuid::nil()),
+            execution_scope: OperationExecutionScope::Domain,
+            run_id: None,
+            context_revision: None,
+            operation: AuthorizationOperation::Source(SourceAuthorizationFacts {
+                target: SourceAuthorizationTarget::Memory(MemorySearchScope::for_session(
+                    SessionId::from_uuid(Uuid::nil()),
+                )),
+                usage: SourceAuthorizationUse::Read,
+            }),
+        })
+    }
+
+    struct Allow;
+
+    impl PreparedOperationAuthorization for Allow {
+        fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+            crate::authorization::OperationReviewTier::R1
+        }
+
+        fn check_current(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<(), OperationAuthorizationError> {
+            Ok(())
+        }
+    }
+
+    struct AllowWork;
+
+    impl WorkAuthorization for AllowWork {
+        fn prepare(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+            Ok(Arc::new(Allow))
+        }
+    }
+
+    fn work() -> WorkAuthorizationContext {
+        WorkAuthorizationContext::new(Arc::new(AllowWork), OperationExecutionScope::Domain)
+    }
+
+    fn check(
+        work: &WorkAuthorizationContext,
+        binding: &PreparedAuthorizationBinding,
+    ) -> PreparedOperationCheck {
+        PreparedOperationCheck::prepare(work.clone(), binding.clone()).expect("prepared")
+    }
+
+    #[test]
+    fn late_verdict_after_retirement_is_rejected_and_cannot_enter() {
+        let approvals = ApprovalService::new();
+        let (work, binding) = (work(), binding());
+        let handle = approvals.begin_review(&binding, &work).expect("attempt");
+        assert_eq!(
+            approvals.retire_review(&handle, ReviewRetirementReason::DeadlineExpired),
+            Ok(ReviewAttemptStatus::Retired)
+        );
+        assert_eq!(
+            record(&approvals, &handle, ReviewVerdict::Allow),
+            Err(ReviewOwnerError::Rejected(
+                ApprovalLifecycleRejectionReason::ReviewRetired
+            ))
+        );
+        assert_eq!(
+            spend(&approvals, &handle, &check(&work, &binding), &work),
+            Err(ReviewOwnerError::Rejected(
+                ApprovalLifecycleRejectionReason::ReviewRetired
+            ))
+        );
+    }
+
+    #[test]
+    fn allow_is_spent_once_and_used_is_never_relabelled() {
+        let approvals = ApprovalService::new();
+        let (work, binding) = (work(), binding());
+        let entering = check(&work, &binding);
+        let handle = approvals.begin_review(&binding, &work).expect("attempt");
+        assert_eq!(
+            spend(&approvals, &handle, &entering, &work),
+            Err(ReviewOwnerError::Rejected(
+                ApprovalLifecycleRejectionReason::ReviewNotSatisfied
+            )),
+            "a pending review cannot be spent"
+        );
+        assert_eq!(
+            record(&approvals, &handle, ReviewVerdict::Allow),
+            Ok(ReviewAttemptStatus::Allowed)
+        );
+        assert_eq!(
+            spend(&approvals, &handle, &entering, &work),
+            Ok(ReviewAttemptStatus::Used)
+        );
+        assert_eq!(
+            spend(&approvals, &handle, &entering, &work),
+            Err(ReviewOwnerError::Rejected(
+                ApprovalLifecycleRejectionReason::AlreadyDecided
+            ))
+        );
+        assert_eq!(
+            approvals.retire_review(&handle, ReviewRetirementReason::Abandoned),
+            Err(ReviewOwnerError::Rejected(
+                ApprovalLifecycleRejectionReason::AlreadyDecided
+            )),
+            "a spent allow is never relabelled as retired"
+        );
+    }
+
+    #[test]
+    fn denied_or_escalated_review_cannot_be_retired_or_spent() {
+        for (verdict, settled) in [
+            (ReviewVerdict::Deny, ReviewAttemptStatus::Denied),
+            (ReviewVerdict::Escalate, ReviewAttemptStatus::Escalated),
+        ] {
+            let approvals = ApprovalService::new();
+            let (work, binding) = (work(), binding());
+            let handle = approvals.begin_review(&binding, &work).expect("attempt");
+            assert_eq!(record(&approvals, &handle, verdict), Ok(settled));
+            assert!(
+                approvals
+                    .retire_review(&handle, ReviewRetirementReason::ContextChanged)
+                    .is_err()
+            );
+            assert!(spend(&approvals, &handle, &check(&work, &binding), &work).is_err());
+        }
+    }
+
+    #[test]
+    fn equal_facts_or_another_work_association_cannot_spend_an_allow() {
+        let approvals = ApprovalService::new();
+        let (work, binding) = (work(), binding());
+        let handle = approvals.begin_review(&binding, &work).expect("attempt");
+        record(&approvals, &handle, ReviewVerdict::Allow).expect("allowed");
+        let equal_facts = PreparedAuthorizationBinding::new(binding.facts().clone());
+        let other_work = self::work();
+        assert_eq!(
+            spend(&approvals, &handle, &check(&work, &equal_facts), &work),
+            Err(ReviewOwnerError::Mismatch)
+        );
+        assert_eq!(
+            spend(
+                &approvals,
+                &handle,
+                &check(&other_work, &binding),
+                &other_work
+            ),
+            Err(ReviewOwnerError::Mismatch)
+        );
+        assert_eq!(
+            spend(&approvals, &handle, &check(&work, &binding), &work),
+            Ok(ReviewAttemptStatus::Used),
+            "the exact operation and work still enter once"
+        );
+    }
+
+    #[test]
+    fn attempts_are_fresh_and_released_attempts_are_unknown() {
+        let approvals = ApprovalService::new();
+        let (work, binding) = (work(), binding());
+        let first = approvals.begin_review(&binding, &work).expect("attempt");
+        let second = approvals.begin_review(&binding, &work).expect("attempt");
+        assert_ne!(first.id(), second.id(), "attempt ids are never reused");
+        assert_eq!(
+            approvals.release_review(first),
+            Err(ReviewOwnerError::Rejected(
+                ApprovalLifecycleRejectionReason::ReviewPending
+            )),
+            "a pending attempt must be retired before disposal"
+        );
+        let first = approvals.begin_review(&binding, &work).expect("attempt");
+        approvals
+            .apply_review(|authority| authority.record_review_unavailable(first.id().to_owned()))
+            .expect("unavailable");
+        let id = first.id().to_owned();
+        assert_eq!(
+            approvals.release_review(first),
+            Ok(ReviewAttemptStatus::Unavailable)
+        );
+        let copied = ReviewAttemptHandle::new(Arc::from(id), binding, work);
+        assert_eq!(
+            record(&approvals, &copied, ReviewVerdict::Allow),
+            Err(ReviewOwnerError::Rejected(
+                ApprovalLifecycleRejectionReason::NotFound
+            )),
+            "a disposed attempt cannot be revived by its id"
+        );
+    }
+
+    #[derive(Default)]
+    struct CountingStore(AtomicUsize);
+
+    impl ApprovalStore for CountingStore {
+        fn load_all(&self) -> Result<Vec<ApprovalRecord>, ApprovalStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn put(&self, _record: &ApprovalRecord) -> Result<(), ApprovalStoreError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn review_attempts_never_reach_the_approval_store() {
+        let store = Arc::new(CountingStore::default());
+        let approvals = ApprovalService::with_store(store.clone()).expect("service");
+        let (work, binding) = (work(), binding());
+        let handle = approvals.begin_review(&binding, &work).expect("attempt");
+        record(&approvals, &handle, ReviewVerdict::Allow).expect("allowed");
+        spend(&approvals, &handle, &check(&work, &binding), &work).expect("used");
+        approvals.release_review(handle).expect("released");
+        assert_eq!(store.0.load(Ordering::SeqCst), 0);
+        // A reopened owner over the same store knows no review attempt.
+        let reopened = ApprovalService::with_store(store).expect("reopened");
+        assert!(
+            reopened
+                .list(ApprovalListFilter::default())
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unavailable_owner_refuses_new_attempts() {
+        let approvals = ApprovalService::unavailable("fixture");
+        assert_eq!(
+            approvals.begin_review(&binding(), &work()).err(),
+            Some(ReviewOwnerError::Unavailable)
+        );
     }
 }

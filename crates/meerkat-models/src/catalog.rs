@@ -250,7 +250,7 @@ pub fn infer_provider(model: &str) -> Option<Provider> {
 /// across the per-model capability rows. It arms the byte-aware compaction
 /// trigger (fires at 4/5 of the cap) so a byte-heavy transcript compacts
 /// BEFORE the provider starts rejecting every turn — the 2026-07-29
-/// household incident grew an inline-media transcript past Anthropic's cap
+/// production incident grew an inline-media transcript past Anthropic's cap
 /// and failed terminally with `request_too_large` while the token trigger
 /// never came close.
 ///
@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(approximate_request_byte_cap(Provider::SelfHosted), None);
         assert_eq!(approximate_request_byte_cap(Provider::Other), None);
         // Pin the incident-class value: Anthropic's cap is the one the
-        // 2026-07-29 household transcript crossed.
+        // 2026-07-29 production transcript crossed.
         assert_eq!(
             approximate_request_byte_cap(Provider::Anthropic),
             Some(9_000_000)

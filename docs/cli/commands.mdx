@@ -571,15 +571,25 @@ confused with `rkat realm prune`, which deletes whole realm directories.
 
 ## mcp
 
-`rkat mcp` is for local and project configuration only.
+`rkat mcp` manages the selected realm's own MCP servers (`--scope realm`) and
+the project and user `mcp.toml` files.
 
 ```bash
-rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
-rkat mcp login <NAME> [--scope project|user|local]
-rkat mcp remove <NAME> [--scope project|user|local]
-rkat mcp list [--scope project|user|local] [--json]
-rkat mcp get <NAME> [--scope project|user|local] [--json]
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local|realm] [--expected-generation <N>] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
+rkat mcp login <NAME> [--scope project|user|local|realm]
+rkat mcp remove <NAME> [--scope project|user|local|realm] [--expected-generation <N>]
+rkat mcp list [--scope project|user|local|realm] [--json]
+rkat mcp get <NAME> [--scope project|user|local|realm] [--json]
 ```
+
+`--scope realm` writes `[[tools.mcp_servers]]` in the realm's own config (the
+realm selected by `--realm`), which its child realms inherit. Only that list
+changes; the rest of the config document is kept as written.
+`--expected-generation` refuses the write unless the realm config is still at
+that generation (`rkat config get --with-generation`). A server that a realm
+only inherits is removed in the realm that configures it. Realm servers are
+literal: `--scope realm` refuses a `${VAR}` reference in the command, args,
+`-e` values, URL or `-H` values; put env-derived values in `mcp.toml`.
 
 Examples:
 
@@ -592,7 +602,8 @@ rkat mcp list
 rkat mcp get filesystem --scope project
 ```
 
-Omit `--scope` on `list` or `get` to search all configured scopes.
+Omit `--scope` on `list` or `get` to search all configured scopes, the realm
+included.
 
 HTTP OAuth is discovered when connecting, not stored in `.rkat/mcp.toml`.
 Interactive login requires an account selection on the server entry: its

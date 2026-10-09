@@ -95,18 +95,25 @@ pub(crate) fn delegation_request_text(input: &LiveDelegationExecutorInput) -> St
         "{LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE}\n\n{request}\n\n{LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING}\n{context}"
     )
 }
+mod outcome_evidence;
 mod peer_replies;
 mod schedule;
+
+use outcome_evidence::{LiveResponsesOriginalRequest, LiveResponsesOutcomeEvidence};
+pub use outcome_evidence::{
+    LiveResponsesOutcomeOwners, LiveResponsesOutcomeReceipt, LiveResponsesOutcomeSourceOwner,
+    LiveResponsesOutcomeVerifier, SessionContextDestinationOwner,
+};
 
 /// Rows per page when reading a worker session's history for pending peer
 /// requests at result release.
 const AWAITING_PEER_HISTORY_PAGE: usize = 200;
 
 use schedule::{
-    LIVE_DELEGATION_CHANNEL_WORKER_CAP, VoiceWorkGraph, VoiceWorkItem, WorkItemDisposition,
-    delegation_title_transcript, fork_work_instructions, narration_text, narration_title,
-    post_close_merge_text, post_close_request, task_after_failed_blockers,
-    task_with_waited_results,
+    LIVE_DELEGATION_CHANNEL_WORKER_CAP, VoiceWorkGraph, VoiceWorkItem, WorkItemCloseOutcome,
+    WorkItemClosePhase, WorkItemDisposition, delegation_title_transcript, fork_work_instructions,
+    narration_text, narration_title, post_close_merge_text, post_close_request,
+    task_after_failed_blockers, task_with_waited_results,
 };
 
 const LIVE_DELEGATION_RESULT_BYTES: usize = 16 * 1024;
@@ -737,6 +744,32 @@ async fn record_live_bridge_terminal_across_revocation(
         .map(LiveBridgeTerminalCommit::Revoked)
 }
 
+/// Re-read an already committed bridge snapshot through its owner just before
+/// its outcome is appended. The terminal and result digest must still be the
+/// ones the recovered executor produced; a snapshot read earlier is never
+/// evidence on its own.
+async fn revalidate_committed_responses_snapshot(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    snapshot: &meerkat_runtime::live_execution::LiveBridgeRecoverySnapshot,
+    terminal: meerkat_core::MeerkatExecutionTerminal,
+    result_digest: Option<&str>,
+) -> Result<LiveResponsesOutcomeEvidence, String> {
+    let current = runtime
+        .live_bridge_recovery_snapshots(snapshot.session_id())
+        .await
+        .map_err(|error| format!("committed bridge snapshot could not be re-read: {error}"))?
+        .into_iter()
+        .find(|current| current.operation() == snapshot.operation())
+        .ok_or_else(|| "committed bridge snapshot is no longer present".to_string())?;
+    if current.terminal() != Some(terminal) || current.result_digest() != result_digest {
+        return Err(
+            "committed bridge snapshot changed before its outcome was appended".to_string(),
+        );
+    }
+    LiveResponsesOutcomeEvidence::validated_snapshot(current)
+        .map_err(|error| format!("committed bridge snapshot is not outcome evidence: {error}"))
+}
+
 struct PreparedResponsesExecution {
     admission: Arc<LiveBridgeOperationAdmission>,
     mob_handle: meerkat_mob::MobHandle,
@@ -785,6 +818,311 @@ fn responses_executor_outcome_receipt(
             "MEERKAT_LIVE_EXECUTOR_OUTCOME_V1\nThe delegated executor failed for operation {operation_id}."
         ),
     }
+}
+
+/// Why a LiveResponses outcome append did not run. Every variant keeps the
+/// committed executor terminal; the outcome stays pending and is never
+/// claimed as projected. Only `Transient` is retried: a native refusal, an
+/// unavailable authorization and a rejected request each settle once.
+#[derive(Debug, thiserror::Error)]
+enum LiveResponsesOutcomeAppendError {
+    /// The original work's control facts are not bound on a governed runtime.
+    #[error("governed outcome append is unavailable: {0}")]
+    Unavailable(&'static str),
+    /// Native admission refused, was unavailable, or could not record its
+    /// observation, whether raised here or returned by the session service.
+    #[error(transparent)]
+    Authorization(meerkat_core::OperationAuthorizationError),
+    /// The service rejected the append for a reason a retry cannot change.
+    #[error(transparent)]
+    Rejected(meerkat_core::service::SessionControlError),
+    /// A transient service condition; the same append may be retried.
+    #[error(transparent)]
+    Transient(meerkat_core::service::SessionControlError),
+    /// The operation's original work binding could not be read for an
+    /// infrastructure reason that may clear (the runtime not ready, recovering
+    /// or busy, store I/O); the same append may be retried. An absent,
+    /// malformed or refused binding is `Unavailable` instead.
+    #[error(transparent)]
+    BindingTransient(meerkat_runtime::live_execution::LiveBridgeOutcomeBindingError),
+}
+
+impl LiveResponsesOutcomeAppendError {
+    /// Only transient conditions are retried; everything else settles once.
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transient(_) | Self::BindingTransient(_))
+    }
+
+    /// Keep the runtime's classification of a binding failure.
+    fn from_binding(
+        error: meerkat_runtime::live_execution::LiveBridgeOutcomeBindingError,
+        unavailable: &'static str,
+    ) -> Self {
+        use meerkat_runtime::live_execution::LiveBridgeOutcomeBindingError as B;
+        match error {
+            B::Unavailable(_) => Self::Unavailable(unavailable),
+            B::Transient(_) => Self::BindingTransient(error),
+        }
+    }
+}
+
+impl From<meerkat_core::OperationAuthorizationError> for LiveResponsesOutcomeAppendError {
+    fn from(error: meerkat_core::OperationAuthorizationError) -> Self {
+        Self::Authorization(error)
+    }
+}
+
+impl From<meerkat_core::service::SessionControlError> for LiveResponsesOutcomeAppendError {
+    /// Classify at the service-result boundary without losing the native
+    /// authorization error.
+    fn from(error: meerkat_core::service::SessionControlError) -> Self {
+        use meerkat_core::service::SessionControlError;
+        match error {
+            SessionControlError::Authorization(error) => Self::Authorization(error),
+            SessionControlError::Session(ref session) if session_error_is_transient(session) => {
+                Self::Transient(error)
+            }
+            // A review refusal has no pending state and is never resent.
+            SessionControlError::Review(_)
+            | SessionControlError::Session(_)
+            | SessionControlError::InvalidRequest { .. }
+            | SessionControlError::Conflict { .. } => Self::Rejected(error),
+        }
+    }
+}
+
+/// Whether a session error may clear without any change to the append: the
+/// runtime or session is momentarily busy, unavailable or held for recovery.
+/// Every other error (a deleted destination, a refused recovery, an
+/// unsupported or disabled capability, a fence conflict) settles once.
+fn session_error_is_transient(error: &meerkat_core::service::SessionError) -> bool {
+    use meerkat_core::service::SessionError;
+    match error {
+        SessionError::RuntimeUnavailable { .. }
+        | SessionError::Busy { .. }
+        | SessionError::Store(_)
+        | SessionError::ExternalWriteFenceBackoff { .. }
+        | SessionError::DurableTailHeldForRecovery { .. }
+        // The session's hosting claim clears once it can be taken.
+        | SessionError::HostingUnavailable { .. } => true,
+        SessionError::NotFound { .. }
+        | SessionError::PersistenceDisabled
+        | SessionError::CompactionDisabled
+        | SessionError::NotRunning { .. }
+        | SessionError::DurableTailRecoveryRefused { .. }
+        | SessionError::DurableEvidenceQuarantined { .. }
+        | SessionError::WholeBlobAuditedEndpointDivergence { .. }
+        | SessionError::Agent(_)
+        | SessionError::FailedWithData { .. }
+        | SessionError::CapabilityUnavailable(_)
+        | SessionError::Unsupported(_)
+        | SessionError::ExternalWriteFenceConflict { .. }
+        // Another owner hosts the destination; restart reconcile re-drives
+        // the append from the recovery snapshot, never a hosting poll.
+        | SessionError::ServedElsewhere { .. } => false,
+    }
+}
+
+/// How one live-path outcome projection ended.
+#[derive(Debug)]
+enum LiveResponsesOutcomeProjection {
+    /// The outcome was appended and its machine outcome receipt recorded.
+    Projected,
+    /// The append settled without projection (a native refusal, an
+    /// unavailable authorization or a rejected request). Nothing was retried
+    /// and no outcome receipt was recorded; the committed terminal stays.
+    Settled(LiveResponsesOutcomeAppendError),
+    /// Projection shutdown cancelled the attempt.
+    Shutdown,
+}
+
+/// Append one outcome and then record its machine outcome receipt. Only a
+/// transient append failure is retried; any other failure settles once,
+/// before the receipt step, so the outcome is never marked projected.
+async fn project_live_responses_outcome<A, AFut, R, RFut>(
+    operation_id: &OperationId,
+    shutdown: &CancellationToken,
+    mut append: A,
+    record_outcome_receipt: R,
+) -> LiveResponsesOutcomeProjection
+where
+    A: FnMut() -> AFut,
+    AFut: std::future::Future<
+            Output = Result<
+                meerkat_core::AppendSystemContextResult,
+                LiveResponsesOutcomeAppendError,
+            >,
+        >,
+    R: FnMut() -> RFut,
+    RFut: std::future::Future<Output = Result<(), meerkat_runtime::RuntimeDriverError>>,
+{
+    let appended = retry_responses_outcome_custody_step(
+        operation_id,
+        shutdown,
+        "source-context-append",
+        || {
+            let attempt = append();
+            async move {
+                match attempt.await {
+                    Ok(status) => Ok(Ok(status)),
+                    Err(retryable) if retryable.is_retryable() => Err(retryable),
+                    Err(settled) => Ok(Err(settled)),
+                }
+            }
+        },
+    )
+    .await;
+    let Some(appended) = appended else {
+        return LiveResponsesOutcomeProjection::Shutdown;
+    };
+    if let Err(settled) = appended {
+        return LiveResponsesOutcomeProjection::Settled(settled);
+    }
+    match retry_responses_outcome_custody_step(
+        operation_id,
+        shutdown,
+        "machine-outcome-receipt",
+        record_outcome_receipt,
+    )
+    .await
+    {
+        Some(()) => LiveResponsesOutcomeProjection::Projected,
+        None => LiveResponsesOutcomeProjection::Shutdown,
+    }
+}
+
+/// How one LiveResponses outcome append runs on this runtime.
+enum LiveResponsesOutcomeRoute {
+    /// No native work authorization host is installed on this runtime.
+    Plain(meerkat_core::service::AppendSystemContextRequest),
+    /// A host is installed: the append is authenticated, with the evidence as
+    /// its process receipt.
+    Authenticated(Arc<meerkat_core::service::SystemContextControlRequest>),
+}
+
+/// Build the append for the chosen profile: `None` (an ungoverned operation on
+/// a runtime without a host) is the legacy plain append; governed facts give
+/// an authenticated control carrying the receipt. The profile is decided by
+/// [`live_responses_outcome_profile`], never here, and a refused
+/// authenticated append never falls back to a plain one.
+fn route_live_responses_outcome(
+    runtime: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: &meerkat_core::SessionId,
+    request: meerkat_core::service::AppendSystemContextRequest,
+    evidence: LiveResponsesOutcomeEvidence,
+    governed: Option<outcome_evidence::LiveResponsesGovernedFacts>,
+) -> Result<LiveResponsesOutcomeRoute, LiveResponsesOutcomeAppendError> {
+    let Some(governed) = governed else {
+        return Ok(LiveResponsesOutcomeRoute::Plain(request));
+    };
+    let receipt = Arc::new(outcome_evidence::LiveResponsesOutcomeReceipt::new(
+        Arc::clone(runtime),
+        &request,
+        evidence,
+        &governed,
+    )?);
+    Ok(LiveResponsesOutcomeRoute::Authenticated(
+        meerkat_core::service::SystemContextControlRequest::from_trusted_ingress(
+            session_id.clone(),
+            request,
+            governed.facts,
+            receipt,
+        )?,
+    ))
+}
+
+/// Whether an outcome append is governed, from the operation's recorded
+/// original work binding and this runtime's installed host:
+/// - no binding, no host: the legacy plain append (`Ok(false)`);
+/// - a binding and a host: governed (`Ok(true)`);
+/// - a binding but no host: a local refusal (`Unavailable`), settled once by
+///   the caller like any other unavailable outcome; a governed operation is
+///   never downgraded to a plain append;
+/// - no binding but a host: a local refusal (`Unavailable`); a legacy or
+///   ungoverned operation is no authority for a governed append.
+fn live_responses_outcome_profile(
+    recorded: bool,
+    host_installed: bool,
+) -> Result<bool, LiveResponsesOutcomeAppendError> {
+    match (recorded, host_installed) {
+        (false, false) => Ok(false),
+        (true, true) => Ok(true),
+        (true, false) => Err(LiveResponsesOutcomeAppendError::Unavailable(
+            "a governed operation's owner is not installed",
+        )),
+        (false, true) => Err(LiveResponsesOutcomeAppendError::Unavailable(
+            "the operation has no original work binding on a governed runtime",
+        )),
+    }
+}
+
+/// Append one LiveResponses outcome with its owner-issued evidence, on the
+/// route [`route_live_responses_outcome`] chooses.
+async fn append_live_responses_outcome(
+    runtime: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_service: &dyn meerkat_mob::MobSessionService,
+    session_id: &meerkat_core::SessionId,
+    request: meerkat_core::service::AppendSystemContextRequest,
+    evidence: LiveResponsesOutcomeEvidence,
+    owners: Option<&LiveResponsesOutcomeOwners>,
+) -> Result<meerkat_core::AppendSystemContextResult, LiveResponsesOutcomeAppendError> {
+    let recorded = runtime
+        .live_bridge_operation_has_original_work(session_id, evidence.operation())
+        .await
+        .map_err(|error| {
+            LiveResponsesOutcomeAppendError::from_binding(
+                error,
+                "the bridge operation is absent or does not match",
+            )
+        })?;
+    let governed = if live_responses_outcome_profile(
+        recorded,
+        runtime.has_native_work_authorization_host(),
+    )? {
+        Some(
+            outcome_evidence::resolve_live_responses_governed_facts(
+                runtime,
+                owners,
+                session_id,
+                evidence.operation(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    match route_live_responses_outcome(runtime, session_id, request, evidence, governed)? {
+        LiveResponsesOutcomeRoute::Plain(request) => Ok(session_service
+            .append_system_context(session_id, request)
+            .await?),
+        LiveResponsesOutcomeRoute::Authenticated(control) => Ok(session_service
+            .append_authenticated_system_context(control)
+            .await?),
+    }
+}
+
+/// The outcome append for one delegated operation. Its idempotency key makes a
+/// replay after restart a duplicate of the same append.
+fn responses_outcome_append_request(
+    operation_id: &OperationId,
+    terminal: DurableExecutorTerminalKind,
+    output: Option<&str>,
+) -> meerkat_core::service::AppendSystemContextRequest {
+    meerkat_core::service::AppendSystemContextRequest {
+        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+            responses_executor_outcome_receipt(operation_id, terminal, output),
+        ),
+        source: Some(responses_outcome_source(operation_id)),
+        idempotency_key: Some(responses_outcome_idempotency_key(operation_id)),
+    }
+}
+
+fn responses_outcome_source(operation_id: &OperationId) -> String {
+    format!("gpt-live-responses:{operation_id}")
+}
+
+fn responses_outcome_idempotency_key(operation_id: &OperationId) -> String {
+    format!("gpt-live-responses-outcome:{operation_id}")
 }
 
 /// Independent Meerkat execution completion. This carries no provider send
@@ -1345,6 +1683,9 @@ pub struct ExperimentalLiveDelegationCoordinator {
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     mobs: Arc<crate::MobMcpState>,
     execution_policy: LiveDelegationExecutionPolicy,
+    /// Owner seams for governed LiveResponses outcome appends, installed by
+    /// the composing host. `None`: a governed append is typed Unavailable.
+    responses_outcome_owners: Option<LiveResponsesOutcomeOwners>,
     responses_projection_shutdown: Arc<ResponsesProjectionShutdown>,
     responses_prepared: Arc<Mutex<PreparedResponsesMap>>,
     responses_active: Arc<Mutex<ActiveResponsesMap>>,
@@ -1395,6 +1736,10 @@ pub struct ExperimentalLiveDelegationCoordinator {
     /// own rows): `Some` answers every release with these members.
     #[cfg(test)]
     awaiting_peer_replies_for_test: Arc<std::sync::Mutex<Option<Vec<String>>>>,
+    /// Test gate on the next deferred WorkGraph close: `(entered, resume)`.
+    #[cfg(test)]
+    deferred_close_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1668,6 +2013,7 @@ impl ExperimentalLiveDelegationCoordinator {
             runtime,
             mobs,
             execution_policy: LiveDelegationExecutionPolicy::default(),
+            responses_outcome_owners: None,
             responses_projection_shutdown: Arc::new(ResponsesProjectionShutdown {
                 cancellation: CancellationToken::new(),
             }),
@@ -1697,12 +2043,23 @@ impl ExperimentalLiveDelegationCoordinator {
             post_close_merges: Arc::default(),
             #[cfg(test)]
             awaiting_peer_replies_for_test: Arc::default(),
+            #[cfg(test)]
+            deferred_close_gate_for_test: Arc::default(),
         }
     }
 
     #[must_use]
     pub fn with_execution_policy(mut self, policy: LiveDelegationExecutionPolicy) -> Self {
         self.execution_policy = policy;
+        self
+    }
+
+    /// Install the owner seams a governed LiveResponses outcome append needs:
+    /// the bridge outcome's source owner and the receiving session's
+    /// destination owner.
+    #[must_use]
+    pub fn with_responses_outcome_owners(mut self, owners: LiveResponsesOutcomeOwners) -> Self {
+        self.responses_outcome_owners = Some(owners);
         self
     }
 
@@ -1835,8 +2192,11 @@ impl ExperimentalLiveDelegationCoordinator {
                                     .to_string(),
                         };
                     }
-                    if snapshot.terminal().is_none()
-                        && let Err(error) = self
+                    // The outcome append carries owner-issued evidence: the
+                    // receipt reconciliation returns, or the committed snapshot
+                    // re-read through its owner. Neither is current permission.
+                    let evidence = if snapshot.terminal().is_none() {
+                        let receipt = match self
                             .runtime
                             .reconcile_revoked_live_bridge_execution_terminal(
                                 snapshot,
@@ -1844,30 +2204,66 @@ impl ExperimentalLiveDelegationCoordinator {
                                 recovered_digest.as_deref(),
                             )
                             .await
-                    {
+                        {
+                            Ok(receipt) => receipt,
+                            Err(error) => {
+                                return ExperimentalResponsesRestartDisposition::Broken {
+                                    reason: format!(
+                                        "recovered executor terminal remains uncommitted: {error}"
+                                    ),
+                                };
+                            }
+                        };
+                        match LiveResponsesOutcomeEvidence::recovered_terminal(
+                            receipt,
+                            LiveResponsesOriginalRequest::Snapshot(snapshot.clone()),
+                        ) {
+                            Ok(evidence) => evidence,
+                            Err(error) => {
+                                return ExperimentalResponsesRestartDisposition::Broken {
+                                    reason: format!(
+                                        "recovered executor terminal receipt does not match its snapshot: {error}"
+                                    ),
+                                };
+                            }
+                        }
+                    } else {
+                        match revalidate_committed_responses_snapshot(
+                            self.runtime.as_ref(),
+                            snapshot,
+                            bridge_terminal.terminal(),
+                            recovered_digest.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(evidence) => evidence,
+                            Err(reason) => {
+                                return ExperimentalResponsesRestartDisposition::Broken { reason };
+                            }
+                        }
+                    };
+                    if evidence.operation() != snapshot.operation() {
                         return ExperimentalResponsesRestartDisposition::Broken {
-                            reason: format!(
-                                "recovered executor terminal remains uncommitted: {error}"
-                            ),
+                            reason: "outcome evidence names a different operation".to_string(),
                         };
                     }
-                    let receipt_text = responses_executor_outcome_receipt(
+                    let projection = responses_outcome_append_request(
                         operation_id,
                         executor_terminal,
                         executor_output.as_deref(),
                     );
-                    let projection = meerkat_core::service::AppendSystemContextRequest {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            receipt_text,
-                        ),
-                        source: Some(format!("gpt-live-responses:{operation_id}")),
-                        idempotency_key: Some(format!("gpt-live-responses-outcome:{operation_id}")),
-                    };
-                    if let Err(error) = self
-                        .mobs
-                        .session_service()
-                        .append_system_context(snapshot.session_id(), projection)
-                        .await
+                    // On a governed runtime the control facts come from the
+                    // operation's original work binding and the installed
+                    // owners; without them the append is typed Unavailable.
+                    if let Err(error) = append_live_responses_outcome(
+                        &self.runtime,
+                        self.mobs.session_service().as_ref(),
+                        snapshot.session_id(),
+                        projection,
+                        evidence,
+                        self.responses_outcome_owners.as_ref(),
+                    )
+                    .await
                     {
                         return ExperimentalResponsesRestartDisposition::Broken {
                             reason: format!(
@@ -2512,6 +2908,7 @@ impl ExperimentalLiveDelegationCoordinator {
         let task_admission = Arc::clone(&admission);
         let task_operation_id = operation_id.clone();
         let projection_shutdown = self.responses_projection_shutdown.cancellation.clone();
+        let outcome_owners = self.responses_outcome_owners.clone();
         let (start_tx, start_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = start_rx.await;
@@ -2582,52 +2979,82 @@ impl ExperimentalLiveDelegationCoordinator {
                 result_digest.as_deref(),
             )
             .await;
-            let terminal_committed = committed.is_ok();
-            let outcome = match committed {
+            // The committed receipt is kept as the outcome append's
+            // owner-issued evidence, cloned before the completion consumes it.
+            let (outcome, evidence) = match committed {
                 Ok(LiveBridgeTerminalCommit::Active(receipt)) => {
-                    Ok(ExperimentalLiveBridgeExecutionCompletion {
-                        terminal: receipt,
-                        output: provider_output_after_delivery_fence(
-                            bridge_terminal,
-                            delivery_fenced,
-                        ),
-                    })
+                    let evidence = LiveResponsesOutcomeEvidence::live_terminal(receipt.clone());
+                    (
+                        Ok(ExperimentalLiveBridgeExecutionCompletion {
+                            terminal: receipt,
+                            output: provider_output_after_delivery_fence(
+                                bridge_terminal,
+                                delivery_fenced,
+                            ),
+                        }),
+                        Some(evidence),
+                    )
                 }
-                Ok(LiveBridgeTerminalCommit::Revoked(receipt)) => Err(format!(
-                    "provider channel was revoked; executor terminal was durably reconciled for operation {} without submission authority",
-                    receipt.operation().operation_id()
-                )),
-                Err(error) => Err(error.to_string()),
+                Ok(LiveBridgeTerminalCommit::Revoked(receipt)) => {
+                    let message = format!(
+                        "provider channel was revoked; executor terminal was durably reconciled for operation {} without submission authority",
+                        receipt.operation().operation_id()
+                    );
+                    let evidence = LiveResponsesOutcomeEvidence::recovered_terminal(
+                        receipt,
+                        LiveResponsesOriginalRequest::Admission(Arc::clone(&task_admission)),
+                    )
+                    .inspect_err(|error| {
+                        tracing::error!(
+                            %error,
+                            %task_operation_id,
+                            "revoked executor terminal has no matching original request; its outcome is not appended"
+                        );
+                    })
+                    .ok();
+                    (Err(message), evidence)
+                }
+                Err(error) => (Err(error.to_string()), None),
             };
             let _ = execution.completion.send(outcome);
-            if !terminal_committed {
+            let Some(evidence) = evidence else {
+                return;
+            };
+
+            if evidence.operation() != task_admission.operation() {
+                tracing::error!(
+                    %task_operation_id,
+                    "outcome evidence names a different operation; its outcome is not appended"
+                );
                 return;
             }
-
-            let receipt_text = responses_executor_outcome_receipt(
+            let projection = responses_outcome_append_request(
                 &task_operation_id,
                 executor_terminal,
                 executor_output.as_deref(),
             );
-            let projection = meerkat_core::service::AppendSystemContextRequest {
-                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(receipt_text),
-                source: Some(format!("gpt-live-responses:{task_operation_id}")),
-                idempotency_key: Some(format!("gpt-live-responses-outcome:{task_operation_id}")),
-            };
-            let Some(_append_status) = retry_responses_outcome_custody_step(
+            match project_live_responses_outcome(
                 &task_operation_id,
                 &projection_shutdown,
-                "source-context-append",
-                || session_service.append_system_context(&source_session_id, projection.clone()),
-            )
-            .await
-            else {
-                return;
-            };
-            let Some(()) = retry_responses_outcome_custody_step(
-                &task_operation_id,
-                &projection_shutdown,
-                "machine-outcome-receipt",
+                || {
+                    let runtime = Arc::clone(&runtime);
+                    let session_service = Arc::clone(&session_service);
+                    let source_session_id = source_session_id.clone();
+                    let projection = projection.clone();
+                    let evidence = evidence.clone();
+                    let outcome_owners = outcome_owners.clone();
+                    async move {
+                        append_live_responses_outcome(
+                            &runtime,
+                            session_service.as_ref(),
+                            &source_session_id,
+                            projection,
+                            evidence,
+                            outcome_owners.as_ref(),
+                        )
+                        .await
+                    }
+                },
                 || {
                     runtime.record_live_bridge_outcome_receipt(
                         task_admission.session_id(),
@@ -2636,9 +3063,18 @@ impl ExperimentalLiveDelegationCoordinator {
                 },
             )
             .await
-            else {
-                return;
-            };
+            {
+                LiveResponsesOutcomeProjection::Projected => {}
+                LiveResponsesOutcomeProjection::Settled(error) => {
+                    tracing::warn!(
+                        %error,
+                        %task_operation_id,
+                        "outcome append settled without projection; the committed executor terminal is kept and the outcome stays pending"
+                    );
+                    return;
+                }
+                LiveResponsesOutcomeProjection::Shutdown => return,
+            }
             let retirement_disposition = drive_responses_retirement_after_persisted_fact(
                 runtime.as_ref(),
                 pending_retirements.as_ref(),
@@ -5117,13 +5553,16 @@ impl ExperimentalLiveDelegationCoordinator {
                     )
                 })
                 .await;
-                let _ = realize_terminal(
+                let realized = realize_terminal(
                     &cleanup_coordinator,
                     &cleanup_retained,
                     &service,
                     execution.await_terminal().await,
                 )
                 .await;
+                if let Some(close) = realized.deferred_close {
+                    cleanup_coordinator.settle_work_item_close(close).await;
+                }
                 cleanup_tasks.lock().await.remove(&cleanup_operation_id);
             });
             self.failed_start_cleanups.lock().await.insert(
@@ -5189,13 +5628,14 @@ impl ExperimentalLiveDelegationCoordinator {
                     "steer deliveries settled at the worker's terminal"
                 );
             }
-            let terminal = realize_terminal(
+            let mut terminal = realize_terminal(
                 task_coordinator.as_ref(),
                 &task_retained,
                 &service,
                 worker_terminal,
             )
             .await;
+            let deferred_close = terminal.deferred_close.take();
             tracing::info!(
                 operation_id = %task_retained.operation.operation_id(),
                 elapsed_since_terminal_ms = task_retained.elapsed_since_terminal_ms(),
@@ -5208,6 +5648,27 @@ impl ExperimentalLiveDelegationCoordinator {
             task_coordinator
                 .record_terminal_realization(&task_channel_key, &task_retained, terminal)
                 .await;
+            // The result's release now runs on its own task; the item's close
+            // settles here, independent of it, and its dependents are
+            // scheduled once it lands.
+            if let Some(close) = deferred_close {
+                #[cfg(test)]
+                {
+                    let gate = task_coordinator
+                        .deferred_close_gate_for_test
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    if let Some((entered, resume)) = gate {
+                        let _ = entered.send(());
+                        let _ = resume.await;
+                    }
+                }
+                task_coordinator.settle_work_item_close(close).await;
+                task_coordinator
+                    .pump_channel_schedule(&task_channel_key)
+                    .await;
+            }
         });
         self.active.lock().await.insert(
             retained.operation.operation_id().clone(),
@@ -5549,6 +6010,23 @@ impl ExperimentalLiveDelegationCoordinator {
         for operation_id in pending_operation_ids {
             pending.remove(&operation_id);
         }
+    }
+
+    /// Settle a deferred voice work-item close. A typed failure is logged
+    /// once at WARN; durable recovery of a stranded item belongs to the
+    /// restart reconciler.
+    async fn settle_work_item_close(&self, close: DeferredWorkItemClose) -> WorkItemSettleOutcome {
+        let outcome = close.settle().await;
+        if let WorkItemSettleOutcome::Failed { phase, attempts } = outcome {
+            tracing::warn!(
+                item = %close.item,
+                status = ?close.status,
+                ?phase,
+                attempts,
+                "voice work item could not be closed after its worker ended"
+            );
+        }
+        outcome
     }
 
     async fn remove_retained_delegation(&self, retained: &Arc<RetainedDelegation>) {
@@ -6439,13 +6917,16 @@ async fn cleanup_started_execution_after_publication_failure(
             tracing::warn!(%error, "cancellation observation publication was not replayed; terminal observation remains authoritative");
         }
     }
-    let _ = realize_terminal(
+    let realized = realize_terminal(
         coordinator,
         retained,
         service,
         execution.await_terminal().await,
     )
     .await;
+    if let Some(close) = realized.deferred_close {
+        coordinator.settle_work_item_close(close).await;
+    }
 }
 
 struct RealizedDelegationTerminal {
@@ -6460,6 +6941,90 @@ struct RealizedDelegationTerminal {
     /// The session the worker's completed turn ran in, read again at result
     /// release for peer requests still awaiting an answer.
     worker_session: Option<SessionId>,
+    /// The WorkGraph close the worker's item still needs. Settled by the
+    /// delegation task after the terminal is recorded, never on the result's
+    /// provider path; see [`DeferredWorkItemClose`].
+    deferred_close: Option<DeferredWorkItemClose>,
+}
+
+/// Closing a voice work item its worker left open: best-effort WorkGraph
+/// maintenance (a failure is logged and the classified terminal stands), so
+/// it is settled after the terminal is recorded rather than before the
+/// result's release. It does not depend on whether or when a result is
+/// dispatched: failed and cancelled workers, and completed work whose channel
+/// closed, settle it too. Its close is what lets dependent items become
+/// ready, so the channel's schedule is pumped again after it.
+struct DeferredWorkItemClose {
+    workgraph: schedule::VoiceWorkGraph,
+    item: meerkat::WorkItemId,
+    status: meerkat::WorkStatus,
+    summary: Option<String>,
+}
+
+/// Attempts at a deferred close before it is reported as failed, and the
+/// pause before each retry (growing with the attempt).
+const WORK_ITEM_SETTLE_ATTEMPTS: u32 = 3;
+const WORK_ITEM_SETTLE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// What a deferred voice work-item close came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkItemSettleOutcome {
+    Closed,
+    AlreadyTerminal,
+    /// The item no longer exists; nothing to close.
+    NotFound,
+    /// The close failed (at once for a permanent error, after the bounded
+    /// retries for a transient one); `phase` is where it stopped.
+    Failed {
+        phase: WorkItemClosePhase,
+        attempts: u32,
+    },
+}
+
+impl DeferredWorkItemClose {
+    /// Close the item, retrying a transient failure (a stale revision or a
+    /// store error) a bounded number of times; a permanent one fails at once.
+    /// Each attempt is replay-safe (see `VoiceWorkGraph::close`).
+    async fn settle(&self) -> WorkItemSettleOutcome {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self
+                .workgraph
+                .close(&self.item, self.status, self.summary.as_deref())
+                .await
+            {
+                Ok(WorkItemCloseOutcome::Closed) => return WorkItemSettleOutcome::Closed,
+                Ok(WorkItemCloseOutcome::AlreadyTerminal) => {
+                    return WorkItemSettleOutcome::AlreadyTerminal;
+                }
+                Ok(WorkItemCloseOutcome::NotFound) => return WorkItemSettleOutcome::NotFound,
+                Err(failure) if failure.retryable && attempt < WORK_ITEM_SETTLE_ATTEMPTS => {
+                    tracing::debug!(
+                        item = %self.item,
+                        attempt,
+                        phase = ?failure.phase,
+                        %failure,
+                        "voice work item close failed; retrying"
+                    );
+                    tokio::time::sleep(WORK_ITEM_SETTLE_RETRY_PAUSE * attempt).await;
+                }
+                Err(failure) => {
+                    tracing::debug!(
+                        item = %self.item,
+                        attempt,
+                        phase = ?failure.phase,
+                        %failure,
+                        "voice work item close failed"
+                    );
+                    return WorkItemSettleOutcome::Failed {
+                        phase: failure.phase,
+                        attempts: attempt,
+                    };
+                }
+            }
+        }
+    }
 }
 
 /// Retry a binding-fenced step while the worker's channel is still bound.
@@ -6536,52 +7101,54 @@ async fn classify_worker_terminal(
     LiveDelegationWorkerTerminalKind,
     Vec<(meerkat::WorkItemId, String)>,
     bool,
+    Option<DeferredWorkItemClose>,
 ) {
     let (Some(workgraph), Some(work)) = (retained.workgraph.as_ref(), retained.work.as_ref())
     else {
-        return (mob_terminal, Vec::new(), false);
+        return (mob_terminal, Vec::new(), false, None);
     };
     let disposition = match workgraph.disposition_after_worker_turn(&work.id).await {
         Ok(disposition) => disposition,
         Err(error) => {
             tracing::warn!(%error, "voice work item state unavailable; using the Mob terminal alone");
-            return (mob_terminal, Vec::new(), false);
+            return (mob_terminal, Vec::new(), false, None);
         }
     };
     let close = |status: meerkat::WorkStatus, summary: Option<&str>| {
-        let workgraph = workgraph.clone();
-        let item = work.id.clone();
-        let summary = summary.map(str::to_string);
-        async move {
-            if let Err(error) = workgraph.close(&item, status, summary.as_deref()).await {
-                tracing::warn!(%error, "voice work item could not be closed after its worker ended");
-            }
-        }
+        Some(DeferredWorkItemClose {
+            workgraph: workgraph.clone(),
+            item: work.id.clone(),
+            status,
+            summary: summary.map(str::to_string),
+        })
     };
     match (mob_terminal, disposition) {
         (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Completed) => (
             LiveDelegationWorkerTerminalKind::Completed,
             Vec::new(),
             false,
+            None,
         ),
         (
             LiveDelegationWorkerTerminalKind::Completed,
             WorkItemDisposition::InProgress | WorkItemDisposition::ReleasedReady,
-        ) => {
-            close(meerkat::WorkStatus::Completed, result_text).await;
-            (
-                LiveDelegationWorkerTerminalKind::Completed,
-                Vec::new(),
-                false,
-            )
-        }
-        (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Failed) => {
-            (LiveDelegationWorkerTerminalKind::Failed, Vec::new(), false)
-        }
+        ) => (
+            LiveDelegationWorkerTerminalKind::Completed,
+            Vec::new(),
+            false,
+            close(meerkat::WorkStatus::Completed, result_text),
+        ),
+        (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Failed) => (
+            LiveDelegationWorkerTerminalKind::Failed,
+            Vec::new(),
+            false,
+            None,
+        ),
         (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Cancelled) => (
             LiveDelegationWorkerTerminalKind::Cancelled,
             Vec::new(),
             false,
+            None,
         ),
         (
             LiveDelegationWorkerTerminalKind::Completed,
@@ -6593,17 +7160,20 @@ async fn classify_worker_terminal(
             LiveDelegationWorkerTerminalKind::Blocked,
             blockers,
             explicit_block,
+            None,
         ),
         (terminal, disposition) => {
-            if !disposition.is_terminal() {
+            let deferred = if disposition.is_terminal() {
+                None
+            } else {
                 let status = if terminal == LiveDelegationWorkerTerminalKind::Cancelled {
                     meerkat::WorkStatus::Cancelled
                 } else {
                     meerkat::WorkStatus::Failed
                 };
-                close(status, None).await;
-            }
-            (terminal, Vec::new(), false)
+                close(status, None)
+            };
+            (terminal, Vec::new(), false, deferred)
         }
     }
 }
@@ -6638,7 +7208,7 @@ async fn realize_terminal(
         DelegationTurnTerminal::Completed(turn) => Some(turn.result().session_id().clone()),
         _ => None,
     };
-    let (terminal_kind, blockers, explicit_block) =
+    let (terminal_kind, blockers, explicit_block, deferred_close) =
         classify_worker_terminal(retained, mob_terminal, mob_result_text.as_deref()).await;
     tracing::info!(
         operation_id = %admission.operation().operation_id(),
@@ -6702,6 +7272,7 @@ async fn realize_terminal(
                 explicit_block,
                 channel_closed: false,
                 worker_session,
+                deferred_close,
             };
         }
     }
@@ -6712,6 +7283,7 @@ async fn realize_terminal(
         blockers,
         explicit_block,
         mob_result_text,
+        deferred_close,
     )
     .await
 }
@@ -6727,6 +7299,7 @@ async fn realize_terminal_after_channel_close(
     blockers: Vec<(meerkat::WorkItemId, String)>,
     explicit_block: bool,
     mob_result_text: Option<String>,
+    deferred_close: Option<DeferredWorkItemClose>,
 ) -> RealizedDelegationTerminal {
     let runtime = coordinator.runtime.as_ref();
     let session_id = retained.runtime_binding.session_id();
@@ -6781,6 +7354,7 @@ async fn realize_terminal_after_channel_close(
         explicit_block,
         channel_closed: true,
         worker_session: None,
+        deferred_close,
     }
 }
 
@@ -6869,6 +7443,88 @@ mod tests {
     use super::*;
     use meerkat_core::exact_operation::ExactOperationIdentity;
     use meerkat_core::interaction::InteractionId;
+
+    async fn claimed_voice_item(workgraph: &schedule::VoiceWorkGraph) -> meerkat::WorkItemId {
+        let item = workgraph
+            .create_item(
+                &meerkat_core::LiveChannelId::new("settle-test-channel"),
+                &SessionId::new(),
+                "settle-delegation",
+                "settle the item",
+            )
+            .await
+            .expect("voice item")
+            .id;
+        workgraph.claim(&item, "worker").await.expect("claim");
+        item
+    }
+
+    fn deferred_close(
+        workgraph: &schedule::VoiceWorkGraph,
+        item: meerkat::WorkItemId,
+    ) -> DeferredWorkItemClose {
+        DeferredWorkItemClose {
+            workgraph: workgraph.clone(),
+            item,
+            status: meerkat::WorkStatus::Completed,
+            summary: Some("a result".to_string()),
+        }
+    }
+
+    fn settle_test_workgraph() -> schedule::VoiceWorkGraph {
+        schedule::VoiceWorkGraph::new(meerkat::WorkGraphService::new(Arc::new(
+            meerkat::MemoryWorkGraphStore::new(),
+        )))
+    }
+
+    /// A transient store fault is retried: one fault, then the close lands;
+    /// a fault on every attempt comes back as a typed `Failed` naming the
+    /// step after the bounded attempts.
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_close_fault_is_retried_then_reported_typed() {
+        let workgraph = settle_test_workgraph();
+        let item = claimed_voice_item(&workgraph).await;
+        workgraph.inject_close_faults(1);
+        assert_eq!(
+            deferred_close(&workgraph, item).settle().await,
+            WorkItemSettleOutcome::Closed
+        );
+        let item = claimed_voice_item(&workgraph).await;
+        workgraph.inject_close_faults(usize::try_from(WORK_ITEM_SETTLE_ATTEMPTS).expect("small"));
+        assert_eq!(
+            deferred_close(&workgraph, item).settle().await,
+            WorkItemSettleOutcome::Failed {
+                phase: WorkItemClosePhase::Close,
+                attempts: WORK_ITEM_SETTLE_ATTEMPTS,
+            }
+        );
+    }
+
+    /// A missing item (pruned by the store) is a typed no-op, not a failure,
+    /// and a permanent error fails at once without retrying.
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_item_is_a_no_op_and_a_permanent_error_is_not_retried() {
+        let workgraph = settle_test_workgraph();
+        assert_eq!(
+            deferred_close(&workgraph, meerkat::WorkItemId::generated())
+                .settle()
+                .await,
+            WorkItemSettleOutcome::NotFound
+        );
+        // Evidence with the result's digest id but different content is a
+        // conflict: permanent, so one attempt.
+        let item = claimed_voice_item(&workgraph).await;
+        workgraph
+            .add_conflicting_result_evidence(&item, "a result")
+            .await;
+        assert_eq!(
+            deferred_close(&workgraph, item).settle().await,
+            WorkItemSettleOutcome::Failed {
+                phase: WorkItemClosePhase::Evidence,
+                attempts: 1,
+            }
+        );
+    }
 
     #[cfg(all(
         feature = "experimental-gpt-live-gate0-harness",

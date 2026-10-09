@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 const INVALID: u64 = u64::MAX;
 
 struct PublicationInner {
+    instance: uuid::Uuid,
     sequence: AtomicU64,
     writer: Mutex<()>,
 }
@@ -49,6 +50,7 @@ impl LocalAuthorizationPublication {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(PublicationInner {
+                instance: uuid::Uuid::new_v4(),
                 sequence: AtomicU64::new(0),
                 writer: Mutex::new(()),
             }),
@@ -213,6 +215,16 @@ impl fmt::Debug for LocalPublicationStamp {
 }
 
 impl LocalPublicationStamp {
+    /// Historical data from this exact coherent read, never the latest counter.
+    pub(crate) fn policy_observation(
+        &self,
+    ) -> meerkat_core::authorization::PolicyPublicationObservation {
+        meerkat_core::authorization::PolicyPublicationObservation::LocalPublication {
+            instance: self.inner.instance,
+            sequence: self.observation_sequence(),
+        }
+    }
+
     /// Historical process-local diagnostic data only. Not a permission,
     /// durable policy epoch, or cross-process freshness proof.
     pub(crate) fn observation_sequence(&self) -> u64 {
@@ -264,6 +276,24 @@ mod tests {
         assert_eq!(original.check_current(), Err(PublicationError::Changed));
         let (_, rebuilt) = publication.observe(|| 8).expect("new owner view");
         assert_eq!(rebuilt.check_current(), Ok(()));
+    }
+
+    #[test]
+    fn historical_observation_retains_its_instance_and_captured_sequence() {
+        let publication = LocalAuthorizationPublication::new();
+        let ((), original) = publication.observe(|| ()).expect("initial view");
+        let before = original.policy_observation();
+        drop(publication.begin_owner_change().expect("owner change"));
+        let ((), refreshed) = publication.observe(|| ()).expect("fresh view");
+        assert_eq!(original.policy_observation(), before);
+        assert_ne!(refreshed.policy_observation(), before);
+        let other = LocalAuthorizationPublication::new();
+        let ((), same_sequence) = other.observe(|| ()).expect("other publication");
+        assert_eq!(
+            original.observation_sequence(),
+            same_sequence.observation_sequence()
+        );
+        assert_ne!(same_sequence.policy_observation(), before);
     }
 
     #[test]

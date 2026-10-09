@@ -3361,9 +3361,12 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
     // (`meerkat::live_close=info`): the exact close is this scenario's
     // most timing-sensitive step (10ba653c6: close requested 51 ms after an
     // owned thinking append, 5 s ceiling elapsed, journal s99/67abce5e).
+    // `meerkat_runtime` and `meerkat_mob_mcp` at INFO name a held
+    // finalization or delegation step if the live observation pump stalls
+    // during delegated work (#1832).
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug,meerkat_runtime=info,meerkat_mob_mcp=info",
         )
         .with_test_writer()
         .try_init();
@@ -11565,7 +11568,10 @@ async fn run_s98_real_audio_and_context(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug",
+            // `meerkat_runtime` and `meerkat_mob_mcp` at INFO name the held
+            // finalization or delegation step when the live observation pump
+            // stalls during the existing-member delegation (#1832).
+            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime=info,meerkat_mob_mcp=info",
         )
         .with_test_writer()
         .try_init();

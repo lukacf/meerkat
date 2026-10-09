@@ -122,6 +122,22 @@ fn model_operation_unavailable_notice() -> Message {
     )
 }
 
+/// The model operation required review a model request cannot carry. Local
+/// review feedback for the retained controller, not a permission decision.
+fn model_operation_review_notice(
+    refusal: crate::approval::review::OperationReviewRefusal,
+) -> Message {
+    synthetic_notice_block_message(
+        SystemNoticeKind::Generic,
+        "The requested model operation requires operation review that this request cannot carry, so it was not sent. Continue with the retained controller or choose another action; no permission decision was made.",
+        crate::SystemNoticeBlock::RuntimeNotice {
+            category: "operation_review_required".into(),
+            detail: None,
+            payload: Some(serde_json::json!({"code": refusal.code(), "review": refusal})),
+        },
+    )
+}
+
 fn model_operation_refusal_notice() -> Message {
     synthetic_notice_block_message(
         SystemNoticeKind::Generic,
@@ -880,7 +896,9 @@ where
         else {
             return false;
         };
-        let notice = if error.operation_authorization_unavailable() {
+        let notice = if let Some(refusal) = error.operation_review_refusal() {
+            model_operation_review_notice(refusal)
+        } else if error.operation_authorization_unavailable() {
             model_operation_unavailable_notice()
         } else {
             model_operation_refusal_notice()
@@ -894,6 +912,46 @@ where
         );
         *controller_feedback = true;
         true
+    }
+
+    /// Lower the active turn's reasoning preference onto one attempt's
+    /// request copy (`profile` is the model this attempt actually selected)
+    /// and describe what the attempt sent. `None` when the turn carries no
+    /// preference, which leaves the request and the event stream untouched.
+    fn lower_turn_reasoning_preference(
+        &self,
+        profile: Option<&crate::ModelProfileWitness>,
+        turn_number: Option<u32>,
+        fallback_attempt: Option<u32>,
+        params: &mut Option<ProviderParamsOverride>,
+    ) -> Option<AgentEvent> {
+        let requested = self.active_turn_request_reasoning?;
+        let provider = profile.map(crate::ModelProfileWitness::provider);
+        let (baseline, outcome) = match requested.applied_level() {
+            Some(level) => {
+                let (baseline, outcome) =
+                    crate::agent::reasoning_preference::lower_reasoning_preference(
+                        profile.and_then(crate::ModelProfileWitness::catalog_capabilities),
+                        provider.unwrap_or(crate::Provider::Other),
+                        level,
+                        params,
+                    );
+                (baseline, Some(outcome))
+            }
+            None => (
+                crate::agent::reasoning_preference::baseline_effort(params.as_ref()),
+                None,
+            ),
+        };
+        Some(AgentEvent::RequestReasoningLowered {
+            turn_number,
+            fallback_attempt,
+            provider,
+            model: profile.map(|profile| profile.model().to_string()),
+            requested,
+            baseline,
+            outcome,
+        })
     }
 
     fn request_model_profile(
@@ -1397,7 +1455,7 @@ where
             .effective_params()
             .map_err(|err| AgentError::ConfigError(err.to_string()))?;
         let provider_params = (!provider_params.is_empty()).then_some(provider_params);
-        let provider_params = Self::apply_extraction_request_overrides(
+        let mut provider_params = Self::apply_extraction_request_overrides(
             switch.new_identity.provider,
             provider_params,
             compiled_extraction_output_schema.as_ref(),
@@ -1406,6 +1464,20 @@ where
             switch.new_identity.provider,
             provider_params.as_ref(),
         )?;
+        // The fallback attempt lowers the turn's reasoning preference again,
+        // against its own target model; extraction keeps its baseline.
+        if extraction_output_schema.is_none()
+            && let Some(event) = self.lower_turn_reasoning_preference(
+                Some(&switch.target_profile),
+                None,
+                Some(request.attempt),
+                &mut provider_params,
+            )
+        {
+            let _ =
+                crate::event_tap::tap_emit(&self.event_tap, self.default_event_tx.as_ref(), event)
+                    .await;
+        }
         let max_tokens = request.max_tokens;
 
         let skipped_targets = switch
@@ -4476,9 +4548,12 @@ where
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
         failure: &crate::session::DeferredToolBatchFailure,
     ) -> Result<AgentError, AgentError> {
-        let error = match failure.kind {
+        let error = match &failure.kind {
             crate::session::DeferredToolBatchFailureKind::OperationObservationUnavailable => {
                 AgentError::operation_observation_unavailable()
+            }
+            crate::session::DeferredToolBatchFailureKind::PostToolHookInfrastructure(failure) => {
+                failure.to_agent_error()
             }
         };
         self.terminalize_fatal_error(run_id, turn_count, event_tx, &error)
@@ -4990,6 +5065,10 @@ where
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
     ) -> Result<CallingLlmStep, AgentError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(observer) = self.model_preparation_observer.as_ref() {
+            observer();
+        }
         match self.refresh_calling_llm_boundary_notices(ctx).await? {
             CallingLlmBoundaryGate::Deferred => return Ok(CallingLlmStep::Repoll),
             CallingLlmBoundaryGate::Proceed => {}
@@ -5066,12 +5145,23 @@ where
                 AgentError::InternalError(format!("auth synthetic notice refresh failed: {error}"))
             })?;
 
+        // Ready background hook facts belong only to this original run. This
+        // is an ordinary notice phase, not a new model call or late producer.
+        self.transfer_background_hook_completions(ctx.run_id, ctx.event_tx.as_ref())
+            .await;
+
         // 1. Poll external updates BEFORE tool capture so newly
         //    connected tools are visible in the same LLM call.
         let ext = self.tools.poll_external_updates().await;
 
         // 2. Emit ToolConfigChanged for completed background connections.
         for notice in &ext.notices {
+            // The router drains each completed notice once. Keep safe setup
+            // failure feedback in the transcript as well as the host event;
+            // the model can continue with the remaining available tools.
+            if let Some(message) = notice.model_setup_failure_notice() {
+                self.session.push(message);
+            }
             let mut payload = notice.to_tool_config_changed_payload();
             if payload.applied_at_turn.is_none() {
                 payload.applied_at_turn = Some(ctx.turn_count);
@@ -5106,6 +5196,7 @@ where
                     phase: Some(crate::event::ExternalToolDeltaPhase::Pending),
                     persisted: false,
                     detail: Some(body),
+                    confinement_refusal: None,
                     pending_sources: pending_servers,
                 },
             )]
@@ -5737,8 +5828,22 @@ where
                 .filter(|choice| !choice.is_auto())
                 .cloned()
         };
-        let typed_provider_params =
+        let mut typed_provider_params =
             Some(effective_provider_params).filter(|params| !params.is_empty());
+        // The turn's reasoning preference, lowered onto this request's own
+        // copy against the model this attempt selected. Extraction is a
+        // separate tool-free request and keeps its baseline.
+        if !in_extraction
+            && let Some(event) = self.lower_turn_reasoning_preference(
+                self.request_model_profile(*ctx.controller_feedback)
+                    .as_ref(),
+                Some(ctx.turn_count),
+                None,
+                &mut typed_provider_params,
+            )
+        {
+            emit_phase_event!(self, ctx, event);
+        }
         Ok(CallingLlmGate::Continue(CallingLlmPrepared {
             in_extraction,
             assistant_message_id,
@@ -6870,7 +6975,9 @@ where
         // any other tool execution failure.
         let mut dispatch_results = dispatch_tool_calls_boxed(
             Arc::clone(&self.tools),
-            self.tool_dispatch_context.clone(),
+            self.tool_dispatch_context
+                .clone()
+                .with_operation_review(self.operation_review.clone()),
             self.tools_config.default_timeout,
             self.tools_config.tool_timeouts.clone(),
             self.tools_config.max_concurrent.max(1),
@@ -6922,35 +7029,46 @@ where
                 .and_then(|tool| tool.provenance.clone())
         };
 
-        let pre_tool_reports = futures::future::join_all(tool_calls.iter().map(|(tc, args)| {
-            self.execute_hooks(
-                HookInvocation {
-                    run_id: None,
-                    point: HookPoint::PreToolExecution,
-                    session_id: self.session.id().clone(),
-                    turn_number: Some(ctx.turn_count),
-                    prompt_input: None,
-                    error_report: None,
-                    error_class: None,
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: Some(HookToolCall {
-                        tool_use_id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        args: args.clone(),
-                        provenance: provenance_for_tool(tc.name.as_str()),
-                    }),
-                    tool_result: None,
-                    observation: None,
-                },
-                ctx.event_tx.as_ref(),
-            )
+        let mut collected = futures::future::join_all(tool_calls.iter().map(|(tc, args)| {
+            self.collect_hook_execution(HookInvocation {
+                run_id: None,
+                point: HookPoint::PreToolExecution,
+                session_id: self.session.id().clone(),
+                turn_number: Some(ctx.turn_count),
+                prompt_input: None,
+                error_report: None,
+                error_class: None,
+                llm_request: None,
+                llm_response: None,
+                tool_call: Some(HookToolCall {
+                    tool_use_id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    args: args.clone(),
+                    provenance: provenance_for_tool(tc.name.as_str()),
+                }),
+                tool_result: None,
+                observation: None,
+            })
         }))
         .await;
 
+        // Transfer every returned scheduling notice before event delivery or
+        // error processing can short-circuit this concurrently executed batch.
+        for execution in &mut collected {
+            self.append_collected_hook_notices(execution);
+        }
+        for execution in &mut collected {
+            self.emit_collected_hook_events(execution, ctx.event_tx.as_ref())
+                .await;
+        }
+
         for (tool_index, ((tc, _args), pre_tool_report)) in tool_calls
             .into_iter()
-            .zip(pre_tool_reports.into_iter())
+            .zip(
+                collected
+                    .into_iter()
+                    .map(|execution| execution.into_result()),
+            )
             .enumerate()
         {
             let pre_tool_report = match pre_tool_report {
@@ -7092,7 +7210,8 @@ where
                     if outcome.terminal_cause().is_some_and(|cause| {
                         cause.kind() == crate::ToolDispatchTerminalErrorKind::OperationObservationUnavailable
                     }) {
-                        deferred_failure = Some(crate::session::DeferredToolBatchFailureKind::OperationObservationUnavailable);
+                        // The first failure in batch order is the run's disposition.
+                        deferred_failure.get_or_insert(crate::session::DeferredToolBatchFailureKind::OperationObservationUnavailable);
                     }
                     outcome.clear_terminal_cause();
                     all_async_ops.extend(outcome.async_ops);
@@ -7120,7 +7239,7 @@ where
                 Err(error) => {
                     let (error, settlement_failures) = error.into_primary_and_settlement_failures();
                     if matches!(error, ToolError::OperationObservationUnavailable) {
-                        deferred_failure = Some(crate::session::DeferredToolBatchFailureKind::OperationObservationUnavailable);
+                        deferred_failure.get_or_insert(crate::session::DeferredToolBatchFailureKind::OperationObservationUnavailable);
                     }
                     crate::ops::terminal_tool_outcome_for_error(
                         tc.id.clone(),
@@ -7149,7 +7268,7 @@ where
             }
 
             let post_tool_report = self
-                .execute_turn_hooks(
+                .execute_hooks(
                     HookInvocation {
                         run_id: None,
                         point: HookPoint::PostToolExecution,
@@ -7171,16 +7290,76 @@ where
                         ),
                         observation: None,
                     },
-                    ctx.run_id,
-                    ctx.turn_count,
-                    ctx.event_tx,
+                    ctx.event_tx.as_ref(),
                 )
-                .await?;
+                .await;
 
-            if let Some(error) = post_tool_report.denial_error(HookPoint::PostToolExecution) {
-                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
-                    .await?;
-                return Err(error);
+            let publication_refusal = match post_tool_report {
+                Ok(report) => report.denial(HookPoint::PostToolExecution).map(|denial| {
+                    // The original decision was emitted by execute_hooks.
+                    // Do not expose withheld data again through hook text or
+                    // payload in the model-facing refusal.
+                    ToolError::HookDenied {
+                        denial: Box::new(crate::hooks::HookDenial {
+                            message: String::from(
+                                "Tool result publication was withheld; this does not undo any entered tool execution.",
+                            ),
+                            payload: None,
+                            ..denial
+                        }),
+                    }
+                }),
+                Err(AgentError::HookLaunchRefused {
+                    hook_id,
+                    reason: crate::hooks::HookFailureReason::ConfinementRefused { refusal },
+                }) => Some(ToolError::HookLaunchRefused {
+                    hook_id,
+                    point: HookPoint::PostToolExecution,
+                    refusal,
+                }),
+                Err(error) => {
+                    let Some(failure) =
+                        crate::session::DeferredHookInfrastructureFailure::from_agent_error(&error)
+                    else {
+                        self.terminalize_fatal_error(
+                            ctx.run_id,
+                            ctx.turn_count,
+                            ctx.event_tx,
+                            &error,
+                        )
+                        .await?;
+                        return Err(error);
+                    };
+                    // A mandatory hook failed after this tool entered. Withhold
+                    // its raw publication, let every entered sibling settle
+                    // through the normal commit, then end the run with this
+                    // exact hook error. Nothing is denied or replayed.
+                    deferred_failure.get_or_insert(
+                        crate::session::DeferredToolBatchFailureKind::PostToolHookInfrastructure(
+                            failure,
+                        ),
+                    );
+                    Some(ToolError::Other(String::from(
+                        "Tool result publication was withheld because a required post-tool hook failed; this does not undo any entered tool execution.",
+                    )))
+                }
+            };
+            if let Some(error) = publication_refusal {
+                let settlement_failures = std::mem::take(&mut tool_result.settlement_failures);
+                tool_result = crate::ops::terminal_tool_outcome_for_error(
+                    tc.id.clone(),
+                    error.with_settlement_failures(settlement_failures),
+                )
+                .result;
+                // Withhold this call's assistant content, not the already
+                // started async work or its non-transcript session effects.
+                // Every sibling still passes through its own PostTool hooks.
+                tool_session_effects.retain(|effect| {
+                    !matches!(
+                        effect,
+                        crate::ops::SessionEffect::AppendAssistantBlocks { .. }
+                    )
+                });
             }
 
             // Emit execution complete
@@ -13888,7 +14067,7 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_externalizes_inline_media_before_the_rewrite_edge_binds_it() {
-        // Regression for the 2026-09-22 HomeCore wedge (session parent-1,
+        // Regression for a 2026-09-22 production wedge (a downstream session,
         // meerkat 0.8.40): a user row carrying an inline image was retained
         // verbatim by a compaction rewrite, so the audit graph edge recorded
         // the row with inline bytes. The WholeBlob checkpoint then
@@ -14041,6 +14220,8 @@ mod tests {
                 }
                 Ok(HookExecutionReport {
                     started: vec![crate::hooks::HookId::new("observe-run-completed")],
+                    launch_refusals: Vec::new(),
+                    background_skips: Vec::new(),
                     outcomes: vec![HookOutcome {
                         hook_id: crate::hooks::HookId::new("observe-run-completed"),
                         point: HookPoint::RunCompleted,
@@ -14236,6 +14417,8 @@ mod tests {
                 // never began (e.g. it sat behind a saturated background queue).
                 Ok(HookExecutionReport {
                     started: vec![HookId::new("ran")],
+                    launch_refusals: Vec::new(),
+                    background_skips: Vec::new(),
                     outcomes: vec![HookOutcome {
                         hook_id: HookId::new("ran"),
                         point: HookPoint::RunStarted,
@@ -15213,6 +15396,153 @@ mod tests {
         }
         assert!(saw_run_started, "tap should receive RunStarted");
         assert!(saw_run_completed, "tap should receive RunCompleted");
+    }
+
+    /// #1823: a turn's reasoning preference lowers only that turn's request
+    /// copies, against the selected model's catalog row, and reports each
+    /// attempt. The next turn without one is the baseline again, and the
+    /// durable session identity never changes.
+    #[tokio::test]
+    async fn reasoning_preference_lowers_only_its_turn_and_never_the_session() {
+        use crate::lifecycle::run_primitive::{
+            OpenAiProviderTag, ProviderParamsOverride, ProviderTag, ReasoningBatchDisposition,
+            ReasoningEffort, ReasoningLoweringBaseline, ReasoningLoweringOutcome,
+        };
+        use crate::model_profile::capabilities::{EffortLevel, ModelCapabilities};
+        use crate::model_profile::test_catalog::{OPENAI_MODEL, TEST_CATALOG};
+
+        let row = TEST_CATALOG
+            .capabilities_for(crate::Provider::OpenAI, OPENAI_MODEL)
+            .expect("test openai row");
+        let capabilities: &'static [ModelCapabilities] = Box::leak(
+            TEST_CATALOG
+                .capabilities
+                .iter()
+                .map(|caps| {
+                    if caps.id == row.id {
+                        ModelCapabilities {
+                            supports_reasoning: true,
+                            effort_levels: &[
+                                EffortLevel::None,
+                                EffortLevel::Low,
+                                EffortLevel::Medium,
+                                EffortLevel::High,
+                            ],
+                            ..*caps
+                        }
+                    } else {
+                        *caps
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let catalog = crate::ModelCatalog {
+            capabilities,
+            ..*TEST_CATALOG
+        };
+        let registry = Arc::new(
+            crate::ModelRegistry::from_config(&crate::Config::default(), catalog)
+                .expect("registry"),
+        );
+        let baseline = || ProviderParamsOverride {
+            temperature: Some(0.2),
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let client = Arc::new(RecordingLlmClient::new());
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new()
+                .model(OPENAI_MODEL)
+                .provider_params(baseline())
+                .with_effective_model_registry(Arc::clone(&registry)),
+            explicit_hot_swap_session(OPENAI_MODEL),
+        )
+        .with_tool_visibility_owner(explicit_test_visibility_owner())
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+        agent.config.max_turns = Some(1);
+        let identity_before = agent
+            .session()
+            .session_metadata()
+            .expect("metadata")
+            .llm_identity();
+
+        agent.set_active_turn_request_reasoning(Some(ReasoningBatchDisposition::Apply(
+            EffortLevel::Low,
+        )));
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("voice turn".into(), tx)
+            .await
+            .expect("preferred turn");
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        agent.run("typed turn".into()).await.expect("plain turn");
+
+        let run_started_requests = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::event::AgentEvent::RunStarted {
+                    request_reasoning, ..
+                } => Some(*request_reasoning),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            run_started_requests,
+            vec![Some(ReasoningBatchDisposition::Apply(EffortLevel::Low))],
+            "RunStarted carries the request, never the applied value"
+        );
+        let seen = client.seen_params();
+        assert_eq!(seen.len(), 2);
+        let effort_of = |params: &Option<ProviderParamsOverride>| match params
+            .as_ref()
+            .and_then(|params| params.provider_tag.as_ref())
+        {
+            Some(ProviderTag::OpenAi(tag)) => tag.reasoning_effort,
+            _ => None,
+        };
+        assert_eq!(effort_of(&seen[0]), Some(ReasoningEffort::Low));
+        assert_eq!(
+            seen[0].as_ref().and_then(|params| params.temperature),
+            Some(0.2),
+            "unrelated knobs stay"
+        );
+        assert_eq!(seen[1], Some(baseline()), "the next turn is the baseline");
+        let lowered = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::event::AgentEvent::RequestReasoningLowered {
+                    requested,
+                    baseline,
+                    outcome,
+                    model,
+                    ..
+                } => Some((*requested, *baseline, *outcome, model.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lowered,
+            vec![(
+                ReasoningBatchDisposition::Apply(EffortLevel::Low),
+                ReasoningLoweringBaseline::Explicit(EffortLevel::High),
+                Some(ReasoningLoweringOutcome::Applied(EffortLevel::Low)),
+                Some(OPENAI_MODEL.to_string()),
+            )]
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata")
+                .llm_identity(),
+            identity_before,
+            "the preference never reaches the durable identity"
+        );
     }
 
     #[tokio::test]
@@ -16362,6 +16692,8 @@ mod tests {
                     if let Some(decision) = &self.denial {
                         return Ok(HookExecutionReport {
                             started: vec![HookId::new("policy-command-hook")],
+                            launch_refusals: Vec::new(),
+                            background_skips: Vec::new(),
                             outcomes: vec![HookOutcome {
                                 hook_id: HookId::new("policy-command-hook"),
                                 point: HookPoint::PreToolExecution,
@@ -17462,6 +17794,315 @@ mod tests {
         assert_eq!(
             fresh.usage.input_tokens, 2500,
             "the session total keeps both"
+        );
+    }
+
+    /// A mixed callback batch whose entered tool's mandatory PostTool hook
+    /// fails for infrastructure reasons stages that exact typed failure with
+    /// the completed siblings. Applying the callback result and resuming
+    /// commits the whole batch once, keeps the affected call's raw result and
+    /// assistant content withheld, and ends with the original hook error,
+    /// with no further model call, replay or duplicate effect.
+    #[tokio::test]
+    async fn callback_batch_with_post_tool_hook_infrastructure_failure_resumes_to_the_exact_error()
+    {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookId, HookInvocation, HookPoint,
+        };
+
+        const RAW_RESULT: &str = "guarded-raw-result-canary";
+        const GUARDED_EFFECT: &str = "guarded withheld effect";
+        const SIBLING_EFFECT: &str = "sibling effect";
+        const HOOK_ID: &str = "post-tool-guardrail";
+        const HOOK_FAILURE: &str = "guardrail runtime crashed";
+
+        struct Dispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            entered: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for Dispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.entered.lock().unwrap().push(call.id.to_string());
+                let (result, effect) = match call.name {
+                    "ask_user" => {
+                        return Err(ToolError::callback_pending(
+                            call.name,
+                            serde_json::json!({ "question": "approve?" }),
+                        ));
+                    }
+                    "guarded" => (RAW_RESULT, GUARDED_EFFECT),
+                    _ => ("sibling complete", SIBLING_EFFECT),
+                };
+                Ok(crate::ops::ToolDispatchOutcome::new(
+                    ToolResult::new(call.id.to_string(), result.to_string(), false),
+                    Vec::new(),
+                    vec![crate::ops::SessionEffect::AppendAssistantBlocks {
+                        blocks: vec![AssistantBlock::Text {
+                            text: effect.to_string(),
+                            meta: None,
+                        }],
+                    }],
+                ))
+            }
+        }
+
+        struct Client {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for Client {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let call = |id: &str, name: &str| AssistantBlock::ToolUse {
+                    id: id.to_string(),
+                    name: name.into(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                };
+                Ok(super::LlmStreamResult::new(
+                    vec![
+                        call("callback-first", "ask_user"),
+                        call("guarded-second", "guarded"),
+                        call("sibling-third", "do_work"),
+                    ],
+                    StopReason::ToolUse,
+                    normalized_test_usage(self, Usage::default()),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        struct Guardrail {
+            post_tool_calls: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl HookEngine for Guardrail {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::PostToolExecution {
+                    return Ok(HookExecutionReport::empty());
+                }
+                let result = invocation.tool_result.expect("actual post-tool result");
+                self.post_tool_calls
+                    .lock()
+                    .unwrap()
+                    .push(result.tool_use_id.clone());
+                if result.tool_use_id == "guarded-second" {
+                    return Err(HookEngineError::ExecutionFailed {
+                        hook_id: HookId::new(HOOK_ID),
+                        reason: HOOK_FAILURE.into(),
+                    });
+                }
+                Ok(HookExecutionReport::empty())
+            }
+        }
+
+        let tool = |name: &str| {
+            Arc::new(ToolDef::new(
+                name,
+                "mixed callback fixture tool",
+                serde_json::json!({"type": "object"}),
+            ))
+        };
+        let dispatcher = Arc::new(Dispatcher {
+            tools: Arc::from([tool("ask_user"), tool("guarded"), tool("do_work")]),
+            entered: Mutex::new(Vec::new()),
+        });
+        let client = Arc::new(Client {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let hooks = Arc::new(Guardrail {
+            post_tool_calls: Mutex::new(Vec::new()),
+        });
+        let mut agent = with_test_turn_state_handle(
+            AgentBuilder::new()
+                .with_ops_lifecycle(Arc::new(CompletionCursorRegistry::new()))
+                .with_hook_engine(hooks.clone()),
+        )
+        .build_standalone(client.clone(), dispatcher.clone(), Arc::new(NoopStore))
+        .await;
+
+        let (initial_tx, _initial_rx) = mpsc::channel(64);
+        let error = agent
+            .run_with_events("run mixed tools".to_string().into(), initial_tx)
+            .await
+            .expect_err("the callback continuation remains externally pending");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+
+        // The staged record carries the exact typed hook failure.
+        let staged = agent
+            .session()
+            .pending_callback_tool_batch()
+            .unwrap()
+            .expect("mixed callback batch is staged");
+        let expected_kind =
+            crate::session::DeferredToolBatchFailureKind::PostToolHookInfrastructure(
+                crate::session::DeferredHookInfrastructureFailure::ExecutionFailed {
+                    hook_id: HookId::new(HOOK_ID),
+                    reason: HOOK_FAILURE.into(),
+                },
+            );
+        assert_eq!(
+            staged
+                .deferred_failure
+                .as_ref()
+                .map(|failure| &failure.kind),
+            Some(&expected_kind)
+        );
+        assert_eq!(
+            staged
+                .completed_results
+                .iter()
+                .map(|result| (result.tool_use_id.as_str(), result.is_error))
+                .collect::<Vec<_>>(),
+            [("guarded-second", true), ("sibling-third", false)]
+        );
+
+        let durable_session = serde_json::from_value(
+            serde_json::to_value(agent.session()).expect("staging serializes durably"),
+        )
+        .expect("staging restores durably");
+        *agent.session_mut() = durable_session;
+
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-first".to_string(),
+                "approved".to_string(),
+                false,
+            )])
+            .expect("the callback result publishes the complete staged batch");
+        agent.set_runtime_execution_kind(Some(
+            crate::lifecycle::RuntimeExecutionKind::ResumePending,
+        ));
+        let (resume_tx, mut resume_rx) = mpsc::channel(64);
+        match agent
+            .run_pending_with_events(resume_tx)
+            .await
+            .expect_err("the resumed batch ends with the retained hook failure")
+        {
+            AgentError::HookExecutionFailed { hook_id, reason } => {
+                assert_eq!(hook_id, HookId::new(HOOK_ID));
+                assert_eq!(reason, HOOK_FAILURE);
+            }
+            other => panic!("expected the exact hook infrastructure class, got {other:?}"),
+        }
+        let resume_events = std::iter::from_fn(|| resume_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            resume_events
+                .iter()
+                .filter(|event| matches!(event, crate::event::AgentEvent::RunFailed { .. }))
+                .count(),
+            1
+        );
+
+        assert_eq!(
+            client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the infrastructure failure ends the run without another model call"
+        );
+        let mut entered = dispatcher.entered.lock().unwrap().clone();
+        entered.sort();
+        assert_eq!(
+            entered,
+            ["callback-first", "guarded-second", "sibling-third"],
+            "each body enters once: no replay"
+        );
+        assert_eq!(
+            *hooks.post_tool_calls.lock().unwrap(),
+            ["guarded-second", "sibling-third"],
+            "each completed result passes the PostTool hook once"
+        );
+        assert!(
+            agent
+                .session()
+                .deferred_callback_continuation()
+                .unwrap()
+                .is_none(),
+            "the retained failure settles its callback receipt"
+        );
+
+        let messages = agent.session().messages();
+        let results: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            ["callback-first", "guarded-second", "sibling-third"],
+            "the whole batch commits once, in its original order"
+        );
+        assert_eq!(results[0].text_content(), "approved");
+        assert!(results[1].is_error);
+        assert!(
+            results[1]
+                .text_content()
+                .contains("required post-tool hook failed")
+        );
+        assert_eq!(results[2].text_content(), "sibling complete");
+        let effect_count = |text: &str| {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::BlockAssistant(message) => Some(&message.blocks),
+                    _ => None,
+                })
+                .flatten()
+                .filter(|block| matches!(block, AssistantBlock::Text { text: t, .. } if t == text))
+                .count()
+        };
+        assert_eq!(
+            effect_count(SIBLING_EFFECT),
+            1,
+            "the sibling effect commits exactly once"
+        );
+        assert_eq!(
+            effect_count(GUARDED_EFFECT),
+            0,
+            "the affected call's assistant content stays withheld"
+        );
+        let serialized = serde_json::to_string(messages).unwrap();
+        assert!(
+            !serialized.contains(RAW_RESULT),
+            "the raw result stays withheld"
+        );
+        assert!(
+            !serialized.contains(HOOK_FAILURE),
+            "the hook's private reason stays out of the transcript"
         );
     }
 
@@ -18745,141 +19386,1048 @@ mod tests {
         }
     }
 
-    struct DenyPostToolHook;
+    // Pure forwarding wrapper: registrations are recorded only after the real
+    // generated turn owner accepts them, with its resulting snapshot checked.
+    // It supplies no lifecycle verdict, async completion, or barrier receipt.
+    struct PostToolRetentionHandle {
+        inner: Arc<crate::agent::test_turn_state_handle::TestTurnStateHandle>,
+        registrations: Mutex<Vec<(RunId, Vec<crate::ops::AsyncOpRef>)>>,
+    }
 
-    #[async_trait]
-    impl crate::hooks::HookEngine for DenyPostToolHook {
-        async fn execute(
+    impl crate::handles::TurnStateHandle for PostToolRetentionHandle {
+        fn apply_turn_input(
             &self,
-            invocation: crate::hooks::HookInvocation,
-            _overrides: Option<&crate::config::HookRunOverrides>,
-        ) -> Result<crate::hooks::HookExecutionReport, crate::hooks::HookEngineError> {
-            if invocation.point == crate::hooks::HookPoint::PostToolExecution {
-                return Ok(crate::hooks::HookExecutionReport {
-                    decision: Some(crate::hooks::HookDecision::deny(
-                        crate::hooks::HookId::new("deny-image-tool"),
-                        crate::hooks::HookReasonCode::PolicyViolation,
-                        "blocked".to_string(),
-                        None,
-                    )),
-                    ..Default::default()
-                });
+            input: crate::turn_execution_authority::TurnExecutionInput,
+        ) -> Result<
+            Vec<crate::turn_execution_authority::TurnExecutionEffect>,
+            crate::handles::DslTransitionError,
+        > {
+            let registration = match &input {
+                crate::turn_execution_authority::TurnExecutionInput::RegisterPendingOps {
+                    run_id,
+                    op_refs,
+                    barrier_operation_ids,
+                    has_barrier_ops,
+                } => {
+                    assert!(barrier_operation_ids.is_empty());
+                    assert!(
+                        !*has_barrier_ops,
+                        "this fixture creates only a detached obligation"
+                    );
+                    Some((run_id.clone(), op_refs.clone()))
+                }
+                _ => None,
+            };
+            let effects = self.inner.apply_turn_input(input)?;
+            if let Some((run_id, op_refs)) = registration {
+                let snapshot = self.inner.snapshot();
+                assert_eq!(snapshot.active_run_id.as_ref(), Some(&run_id));
+                assert_eq!(snapshot.pending_op_refs, op_refs.iter().cloned().collect());
+                assert!(snapshot.barrier_operation_ids.is_empty());
+                assert!(!snapshot.has_barrier_ops);
+                self.registrations.lock().unwrap().push((run_id, op_refs));
             }
-            Ok(Default::default())
+            Ok(effects)
+        }
+
+        fn start_conversation_run(
+            &self,
+            run_id: RunId,
+            primitive_kind: TurnPrimitiveKind,
+            admitted_content_shape: ContentShape,
+            vision_enabled: bool,
+            image_tool_results_enabled: bool,
+            max_extraction_retries: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_conversation_run(
+                run_id,
+                primitive_kind,
+                admitted_content_shape,
+                vision_enabled,
+                image_tool_results_enabled,
+                max_extraction_retries,
+            )
+        }
+
+        fn start_immediate_append(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_immediate_append(run_id)
+        }
+
+        fn primitive_applied(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.primitive_applied(run_id)
+        }
+
+        fn llm_returned_tool_calls(
+            &self,
+            run_id: RunId,
+            tool_count: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.llm_returned_tool_calls(run_id, tool_count)
+        }
+
+        fn llm_returned_terminal(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.llm_returned_terminal(run_id)
+        }
+
+        fn register_pending_ops(
+            &self,
+            run_id: RunId,
+            op_refs: std::collections::BTreeSet<crate::ops::AsyncOpRef>,
+            barrier_operation_ids: std::collections::BTreeSet<crate::ops::OperationId>,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner
+                .register_pending_ops(run_id, op_refs, barrier_operation_ids)
+        }
+
+        fn tool_calls_resolved(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.tool_calls_resolved(run_id)
+        }
+
+        fn ops_barrier_satisfied(
+            &self,
+            run_id: RunId,
+            operation_ids: std::collections::BTreeSet<crate::ops::OperationId>,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.ops_barrier_satisfied(run_id, operation_ids)
+        }
+
+        fn boundary_continue(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.boundary_continue(run_id)
+        }
+
+        fn boundary_complete(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.boundary_complete(run_id)
+        }
+
+        fn enter_extraction(
+            &self,
+            run_id: RunId,
+            max_retries: u32,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.enter_extraction(run_id, max_retries)
+        }
+
+        fn extraction_start(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_start(run_id)
+        }
+
+        fn extraction_validation_passed(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_validation_passed(run_id)
+        }
+
+        fn extraction_validation_failed(
+            &self,
+            run_id: RunId,
+            error: String,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_validation_failed(run_id, error)
+        }
+
+        fn extraction_failed(
+            &self,
+            run_id: RunId,
+            error: String,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_failed(run_id, error)
+        }
+
+        fn recoverable_failure(
+            &self,
+            run_id: RunId,
+            retry: crate::retry::LlmRetrySchedule,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.recoverable_failure(run_id, retry)
+        }
+
+        fn fatal_failure(
+            &self,
+            run_id: RunId,
+            failure: TurnFailureSource,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.fatal_failure(run_id, failure)
+        }
+
+        fn retry_requested(
+            &self,
+            run_id: RunId,
+            retry_attempt: u32,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.retry_requested(run_id, retry_attempt)
+        }
+
+        fn cancel_now(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.cancel_now(run_id)
+        }
+
+        fn request_cancel_after_boundary(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.request_cancel_after_boundary(run_id)
+        }
+
+        fn cancellation_observed(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.cancellation_observed(run_id)
+        }
+
+        fn acknowledge_terminal(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.acknowledge_terminal(run_id)
+        }
+
+        fn turn_limit_reached(
+            &self,
+            run_id: RunId,
+            turn_count: u64,
+            max_turns: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.turn_limit_reached(run_id, turn_count, max_turns)
+        }
+
+        fn budget_exhausted(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.budget_exhausted(run_id)
+        }
+
+        fn time_budget_exceeded(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.time_budget_exceeded(run_id)
+        }
+
+        fn force_cancel_no_run(&self) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.force_cancel_no_run()
+        }
+
+        fn run_completed(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_completed(run_id)
+        }
+
+        fn run_failed(
+            &self,
+            run_id: RunId,
+            reason: crate::turn_execution_authority::TurnFailureReason,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_failed(run_id, reason)
+        }
+
+        fn run_cancelled(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_cancelled(run_id)
+        }
+
+        fn snapshot(&self) -> crate::handles::TurnStateSnapshot {
+            self.inner.snapshot()
         }
     }
 
-    #[tokio::test]
-    async fn post_tool_denial_terminalizes_without_fabricated_tool_result() {
-        let client = Arc::new(ImageEffectClient {
-            call_count: Mutex::new(0),
-        });
-        let tools = Arc::new(ImageEffectDispatcher::new());
+    // Core Agent/client continuation only: generated test owners retain session
+    // effects and detached-op registration, not native work or OS authority.
+    // The configured settlement gate emits real diagnostics after both bodies
+    // enter. No barrier completion or detached worker execution is simulated.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PostToolFailureMode {
+        Denied,
+        LaunchRefused,
+        /// A mandatory hook's runtime failed after the tool entered.
+        InfrastructureFailed,
+    }
+
+    async fn assert_post_tool_refusal_preserves_entered_sibling(mode: PostToolFailureMode) {
+        let launch_refused = mode == PostToolFailureMode::LaunchRefused;
+        let infrastructure_failed = mode == PostToolFailureMode::InfrastructureFailed;
+        use crate::hooks::{
+            HookDecision, HookEngine, HookEngineError, HookExecutionReport, HookFailureReason,
+            HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode,
+        };
+
+        const RAW_RESULT: &str = "post-tool-withheld-result-canary";
+        const SIBLING_RESULT: &str = "permitted sibling result";
+        const SIBLING_EFFECT: &str = "permitted sibling committed effect";
+        const HOOK_ID: &str = "deny-image-tool";
+        const HOOK_FAILURE: &str = "guardrail runtime crashed";
+
+        struct Client {
+            inner: ImageEffectClient,
+            requests: Mutex<Vec<Vec<Message>>>,
+            seen_tools: Mutex<Vec<Vec<String>>>,
+            authority: Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>,
+            expected_authority: crate::service::MobToolAuthorityContext,
+            turn: Arc<PostToolRetentionHandle>,
+            detached_op: crate::ops::AsyncOpRef,
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for Client {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
+                max_tokens: u32,
+                temperature: Option<f32>,
+                provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                let request_index = {
+                    let mut requests = self.requests.lock().unwrap();
+                    let index = requests.len();
+                    requests.push(messages.to_vec());
+                    index
+                };
+                self.seen_tools
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+                if request_index == 1 {
+                    let registrations = self.turn.registrations.lock().unwrap();
+                    assert_eq!(registrations.len(), 1);
+                    assert_eq!(
+                        registrations[0].1,
+                        vec![self.detached_op.clone()],
+                        "the turn owner retains the detached obligation before model continuation"
+                    );
+                    assert_eq!(
+                        *self.authority.read().unwrap(),
+                        self.expected_authority,
+                        "the entered tool's generated authority effect precedes model continuation"
+                    );
+                }
+                let response = self
+                    .inner
+                    .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                    .await?;
+                let (mut blocks, stop_reason, usage) = response.into_parts();
+                if stop_reason == StopReason::ToolUse {
+                    blocks.push(AssistantBlock::ToolUse {
+                        id: "sibling-call".into(),
+                        name: "sibling_effect".into(),
+                        args: serde_json::value::RawValue::from_string("{}".into()).unwrap(),
+                        meta: None,
+                    });
+                }
+                Ok(super::LlmStreamResult::new(blocks, stop_reason, usage))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        struct Dispatcher {
+            image: ImageEffectDispatcher,
+            deferred: DeferredLoadDispatcher,
+            entered: Arc<Mutex<Vec<String>>>,
+            authority: crate::service::MobToolAuthorityContext,
+            detached_op: crate::ops::AsyncOpRef,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for Dispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                let mut tools = self.image.tools().to_vec();
+                tools.push(Arc::new(ToolDef::new(
+                    "sibling_effect",
+                    "returns the permitted sibling session effect",
+                    serde_json::json!({"type": "object"}),
+                )));
+                tools.extend(self.deferred.tools().iter().cloned());
+                tools.into()
+            }
+
+            fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+                self.deferred.tool_catalog_capabilities()
+            }
+
+            fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+                let mut catalog: Vec<_> = self
+                    .tools()
+                    .iter()
+                    .filter(|tool| matches!(tool.name.as_str(), "image_effect" | "sibling_effect"))
+                    .map(|tool| crate::ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+                    .collect();
+                catalog.extend(self.deferred.tool_catalog().iter().cloned());
+                catalog.into()
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.entered.lock().unwrap().push(call.id.to_string());
+                if call.name == "image_effect" {
+                    let id = call.id.to_string();
+                    let mut outcome = self.image.dispatch(call).await?;
+                    outcome.result = ToolResult::new(id, RAW_RESULT.into(), false);
+                    outcome.async_ops.push(self.detached_op.clone());
+                    outcome.session_effects.extend([
+                        crate::ops::SessionEffect::ReplaceMobToolAuthorityContext {
+                            authority_context: self.authority.clone(),
+                        },
+                        crate::ops::SessionEffect::RequestDeferredTools {
+                            authorities: vec![crate::DeferredToolLoadAuthority::new(
+                                "deferred_tool",
+                                crate::ToolVisibilityWitness {
+                                    last_seen_provenance: Some(crate::ToolProvenance {
+                                        kind: crate::ToolSourceKind::Callback,
+                                        source_id: "test".into(),
+                                    }),
+                                },
+                            )],
+                        },
+                    ]);
+                    return Ok(outcome);
+                }
+                assert_eq!(call.name, "sibling_effect");
+                Ok(crate::ops::ToolDispatchOutcome::new(
+                    ToolResult::new(call.id.into(), SIBLING_RESULT.into(), false),
+                    Vec::new(),
+                    vec![crate::ops::SessionEffect::AppendAssistantBlocks {
+                        blocks: vec![AssistantBlock::Text {
+                            text: SIBLING_EFFECT.into(),
+                            meta: None,
+                        }],
+                    }],
+                ))
+            }
+        }
+
+        struct Guardrail {
+            launch_refused: bool,
+            infrastructure_failed: bool,
+            entered: Arc<Mutex<Vec<String>>>,
+            invocations: Mutex<Vec<HookInvocation>>,
+        }
+
+        #[async_trait]
+        impl HookEngine for Guardrail {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                self.invocations.lock().unwrap().push(invocation.clone());
+                if invocation.point != HookPoint::PostToolExecution {
+                    return Ok(HookExecutionReport::empty());
+                }
+                let result = invocation
+                    .tool_result
+                    .as_ref()
+                    .expect("actual post-tool result");
+                let mut entered = self.entered.lock().unwrap().clone();
+                entered.sort();
+                assert_eq!(entered, ["image-call", "sibling-call"]);
+                // The prerequisite is permanent for this raw result. A fix may
+                // not disable the hook, release the withheld image, or replay
+                // either entered body to obtain an easier result.
+                let blocked = matches!(
+                    result.content_blocks.as_slice(),
+                    [ContentBlock::Text { text }] if text == RAW_RESULT
+                );
+                let hook_id = HookId::new(if blocked {
+                    HOOK_ID
+                } else {
+                    "sibling-guardrail"
+                });
+                if blocked && self.infrastructure_failed {
+                    // Mandatory hook runtime failure after both bodies entered.
+                    return Err(HookEngineError::ExecutionFailed {
+                        hook_id,
+                        reason: HOOK_FAILURE.into(),
+                    });
+                }
+                if blocked && self.launch_refused {
+                    // Mandatory hook failure, not an Observe launch-refusal report.
+                    return Err(HookEngineError::LaunchRefused {
+                        hook_id,
+                        reason: HookFailureReason::ConfinementRefused {
+                            refusal: crate::confinement::ConfinementRefusal::BackendUnavailable,
+                        },
+                    });
+                }
+                let decision = if blocked {
+                    HookDecision::deny(
+                        hook_id.clone(),
+                        HookReasonCode::PolicyViolation,
+                        format!("result publication blocked: {RAW_RESULT}"),
+                        Some(serde_json::json!({"withheld_result": RAW_RESULT})),
+                    )
+                } else {
+                    HookDecision::Allow
+                };
+                Ok(HookExecutionReport {
+                    started: vec![hook_id.clone()],
+                    outcomes: vec![HookOutcome {
+                        hook_id,
+                        point: HookPoint::PostToolExecution,
+                        priority: 0,
+                        registration_index: 0,
+                        decision: Some(decision.clone()),
+                        failure_reason: None,
+                        duration_ms: None,
+                    }],
+                    decision: Some(decision),
+                    ..HookExecutionReport::empty()
+                })
+            }
+        }
+
+        let entered = Arc::new(Mutex::new(Vec::new()));
+        let initial_authority = crate::service::MobToolAuthorityContext::generated_for_test(
+            crate::service::OpaquePrincipalToken::new("post-tool-before"),
+            false,
+            false,
+            false,
+            Default::default(),
+            Default::default(),
+            None,
+            None,
+        );
+        let expected_authority = crate::service::MobToolAuthorityContext::generated_for_test(
+            crate::service::OpaquePrincipalToken::new("post-tool-retained"),
+            true,
+            false,
+            false,
+            ["retained-mob".to_string()].into_iter().collect(),
+            Default::default(),
+            None,
+            None,
+        );
+        let authority = Arc::new(std::sync::RwLock::new(initial_authority));
+        let detached_op = crate::ops::AsyncOpRef::detached(crate::ops::OperationId::new());
         let turn_handle =
             Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let recording_handle = Arc::new(PostToolRetentionHandle {
+            inner: Arc::clone(&turn_handle),
+            registrations: Mutex::new(Vec::new()),
+        });
+        let client = Arc::new(Client {
+            inner: ImageEffectClient {
+                call_count: Mutex::new(0),
+            },
+            requests: Mutex::new(Vec::new()),
+            seen_tools: Mutex::new(Vec::new()),
+            authority: Arc::clone(&authority),
+            expected_authority: expected_authority.clone(),
+            turn: Arc::clone(&recording_handle),
+            detached_op: detached_op.clone(),
+        });
+        let tools = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(Dispatcher {
+                    image: ImageEffectDispatcher::new(),
+                    deferred: DeferredLoadDispatcher::new(),
+                    entered: Arc::clone(&entered),
+                    authority: expected_authority.clone(),
+                    detached_op: detached_op.clone(),
+                }),
+                crate::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_dispatch_admission(Arc::new(AlwaysFailsSettlement)),
+        );
+        let hooks = Arc::new(Guardrail {
+            launch_refused,
+            infrastructure_failed,
+            entered: Arc::clone(&entered),
+            invocations: Mutex::new(Vec::new()),
+        });
+        // Session effects commit into canonical build state, which a real
+        // session carries; the fixture seeds it as the other effect tests do.
+        let mut session = crate::Session::new();
+        session
+            .set_build_state(crate::SessionBuildState::default())
+            .expect("test session build state should serialize");
         let mut agent = AgentBuilder::new()
-            .with_turn_state_handle(turn_handle.clone())
+            .resume_session(session)
+            .with_turn_state_handle(recording_handle.clone())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
             .with_runtime_execution_kind_for_test(
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
-            .with_hook_engine(Arc::new(DenyPostToolHook))
+            .with_hook_engine(hooks.clone())
             .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
+        agent.set_mob_authority_handle(Arc::clone(&authority));
 
-        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
-        let err = agent
-            .run_with_events("prompt".to_string().into(), tx)
-            .await
-            .expect_err("PostToolExecution denial should fail the run");
-        assert!(matches!(
-            err,
-            AgentError::HookDenied {
-                point: crate::hooks::HookPoint::PostToolExecution,
-                ..
-            }
-        ));
-        assert_eq!(
-            *client.call_count.lock().unwrap(),
-            1,
-            "post-tool denial should not continue into a follow-up LLM turn"
-        );
-        assert!(
-            !agent
-                .session()
-                .messages()
-                .iter()
-                .any(|message| matches!(message, Message::ToolResults { .. })),
-            "post-tool denial must not fabricate a transcript ToolResult"
-        );
-        assert!(
-            !agent.session().messages().iter().any(|message| matches!(
-                message,
-                Message::BlockAssistant(blocks)
-                    if blocks
-                        .blocks
-                        .iter()
-                        .any(|block| matches!(block, AssistantBlock::Image { .. }))
-            )),
-            "hook-denied tool session effects must not append assistant image blocks"
-        );
-
-        let mut saw_run_failed = false;
-        let mut saw_typed_post_tool_failure = false;
-        let mut saw_success_like_event = false;
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(256);
+        let run = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            agent.run_with_events("call both tools".to_string().into(), tx),
+        )
+        .await
+        .expect("post-tool refusal must not park the core Agent");
+        let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            match event {
-                crate::event::AgentEvent::RunFailed { error_report, .. } => {
-                    saw_run_failed = true;
-                    saw_typed_post_tool_failure = error_report.class
-                        == crate::event::AgentErrorClass::Hook
-                        && matches!(
-                            error_report.reason.as_ref(),
-                            Some(crate::event::AgentErrorReason::HookDenied {
-                                hook_id: Some(hook_id),
-                                point: crate::hooks::HookPoint::PostToolExecution,
-                                reason_code: crate::hooks::HookReasonCode::PolicyViolation,
-                            }) if hook_id == &crate::hooks::HookId::new("deny-image-tool")
-                        );
+            events.push(event);
+        }
+        let mut bodies = entered.lock().unwrap().clone();
+        bodies.sort();
+        assert_eq!(
+            bodies,
+            ["image-call", "sibling-call"],
+            "each body enters once"
+        );
+        // A local refusal continues with model feedback; a hook
+        // infrastructure failure ends the run with its exact class once the
+        // entered siblings settled, with no further model call.
+        let model_calls: usize = if infrastructure_failed { 1 } else { 2 };
+        if infrastructure_failed {
+            match run.expect_err("a mandatory hook infrastructure failure ends the run") {
+                AgentError::HookExecutionFailed { hook_id, reason } => {
+                    assert_eq!(hook_id, HookId::new(HOOK_ID));
+                    assert_eq!(reason, HOOK_FAILURE);
                 }
-                crate::event::AgentEvent::RunCompleted { .. }
-                | crate::event::AgentEvent::TurnCompleted { .. }
-                | crate::event::AgentEvent::ToolExecutionCompleted { .. }
-                | crate::event::AgentEvent::ToolResultReceived { .. } => {
-                    saw_success_like_event = true;
+                other => panic!("expected the exact hook infrastructure class, got {other:?}"),
+            }
+        } else {
+            let result = run.expect("a refused post-tool hook must not terminate the run");
+            assert_eq!(result.text, "done");
+            assert_eq!(result.turns, 2);
+        }
+        assert_eq!(
+            *client.inner.call_count.lock().unwrap(),
+            u32::try_from(model_calls).unwrap()
+        );
+        let seen_tools = client.seen_tools.lock().unwrap();
+        assert_eq!(seen_tools.len(), model_calls);
+        assert!(!seen_tools[0].iter().any(|name| name == "deferred_tool"));
+        if !infrastructure_failed {
+            assert!(
+                seen_tools[1].iter().any(|name| name == "deferred_tool"),
+                "the entered tool's deferred request reaches the next real model call"
+            );
+            assert!(
+                !seen_tools[1].iter().any(|name| name == "deferred_tool_two"),
+                "an unrelated deferred tool remains hidden"
+            );
+        }
+        let visibility = agent
+            .session()
+            .tool_visibility_state()
+            .unwrap()
+            .expect("generated visibility owner commits its projection");
+        let expected_deferred: std::collections::BTreeSet<_> =
+            [crate::ToolName::from("deferred_tool")]
+                .into_iter()
+                .collect();
+        if !infrastructure_failed {
+            assert_eq!(
+                visibility.active_requested_deferred_names,
+                expected_deferred
+            );
+        }
+        assert_eq!(
+            visibility.staged_requested_deferred_names, expected_deferred,
+            "the entered tool's non-transcript deferred request is retained"
+        );
+        assert_eq!(*authority.read().unwrap(), expected_authority);
+        let stored_authority = agent
+            .session()
+            .build_state()
+            .unwrap()
+            .mob_tool_authority_context
+            .expect("retain the durable authority projection");
+        assert_eq!(
+            serde_json::to_value(stored_authority).unwrap(),
+            serde_json::to_value(&expected_authority).unwrap()
+        );
+        // Persistence is only a projection; the live generated handle above
+        // is the assertion about retained process authority.
+
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            model_calls,
+            "only a local refusal makes the next actual client call"
+        );
+        let mut transcripts = vec![agent.session().messages()];
+        if !infrastructure_failed {
+            transcripts.insert(0, &requests[1][..]);
+        }
+        for messages in transcripts {
+            let results: Vec<_> = messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::ToolResults { results, .. } => Some(results),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(
+                results
+                    .iter()
+                    .map(|result| result.tool_use_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["image-call", "sibling-call"],
+                "settle both original call IDs once, in their original order"
+            );
+            for result in &results {
+                assert_eq!(
+                    result.settlement_failures.len(),
+                    1,
+                    "sanitizing a result must retain its actual settlement diagnostic"
+                );
+                let failure = &result.settlement_failures[0];
+                assert_eq!(
+                    failure.admission_source,
+                    crate::ops::ToolDispatchAdmissionSource::ConfiguredGate
+                );
+                assert_eq!(failure.effect_kind, crate::LiveBridgeEffectKind::ExternalIo);
+                assert_eq!(
+                    failure.physical_outcome,
+                    crate::LiveBridgeEffectOutcome::Committed
+                );
+                assert_eq!(
+                    failure.failure_kind,
+                    crate::ops::ToolDispatchTerminalErrorKind::ExecutionFailed
+                );
+            }
+            assert!(
+                results[0].is_error,
+                "refuse result publication, not the entered body"
+            );
+            let feedback_text = results[0].text_content();
+            assert!(
+                feedback_text.len() <= 1024,
+                "this fixture needs only bounded feedback"
+            );
+            if infrastructure_failed {
+                assert!(
+                    feedback_text.contains("required post-tool hook failed"),
+                    "the withheld call settles with neutral feedback: {feedback_text}"
+                );
+                assert!(
+                    !feedback_text.contains("hook_denied") && !feedback_text.contains(HOOK_FAILURE),
+                    "no denial is synthesized and the hook's private reason stays out"
+                );
+            }
+            if mode == PostToolFailureMode::Denied {
+                let feedback: serde_json::Value = serde_json::from_str(&feedback_text)
+                    .expect("model receives the existing structured hook denial");
+                assert_eq!(feedback["error"], "hook_denied");
+                assert_eq!(
+                    feedback["data"],
+                    serde_json::json!({
+                        "hook_id": HOOK_ID,
+                        "point": "post_tool_execution",
+                        "reason_code": "policy_violation",
+                    })
+                );
+            }
+            if launch_refused {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&feedback_text) {
+                    assert_ne!(
+                        payload["error"], "confinement_refused",
+                        "the already-entered tool is not a pre-entry confinement refusal"
+                    );
+                }
+                // The hook did not enter; both tool bodies did. Require the
+                // hook identity and point in actual model-visible feedback,
+                // not a bare pre-entry tool ConfinementRefused. The future
+                // owner may use the tool result or an existing notice carrier.
+                let model_feedback = messages
+                    .iter()
+                    .flat_map(|message| match message {
+                        Message::ToolResults { results, .. } => results
+                            .iter()
+                            .map(ToolResult::text_content)
+                            .collect::<Vec<_>>(),
+                        Message::System(message) => vec![message.content.clone()],
+                        Message::SystemNotice(notice) => vec![notice.model_projection_text()],
+                        _ => Vec::new(),
+                    })
+                    .find(|text| {
+                        text.contains(HOOK_ID)
+                            && (text.contains("post_tool_execution")
+                                || text.contains("PostToolExecution"))
+                            && (text.contains("backend_unavailable")
+                                || text.contains(
+                                    &crate::confinement::ConfinementRefusal::BackendUnavailable
+                                        .to_string(),
+                                ))
+                    })
+                    .expect("next model context identifies the refused post-tool hook and reason");
+                assert!(
+                    model_feedback.len() <= 1024,
+                    "fixture feedback stays bounded"
+                );
+            }
+            assert!(!results[1].is_error);
+            assert_eq!(results[1].text_content(), SIBLING_RESULT);
+            let serialized = serde_json::to_string(messages).unwrap();
+            assert!(
+                !serialized.contains(RAW_RESULT),
+                "withhold the raw result even when the denial message/payload repeats it"
+            );
+            assert!(
+                !serialized.contains("private admission persistence failure"),
+                "settlement diagnostics must not expose their owner's private error"
+            );
+            assert!(
+                !serialized.contains("image-blob"),
+                "retain the old image-withholding oracle"
+            );
+            let sibling_effects = messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::BlockAssistant(message) => Some(&message.blocks),
+                    _ => None,
+                })
+                .flatten()
+                .filter(|block| {
+                    matches!(
+                        block, AssistantBlock::Text { text, .. } if text == SIBLING_EFFECT
+                    )
+                })
+                .count();
+            assert_eq!(
+                sibling_effects, 1,
+                "commit the actual sibling SessionEffect once"
+            );
+        }
+
+        let invocations = hooks.invocations.lock().unwrap();
+        let post_tools: Vec<_> = invocations
+            .iter()
+            .filter(|invocation| invocation.point == HookPoint::PostToolExecution)
+            .collect();
+        assert_eq!(
+            post_tools
+                .iter()
+                .filter(|invocation| {
+                    invocation.tool_result.as_ref().is_some_and(|result| {
+                        result.tool_use_id == "image-call" && result.text_projection() == RAW_RESULT
+                    })
+                })
+                .count(),
+            1,
+            "inspect the blocked original result exactly once"
+        );
+        assert_eq!(
+            post_tools
+                .iter()
+                .filter(|invocation| {
+                    invocation.tool_result.as_ref().is_some_and(|result| {
+                        result.tool_use_id == "sibling-call"
+                            && result.text_projection() == SIBLING_RESULT
+                    })
+                })
+                .count(),
+            1,
+            "the sibling still passes through the installed guardrail"
+        );
+        assert_eq!(
+            invocations
+                .iter()
+                .filter(|invocation| invocation.point == HookPoint::PreLlmRequest)
+                .count(),
+            model_calls
+        );
+        let run_id = post_tools[0]
+            .run_id
+            .as_ref()
+            .expect("core run identity is present");
+        assert_eq!(
+            *recording_handle.registrations.lock().unwrap(),
+            vec![(run_id.clone(), vec![detached_op])],
+            "exact detached obligation reaches the real turn owner under the original run"
+        );
+        assert!(
+            invocations
+                .iter()
+                .filter(|invocation| matches!(
+                    invocation.point,
+                    HookPoint::PreLlmRequest | HookPoint::PostToolExecution
+                ))
+                .all(|invocation| {
+                    invocation.run_id.as_ref() == Some(run_id)
+                        && &invocation.session_id == agent.session().id()
+                })
+        );
+
+        let mut starts = Vec::new();
+        let mut completions = Vec::new();
+        let mut received = Vec::new();
+        let mut refusals = 0;
+        let mut denials = 0;
+        let mut run_failures = 0;
+        let mut guarded_hook_failures = 0;
+        let mut guarded_hook_starts = 0;
+        let mut guarded_hook_completions = 0;
+        for event in &events {
+            match event {
+                crate::event::AgentEvent::RunFailed { .. } => {
+                    assert!(infrastructure_failed, "local refusal failed the run");
+                    run_failures += 1;
+                }
+                crate::event::AgentEvent::AssistantImageAppended { .. } => {
+                    panic!("post-tool refusal published the withheld image")
+                }
+                crate::event::AgentEvent::ToolExecutionStarted { id, .. } => {
+                    starts.push(id.as_str());
+                }
+                crate::event::AgentEvent::ToolExecutionCompleted { id, is_error, .. } => {
+                    assert_eq!(*is_error, id == "image-call");
+                    completions.push(id.as_str());
+                }
+                crate::event::AgentEvent::ToolResultReceived { id, is_error, .. } => {
+                    assert_eq!(*is_error, id == "image-call");
+                    received.push(id.as_str());
+                }
+                crate::event::AgentEvent::HookLaunchRefused {
+                    hook_id,
+                    point,
+                    reason,
+                    tool_use_id,
+                    ..
+                } => {
+                    assert_eq!(tool_use_id.as_deref(), Some("image-call"));
+                    assert_eq!(hook_id, &HookId::new(HOOK_ID));
+                    assert_eq!(*point, HookPoint::PostToolExecution);
+                    assert_eq!(
+                        reason,
+                        &HookFailureReason::ConfinementRefused {
+                            refusal: crate::confinement::ConfinementRefusal::BackendUnavailable,
+                        }
+                    );
+                    refusals += 1;
+                }
+                crate::event::AgentEvent::HookDenied {
+                    hook_id,
+                    point,
+                    reason_code,
+                    ..
+                } => {
+                    assert_eq!(hook_id, &HookId::new(HOOK_ID));
+                    assert_eq!(*point, HookPoint::PostToolExecution);
+                    assert_eq!(*reason_code, HookReasonCode::PolicyViolation);
+                    denials += 1;
+                }
+                crate::event::AgentEvent::HookStarted { hook_id, .. }
+                    if hook_id == &HookId::new(HOOK_ID) =>
+                {
+                    guarded_hook_starts += 1;
+                }
+                crate::event::AgentEvent::HookCompleted { hook_id, .. }
+                    if hook_id == &HookId::new(HOOK_ID) =>
+                {
+                    guarded_hook_completions += 1;
+                }
+                crate::event::AgentEvent::HookFailed { hook_id, .. }
+                    if hook_id == &HookId::new(HOOK_ID) =>
+                {
+                    assert!(infrastructure_failed, "no hook runtime failure occurred");
+                    guarded_hook_failures += 1;
                 }
                 _ => {}
             }
         }
-        assert!(saw_run_failed, "post-tool denial should emit RunFailed");
-        assert!(
-            saw_typed_post_tool_failure,
-            "post-tool denial should emit typed HookDenied terminal error shape"
+        starts.sort_unstable();
+        assert_eq!(
+            starts,
+            ["image-call", "sibling-call"],
+            "both tool bodies really entered"
         );
-        assert!(
-            !saw_success_like_event,
-            "post-tool denial should not emit success-like terminal or tool result events"
+        assert_eq!(completions, ["image-call", "sibling-call"]);
+        assert_eq!(received, ["image-call", "sibling-call"]);
+        let denied = mode == PostToolFailureMode::Denied;
+        assert_eq!(refusals, usize::from(launch_refused));
+        assert_eq!(denials, usize::from(denied));
+        // The failing hook entered (it started), then its runtime failed.
+        assert_eq!(
+            guarded_hook_starts,
+            usize::from(denied || infrastructure_failed)
+        );
+        assert_eq!(guarded_hook_failures, usize::from(infrastructure_failed));
+        assert_eq!(guarded_hook_completions, usize::from(denied));
+        assert_eq!(run_failures, usize::from(infrastructure_failed));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| { matches!(event, crate::event::AgentEvent::RunCompleted { .. }) })
+                .count(),
+            usize::from(!infrastructure_failed)
         );
         assert_eq!(
             turn_handle.run_failed_effect_count(),
-            1,
-            "post-tool denial should terminalize through failed authority exactly once"
+            usize::from(infrastructure_failed)
         );
         assert_eq!(
             turn_handle.run_completed_effect_count(),
-            0,
-            "post-tool denial must not publish completed authority effects"
+            usize::from(!infrastructure_failed)
         );
         let snapshot = agent
             .execution_snapshot()
             .expect("snapshot projects")
-            .expect("test turn-state handle should expose a snapshot");
-        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
-        assert_eq!(
-            snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed,
-            "post-tool denial should leave the canonical turn snapshot failed"
-        );
+            .expect("test turn-state snapshot");
+        let (phase, outcome) = if infrastructure_failed {
+            (crate::TurnPhase::Failed, crate::TurnTerminalOutcome::Failed)
+        } else {
+            (
+                crate::TurnPhase::Completed,
+                crate::TurnTerminalOutcome::Completed,
+            )
+        };
+        assert_eq!(snapshot.turn_phase, phase);
+        assert_eq!(snapshot.terminal_outcome, outcome);
+    }
+
+    #[tokio::test]
+    async fn post_tool_denial_settles_sibling_and_continues_without_replay() {
+        assert_post_tool_refusal_preserves_entered_sibling(PostToolFailureMode::Denied).await;
+    }
+
+    #[tokio::test]
+    async fn post_tool_launch_refusal_settles_sibling_and_continues_without_replay() {
+        assert_post_tool_refusal_preserves_entered_sibling(PostToolFailureMode::LaunchRefused)
+            .await;
+    }
+
+    /// A mandatory PostTool hook infrastructure failure withholds only the
+    /// affected raw publication: the entered sibling's result and effect, the
+    /// affected call's non-transcript effects, settlement diagnostics and
+    /// detached registration all settle, then the run ends with the exact
+    /// hook error. (Fails-old: the run ended before the batch committed.)
+    #[tokio::test]
+    async fn post_tool_hook_infrastructure_failure_settles_entered_siblings() {
+        assert_post_tool_refusal_preserves_entered_sibling(
+            PostToolFailureMode::InfrastructureFailed,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -22446,7 +23994,7 @@ mod tests {
         assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// HomeCore defect B: a provider stream that goes silent mid-turn must be
+    /// Field defect: a provider stream that goes silent mid-turn must be
     /// aborted by the inactivity watchdog and retried through the ordinary
     /// machine-gated recovery path — not hang the turn forever.
     #[tokio::test]
@@ -27035,6 +28583,10 @@ mod tests {
         struct FixturePrepared(PreparedAuthorizationBinding);
 
         impl PreparedOperationAuthorization for FixturePrepared {
+            fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+                crate::authorization::OperationReviewTier::R1
+            }
+
             fn check_current(
                 &self,
                 binding: &PreparedAuthorizationBinding,
@@ -27948,6 +29500,10 @@ mod tests {
             }
 
             impl PreparedOperationAuthorization for Prepared {
+                fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+                    crate::authorization::OperationReviewTier::R1
+                }
+
                 fn check_current(
                     &self,
                     binding: &PreparedAuthorizationBinding,

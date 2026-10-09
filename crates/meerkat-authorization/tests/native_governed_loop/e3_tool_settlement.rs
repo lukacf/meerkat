@@ -293,6 +293,7 @@ impl OperationPolicyOwner for HttpRecordOwner {
                 }],
                 restrictions: ExecutionRestrictions::unrestricted(),
                 expires_at_ms: now_ms + 60_000,
+                review_tier: meerkat_core::authorization::OperationReviewTier::R1,
             });
         }
         let AuthorizationOperation::Model(facts) = &binding.facts().operation else {
@@ -311,6 +312,7 @@ impl OperationPolicyOwner for HttpRecordOwner {
             operation_values: self.values(),
             restrictions: ExecutionRestrictions::unrestricted(),
             expires_at_ms: now_ms + 60_000,
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
 }

@@ -29,6 +29,9 @@
 //!   take a shared guard; offline migration takes the exclusive side and
 //!   waits for in-flight operations to drain. Stores built on this crate hold
 //!   no bespoke opener, which is what makes them fence-aware for free.
+//! - [`watch`]: the cross-process change watch over a database file and its
+//!   sidecars (coalesced notification ticks plus a bounded sweep; a hint,
+//!   never permission or custody).
 //! - [`error`]: the crate error type plus the storage-level error
 //!   classification (transient / corrupt) that store crates layer their
 //!   staleness semantics on top of. Adoption contract: store crates route
@@ -50,6 +53,8 @@ pub mod fence;
 pub mod json_column;
 pub mod ledger;
 pub mod profile;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod watch;
 
 pub use error::{
     BridgeEligibility, SqliteErrorClass, SqliteStoreError, classify_sqlite_error, is_busy_or_locked,

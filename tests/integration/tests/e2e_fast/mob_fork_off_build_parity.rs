@@ -1,7 +1,7 @@
 //! A fork-derived member is built exactly as its source, recorded at the
 //! provider boundary.
 //!
-//! HomeCore (run-32) saw a `fork_off` child of `domain:calendar` built by the
+//! A downstream app saw a `fork_off` child of `domain:calendar` built by the
 //! host with bare mob labels, no application context and no source reference:
 //! the host resolved a generic member, 92 of calendar's 150 tools. The child
 //! could not do calendar work, and because its `tools` block differed, it
@@ -10,7 +10,7 @@
 //! These lanes compose the production persistent session service behind a
 //! host build callback (`SessionAgentBuilder` wrapping the factory, the shape
 //! MobKit's `callback/build_agent` gateway has) that resolves tools from
-//! `app_context`, the way HomeCore does, and runs the members on the real
+//! `app_context`, the way a downstream app does, and runs the members on the real
 //! OpenAI Responses client against a loopback server that records every
 //! request body. A child and its source must send byte-identical `tools`
 //! arrays and the same transcript prefix up to the fork boundary, and a child

@@ -1,11 +1,11 @@
-//! #1102 (OB3 fleet-wide delivery stall): actor-loop isolation.
+//! #1102 (a production fleet-wide delivery stall): actor-loop isolation.
 //!
 //! One member's blocking work must not delay another member's dispatch or
 //! the actor liveness probe. These tests drive runtime-backed members over a
 //! persistent `MeerkatMachine` whose `RuntimeStore` is wrapped with two
 //! switches keyed by session: `fail_commit` makes the committed-boundary
 //! commit return `WriteFailed` (exactly the path that degrades a runtime to
-//! `ReloadRequired`, as OB3's continuity save did) and `park_admissions`
+//! `ReloadRequired`, as a production continuity save did) and `park_admissions`
 //! blocks the durable admission write. The mock session service adds a
 //! parkable live-session lookup (the pre-#1102 inline step that wedged the
 //! loop) and a slow `comms_runtime` for resume readiness.
@@ -68,7 +68,7 @@ impl FaultInjectingRuntimeStore {
     }
 
     /// Park every committed-boundary commit for `session_id` until
-    /// [`Self::release_commits`], then let it succeed. Models OB3's real
+    /// [`Self::release_commits`], then let it succeed. Models the production
     /// trigger: a 30 s HTTP wait on a large session save that had in fact
     /// committed server-side.
     fn park_commits(&self, session_id: &SessionId) {
@@ -123,7 +123,7 @@ impl FaultInjectingRuntimeStore {
 
     /// Make every committed-boundary commit for `session_id` fail with
     /// `WriteFailed`, which the persistent driver converts into
-    /// `mark_durability_reload_required` (OB3's path).
+    /// `mark_durability_reload_required` (the production path).
     fn fail_commit(&self, session_id: &SessionId, enabled: bool) {
         let runtime_id = LogicalRuntimeId::for_session(session_id);
         let mut flagged = self.fail_commit.lock().expect("fail_commit mutex");
@@ -655,7 +655,7 @@ fn turn_driven_definition() -> MobDefinition {
         .as_inline_mut()
         .unwrap();
     worker.runtime_mode = crate::MobRuntimeMode::TurnDriven;
-    // Deliveries in these tests are external (the OB3 console path).
+    // Deliveries in these tests are external (the operator console path).
     worker.external_addressable = true;
     definition
 }
@@ -1009,7 +1009,7 @@ async fn wedged_member_readiness_does_not_delay_peer_admissions() {
     }
 }
 
-/// OB3 shape: member 0's runtime is durability-degraded (`fail_commit` on
+/// Production shape: member 0's runtime is durability-degraded (`fail_commit` on
 /// its boundary commit) AND its inline lookup is parked. The delivery must
 /// be rejected typed before any dispatch work, peers must be admitted, and
 /// the probe must keep answering.
@@ -1199,7 +1199,7 @@ async fn per_member_delivery_order_is_preserved() {
     assert!(mob.handle.member_admission_backlog().parked.is_empty());
 }
 
-/// HomeCore boot shape: many members with slow readiness. Explicit Resume
+/// Production boot shape: many members with slow readiness. Explicit Resume
 /// runs their readiness concurrently and off the loop, so it completes in
 /// about one readiness latency and the probe never pages. (In-crate test
 /// builds cap the resume admission deadline at 2 s, so the per-member
@@ -1901,7 +1901,7 @@ async fn load_one_wedged_member_does_not_page_or_delay_peers() {
     assert!(mob.handle.member_admission_backlog().parked.is_empty());
 }
 
-/// The review-cycle graph (OB3's production wedge): every worker hands off to
+/// The review-cycle graph (the production wedge): every worker hands off to
 /// one reviewer, and the reviewer is the degraded member. Each of the N-1
 /// workers must keep completing its own turns while both of its hand-offs to
 /// the reviewer, the direct delivery and the wired peer send, are rejected
@@ -1981,7 +1981,7 @@ async fn review_cycle_handoffs_to_wedged_reviewer_are_rejected_typed_while_peers
     mob.service.release_live_session_lookups().await;
 }
 
-/// OB3's measured trigger before the false failure: a slow but ultimately
+/// The measured production trigger before the false failure: a slow but ultimately
 /// successful boundary commit on one member (a 30 s-class upload). It must
 /// delay neither the other members' deliveries nor the probe, and the slow
 /// member must come out healthy with its queued follow-up delivered.
@@ -2255,7 +2255,7 @@ async fn reload_member_registration_replaces_the_degraded_registration_in_place(
         mob.send(0, "rejected while degraded").await,
         Err(MobError::MemberReloadRequired { .. })
     ));
-    // The store recovers (OB3: the continuity backend came back) but the
+    // The store recovers (the continuity backend came back) but the
     // shell stays fail-closed until a registration-authorized reload.
     mob.store.fail_commit(mob.session(0), false);
     assert!(matches!(

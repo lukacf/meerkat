@@ -34,6 +34,7 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
         sender_taint: None,
         header: InputHeader {
             ingress_context: None,
+            retained_resume: None,
             authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),

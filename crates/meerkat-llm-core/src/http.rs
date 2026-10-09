@@ -22,7 +22,15 @@ pub async fn execute_with_authorization(
         .map(|check| check.current())
         .transpose()
         .map_err(LlmError::from_operation_authorization)?;
+    // A model request carries no operation review: its current decision may
+    // enter only at R1, before any entry observation or send.
+    let unreviewed = |check: &meerkat_core::authorization::PreparedOperationCheck| {
+        check
+            .require_unreviewed_entry()
+            .map_err(|refusal| LlmError::OperationReviewRefused { refusal })
+    };
     if let Some(check) = &current {
+        unreviewed(check)?;
         check
             .observe_entry()
             .map_err(LlmError::from_operation_observation)?;
@@ -34,6 +42,9 @@ pub async fn execute_with_authorization(
         .map(|check| check.current())
         .transpose()
         .map_err(LlmError::from_operation_authorization)?;
+    if let Some(check) = &current {
+        unreviewed(check)?;
+    }
     let result = client.execute(request).await;
     if let Some(check) = current {
         let outcome = match &result {
@@ -248,5 +259,191 @@ mod tests {
         );
         let response = response.expect("the configured endpoint answers");
         assert_eq!(response.status().as_u16(), 302);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod review_entry_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use meerkat_core::authorization::{
+        OperationObservation, OperationObservationError, PreparedOperationCheck,
+    };
+    use meerkat_core::{
+        AuthorizationOperation, MemorySearchScope, OperationAuthorizationError,
+        OperationAuthorizationFacts, OperationExecutionScope, OperationId, OperationReviewRefusal,
+        OperationReviewTier, PreparedAuthorizationBinding, PreparedOperationAuthorization,
+        ReviewUnavailableKind, ReviewUnsatisfiedKind, SessionId, SourceAuthorizationFacts,
+        SourceAuthorizationTarget, SourceAuthorizationUse, WorkAuthorization,
+        WorkAuthorizationContext,
+    };
+
+    use crate::LlmError;
+
+    struct Tiered {
+        tier: OperationReviewTier,
+        entries: Arc<AtomicUsize>,
+    }
+
+    impl PreparedOperationAuthorization for Tiered {
+        fn review_tier(&self) -> OperationReviewTier {
+            self.tier
+        }
+
+        fn check_current(
+            &self,
+            _: &PreparedAuthorizationBinding,
+        ) -> Result<(), OperationAuthorizationError> {
+            Ok(())
+        }
+
+        fn observe(
+            &self,
+            _: &PreparedAuthorizationBinding,
+            observation: OperationObservation,
+        ) -> Result<(), OperationObservationError> {
+            if matches!(observation, OperationObservation::Entry) {
+                self.entries.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(())
+        }
+    }
+
+    struct Owner(OperationReviewTier, Arc<AtomicUsize>);
+
+    impl WorkAuthorization for Owner {
+        fn prepare(
+            &self,
+            _: &PreparedAuthorizationBinding,
+        ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+            Ok(Arc::new(Tiered {
+                tier: self.0,
+                entries: Arc::clone(&self.1),
+            }))
+        }
+    }
+
+    fn check(tier: OperationReviewTier, entries: &Arc<AtomicUsize>) -> PreparedOperationCheck {
+        PreparedOperationCheck::prepare(
+            WorkAuthorizationContext::new(
+                Arc::new(Owner(tier, Arc::clone(entries))),
+                OperationExecutionScope::Domain,
+            ),
+            PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
+                operation_id: OperationId::new(),
+                execution_scope: OperationExecutionScope::Domain,
+                run_id: None,
+                context_revision: None,
+                operation: AuthorizationOperation::Source(SourceAuthorizationFacts {
+                    target: SourceAuthorizationTarget::Memory(MemorySearchScope::for_session(
+                        SessionId::new(),
+                    )),
+                    usage: SourceAuthorizationUse::Read,
+                }),
+            }),
+        )
+        .unwrap()
+    }
+
+    /// A loopback provider that counts every accepted connection and drops
+    /// it, so an entered request fails at the transport after arriving.
+    async fn counting_provider() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::AcqRel);
+                drop(socket);
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), accepted)
+    }
+
+    #[tokio::test]
+    async fn model_entry_refuses_required_review_before_observation_or_send() {
+        let client = reqwest::Client::new();
+        for (tier, expected) in [
+            (OperationReviewTier::R1, None),
+            (
+                OperationReviewTier::R2,
+                Some(OperationReviewRefusal::Unavailable {
+                    kind: ReviewUnavailableKind::UnsupportedEntry,
+                }),
+            ),
+            (
+                OperationReviewTier::R3,
+                Some(OperationReviewRefusal::Unsatisfied {
+                    kind: ReviewUnsatisfiedKind::HumanConsentRequired,
+                }),
+            ),
+        ] {
+            let entries = Arc::new(AtomicUsize::new(0));
+            let check = check(tier, &entries);
+            let (endpoint, accepted) = counting_provider().await;
+            let request = client.get(endpoint).build().unwrap();
+            let sent = Arc::new(AtomicUsize::new(0));
+            let mut diagnostics = Vec::new();
+            let result = super::execute_with_authorization(
+                &client,
+                request,
+                Some(&check),
+                &mut diagnostics,
+                |_| {
+                    sent.fetch_add(1, Ordering::AcqRel);
+                    LlmError::ConnectionReset
+                },
+            )
+            .await;
+            match expected {
+                // Positive control: R1 enters and reaches the transport.
+                None => {
+                    assert!(matches!(result, Err(LlmError::ConnectionReset)));
+                    assert_eq!(entries.load(Ordering::Acquire), 1);
+                    assert_eq!(sent.load(Ordering::Acquire), 1);
+                    assert!(accepted.load(Ordering::Acquire) >= 1, "the request arrived");
+                }
+                Some(refusal) => {
+                    assert!(
+                        matches!(&result, Err(LlmError::OperationReviewRefused { refusal: actual }) if *actual == refusal),
+                        "{tier:?}"
+                    );
+                    let error = result.unwrap_err();
+                    assert!(!error.is_retryable());
+                    assert_eq!(entries.load(Ordering::Acquire), 0);
+                    assert_eq!(sent.load(Ordering::Acquire), 0);
+                    tokio::task::yield_now().await;
+                    assert_eq!(
+                        accepted.load(Ordering::Acquire),
+                        0,
+                        "zero provider requests"
+                    );
+                }
+            }
+            assert!(diagnostics.is_empty());
+        }
+    }
+
+    /// The model-request review refusal keeps its type through the agent
+    /// error and stays in the authority-unavailable class (never a
+    /// permission refusal). This pins the conversion only; it does not prove
+    /// agent continuation.
+    #[test]
+    fn review_refusal_keeps_its_type_in_the_authority_unavailable_class() {
+        let refusal = OperationReviewRefusal::Unsatisfied {
+            kind: ReviewUnsatisfiedKind::HumanConsentRequired,
+        };
+        let error = LlmError::OperationReviewRefused { refusal };
+        assert!(!error.is_retryable());
+        let agent = error.into_agent_error("fixture");
+        assert_eq!(agent.operation_review_refusal(), Some(refusal));
+        assert!(agent.operation_authorization_unavailable());
+        assert!(
+            agent.operation_refusal().is_none(),
+            "not a permission refusal"
+        );
     }
 }

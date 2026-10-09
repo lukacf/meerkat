@@ -4559,7 +4559,7 @@ mod skill_activation_effect_tests {
             tokio::select! {
                 _ = client.final_entered.acquire() => {}
                 result = &mut run => panic!("run ended before final request: {result:?}"),
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("final request did not enter"),
+                () = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("final request did not enter"),
             }
             let (_, observations) = reader.snapshot().expect("native active observation");
             assert_eq!(observations.len(), 1);

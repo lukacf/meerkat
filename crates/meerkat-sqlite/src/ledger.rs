@@ -542,8 +542,11 @@ pub fn preflight_schema_eligibility(
     Ok(())
 }
 
-/// Check an already installed current schema without waiting for or building
-/// the expected-catalog cache. Ordinary store open prepares that immutable
+/// Check an already installed current schema without building the
+/// expected-catalog cache. It waits for that cache's leaf mutex (held only for
+/// one map lookup or insert; callers may already hold native custody and an
+/// open `BEGIN IMMEDIATE` outside it) and still refuses when the expected
+/// catalog is unbuilt or missing. Ordinary store open prepares that immutable
 /// catalog. This administrative path never migrates or adopts older records.
 pub fn try_preflight_current_schema(
     conn: &Connection,
@@ -575,11 +578,11 @@ pub fn try_preflight_current_schema(
         ))
     };
     let cache = EXPECTED_CURRENT_CATALOGS.get().ok_or_else(unavailable)?;
-    // The cache is a process-global leaf lock held only for one map lookup
-    // or insert (the expected catalog is built outside it), never while any
-    // other lock is taken. Waiting for it cannot invert a lock order, while
-    // refusing on contention made online administration fail whenever any
-    // other store in the process was opening.
+    // A process-global leaf lock: held only for one map lookup or insert
+    // (the expected catalog is built outside it), and no other lock is
+    // acquired while it is held. Callers may hold native custody and an open
+    // transaction outside it. Refusing on its contention made online
+    // administration fail whenever any other store in the process opened.
     let expected = cache
         .lock()
         .map_err(|_| unavailable())?

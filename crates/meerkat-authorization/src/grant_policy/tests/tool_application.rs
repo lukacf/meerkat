@@ -39,6 +39,10 @@ impl AdmittedWorkPolicyOwner for UiOwner {
             expires_at_ms: 800,
         })
     }
+    #[allow(
+        clippy::panic,
+        reason = "Entering the model-run path is a test failure for this UI-only owner."
+    )]
     fn authorize_admitted_work(
         &self,
         _association: &InputAuthorityAssociation,
@@ -69,6 +73,10 @@ impl OperationPolicyOwner for UiOwner {
             review_tier: meerkat_core::authorization::OperationReviewTier::R1,
         })
     }
+    #[allow(
+        clippy::panic,
+        reason = "Entering the model-run path is a test failure for this UI-only owner."
+    )]
     fn authorize_operation(
         &self,
         _association: &InputAuthorityAssociation,
@@ -117,7 +125,7 @@ fn tool_application_requires_explicit_fresh_owner_support() {
             .is_err()
     );
     let policy = Arc::new(GrantBackedWorkPolicy::new(
-        fixture.grants.clone(),
+        fixture.grants,
         Arc::new(UiOwner),
         Arc::new(UiOwner),
     ));

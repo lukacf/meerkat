@@ -62,6 +62,15 @@ pub enum DeferredPromptPolicy {
 /// Errors returned by `SessionService` methods.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    /// Diagnostics from entered tool work accompany the original session
+    /// failure without changing its classification or recovery behavior.
+    #[error("{error}")]
+    WithSettlementFailures {
+        #[source]
+        error: Box<SessionError>,
+        failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+    },
+
     /// Runtime authority could not be acquired before the operation started.
     /// Existing admitted work remains intact; this is not a permission verdict.
     #[error("runtime authority unavailable: {reason}")]
@@ -303,6 +312,65 @@ impl SessionProviderAuthFailure {
 }
 
 impl SessionError {
+    /// The original failure, independent of tool settlement diagnostics.
+    #[must_use]
+    pub fn primary_error(&self) -> &Self {
+        let mut current = self;
+        while let Self::WithSettlementFailures { error, .. } = current {
+            current = error;
+        }
+        current
+    }
+
+    pub fn settlement_failures(
+        &self,
+    ) -> impl Iterator<Item = &crate::ops::ToolDispatchSettlementFailure> {
+        std::iter::successors(Some(self), |error| match error {
+            Self::WithSettlementFailures { error, .. } => Some(error.as_ref()),
+            _ => None,
+        })
+        .flat_map(|error| {
+            let failures = match error {
+                Self::WithSettlementFailures { failures, .. } => failures.as_slice(),
+                _ => &[],
+            };
+            let agent = match error {
+                Self::Agent(error) => Some(error),
+                _ => None,
+            };
+            failures.iter().chain(
+                agent
+                    .into_iter()
+                    .flat_map(crate::AgentError::settlement_failures),
+            )
+        })
+    }
+
+    /// Retain the typed primary error, including store and lifecycle errors.
+    #[must_use]
+    pub fn with_settlement_failures(
+        self,
+        failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+    ) -> Self {
+        if failures.is_empty() {
+            return self;
+        }
+        let mut primary = self;
+        let mut retained = Vec::new();
+        while let Self::WithSettlementFailures { error, failures } = primary {
+            retained.extend(failures);
+            primary = *error;
+        }
+        retained.extend(failures);
+        match primary {
+            Self::Agent(error) => Self::Agent(error.with_settlement_failures(retained)),
+            error => Self::WithSettlementFailures {
+                error: Box::new(error),
+                failures: retained,
+            },
+        }
+    }
+
     const AGENT_BUILD_FAILURE_CAUSE_KEY: &'static str = "agent_build_failure_cause";
     const LLM_IDENTITY_UNRESOLVABLE_CAUSE: &'static str = "LlmIdentityUnresolvable";
     const PROVIDER_AUTH_CAUSE_KEY: &'static str = "cause";
@@ -325,7 +393,7 @@ impl SessionError {
 
     pub fn is_build_llm_identity_unresolvable(&self) -> bool {
         matches!(
-            self,
+            self.primary_error(),
             Self::FailedWithData { data, .. }
                 if data
                     .get(Self::AGENT_BUILD_FAILURE_CAUSE_KEY)
@@ -346,7 +414,7 @@ impl SessionError {
     /// Read the typed provider-auth projection, if this session error carries
     /// one. Unknown or malformed structured data fails closed as `None`.
     pub fn provider_auth_failure_data(&self) -> Option<SessionProviderAuthFailure> {
-        let Self::FailedWithData { data, .. } = self else {
+        let Self::FailedWithData { data, .. } = self.primary_error() else {
             return None;
         };
         if data
@@ -374,7 +442,7 @@ impl SessionError {
 
     pub fn requests_runtime_executor_stop(&self) -> bool {
         matches!(
-            self,
+            self.primary_error(),
             Self::FailedWithData { data, .. }
                 if data
                     .get("core_apply_failure_cause")
@@ -413,7 +481,7 @@ impl SessionError {
     /// Whether this error is a [`Self::runtime_teardown_in_progress`].
     pub fn is_runtime_teardown_in_progress(&self) -> bool {
         matches!(
-            self,
+            self.primary_error(),
             Self::FailedWithData { data, .. }
                 if data.get("kind").and_then(serde_json::Value::as_str)
                     == Some(Self::RUNTIME_TEARDOWN_IN_PROGRESS_KIND)
@@ -431,6 +499,7 @@ impl SessionError {
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::WithSettlementFailures { error, .. } => error.code(),
             Self::RuntimeUnavailable { .. } => "SESSION_RUNTIME_UNAVAILABLE",
             Self::NotFound { .. } => "SESSION_NOT_FOUND",
             Self::Busy { .. } => "SESSION_BUSY",
@@ -457,6 +526,18 @@ impl SessionError {
 
     pub fn structured_data(&self) -> Option<serde_json::Value> {
         match self {
+            Self::WithSettlementFailures { error, .. } => {
+                let mut data = match error.structured_data() {
+                    Some(serde_json::Value::Object(data)) => data,
+                    Some(value) => serde_json::Map::from_iter([("primary_data".into(), value)]),
+                    None => serde_json::Map::new(),
+                };
+                data.insert(
+                    "settlement_failures".into(),
+                    serde_json::json!(self.settlement_failures().collect::<Vec<_>>()),
+                );
+                Some(serde_json::Value::Object(data))
+            }
             Self::FailedWithData { data, .. } => Some(data.clone()),
             Self::CapabilityUnavailable(refusal) => serde_json::to_value(refusal.data).ok(),
             Self::ServedElsewhere { id } => Some(serde_json::json!({
@@ -487,7 +568,7 @@ impl SessionError {
     /// the durable session is intact and withheld — not that the service
     /// faulted — so surfaces classify on this instead of `Display` text.
     pub fn durable_resume_hold(&self) -> Option<DurableResumeHold> {
-        match self {
+        match self.primary_error() {
             Self::DurableTailHeldForRecovery { .. } => Some(DurableResumeHold::TailHeldForRecovery),
             Self::DurableTailRecoveryRefused { .. } => Some(DurableResumeHold::RecoveryRefused),
             Self::DurableEvidenceQuarantined { .. } => Some(DurableResumeHold::EvidenceQuarantined),
@@ -3487,6 +3568,94 @@ impl dyn SessionService {
 )]
 mod tests {
     use super::*;
+
+    fn settlement_marker() -> crate::ToolDispatchSettlementFailure {
+        crate::ToolDispatchSettlementFailure {
+            admission_source: crate::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Unknown,
+            failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        }
+    }
+
+    #[test]
+    fn session_settlement_companions_preserve_primary_classification_and_source() {
+        let id = SessionId::new();
+        for error in [
+            SessionError::NotFound { id: id.clone() },
+            SessionError::Busy { id: id.clone() },
+            SessionError::Store(Box::new(std::io::Error::other("store failed"))),
+            SessionError::PersistenceDisabled,
+            SessionError::RuntimeUnavailable {
+                reason: crate::authorization::ControllerReadinessFailure::AuthorityChanged,
+            },
+            SessionError::DurableEvidenceQuarantined { id },
+        ] {
+            let expected = (
+                error.code(),
+                transport::jsonrpc_code(&error),
+                transport::http_status(&error),
+                transport::cli_exit_code(&error),
+                error.to_string(),
+                error.durable_resume_hold(),
+            );
+            let error = error
+                .with_settlement_failures(vec![settlement_marker()])
+                .with_settlement_failures(vec![settlement_marker()]);
+            assert_eq!(
+                expected,
+                (
+                    error.code(),
+                    transport::jsonrpc_code(&error),
+                    transport::http_status(&error),
+                    transport::cli_exit_code(&error),
+                    error.to_string(),
+                    error.durable_resume_hold()
+                )
+            );
+            assert_eq!(error.settlement_failures().count(), 2);
+            assert_eq!(
+                error.structured_data().unwrap()["settlement_failures"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            if let SessionError::Store(source) = error.primary_error() {
+                assert!(source.downcast_ref::<std::io::Error>().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn session_settlement_companions_retain_typed_control_and_nonobject_data() {
+        let error = SessionError::runtime_teardown_in_progress("waiting", "runtime", "stop")
+            .with_settlement_failures(vec![settlement_marker()]);
+        assert!(error.is_runtime_teardown_in_progress());
+        assert_eq!(error.structured_data().unwrap()["code"], "SESSION_BUSY");
+        let error = SessionError::runtime_executor_stopped("stopped")
+            .with_settlement_failures(vec![settlement_marker()]);
+        assert!(error.requests_runtime_executor_stop());
+        let error = SessionError::FailedWithData {
+            message: "primary".into(),
+            data: serde_json::json!([1, 2]),
+        }
+        .with_settlement_failures(vec![settlement_marker()]);
+        assert_eq!(
+            error.structured_data().unwrap()["primary_data"],
+            serde_json::json!([1, 2])
+        );
+        let error = SessionError::Agent(crate::AgentError::Cancelled)
+            .with_settlement_failures(vec![settlement_marker()]);
+        assert!(matches!(error, SessionError::Agent(_)));
+        assert_eq!(error.settlement_failures().count(), 1);
+        assert!(matches!(
+            crate::lifecycle::core_executor::CoreExecutorError::apply_failed_from_session_error(
+                error
+            ),
+            crate::lifecycle::core_executor::CoreExecutorError::Cancelled
+        ));
+    }
 
     #[test]
     fn runtime_teardown_in_progress_is_typed_and_retryable() {

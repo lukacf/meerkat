@@ -152,6 +152,19 @@ impl FactoryAgent {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionAgent for FactoryAgent {
+    fn tool_application_executor(&self) -> Option<meerkat_core::ToolApplicationExecutor> {
+        Some(self.agent.tool_application_executor())
+    }
+
+    fn settle_tool_application(
+        &mut self,
+        outcome: meerkat_core::ToolApplicationExecutionOutcome,
+    ) -> meerkat_session::ephemeral::ToolApplicationSessionSettlement {
+        let failures = outcome.settlement_failures();
+        let (result, dirty) = self.agent.settle_tool_application(outcome).into_parts();
+        (result, dirty, failures)
+    }
+
     fn publish_idle_tool_application_observations(&self) {
         self.agent.publish_idle_tool_application_observations();
     }
@@ -4629,3 +4642,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used)]
+mod tool_application_tests;

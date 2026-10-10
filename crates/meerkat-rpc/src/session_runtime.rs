@@ -12305,7 +12305,8 @@ fn instruction_activation_host_error_to_rpc(
 }
 
 pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
-    if let SessionError::RuntimeUnavailable { .. } | SessionError::HostingUnavailable { .. } = &err
+    if let SessionError::RuntimeUnavailable { .. } | SessionError::HostingUnavailable { .. } =
+        err.primary_error()
     {
         return RpcError {
             code: meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
@@ -12313,7 +12314,7 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
             data: meerkat_contracts::error::session_error_details(&err),
         };
     }
-    let code = match &err {
+    let code = match err.primary_error() {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         // Another runtime owner hosts the session (#1813): the busy class,
         // with `kind = "session_served_elsewhere"` in the data.
@@ -12349,7 +12350,7 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         },
         _ => error::INTERNAL_ERROR,
     };
-    let core_apply_failure_cause = match &err {
+    let core_apply_failure_cause = match err.primary_error() {
         SessionError::Agent(agent_err) => {
             use meerkat_core::lifecycle::core_executor::{
                 CoreApplyFailureCause, CoreApplyFailureCauseKind,
@@ -12363,7 +12364,7 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         }
         _ => None,
     };
-    let core_executor_teardown_reason = match &err {
+    let core_executor_teardown_reason = match err.primary_error() {
         SessionError::Agent(error) => match error.primary_error() {
             meerkat_core::AgentError::StickyModelFallbackAuthorityUnknown { .. } => Some(
                 meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable,

@@ -24,6 +24,7 @@ mod structured_output_tests;
 #[cfg(test)]
 #[doc(hidden)]
 pub(crate) mod test_turn_state_handle;
+mod tool_application_execution;
 #[cfg(test)]
 mod usage_accounting_tests;
 #[cfg(test)]
@@ -1406,6 +1407,9 @@ impl ToolDispatchContext {
         call: ToolCallView<'_>,
         plan: Option<&crate::ResolvedToolExecutionPlan>,
     ) -> Result<Option<Self>, crate::ToolError> {
+        if let Some(control) = self.tool_application_control() {
+            control.revalidate().map_err(crate::ToolError::from)?;
+        }
         match (self.work_authorization(), self.prepared_authorization()) {
             (None, None) => Ok(None),
             (Some(work), Some(prepared)) => prepared
@@ -2095,6 +2099,15 @@ pub async fn dispatch_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized
         .clone()
         .map(crate::approval::review::ReviewDispatchGuard::new);
     let outcome = async {
+        // Review admission can await an operator. Fresh app custody and its
+        // private invocation/scope must still hold immediately before entry,
+        // independently of whether a particular leaf performs another check.
+        if let Some(control) = context.tool_application_control() {
+            control
+                .revalidate_async()
+                .await
+                .map_err(crate::ToolError::from)?;
+        }
         // Forward the binding's own immutable payload and plan all the way to the
         // body. Adapters can then validate exact custody by pointer identity after
         // a wait, without rehashing arguments or scanning policy dependencies.
@@ -3321,7 +3334,7 @@ where
     /// exact returned successor.
     pub(crate) latest_run_checkpoint_receipt: Option<crate::RunCheckpointReceipt>,
     pub(crate) tool_application_observations:
-        crate::tool_application::ToolApplicationObservationReader,
+        crate::tool_application::ToolApplicationInvocationOwner,
     /// Rows `[0, floor)` are committed in the durable store exactly as they
     /// stand in memory (the document loaded at build, the rows a compaction
     /// rewrite installed, or a committed successor the runtime handed over).

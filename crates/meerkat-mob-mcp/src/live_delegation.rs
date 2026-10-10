@@ -898,6 +898,7 @@ impl From<meerkat_core::service::SessionControlError> for LiveResponsesOutcomeAp
 fn session_error_is_transient(error: &meerkat_core::service::SessionError) -> bool {
     use meerkat_core::service::SessionError;
     match error {
+        SessionError::WithSettlementFailures { error, .. } => session_error_is_transient(error),
         SessionError::RuntimeUnavailable { .. }
         | SessionError::Busy { .. }
         | SessionError::Store(_)

@@ -2453,10 +2453,10 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// gets a machine of its own on first use, which lives and dies with this
     /// instance.
     runtime_adapter: std::sync::Mutex<Option<Arc<MeerkatMachine>>>,
-    /// Drains entered application work through its final durable commit before
-    /// service shutdown removes actors. Applications acquire this only after
-    /// the session mutation guard, so a queued application cannot prevent
-    /// shutdown from cancelling the model turn it is waiting behind.
+    /// Drains the serialized fallback for custom SessionAgent implementations.
+    /// Native Agent executors retain exact-actor custody instead. Fallback
+    /// calls acquire this only after the session mutation guard, so queued
+    /// work cannot prevent shutdown from interrupting the model turn.
     tool_application_settlement_gate: RwLock<()>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
@@ -7558,7 +7558,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "reload-required cleanup for session {id} encountered a replacement live actor"
             ))));
         }
-        let discarded = self.inner.discard_live_session_actor(witness).await?;
+        let discarded = match self.inner.discard_live_session_actor(witness).await {
+            Ok(discarded) => discarded,
+            Err(SessionError::Busy { .. }) => {
+                // Durable write authority is already lost. Entered App work
+                // cannot retain this rejected projection or delay the reload.
+                self.inner
+                    .fatalize_live_session_actor_after_durable_convergence_failure(witness)
+                    .await
+            }
+            Err(error) => return Err(error),
+        };
         if discarded {
             self.checkpointer_gates.lock().await.remove(id);
             self.live_checkpointers.lock().await.remove(id);
@@ -7570,11 +7580,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Converge the live actor and every persistent sidecar while the caller
     /// owns the mutation fences appropriate to its operation.
     async fn discard_live_session_unfenced(&self, id: &SessionId) -> Result<(), SessionError> {
-        let result = self.inner.discard_live_session(id).await;
+        let witness = self.inner.live_session_actor_witness(id).await;
+        match self.inner.discard_live_session(id).await {
+            Ok(()) => {}
+            Err(SessionError::Busy { .. }) => {
+                // Internal convergence already owns the mutation/recovery
+                // boundary. An entered App must not keep a stale or failed
+                // projection serving. Explicit public discard reserves the
+                // lifecycle before reaching here and still returns Busy.
+                if let Some(witness) = witness {
+                    if !self
+                        .inner
+                        .fatalize_live_session_actor_after_durable_convergence_failure(&witness)
+                        .await
+                    {
+                        return Err(SessionError::NotFound { id: id.clone() });
+                    }
+                } else {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+            }
+            Err(error) => return Err(error),
+        }
         self.checkpointer_gates.lock().await.remove(id);
         self.live_checkpointers.lock().await.remove(id);
         self.note_live_authority_advanced(id);
-        result
+        Ok(())
     }
 
     pub async fn persist_live_session_now(&self, id: &SessionId) -> Result<usize, SessionError> {
@@ -7693,6 +7724,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<(), SessionError> {
+        let _application_lifecycle = self.inner.reserve_tool_application_lifecycle(id).await?;
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
         self.discard_live_session_unfenced(id).await
     }
@@ -13572,6 +13604,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         machine_archive: MachineSessionArchiveProtocol<'_>,
     ) -> Result<(), SessionError> {
+        machine_archive.require_shared_runtime_store(id, &self.runtime_store)?;
+        let _application_lifecycle = self.inner.reserve_tool_application_lifecycle(id).await?;
         let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
         self.archive_with_machine_protocol_under_runtime_turn_boundary_before(
             id,
@@ -13623,6 +13657,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         post_commit_hook: Option<Arc<dyn meerkat_runtime::MachineSessionArchivePostCommitHook>>,
     ) -> Result<(), SessionError> {
         machine_archive.require_shared_runtime_store(id, &self.runtime_store)?;
+        // Refuse an archive before any durable transition if entered App work
+        // still owns this actor. The reservation closes new entry during the
+        // asynchronous archive, and automatically reopens it on refusal.
+        let _application_lifecycle = self.inner.reserve_tool_application_lifecycle(id).await?;
         // The caller owns the stable outer boundary. Global inner lock order is
         // runtime mutation authority, then the session recovery/checkpointer
         // gates: B -> M -> R -> C. An initially absent runtime can become
@@ -14210,6 +14248,68 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         // the caller's delivery future cannot cancel an admitted side effect.
         tokio::spawn(async move {
             let id = control.session_id().clone();
+            if let Some(admitted) = self.inner.admit_concurrent_tool_application(&id).await? {
+                // The native live owner already carries its accepted invocation.
+                // Check durable lifecycle without loading the accumulated body
+                // or queueing behind the active model's finalization boundary.
+                if matches!(
+                    self.observe_live_durable_source(&id).await?,
+                    crate::LiveDurableSourceObservation::Archived
+                ) {
+                    return Err(SessionError::NotFound { id });
+                }
+                let outcome = admitted.execute(control.request().clone(), context).await;
+                let outcome = match outcome.into_immediate_result() {
+                    Ok(result) => return result.map_err(SessionError::Agent),
+                    Err(outcome) => *outcome,
+                };
+                // Only actual returned notices/effects need actor mutation and
+                // durable publication. The lease keeps this exact actor alive
+                // while this waits for the model's native boundary.
+                let failures = outcome.settlement_failures();
+                let _mutation_guard = self
+                    .live_persist_mutation_guard(&id)
+                    .await
+                    .map_err(|error| error.with_settlement_failures(failures.clone()))?;
+                if self.inner.live_session_actor_witness(&id).await.as_ref()
+                    != Some(admitted.actor())
+                {
+                    return outcome.into_refused_session_result(SessionError::NotFound { id });
+                }
+                let (result, dirty, failures) =
+                    admitted.settle(Arc::clone(&control), outcome).await?;
+                if dirty && let Err(error) = self.persist_full_session(&id).await {
+                    // Seal synchronously before any registry await. Other
+                    // entered App leases must not keep this failed projection
+                    // serving, and waiting for them while holding the mutation
+                    // boundary would deadlock their own settlement.
+                    admitted.quarantine_after_durable_failure();
+                    if self
+                        .inner
+                        .fatalize_live_session_actor_after_durable_convergence_failure(
+                            admitted.actor(),
+                        )
+                        .await
+                    {
+                        // The mutation guard still fences same-session
+                        // materialization and these actor-owned sidecars.
+                        self.checkpointer_gates.lock().await.remove(&id);
+                        self.live_checkpointers.lock().await.remove(&id);
+                        self.note_live_authority_advanced(&id);
+                    }
+                    return Err(error.with_settlement_failures(failures));
+                }
+                if result.is_ok() {
+                    control.revalidate_async().await.map_err(|error| {
+                        SessionError::Agent(
+                            AgentError::tool(error.into()).with_settlement_failures(failures),
+                        )
+                    })?;
+                }
+                return result.map_err(SessionError::Agent);
+            }
+            // Custom SessionAgent implementations retain their prior serialized
+            // execution contract and conservative persistence behavior.
             let _mutation_guard = self.live_persist_mutation_guard(&id).await?;
             let _settlement_guard = self.tool_application_settlement_gate.read().await;
             let result = self.inner.dispatch_tool_application(control, context).await;
@@ -15522,6 +15622,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Call [`Self::try_shutdown`] when the caller must observe a typed
     /// authorization failure.
     pub async fn shutdown(&self) {
+        if let Err(error) = self.inner.drain_tool_applications_for_shutdown().await {
+            tracing::error!(%error, "session service application drain failed");
+            return;
+        }
         let _settlement_guard = self.tool_application_settlement_gate.write().await;
         self.inner.shutdown().await;
     }
@@ -15548,6 +15652,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Shut down all sessions, returning the first typed authorization failure.
     pub async fn try_shutdown(&self) -> Result<(), SessionError> {
+        self.inner.drain_tool_applications_for_shutdown().await?;
         let _settlement_guard = self.tool_application_settlement_gate.write().await;
         self.inner.try_shutdown().await
     }

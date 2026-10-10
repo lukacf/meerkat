@@ -164,7 +164,7 @@ impl CoreApplyFailureCause {
     }
 
     pub fn from_session_error(error: &SessionError) -> Self {
-        match error {
+        match error.primary_error() {
             SessionError::Agent(agent_error) => Self::from_agent_error(agent_error),
             _ => Self::runtime_turn(error.to_string()),
         }
@@ -384,7 +384,7 @@ impl CoreExecutorError {
         if error.requests_runtime_executor_stop() {
             return Self::Stopped;
         }
-        if let SessionError::Agent(agent_error) = &error {
+        if let SessionError::Agent(agent_error) = error.primary_error() {
             match agent_error.primary_error() {
                 AgentError::Cancelled => return Self::Cancelled,
                 AgentError::StickyModelFallbackAuthorityUnknown { message } => {

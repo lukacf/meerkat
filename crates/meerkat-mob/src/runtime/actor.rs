@@ -433,6 +433,9 @@ fn identity_session_load_error_class(
     use meerkat_core::service::SessionError;
 
     match error {
+        SessionError::WithSettlementFailures { error, .. } => {
+            identity_session_load_error_class(error)
+        }
         SessionError::PersistenceDisabled
         | SessionError::CapabilityUnavailable(_)
         | SessionError::Unsupported(_) => IdentitySessionLoadErrorClass::Malformed,

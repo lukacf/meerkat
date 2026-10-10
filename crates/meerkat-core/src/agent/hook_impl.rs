@@ -15,9 +15,9 @@ use tokio::sync::mpsc;
 /// Call-local projections only. Concurrent pre-tool hooks return these to the
 /// mutable caller; no event await can strand an already-returned notice.
 pub(super) struct CollectedHookExecution {
-    result: Result<HookExecutionReport, AgentError>,
-    notices: Vec<crate::types::Message>,
-    events: Vec<AgentEvent>,
+    pub(super) result: Result<HookExecutionReport, AgentError>,
+    pub(super) notices: Vec<crate::types::Message>,
+    pub(super) events: Vec<AgentEvent>,
 }
 
 impl CollectedHookExecution {
@@ -112,65 +112,12 @@ where
             .await
     }
 
-    /// A fresh host submission has no model run or run-scoped overrides. In
-    /// particular, an earlier run cannot disable the configured guardrails.
-    pub(super) async fn execute_tool_application_hooks(
-        &mut self,
-        invocation: HookInvocation,
-    ) -> Result<HookExecutionReport, AgentError> {
-        let mut collected = self
-            .collect_hook_execution_with_overrides(invocation, None)
-            .await;
-        self.append_collected_hook_notices(&mut collected);
-        self.emit_collected_hook_events(&mut collected, None).await;
-        collected.into_result()
-    }
-
     async fn collect_hook_execution_with_overrides(
         &self,
         invocation: HookInvocation,
         overrides: Option<&crate::config::HookRunOverrides>,
     ) -> CollectedHookExecution {
-        let mut collected = CollectedHookExecution {
-            result: Ok(HookExecutionReport::empty()),
-            notices: Vec::new(),
-            events: Vec::new(),
-        };
-        let Some(hook_engine) = &self.hook_engine else {
-            return collected;
-        };
-        collected.result = match hook_engine.execute(invocation.clone(), overrides).await {
-            Ok(report) => {
-                Self::project_hook_report(
-                    &invocation,
-                    &report,
-                    &mut collected.notices,
-                    &mut collected.events,
-                );
-                Ok(report)
-            }
-            Err(mut error) => loop {
-                match error {
-                    HookEngineError::WithReport {
-                        report,
-                        error: next,
-                    } => {
-                        Self::project_hook_report(
-                            &invocation,
-                            &report,
-                            &mut collected.notices,
-                            &mut collected.events,
-                        );
-                        error = *next;
-                    }
-                    error => {
-                        Self::project_hook_engine_error(&invocation, &error, &mut collected.events);
-                        break Err(error.into_agent_error());
-                    }
-                }
-            },
-        };
-        collected
+        collect_hook_execution_with_engine(self.hook_engine.as_ref(), invocation, overrides).await
     }
 
     pub(super) fn append_collected_hook_notices(&mut self, collected: &mut CollectedHookExecution) {
@@ -192,112 +139,158 @@ where
             crate::event_tap::tap_emit(&self.event_tap, event_tx, event).await;
         }
     }
+}
 
-    fn project_hook_report(
-        invocation: &HookInvocation,
-        report: &HookExecutionReport,
-        notices: &mut Vec<crate::types::Message>,
-        events: &mut Vec<AgentEvent>,
-    ) {
-        for skipped in &report.background_skips {
-            notices.push(background_scheduling_notice(invocation, skipped));
+pub(super) async fn collect_hook_execution_with_engine(
+    hook_engine: Option<&std::sync::Arc<dyn crate::hooks::HookEngine>>,
+    invocation: HookInvocation,
+    overrides: Option<&crate::config::HookRunOverrides>,
+) -> CollectedHookExecution {
+    let mut collected = CollectedHookExecution {
+        result: Ok(HookExecutionReport::empty()),
+        notices: Vec::new(),
+        events: Vec::new(),
+    };
+    let Some(hook_engine) = hook_engine else {
+        return collected;
+    };
+    collected.result = match hook_engine.execute(invocation.clone(), overrides).await {
+        Ok(report) => {
+            project_hook_report(
+                &invocation,
+                &report,
+                &mut collected.notices,
+                &mut collected.events,
+            );
+            Ok(report)
         }
-        // Background scheduling is absent from `started`. Its completion may
-        // later establish entry, but scheduling pressure never does.
-        for hook_id in &report.started {
-            events.push(AgentEvent::HookStarted {
-                hook_id: hook_id.clone(),
-                point: invocation.point,
-            });
-        }
-        for outcome in &report.outcomes {
-            events.push(match &outcome.failure_reason {
-                Some(reason) => AgentEvent::HookFailed {
-                    hook_id: outcome.hook_id.clone(),
-                    point: outcome.point,
-                    reason: reason.clone(),
-                },
-                None => AgentEvent::HookCompleted {
-                    hook_id: outcome.hook_id.clone(),
-                    point: outcome.point,
-                    duration_ms: outcome.duration_ms.unwrap_or(0),
-                },
-            });
-        }
-        for refusal in &report.launch_refusals {
-            events.push(AgentEvent::HookLaunchRefused {
-                hook_id: refusal.hook_id.clone(),
-                point: refusal.point,
-                reason: HookFailureReason::ConfinementRefused {
-                    refusal: refusal.refusal,
-                },
-                tool_use_id: invocation
-                    .tool_call
-                    .as_ref()
-                    .map(|call| call.tool_use_id.clone())
-                    .or_else(|| {
-                        invocation
-                            .tool_result
-                            .as_ref()
-                            .map(|result| result.tool_use_id.clone())
-                    }),
-            });
-        }
-        if let Some(HookDecision::Deny {
-            hook_id,
-            reason_code,
-            message,
-            payload,
-        }) = &report.decision
-        {
-            events.push(AgentEvent::HookDenied {
-                hook_id: hook_id.clone(),
-                point: invocation.point,
-                reason_code: *reason_code,
-                message: message.clone(),
-                payload: payload.clone(),
-            });
-        }
+        Err(mut error) => loop {
+            match error {
+                HookEngineError::WithReport {
+                    report,
+                    error: next,
+                } => {
+                    project_hook_report(
+                        &invocation,
+                        &report,
+                        &mut collected.notices,
+                        &mut collected.events,
+                    );
+                    error = *next;
+                }
+                error => {
+                    project_hook_engine_error(&invocation, &error, &mut collected.events);
+                    break Err(error.into_agent_error());
+                }
+            }
+        },
+    };
+    collected
+}
+
+fn project_hook_report(
+    invocation: &HookInvocation,
+    report: &HookExecutionReport,
+    notices: &mut Vec<crate::types::Message>,
+    events: &mut Vec<AgentEvent>,
+) {
+    for skipped in &report.background_skips {
+        notices.push(background_scheduling_notice(invocation, skipped));
     }
-
-    fn project_hook_engine_error(
-        invocation: &HookInvocation,
-        error: &HookEngineError,
-        events: &mut Vec<AgentEvent>,
-    ) {
-        if let HookEngineError::LaunchRefused { hook_id, reason } = error {
-            events.push(AgentEvent::HookLaunchRefused {
-                hook_id: hook_id.clone(),
-                point: invocation.point,
+    // Background scheduling is absent from `started`. Its completion may
+    // later establish entry, but scheduling pressure never does.
+    for hook_id in &report.started {
+        events.push(AgentEvent::HookStarted {
+            hook_id: hook_id.clone(),
+            point: invocation.point,
+        });
+    }
+    for outcome in &report.outcomes {
+        events.push(match &outcome.failure_reason {
+            Some(reason) => AgentEvent::HookFailed {
+                hook_id: outcome.hook_id.clone(),
+                point: outcome.point,
                 reason: reason.clone(),
-                tool_use_id: invocation
-                    .tool_call
-                    .as_ref()
-                    .map(|call| call.tool_use_id.clone())
-                    .or_else(|| {
-                        invocation
-                            .tool_result
-                            .as_ref()
-                            .map(|result| result.tool_use_id.clone())
-                    }),
-            });
-            return;
-        }
-        if let Some(hook_id) = error.hook_id() {
-            // Preserve the existing foreground error classification/observations.
-            events.push(AgentEvent::HookStarted {
-                hook_id: hook_id.clone(),
-                point: invocation.point,
-            });
-            events.push(AgentEvent::HookFailed {
-                hook_id: hook_id.clone(),
-                point: invocation.point,
-                reason: HookFailureReason::from_engine_error(error),
-            });
-        }
+            },
+            None => AgentEvent::HookCompleted {
+                hook_id: outcome.hook_id.clone(),
+                point: outcome.point,
+                duration_ms: outcome.duration_ms.unwrap_or(0),
+            },
+        });
+    }
+    for refusal in &report.launch_refusals {
+        events.push(AgentEvent::HookLaunchRefused {
+            hook_id: refusal.hook_id.clone(),
+            point: refusal.point,
+            reason: HookFailureReason::ConfinementRefused {
+                refusal: refusal.refusal,
+            },
+            tool_use_id: invocation
+                .tool_call
+                .as_ref()
+                .map(|call| call.tool_use_id.clone())
+                .or_else(|| {
+                    invocation
+                        .tool_result
+                        .as_ref()
+                        .map(|result| result.tool_use_id.clone())
+                }),
+        });
+    }
+    if let Some(HookDecision::Deny {
+        hook_id,
+        reason_code,
+        message,
+        payload,
+    }) = &report.decision
+    {
+        events.push(AgentEvent::HookDenied {
+            hook_id: hook_id.clone(),
+            point: invocation.point,
+            reason_code: *reason_code,
+            message: message.clone(),
+            payload: payload.clone(),
+        });
     }
 }
 
+fn project_hook_engine_error(
+    invocation: &HookInvocation,
+    error: &HookEngineError,
+    events: &mut Vec<AgentEvent>,
+) {
+    if let HookEngineError::LaunchRefused { hook_id, reason } = error {
+        events.push(AgentEvent::HookLaunchRefused {
+            hook_id: hook_id.clone(),
+            point: invocation.point,
+            reason: reason.clone(),
+            tool_use_id: invocation
+                .tool_call
+                .as_ref()
+                .map(|call| call.tool_use_id.clone())
+                .or_else(|| {
+                    invocation
+                        .tool_result
+                        .as_ref()
+                        .map(|result| result.tool_use_id.clone())
+                }),
+        });
+        return;
+    }
+    if let Some(hook_id) = error.hook_id() {
+        // Preserve the existing foreground error classification/observations.
+        events.push(AgentEvent::HookStarted {
+            hook_id: hook_id.clone(),
+            point: invocation.point,
+        });
+        events.push(AgentEvent::HookFailed {
+            hook_id: hook_id.clone(),
+            point: invocation.point,
+            reason: HookFailureReason::from_engine_error(error),
+        });
+    }
+}
 /// Each variable identity is bounded independently for audience projection. An
 /// oversized identity is omitted explicitly, never replaced with an exact-looking
 /// prefix. This does not change the engine's original typed scheduling report.

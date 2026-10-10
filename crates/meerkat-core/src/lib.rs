@@ -537,8 +537,9 @@ pub use surface_metadata::{
     is_reserved_meerkat_metadata_key, validate_public_app_context, validate_public_labels,
 };
 pub use tool_application::{
-    ToolApplicationControlRequest, ToolApplicationIngress, ToolApplicationObservation,
-    ToolApplicationObservationReader, ToolApplicationOperation, ToolApplicationRequest,
+    ToolApplicationControlRequest, ToolApplicationExecutionOutcome, ToolApplicationExecutor,
+    ToolApplicationIngress, ToolApplicationObservation, ToolApplicationObservationReader,
+    ToolApplicationOperation, ToolApplicationRequest, ToolApplicationSettlement,
 };
 pub use tool_catalog::{
     ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,

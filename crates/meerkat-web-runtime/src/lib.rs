@@ -837,6 +837,32 @@ fn err_mob_destroy(e: MobMcpDestroyError) -> JsValue {
 /// `internal_error` and never laundered into an Ok-with-status payload.
 fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
     match e {
+        error @ meerkat_core::SessionError::WithSettlementFailures { .. } => {
+            let failures = error.settlement_failures().cloned().collect::<Vec<_>>();
+            let mut primary = error;
+            while let meerkat_core::SessionError::WithSettlementFailures { error, .. } = primary {
+                primary = *error;
+            }
+            let mut object = match session_error_envelope(primary) {
+                serde_json::Value::Object(object) => object,
+                value => serde_json::Map::from_iter([("primary_data".into(), value)]),
+            };
+            if let Some(displaced) =
+                object.insert("settlement_failures".into(), serde_json::json!(failures))
+            {
+                // Protocol-owned diagnostics cannot be replaced by an
+                // arbitrary primary payload using the same reserved key.
+                let preserved = match object.remove("primary_settlement_failures") {
+                    Some(previous) => serde_json::json!({
+                        "settlement_failures": displaced,
+                        "primary_settlement_failures": previous,
+                    }),
+                    None => displaced,
+                };
+                object.insert("primary_settlement_failures".into(), preserved);
+            }
+            serde_json::Value::Object(object)
+        }
         error @ meerkat_core::SessionError::RuntimeUnavailable { .. } => serde_json::json!({
             "code": error.code(), "message": error.to_string(),
             "details": meerkat_contracts::error::session_error_details(&error),
@@ -5085,6 +5111,65 @@ capabilities = [{capability_values}]
             envelope.get("status").is_none(),
             "agent fault must not be laundered into an in-band status string"
         );
+    }
+
+    #[test]
+    fn session_settlement_envelope_retains_primary_payload_and_native_diagnostics() {
+        let marker = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Unknown,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        };
+        for data in [serde_json::json!([1, 2]), serde_json::Value::Null] {
+            let error = meerkat_core::SessionError::FailedWithData {
+                message: "primary error".into(),
+                data: data.clone(),
+            }
+            .with_settlement_failures(vec![marker.clone()]);
+            let envelope = session_error_envelope(error);
+            assert_eq!(envelope["primary_data"], data);
+            assert_eq!(envelope["settlement_failures"], serde_json::json!([marker]));
+        }
+        for displaced in [
+            serde_json::json!("primary field"),
+            serde_json::json!(["untyped"]),
+        ] {
+            let error = meerkat_core::SessionError::FailedWithData {
+                message: "primary error".into(),
+                data: serde_json::json!({
+                    "code": "PRIMARY_CODE",
+                    "message": "primary message",
+                    "settlement_failures": displaced,
+                    "primary_settlement_failures": "earlier field",
+                }),
+            }
+            .with_settlement_failures(vec![marker.clone()])
+            .with_settlement_failures(vec![marker.clone()]);
+            let envelope = session_error_envelope(error);
+            assert_eq!(envelope["code"], "PRIMARY_CODE");
+            assert_eq!(envelope["message"], "primary message");
+            assert_eq!(
+                envelope["settlement_failures"],
+                serde_json::json!([marker, marker])
+            );
+            assert_eq!(
+                envelope["primary_settlement_failures"]["settlement_failures"],
+                displaced
+            );
+            assert_eq!(
+                envelope["primary_settlement_failures"]["primary_settlement_failures"],
+                "earlier field"
+            );
+        }
+        let error = meerkat_core::SessionError::NotFound {
+            id: meerkat_core::SessionId::new(),
+        }
+        .with_settlement_failures(vec![marker.clone()]);
+        let envelope = session_error_envelope(error);
+        assert_eq!(envelope["code"], "SESSION_NOT_FOUND");
+        assert_eq!(envelope["message"], "session not found");
+        assert_eq!(envelope["settlement_failures"], serde_json::json!([marker]));
     }
 
     #[test]

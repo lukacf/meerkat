@@ -96,11 +96,22 @@ work-policy owner. The prior agent run's authorization is never reused. Resource
 context providers implement `prepare_resource` separately from tool-call
 credential preparation.
 
+Native session-service App IO can run while the model turn continues. Each
+request uses an executor minted by the original Agent with its current tool
+scope and configured hooks and review. Results without session effects or hook
+notices return without loading or saving the accumulated transcript. Actual
+effects and notices wait for that exact actor to apply them; persistent services
+commit them before response delivery. This decision uses the collected outcome,
+not `readOnlyHint`; a post-hook error or a disconnected caller does not cancel
+required settlement. Custom `SessionAgent` implementations that do not provide
+this executor keep serialized execution.
+
 The runtime binds live operations to the originating physical MCP connection.
 Retained views can replay without re-executing the tool; retirement, replacement
 or process restart refuses new IO against the old binding. App code cannot pick
-another server by supplying a name. Developer panels and generated UI languages
-are host concerns, not additional MCP authoring contracts.
+another server by supplying a name. Developer panels belong to the embedding
+product's Console integration. An MCP App can use its own renderer for a
+versioned generated UI document without another host authoring contract.
 
 ## Built-in tools
 

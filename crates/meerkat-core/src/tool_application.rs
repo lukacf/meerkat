@@ -6,7 +6,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::{
-    Arc, RwLock,
+    Arc, OnceLock, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -183,6 +183,318 @@ pub(crate) struct ToolApplicationObservationRun {
     run_id: RunId,
 }
 
+/// Canonical invocation ownership lives with the Agent, independently of the
+/// public display reader. Only Agent transcript publication can mint records.
+#[derive(Default)]
+pub(crate) struct ToolApplicationInvocationOwner {
+    observations: ToolApplicationObservationReader,
+    state: Arc<RwLock<ToolApplicationInvocationState>>,
+}
+
+struct ToolApplicationInvocationState {
+    open: bool,
+    accepted: BTreeMap<String, Arc<ToolApplicationObservation>>,
+}
+
+impl Default for ToolApplicationInvocationState {
+    fn default() -> Self {
+        Self {
+            open: true,
+            accepted: BTreeMap::new(),
+        }
+    }
+}
+
+impl ToolApplicationInvocationOwner {
+    pub(crate) fn reader(&self) -> ToolApplicationObservationReader {
+        self.observations.clone()
+    }
+
+    pub(crate) fn execution_owner(&self) -> ToolApplicationExecutionOwner {
+        ToolApplicationExecutionOwner {
+            state: self.state.clone(),
+        }
+    }
+
+    fn publish_accepted(&self, messages: &[Message]) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut previous = std::mem::take(&mut state.accepted);
+        state.accepted = ToolApplicationObservation::from_messages(messages)
+            .into_iter()
+            .map(|observation| {
+                let id = observation.tool_call_id.clone();
+                let accepted = previous
+                    .remove(&id)
+                    .filter(|old| old.as_ref() == &observation)
+                    .unwrap_or_else(|| Arc::new(observation));
+                (id, accepted)
+            })
+            .collect();
+    }
+
+    pub(crate) fn publish_idle(&self, messages: &[Message]) {
+        self.publish_accepted(messages);
+        self.observations.publish_idle(messages);
+    }
+
+    pub(crate) fn begin_run(
+        &self,
+        run_id: RunId,
+        messages: &[Message],
+    ) -> ToolApplicationObservationRun {
+        self.publish_accepted(messages);
+        self.observations.begin_run(run_id, messages)
+    }
+
+    pub(crate) fn refresh(&self, messages: &[Message]) {
+        self.publish_accepted(messages);
+        self.observations.refresh(messages);
+    }
+
+    pub(crate) fn invalidate(&self) {
+        self.state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accepted
+            .clear();
+        self.observations.invalidate();
+    }
+}
+
+impl Drop for ToolApplicationInvocationOwner {
+    fn drop(&mut self) {
+        self.execution_owner().close_admission();
+    }
+}
+
+/// Process-only identity of one exact Agent, never derived from a session id
+/// or reconstructed from a display projection.
+#[derive(Clone)]
+pub(crate) struct ToolApplicationExecutionOwner {
+    state: Arc<RwLock<ToolApplicationInvocationState>>,
+}
+
+impl ToolApplicationExecutionOwner {
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    pub(crate) fn close_admission(&self) {
+        self.state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .open = false;
+    }
+
+    pub(crate) fn accept(
+        &self,
+        request: &ToolApplicationRequest,
+        scope: crate::tool_scope::ToolScope,
+    ) -> Result<Arc<ToolApplicationInvocationGuard>, OperationAuthorizationError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| OperationAuthorizationError::Unavailable)?;
+        if !state.open {
+            return Err(OperationAuthorizationError::Unavailable);
+        }
+        let accepted = state
+            .accepted
+            .get(&request.tool_call_id)
+            .filter(|record| record.host_metadata.contains_key(&request.extension))
+            .cloned()
+            .ok_or(OperationAuthorizationError::Unavailable)?;
+        Ok(Arc::new(ToolApplicationInvocationGuard {
+            owner: self.clone(),
+            accepted,
+            scope,
+            target: OnceLock::new(),
+        }))
+    }
+}
+
+pub(crate) struct ToolApplicationInvocationGuard {
+    owner: ToolApplicationExecutionOwner,
+    accepted: Arc<ToolApplicationObservation>,
+    scope: crate::tool_scope::ToolScope,
+    target: OnceLock<String>,
+}
+
+impl ToolApplicationInvocationGuard {
+    pub(crate) fn source(&self) -> &str {
+        &self.accepted.tool_name
+    }
+    pub(crate) fn invocation(&self, extension: &str) -> &Value {
+        &self.accepted.host_metadata[extension]
+    }
+    pub(crate) fn bind_target(&self, target: String) -> Result<(), OperationAuthorizationError> {
+        self.target
+            .set(target)
+            .map_err(|_| OperationAuthorizationError::Unavailable)?;
+        self.revalidate()
+    }
+}
+
+impl ToolApplicationIngress for ToolApplicationInvocationGuard {
+    fn revalidate(&self) -> Result<(), OperationAuthorizationError> {
+        let state = self
+            .owner
+            .state
+            .read()
+            .map_err(|_| OperationAuthorizationError::Unavailable)?;
+        if !state.open
+            || !state
+                .accepted
+                .get(&self.accepted.tool_call_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.accepted))
+        {
+            return Err(OperationAuthorizationError::Unavailable);
+        }
+        if !self
+            .scope
+            .host_visible_tool_names()
+            .map_err(|_| OperationAuthorizationError::Unavailable)?
+            .iter()
+            .any(|name| name.as_str() == self.source())
+        {
+            return Err(OperationAuthorizationError::Unavailable);
+        }
+        if let Some(target) = self.target.get()
+            && !self
+                .scope
+                .app_visible_tool_names()
+                .map_err(|_| OperationAuthorizationError::Unavailable)?
+                .iter()
+                .any(|name| name.as_str() == target)
+        {
+            return Err(OperationAuthorizationError::Unavailable);
+        }
+        Ok(())
+    }
+    fn as_any(&self) -> &(dyn Any + Send + Sync) {
+        self
+    }
+}
+
+/// An Agent-minted executor. Hosts retain it only with the exact native actor
+/// custody lease, and own its future through outcome settlement on cancellation.
+#[derive(Clone)]
+pub struct ToolApplicationExecutor {
+    pub(crate) execution: Arc<dyn ToolApplicationExecution>,
+    pub(crate) owner: ToolApplicationExecutionOwner,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub(crate) trait ToolApplicationExecution: Send + Sync {
+    async fn execute(
+        &self,
+        request: ToolApplicationRequest,
+        context: crate::ToolDispatchContext,
+    ) -> ToolApplicationExecutionOutcome;
+}
+
+impl ToolApplicationExecutor {
+    pub async fn execute(
+        &self,
+        request: ToolApplicationRequest,
+        context: crate::ToolDispatchContext,
+    ) -> ToolApplicationExecutionOutcome {
+        self.execution.execute(request, context).await
+    }
+
+    /// Refuse new entry during native actor shutdown. Existing outcome
+    /// settlement remains valid for this exact owner.
+    pub fn close_admission(&self) {
+        self.owner.close_admission();
+    }
+}
+
+/// Result plus every pending canonical mutation, including on failed hooks or
+/// failed result publication. Fields are opaque so hosts cannot forge effects.
+pub struct ToolApplicationExecutionOutcome {
+    pub(crate) owner: ToolApplicationExecutionOwner,
+    pub(crate) result: Result<Value, crate::AgentError>,
+    pub(crate) notices: Vec<Message>,
+    pub(crate) events: Vec<crate::AgentEvent>,
+    pub(crate) effects: Vec<crate::ops::SessionEffect>,
+    pub(crate) settlement_failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+}
+
+impl ToolApplicationExecutionOutcome {
+    pub fn requires_settlement(&self) -> bool {
+        !self.notices.is_empty() || !self.effects.is_empty()
+    }
+
+    /// Revoke result publication after an actor wait without undoing entered
+    /// work or discarding hook notices and non-publication effects. A primary
+    /// execution/hook failure remains typed when publication also becomes invalid.
+    pub fn withhold_result(mut self, error: crate::AgentError) -> Self {
+        self.effects.retain(|effect| {
+            !matches!(
+                effect,
+                crate::ops::SessionEffect::AppendAssistantBlocks { .. }
+            )
+        });
+        if self.result.is_ok() {
+            self.result = Err(error.with_settlement_failures(self.settlement_failures()));
+        }
+        self
+    }
+
+    /// Empty outcomes can be returned while the model owns its Agent borrow.
+    /// A mutation-bearing outcome is returned intact for actor settlement.
+    pub fn into_immediate_result(self) -> Result<Result<Value, crate::AgentError>, Box<Self>> {
+        if self.requires_settlement() {
+            Err(Box::new(self))
+        } else {
+            Ok(self.result)
+        }
+    }
+
+    /// Native actor loss cannot settle this outcome elsewhere. Preserve the
+    /// entered operation's diagnostics when the owning service reports refusal.
+    pub fn into_refused_result(self, error: crate::AgentError) -> Result<Value, crate::AgentError> {
+        Err(error.with_settlement_failures(self.settlement_failures()))
+    }
+
+    /// Retain diagnostics when native custody or persistence fails without
+    /// changing that failure's primary session classification.
+    pub fn into_refused_session_result(
+        self,
+        error: crate::SessionError,
+    ) -> Result<Value, crate::SessionError> {
+        Err(error.with_settlement_failures(self.settlement_failures()))
+    }
+
+    pub fn settlement_failures(&self) -> Vec<crate::ops::ToolDispatchSettlementFailure> {
+        let mut failures = self.settlement_failures.clone();
+        if let Err(result) = &self.result {
+            for failure in result.settlement_failures() {
+                if !failures.contains(failure) {
+                    failures.push(failure.clone());
+                }
+            }
+        }
+        failures
+    }
+}
+
+/// Actor settlement preserves dirty evidence independently of result success.
+pub struct ToolApplicationSettlement {
+    pub(crate) result: Result<Value, crate::AgentError>,
+    pub(crate) dirty: bool,
+}
+
+impl ToolApplicationSettlement {
+    pub fn into_parts(self) -> (Result<Value, crate::AgentError>, bool) {
+        (self.result, self.dirty)
+    }
+}
+
 impl Drop for ToolApplicationObservationRun {
     fn drop(&mut self) {
         let mut state = self
@@ -339,6 +651,7 @@ pub struct ToolApplicationControlRequest {
     ingress: Arc<dyn ToolApplicationIngress>,
     claimed: AtomicBool,
     execution_claimed: AtomicBool,
+    execution_guard: OnceLock<Arc<dyn ToolApplicationIngress>>,
 }
 
 impl std::fmt::Debug for ToolApplicationControlRequest {
@@ -365,6 +678,7 @@ impl ToolApplicationControlRequest {
             ingress,
             claimed: AtomicBool::new(false),
             execution_claimed: AtomicBool::new(false),
+            execution_guard: OnceLock::new(),
         }))
     }
 
@@ -379,11 +693,29 @@ impl ToolApplicationControlRequest {
     }
 
     pub fn revalidate(&self) -> Result<(), OperationAuthorizationError> {
-        self.ingress.revalidate()
+        self.ingress.revalidate()?;
+        if let Some(guard) = self.execution_guard.get() {
+            guard.revalidate()?;
+        }
+        Ok(())
     }
 
     pub async fn revalidate_async(&self) -> Result<(), OperationAuthorizationError> {
-        self.ingress.revalidate_async().await
+        self.ingress.revalidate_async().await?;
+        if let Some(guard) = self.execution_guard.get() {
+            guard.revalidate_async().await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_execution_guard(
+        &self,
+        guard: Arc<dyn ToolApplicationIngress>,
+    ) -> Result<(), OperationAuthorizationError> {
+        self.execution_guard
+            .set(guard)
+            .map_err(|_| OperationAuthorizationError::Unavailable)?;
+        self.revalidate()
     }
 
     /// The Agent also owns one execution attempt, including direct embedded

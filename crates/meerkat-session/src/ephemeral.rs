@@ -2176,6 +2176,12 @@ enum SessionCommand {
         context: meerkat_core::ToolDispatchContext,
         reply_tx: oneshot::Sender<Result<serde_json::Value, meerkat_core::error::AgentError>>,
     },
+    SettleToolApplication {
+        actor: LiveSessionActorWitness,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+        outcome: meerkat_core::ToolApplicationExecutionOutcome,
+        reply_tx: oneshot::Sender<ToolApplicationSessionSettlement>,
+    },
     UpdateMobToolAuthority {
         authority_context: Option<MobToolAuthorityContext>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -2403,6 +2409,8 @@ struct SessionHandle {
     /// Native Agent publication retained by this exact actor registry entry.
     /// It can be read during a turn without sending an actor command.
     tool_application_observation_reader: Option<meerkat_core::ToolApplicationObservationReader>,
+    tool_application_executor: Option<meerkat_core::ToolApplicationExecutor>,
+    tool_application_custody: Arc<ToolApplicationCustody>,
     /// Runtime-owned turn phase handle for active-boundary probes.
     turn_state_handle: Option<Arc<dyn TurnStateHandle>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
@@ -2456,6 +2464,14 @@ impl StartTurnAdmissionClaim {
         handle: &SessionHandle,
         validated_identity: Option<SessionLlmIdentity>,
     ) -> Result<Self, SessionError> {
+        let custody = handle
+            .tool_application_custody
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if custody.closed || custody.lifecycle_reservations != 0 {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
         let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             match slot
@@ -2470,6 +2486,7 @@ impl StartTurnAdmissionClaim {
                 }
             }
         };
+        drop(custody);
         handle.state_tx.send_replace(projection);
         Ok(Self {
             actor_witness: handle.actor_witness.clone(),
@@ -2505,6 +2522,215 @@ impl Drop for StartTurnAdmissionClaim {
         if let Some(projection) = projection {
             self.state_tx.send_replace(projection);
         }
+    }
+}
+
+impl SessionHandle {
+    fn revoke_actor(&self) {
+        self.tool_application_custody.close();
+        if let Some(executor) = &self.tool_application_executor {
+            executor.close_admission();
+        }
+        self.actor_witness.revoke();
+    }
+}
+
+/// Mechanical custody only. Native ingress, tool scope and execution policy
+/// still authorize every call; this count prevents retiring its exact actor
+/// before any returned session effects have been settled durably.
+#[derive(Default)]
+struct ToolApplicationCustody {
+    state: std::sync::Mutex<ToolApplicationCustodyState>,
+    drained: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct ToolApplicationCustodyState {
+    closed: bool,
+    operations: usize,
+    lifecycle_reservations: usize,
+}
+
+impl ToolApplicationCustody {
+    fn acquire(
+        self: &Arc<Self>,
+        id: &SessionId,
+    ) -> Result<ToolApplicationCustodyLease, SessionError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed || state.lifecycle_reservations != 0 {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        state.operations += 1;
+        Ok(ToolApplicationCustodyLease(Arc::clone(self)))
+    }
+
+    fn close_if_idle<T>(
+        &self,
+        id: &SessionId,
+        close: impl FnOnce() -> Result<T, SessionError>,
+    ) -> Result<T, SessionError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.operations != 0 {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+        let result = close()?;
+        state.closed = true;
+        Ok(result)
+    }
+
+    fn close(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed = true;
+    }
+
+    #[cfg(any(test, all(feature = "session-store", not(target_arch = "wasm32"))))]
+    fn reserve_lifecycle(
+        self: &Arc<Self>,
+        id: &SessionId,
+    ) -> Result<ToolApplicationLifecycleReservation, SessionError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.operations != 0 {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+        state.lifecycle_reservations += 1;
+        Ok(ToolApplicationLifecycleReservation(Arc::clone(self)))
+    }
+
+    async fn wait_drained(&self) {
+        loop {
+            let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .operations
+                == 0
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct ToolApplicationCustodyLease(Arc<ToolApplicationCustody>);
+
+#[cfg(any(test, all(feature = "session-store", not(target_arch = "wasm32"))))]
+pub(crate) struct ToolApplicationLifecycleReservation(Arc<ToolApplicationCustody>);
+
+#[cfg(any(test, all(feature = "session-store", not(target_arch = "wasm32"))))]
+impl Drop for ToolApplicationLifecycleReservation {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.lifecycle_reservations -= 1;
+    }
+}
+
+impl Drop for ToolApplicationCustodyLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.operations -= 1;
+        if state.operations == 0 {
+            self.0.drained.notify_waiters();
+        }
+    }
+}
+
+/// Retains the exact command sender and actor until native IO and all session
+/// settlement finish. It can never be redirected through a logical ID lookup.
+pub(crate) struct AdmittedToolApplication {
+    actor: LiveSessionActorWitness,
+    command_tx: mpsc::Sender<SessionCommand>,
+    executor: meerkat_core::ToolApplicationExecutor,
+    _custody: ToolApplicationCustodyLease,
+}
+
+impl AdmittedToolApplication {
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) fn actor(&self) -> &LiveSessionActorWitness {
+        &self.actor
+    }
+
+    /// A failed durable boundary cannot leave this projection available while
+    /// registry retirement waits. The exact entered calls retain their own
+    /// tasks, but cannot enter again or publish through this failed actor.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) fn quarantine_after_durable_failure(&self) {
+        self._custody.0.close();
+        self.executor.close_admission();
+        self.actor.revoke();
+    }
+
+    pub(crate) async fn execute(
+        &self,
+        request: meerkat_core::ToolApplicationRequest,
+        context: meerkat_core::ToolDispatchContext,
+    ) -> meerkat_core::ToolApplicationExecutionOutcome {
+        self.executor.execute(request, context).await
+    }
+
+    pub(crate) async fn settle(
+        &self,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+        outcome: meerkat_core::ToolApplicationExecutionOutcome,
+    ) -> Result<ToolApplicationSessionSettlement, SessionError> {
+        let failures = outcome.settlement_failures();
+        if !self.actor.is_live() {
+            return Ok((
+                outcome.into_refused_result(AgentError::Cancelled),
+                false,
+                failures,
+            ));
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if let Err(error) = self
+            .command_tx
+            .send(SessionCommand::SettleToolApplication {
+                actor: self.actor.clone(),
+                control,
+                outcome,
+                reply_tx,
+            })
+            .await
+        {
+            if let SessionCommand::SettleToolApplication { outcome, .. } = error.0 {
+                return Ok((
+                    outcome.into_refused_result(AgentError::Cancelled),
+                    false,
+                    failures,
+                ));
+            }
+            return Err(SessionError::NotFound {
+                id: self.actor.session_id().clone(),
+            });
+        }
+        reply_rx.await.map_err(|_| {
+            SessionError::NotFound {
+                id: self.actor.session_id().clone(),
+            }
+            .with_settlement_failures(failures)
+        })
     }
 }
 
@@ -2874,9 +3100,39 @@ pub type LiveBridgeSessionOperationTerminalReceiver =
 
 pub type LiveBridgePreparedSessionOperation = meerkat_core::LiveBridgePreparedOperation;
 
+/// Result, actual session mutation, and known native settlement diagnostics.
+/// The diagnostics remain available if durable publication later fails.
+pub type ToolApplicationSessionSettlement = (
+    Result<serde_json::Value, AgentError>,
+    bool,
+    Vec<meerkat_core::ops::ToolDispatchSettlementFailure>,
+);
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionAgent: Send {
+    /// Mint the native, exact-owner application executor. Custom agents that
+    /// do not provide it retain the serialized `tool_application` path.
+    fn tool_application_executor(&self) -> Option<meerkat_core::ToolApplicationExecutor> {
+        None
+    }
+
+    /// Apply an opaque result only to the Agent that minted its executor.
+    /// The native settlement reports actual session changes even on error.
+    fn settle_tool_application(
+        &mut self,
+        outcome: meerkat_core::ToolApplicationExecutionOutcome,
+    ) -> ToolApplicationSessionSettlement {
+        let failures = outcome.settlement_failures();
+        (
+            outcome.into_refused_result(AgentError::ConfigError(
+                "tool application settlement is not supported by this session agent".into(),
+            )),
+            false,
+            failures,
+        )
+    }
+
     /// Publish canonical host observations between native actor commands.
     fn publish_idle_tool_application_observations(&self) {}
 
@@ -5108,6 +5364,86 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn reserve_tool_application_lifecycle(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<ToolApplicationLifecycleReservation>, SessionError> {
+        self.sessions
+            .with_handle(id, |handle| {
+                handle.tool_application_custody.reserve_lifecycle(id)
+            })
+            .await
+            .transpose()
+    }
+
+    pub(crate) async fn admit_concurrent_tool_application(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<AdmittedToolApplication>, SessionError> {
+        self.sessions
+            .with_handle(id, |handle| {
+                if !handle.actor_witness.is_live()
+                    || handle.command_tx.is_closed()
+                    || handle.archive_snapshot_gate.closed.load(Ordering::Acquire)
+                    || lock_turn_admission(&handle.turn_admission).phase()
+                        == TurnAdmissionPhase::ShuttingDown
+                {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+                let Some(executor) = handle.tool_application_executor.as_ref() else {
+                    return Ok(None);
+                };
+                let custody = handle.tool_application_custody.acquire(id)?;
+                Ok(Some(AdmittedToolApplication {
+                    actor: handle.actor_witness.clone(),
+                    command_tx: handle.command_tx.clone(),
+                    executor: executor.clone(),
+                    _custody: custody,
+                }))
+            })
+            .await
+            .unwrap_or_else(|| Err(SessionError::NotFound { id: id.clone() }))
+    }
+
+    /// Stop new actor work and cancel active turns before waiting for entered
+    /// application settlement. Waiting for a turn guard before interrupting
+    /// would deadlock a mutation returned while the model is still running.
+    pub(crate) async fn drain_tool_applications_for_shutdown(&self) -> Result<(), SessionError> {
+        let custody = self
+            .sessions
+            .read(|sessions| {
+                let mut custody = Vec::with_capacity(sessions.len());
+                for (id, handle) in sessions {
+                    handle.tool_application_custody.close();
+                    if let Some(executor) = &handle.tool_application_executor {
+                        executor.close_admission();
+                    }
+                    let mut slot = lock_turn_admission(&handle.turn_admission);
+                    if matches!(
+                        slot.phase(),
+                        TurnAdmissionPhase::Admitted | TurnAdmissionPhase::Running
+                    ) {
+                        let wake = slot.request_interrupt().map_err(|error| {
+                            SessionError::Agent(AgentError::InternalError(format!(
+                                "session {id} could not interrupt for application drain: {error}"
+                            )))
+                        })?;
+                        if wake {
+                            wake_interrupt_notify(&handle.interrupt_notify);
+                        }
+                    }
+                    custody.push(Arc::clone(&handle.tool_application_custody));
+                }
+                Ok::<_, SessionError>(custody)
+            })
+            .await?;
+        for custody in custody {
+            custody.wait_drained().await;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn dispatch_tool_application(
         &self,
         control: Arc<meerkat_core::ToolApplicationControlRequest>,
@@ -5227,7 +5563,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     return Ok(None);
                 };
                 let projection = Self::request_live_session_handle_shutdown(id, handle)?;
-                handle.actor_witness.revoke();
+                handle.revoke_actor();
                 let Some(handle) = sessions.swap_remove(id) else {
                     return Err(SessionError::Agent(AgentError::InternalError(format!(
                         "session {id} disappeared during exact live actor discard"
@@ -5255,14 +5591,42 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) {
+        let witness = self
+            .sessions
+            .with_handle(id, |handle| handle.actor_witness.clone())
+            .await;
+        if let Some(witness) = witness {
+            self.fatalize_live_session_actor_after_durable_convergence_failure(&witness)
+                .await;
+        }
+    }
+
+    /// Fatal cleanup has different semantics from an explicit discard: entered
+    /// App work cannot keep a failed durable projection alive. Compare the
+    /// exact actor, revoke it before removing the registry entry, and terminate
+    /// without waiting on App leases that may themselves need the caller's
+    /// held turn-finalization boundary. Their owned tasks return typed custody
+    /// refusals with their retained settlement diagnostics.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn fatalize_live_session_actor_after_durable_convergence_failure(
+        &self,
+        witness: &LiveSessionActorWitness,
+    ) -> bool {
+        let id = witness.session_id();
         let handle = self
             .sessions
-            .write(|sessions| sessions.swap_remove(id))
+            .write(|sessions| {
+                let handle = sessions.get(id)?;
+                if !witness.is_handle(handle) {
+                    return None;
+                }
+                handle.revoke_actor();
+                sessions.swap_remove(id)
+            })
             .await;
         let Some(handle) = handle else {
-            return;
+            return false;
         };
-        handle.actor_witness.revoke();
         self.staged_registry.forget(id);
         handle.archive_snapshot_gate.close_for_snapshot();
         handle.task_handle.abort();
@@ -5278,6 +5642,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         #[cfg(test)]
         self.fatalized_actor_task_terminations
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        true
     }
 
     /// Drop only the actor incarnation named by `witness`.
@@ -5300,7 +5665,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 }
                 let projection =
                     Self::request_live_session_handle_shutdown(witness.session_id(), handle)?;
-                handle.actor_witness.revoke();
+                handle.revoke_actor();
                 let Some(handle) = sessions.swap_remove(witness.session_id()) else {
                     return Err(SessionError::Agent(AgentError::InternalError(format!(
                         "session {} disappeared during exact live actor discard",
@@ -5321,13 +5686,19 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         handle: &SessionHandle,
     ) -> Result<TurnAdmissionProjection, SessionError> {
-        let mut slot = lock_turn_admission(&handle.turn_admission);
-        slot.request_shutdown().map_err(|error| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "session {id} could not enter generated shutdown state: {error}"
-            )))
+        let projection = handle.tool_application_custody.close_if_idle(id, || {
+            let mut slot = lock_turn_admission(&handle.turn_admission);
+            slot.request_shutdown().map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "session {id} could not enter generated shutdown state: {error}"
+                )))
+            })?;
+            Ok(slot.projection())
         })?;
-        Ok(slot.projection())
+        if let Some(executor) = &handle.tool_application_executor {
+            executor.close_admission();
+        }
+        Ok(projection)
     }
 
     fn shutdown_removed_live_session_handle(
@@ -7069,6 +7440,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// Every session is attempted. Handles whose generated teardown authority
     /// rejects shutdown remain registered for a later retry.
     pub async fn try_shutdown(&self) -> Result<(), SessionError> {
+        self.drain_tool_applications_for_shutdown().await?;
         let (handles, first_error) = self
             .sessions
             .write(|sessions| {
@@ -7078,7 +7450,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 for (session_id, handle) in pending {
                     match Self::request_live_session_handle_shutdown(&session_id, &handle) {
                         Ok(projection) => {
-                            handle.actor_witness.revoke();
+                            handle.revoke_actor();
                             handles.push((session_id, handle, projection));
                         }
                         Err(error) => {
@@ -7514,6 +7886,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let turn_state_handle = agent.turn_state_handle();
         agent.publish_idle_tool_application_observations();
         let tool_application_observation_reader = agent.tool_application_observation_reader();
+        let tool_application_executor = agent.tool_application_executor();
+        let tool_application_custody = Arc::new(ToolApplicationCustody::default());
         // W2-E: capture the session-context DSL handle so the session task
         // can fire `AdvanceSessionContext` on every summary-publish site.
         let session_context = agent.session_context_handle();
@@ -7632,6 +8006,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             transient_turn_context_state,
             archive_snapshot_gate,
             tool_application_observation_reader,
+            tool_application_executor,
+            tool_application_custody,
             turn_state_handle,
             deferred_turn_state,
             active_capacity_lease,
@@ -7684,7 +8060,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     return Err(error);
                 }
             };
-            handle.actor_witness.revoke();
+            handle.revoke_actor();
             handle.state_tx.send_replace(projection);
             handle.shutdown_notify.notify_one();
             return Err(SessionError::Agent(
@@ -7803,7 +8179,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             self.sessions
                 .write(|sessions| {
                     if let Some(handle) = sessions.swap_remove(&session_id) {
-                        handle.actor_witness.revoke();
+                        handle.revoke_actor();
                     }
                 })
                 .await;
@@ -7821,7 +8197,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 self.sessions
                     .write(|sessions| {
                         if let Some(handle) = sessions.swap_remove(&session_id) {
-                            handle.actor_witness.revoke();
+                            handle.revoke_actor();
                         }
                     })
                     .await;
@@ -7871,7 +8247,38 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         #[cfg(not(feature = "runtime-machine"))]
         let context = meerkat_core::ToolDispatchContext::default()
             .with_tool_application_control(Arc::clone(&control));
-        self.dispatch_tool_application(control, context).await
+        // The owned task, rather than HTTP delivery, retains the action and
+        // any native session settlement after physical handoff.
+        tokio::spawn(async move {
+            let Some(admitted) = self
+                .admit_concurrent_tool_application(control.session_id())
+                .await?
+            else {
+                return self.dispatch_tool_application(control, context).await;
+            };
+            let outcome = admitted.execute(control.request().clone(), context).await;
+            match outcome.into_immediate_result() {
+                Ok(result) => result.map_err(SessionError::Agent),
+                Err(outcome) => {
+                    let (result, _, failures) =
+                        admitted.settle(Arc::clone(&control), *outcome).await?;
+                    if result.is_ok() {
+                        control.revalidate_async().await.map_err(|error| {
+                            SessionError::Agent(
+                                AgentError::tool(error.into()).with_settlement_failures(failures),
+                            )
+                        })?;
+                    }
+                    result.map_err(SessionError::Agent)
+                }
+            }
+        })
+        .await
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "tool application execution task failed: {error}"
+            )))
+        })?
     }
 
     async fn read_tool_application_observations(
@@ -8212,7 +8619,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 // before mutating the live actor's turn-admission authority.
                 authorize_standalone_archive(id)?;
                 let projection = Self::request_live_session_handle_shutdown(id, handle)?;
-                handle.actor_witness.revoke();
+                handle.revoke_actor();
                 let handle = sessions
                     .swap_remove(id)
                     .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
@@ -9202,6 +9609,16 @@ async fn drain_session_task_commands<A: SessionAgent>(
             }
             SessionCommand::ToolApplication { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
+            SessionCommand::SettleToolApplication {
+                outcome, reply_tx, ..
+            } => {
+                let failures = outcome.settlement_failures();
+                let _ = reply_tx.send((
+                    outcome.into_refused_result(AgentError::Cancelled),
+                    false,
+                    failures,
+                ));
             }
             SessionCommand::UpdateMobToolAuthority { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
@@ -10626,6 +11043,40 @@ async fn session_task<A: SessionAgent>(
                         item_id,
                         content_index,
                     );
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::SettleToolApplication {
+                actor,
+                control: request_control,
+                mut outcome,
+                reply_tx,
+            } => {
+                let result = if actor.is_live() && actor.same_incarnation(&control.actor_witness) {
+                    // Settlement can wait behind a model turn. A revoked
+                    // viewer or invocation must not publish a private result
+                    // or transcript append, while entered effects still settle.
+                    if let Err(error) = request_control.revalidate_async().await {
+                        outcome = outcome.withhold_result(AgentError::tool(error.into()));
+                    }
+                    agent.settle_tool_application(outcome)
+                } else {
+                    let failures = outcome.settlement_failures();
+                    (
+                        outcome.into_refused_result(AgentError::Cancelled),
+                        false,
+                        failures,
+                    )
+                };
+                if result.1 {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
                 let _ = reply_tx.send(result);
             }
             SessionCommand::ToolApplication {
@@ -14707,3 +15158,6 @@ mod inline_video_admission_tests {
         drop(replacement_guard);
     }
 }
+
+#[cfg(test)]
+mod tool_application_custody_tests;

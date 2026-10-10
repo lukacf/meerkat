@@ -5116,6 +5116,7 @@ mod tests {
     impl StaticDispatcher {
         fn new(name: &str) -> Self {
             let tool = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: format!("tool {name}"),
                 input_schema: serde_json::json!({

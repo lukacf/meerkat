@@ -46,6 +46,7 @@ impl BuiltinTool for TaskGetTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "task_get".into(),
             description: "Get a task by its ID".into(),
             input_schema: crate::schema::schema_for::<TaskGetParams>(),

@@ -1169,6 +1169,8 @@ where
         self.apply_llm_request_policy(pending.request_policy);
         self.active_model_profile = Some(pending.target_profile);
         self.session = pending.next_session;
+        self.tool_application_observations
+            .refresh(self.session.messages());
         self.durable_row_floor = self.session.messages().len();
         tracing::warn!(model = %self.client.model(), provider = %self.client.provider().as_str(), "model fallback committed");
         let _ = crate::event_tap::tap_emit(
@@ -1747,6 +1749,8 @@ where
             self.apply_llm_request_policy(switch.request_policy);
             self.active_model_profile = Some(switch.target_profile);
             self.session = next_session;
+            self.tool_application_observations
+                .refresh(self.session.messages());
             self.durable_row_floor = self.session.messages().len();
             let _ = crate::event_tap::tap_emit(
                 &self.event_tap,
@@ -3169,7 +3173,7 @@ where
                         .session_boundary_index
                         .saturating_add(1);
                     let cadence = self.compaction_cadence.clone();
-                    crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                    crate::agent::compact::persist_compaction_cadence(&mut self.session, &cadence)
                         .map_err(|error| {
                             AgentError::InternalError(format!(
                                 "failed to persist session compaction cadence metadata: {error}"
@@ -3198,6 +3202,7 @@ where
                         current_boundary_index,
                     );
                     if compactor.should_compact(&ctx) {
+                        self.tool_application_observations.invalidate();
                         let rollback_state = crate::agent::CompactionRollbackState {
                             rollback_session: self.session.clone(),
                             rollback_last_input_tokens: self.last_input_tokens,
@@ -3464,6 +3469,8 @@ where
                                 match self.memory_store.clone() {
                                         None => {
                                             self.session = compacted_session;
+                                            self.tool_application_observations
+                                                .refresh(self.session.messages());
                                             self.durable_row_floor = self.session.messages().len();
                                             (true, true)
                                         }
@@ -3572,6 +3579,8 @@ where
                                                                 };
                                                                 if adopted {
                                                                     self.session = compacted_session;
+                                                                    self.tool_application_observations
+                                                                        .refresh(self.session.messages());
                                                                     self.durable_row_floor = self.session.messages().len();
                                                                     if self
                                                                         .in_flight_compaction_stage
@@ -3713,6 +3722,8 @@ where
                                     ),
                                 );
                             }
+                            self.tool_application_observations
+                                .refresh(self.session.messages());
                             if rewrite_committed {
                                 self.last_input_tokens = 0;
                                 self.post_compaction_pressure_check = provider_request_pressure
@@ -3745,7 +3756,7 @@ where
                     }
                 }
                 let cadence = self.compaction_cadence.clone();
-                crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                crate::agent::compact::persist_compaction_cadence(&mut self.session, &cadence)
                     .map_err(|error| {
                         AgentError::InternalError(format!(
                             "failed to persist session compaction cadence metadata: {error}"
@@ -4118,6 +4129,8 @@ where
             }
         }
         self.session = next_session;
+        self.tool_application_observations
+            .refresh(self.session.messages());
         self.durable_row_floor = self.session.messages().len();
         if let Some(transaction) = self.compaction_transaction.as_mut() {
             transaction.phase = crate::agent::CompactionTransactionPhase::RuntimeCommitted {
@@ -4316,6 +4329,8 @@ where
             restored_cadence.last_compaction_attempt_boundary_index =
                 attempted_cadence.last_compaction_attempt_boundary_index;
             self.session = restored_session;
+            self.tool_application_observations
+                .refresh(self.session.messages());
             // Durable boundary appends applied after the capture are gone
             // from the restored image.
             self.transient_turn_context_state
@@ -4362,7 +4377,7 @@ where
                 });
         if cadence_persist_pending {
             let cadence = self.compaction_cadence.clone();
-            match crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence) {
+            match crate::agent::compact::persist_compaction_cadence(&mut self.session, &cadence) {
                 Ok(()) => {
                     if let Some(transaction) = self.compaction_transaction.as_mut() {
                         transaction.phase =
@@ -4777,6 +4792,14 @@ where
         self.latest_run_checkpoint_receipt = None;
         self.runtime_started_run_id = Some(run_id.clone());
         self.tool_dispatch_context.bind_run_id(run_id.clone());
+        let _tool_application_observation_run = if self.noncommitting_live_bridge_run {
+            None
+        } else {
+            Some(
+                self.tool_application_observations
+                    .begin_run(run_id.clone(), self.session.messages()),
+            )
+        };
         // Open the first actor-local boundary generation before the first
         // suspension point, and retain a run-scope guard so normal errors,
         // natural completion, hard-interrupt future drops, and task abort all
@@ -5665,6 +5688,8 @@ where
             .reserved_assistant_message
             .get_or_insert_with(crate::types::AssistantMessageId::mint);
 
+        self.tool_application_observations
+            .refresh(self.session.messages());
         if !in_extraction {
             emit_phase_event!(
                 self,
@@ -7512,6 +7537,8 @@ where
                 return Err(error);
             }
             self.session = staged_session;
+            self.tool_application_observations
+                .refresh(self.session.messages());
         } else {
             self.session
                 .push(Message::BlockAssistant(assistant_msg.clone()));
@@ -7547,6 +7574,8 @@ where
         if !callback_batch_pending && !tool_results.is_empty() {
             self.session
                 .push(Message::tool_results(tool_results.clone()));
+            self.tool_application_observations
+                .refresh(self.session.messages());
         }
 
         // Each effect-appended assistant message has its own occurrence id,
@@ -10639,6 +10668,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 tools: Arc::from([Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "external_callback".into(),
                     description: "external callback fixture".to_string(),
                     input_schema: serde_json::json!({ "type": "object" }),
@@ -11590,6 +11620,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
+                        audience: Default::default(),
                         name: (*name).into(),
                         description: format!("{name} tool"),
                         input_schema: serde_json::json!({ "type": "object" }),
@@ -11611,6 +11642,7 @@ mod tests {
         /// while the transcript alone stays well inside it.
         fn with_wide_tool(name: &str, description_bytes: usize) -> Self {
             let tools = vec![Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: "d".repeat(description_bytes),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -11719,18 +11751,21 @@ mod tests {
     impl PlaneAwareToolDispatcher {
         fn new() -> Self {
             let visible = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "visible".into(),
                 description: "visible tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
             });
             let secret = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "secret".into(),
                 description: "secret tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: None,
             });
             let control = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "tool_catalog_search".into(),
                 description: "control search tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -11804,6 +11839,7 @@ mod tests {
     impl DeferredLoadDispatcher {
         fn new() -> Self {
             let deferred = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "deferred_tool".into(),
                 description:
                     "deferred tool that must stay hidden until tool_catalog_load reaches the next boundary."
@@ -11815,6 +11851,7 @@ mod tests {
                 }),
             });
             let deferred_two = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "deferred_tool_two".into(),
                 description:
                     "second deferred tool used only to keep the test dispatcher above the adaptive catalog threshold."
@@ -11826,6 +11863,7 @@ mod tests {
                 }),
             });
             let control = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "tool_catalog_load".into(),
                 description: "control load tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -11917,6 +11955,7 @@ mod tests {
     impl DeferredWithoutControlDispatcher {
         fn new() -> Self {
             let secret = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "secret".into(),
                 description: "deferred secret tool that direct AgentBuilder users must still reach without a control plane."
                     .to_string(),
@@ -11927,6 +11966,7 @@ mod tests {
                 }),
             });
             let deferred_two = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "deferred_tool_two".into(),
                 description:
                     "second deferred tool used only to keep the direct builder dispatcher above the adaptive threshold."
@@ -14590,6 +14630,7 @@ mod tests {
         };
         let dispatcher = ProvenanceToolDispatcher {
             tools: vec![Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "lookup".into(),
                 description: "lookup tool".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -16175,6 +16216,7 @@ mod tests {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(HangingDispatcher {
             tools: Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "slow".into(),
                 description: "hangs until timeout".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -17326,6 +17368,7 @@ mod tests {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(ToolAuthoredTerminalCauseDispatcher {
             tools: Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "spoof_timeout".into(),
                 description: "returns timeout-shaped tool output".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -18889,6 +18932,7 @@ mod tests {
         let client = Arc::new(SingleToolCallClient);
         let tools = Arc::new(BarrierOpDispatcher {
             tools: Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "queue_op".into(),
                 description: "registers a barrier async op".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -19005,6 +19049,7 @@ mod tests {
         let client = Arc::new(SingleToolCallClient);
         let tools = Arc::new(VideoResultDispatcher {
             tools: Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "make_video".into(),
                 description: "returns an unsupported video block".to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
@@ -19341,6 +19386,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 tools: vec![Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "image_effect".into(),
                     description: "returns an assistant image session effect".into(),
                     input_schema: serde_json::json!({ "type": "object" }),
@@ -20762,6 +20808,7 @@ mod tests {
                 .iter()
                 .map(|name| {
                     Arc::new(ToolDef {
+                        audience: Default::default(),
                         name: (*name).into(),
                         description: format!("{name} tool"),
                         input_schema: serde_json::json!({ "type": "object" }),

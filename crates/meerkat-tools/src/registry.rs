@@ -158,6 +158,7 @@ mod tests {
 
     fn test_tool(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: description.to_string(),
             input_schema: empty_object_schema(),
@@ -168,6 +169,7 @@ mod tests {
     #[test]
     fn test_validate_tool_def_invalid_args() {
         let def = ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "A test tool".to_string(),
             input_schema: json!({

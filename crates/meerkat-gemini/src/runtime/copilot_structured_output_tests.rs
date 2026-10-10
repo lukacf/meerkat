@@ -93,6 +93,7 @@ fn review_schema() -> OutputSchema {
 
 fn lookup_tool() -> Arc<ToolDef> {
     Arc::new(ToolDef {
+        audience: Default::default(),
         name: "lookup".into(),
         description: "returns a fixed observation".to_string(),
         input_schema: json!({"type": "object", "properties": {}}),

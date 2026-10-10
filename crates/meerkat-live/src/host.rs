@@ -1023,6 +1023,9 @@ impl LiveProjectionError {
         let code = err.code();
         let message = err.to_string();
         match err {
+            SessionError::WithSettlementFailures { error, .. } => {
+                Self::from_session_error(session_id, *error)
+            }
             SessionError::NotFound { .. } => Self::SessionNotFound(session_id.clone()),
             SessionError::Unsupported(reason) => Self::Rejected(reason),
             SessionError::Busy { id } => Self::SessionBusy(id),
@@ -1837,6 +1840,9 @@ impl LiveToolDispatchError {
         let code = err.code();
         let message = err.to_string();
         match err {
+            SessionError::WithSettlementFailures { error, .. } => {
+                Self::from_session_error(session_id, *error)
+            }
             SessionError::Agent(meerkat_core::AgentError::Tool { error })
                 if matches!(
                     error.primary_error(),

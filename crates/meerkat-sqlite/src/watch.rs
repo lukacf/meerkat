@@ -80,6 +80,27 @@ pub fn sqlite_watch_paths(path: &Path) -> Vec<PathBuf> {
     ]
 }
 
+fn sqlite_watch_targets(db_path: &Path) -> Result<(PathBuf, Vec<PathBuf>), String> {
+    let file_name = db_path
+        .file_name()
+        .ok_or_else(|| format!("{} has no database filename", db_path.display()))?;
+    let parent = db_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = parent.canonicalize().map_err(|error| {
+        format!(
+            "cannot resolve {} for sqlite watch: {error}",
+            parent.display()
+        )
+    })?;
+    // FSEvents reports canonical paths, including /private/var for /var on
+    // macOS. Resolve only the existing directory: database and sidecar files
+    // may not exist yet, or may have been removed when an event is delivered.
+    let watched_paths = sqlite_watch_paths(&parent.join(file_name));
+    Ok((parent, watched_paths))
+}
+
 /// Whether a notification concerns the database (its files or directory).
 pub fn sqlite_watch_event_relevant(
     event: &notify::Event,
@@ -111,11 +132,7 @@ pub fn start_sqlite_change_watch(
     sweep: Duration,
     mut on_tick: impl FnMut(SqliteWatchTick) -> SqliteWatchControl + Send + 'static,
 ) -> Result<SqliteChangeWatch, String> {
-    let parent = db_path
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| format!("{} has no parent directory", db_path.display()))?;
-    let watched_paths = sqlite_watch_paths(db_path);
+    let (parent, watched_paths) = sqlite_watch_targets(db_path)?;
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
 
     let callback_parent = parent.clone();
@@ -185,23 +202,83 @@ pub fn start_sqlite_change_watch(
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_write_to_the_database_ticks_changed() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("store.sqlite3");
-        std::fs::write(&db, b"").unwrap();
+    fn assert_database_write_ticks_changed(db: &Path) {
+        std::fs::write(db, b"").unwrap();
         let (tick_tx, tick_rx) = mpsc::channel();
-        let _watch =
-            start_sqlite_change_watch(&db, "test-watch", SQLITE_WATCH_SWEEP, move |tick| {
-                let _ = tick_tx.send(tick);
-                SqliteWatchControl::Handled
-            })
-            .expect("watch starts");
-        std::fs::write(sidecar_path(&db, "-wal"), b"frame").unwrap();
+        let _watch = start_sqlite_change_watch(db, "test-watch", SQLITE_WATCH_SWEEP, move |tick| {
+            let _ = tick_tx.send(tick);
+            SqliteWatchControl::Handled
+        })
+        .expect("watch starts");
+        std::fs::write(sidecar_path(db, "-wal"), b"frame").unwrap();
         let tick = tick_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("the write is observed within the hang guard");
         assert_eq!(tick, SqliteWatchTick::Changed);
+    }
+
+    #[test]
+    fn a_write_to_the_database_ticks_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_database_write_ticks_changed(&dir.path().join("store.sqlite3"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_targets_match_canonical_events_for_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let db = alias.join("store.sqlite3");
+        let (parent, watched_paths) = sqlite_watch_targets(&db).unwrap();
+        let canonical_parent = actual.canonicalize().unwrap();
+        assert_eq!(parent, canonical_parent);
+        assert_eq!(
+            watched_paths,
+            sqlite_watch_paths(&canonical_parent.join("store.sqlite3"))
+        );
+        assert!(!db.exists());
+        for path in &watched_paths {
+            assert!(!path.exists());
+            for kind in [
+                notify::EventKind::Create(notify::event::CreateKind::File),
+                notify::EventKind::Remove(notify::event::RemoveKind::File),
+            ] {
+                let event = notify::Event::new(kind).add_path(path.clone());
+                assert!(sqlite_watch_event_relevant(&event, &parent, &watched_paths));
+            }
+        }
+        for path in [
+            canonical_parent.join("other.sqlite3-wal"),
+            canonical_parent.join("other").join("store.sqlite3-wal"),
+        ] {
+            let event = notify::Event::new(notify::EventKind::Any).add_path(path);
+            assert!(!sqlite_watch_event_relevant(
+                &event,
+                &parent,
+                &watched_paths
+            ));
+        }
+        let access = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Any))
+            .add_path(watched_paths[0].clone());
+        assert!(!sqlite_watch_event_relevant(
+            &access,
+            &parent,
+            &watched_paths
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_through_a_symlinked_directory_ticks_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        assert_database_write_ticks_changed(&alias.join("store.sqlite3"));
     }
 
     #[test]

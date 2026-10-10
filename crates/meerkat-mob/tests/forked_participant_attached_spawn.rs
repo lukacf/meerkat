@@ -412,6 +412,7 @@ struct SourceOverlay;
 impl meerkat_core::AgentToolDispatcher for SourceOverlay {
     fn tools(&self) -> std::sync::Arc<[std::sync::Arc<meerkat_core::ToolDef>]> {
         vec![std::sync::Arc::new(meerkat_core::ToolDef {
+            audience: Default::default(),
             name: "calendar_create_event".into(),
             description: "source overlay tool".to_string(),
             input_schema: serde_json::json!({"type": "object"}),

@@ -93,6 +93,7 @@ async fn invoke(surface: Surface, reply: Reply, text_only: bool) -> Result<Outpu
                     Default::default(),
                 ),
                 connection_id: crate::McpConnectionId::allocate().unwrap(),
+                standard_tools: Default::default(),
                 protected_metadata: Default::default(),
                 service: service.into(),
                 stdio_child: None,

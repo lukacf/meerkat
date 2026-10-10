@@ -1039,6 +1039,24 @@ impl McpRouterAdapter {
 
 #[async_trait]
 impl AgentToolDispatcher for McpRouterAdapter {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        let guard = self.router.read().await;
+        match guard.as_ref() {
+            Some(router) => {
+                router
+                    .resolve_tool_application(source_tool, request, invocation, context)
+                    .await
+            }
+            None => Err(ToolError::access_denied(source_tool)),
+        }
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         match self.router.try_read() {
             Ok(router) => match router.as_ref() {

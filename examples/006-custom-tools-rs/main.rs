@@ -73,12 +73,14 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                 description: "Get current weather for a city (simulated data)".to_string(),
                 input_schema: meerkat_tools::schema_for::<WeatherArgs>(),
                 provenance: None,
+                audience: Default::default(),
             }),
             Arc::new(ToolDef {
                 name: "convert_units".into(),
                 description: "Convert between measurement units".to_string(),
                 input_schema: meerkat_tools::schema_for::<ConvertArgs>(),
                 provenance: None,
+                audience: Default::default(),
             }),
         ]
         .into()

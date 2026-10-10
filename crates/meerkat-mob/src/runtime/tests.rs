@@ -12541,6 +12541,7 @@ struct EchoBundleDispatcher;
 impl AgentToolDispatcher for EchoBundleDispatcher {
     fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
         vec![Arc::new(meerkat_core::ToolDef {
+            audience: Default::default(),
             name: "bundle_echo".into(),
             description: "Echo input value".to_string(),
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -24120,6 +24121,7 @@ async fn a_mounted_rust_bundle_carries_its_identity_into_a_witnessed_ceiling() {
 
     let mut with_anonymous = defs.clone();
     with_anonymous.push(meerkat_core::ToolDef {
+        audience: Default::default(),
         name: "anonymous".into(),
         description: "A tool with no source identity".to_string(),
         input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -24169,6 +24171,7 @@ async fn a_rust_bundle_keeps_a_tools_explicit_owner() {
     impl AgentToolDispatcher for ExplicitlyOwned {
         fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
             vec![Arc::new(meerkat_core::ToolDef {
+                audience: Default::default(),
                 name: "owned_elsewhere".into(),
                 description: "names its own source".to_string(),
                 input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -24248,6 +24251,7 @@ async fn a_rust_bundle_keeps_a_deferred_tools_catalog_owner() {
     impl DeferredOwned {
         fn tool() -> Arc<meerkat_core::ToolDef> {
             Arc::new(meerkat_core::ToolDef {
+                audience: Default::default(),
                 name: "deferred_tool".into(),
                 description: "loaded on demand".to_string(),
                 input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -24374,6 +24378,7 @@ async fn a_live_rust_bundle_attributes_tools_it_adds_later() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(Arc::new(meerkat_core::ToolDef {
+            audience: Default::default(),
             name: "late_tool".into(),
             description: "added after mount".to_string(),
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -24543,6 +24548,7 @@ async fn profile_tools_mcp_allowlist_scopes_default_external_tools() {
 
     fn mcp_tool(name: &str, source: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("Tool {name}"),
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -24628,6 +24634,7 @@ async fn profile_tools_mcp_empty_passes_all_default_external_tools() {
 
     fn mcp_tool(name: &str, source: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("Tool {name}"),
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -27319,6 +27326,7 @@ impl AgentToolDispatcher for FixedOverlayTools {
             .iter()
             .map(|name| {
                 Arc::new(meerkat_core::ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: format!("{name} overlay tool"),
                     input_schema: serde_json::json!({"type": "object"}),
@@ -71588,6 +71596,7 @@ impl MultiToolDispatcher {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: format!("Tool {name}"),
                     input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -71794,6 +71803,7 @@ impl AgentToolDispatcher for ContextRecordingDispatcher {
 
 fn context_recording_tool(name: &str, provenance: Option<ToolProvenance>) -> Arc<ToolDef> {
     Arc::new(ToolDef {
+        audience: Default::default(),
         name: name.into(),
         description: format!("Tool {name}"),
         input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -71963,6 +71973,7 @@ async fn mcp_provenance_filter_scopes_only_mcp_tools_to_allowlist() {
 
     fn mcp_tool(name: &str, source: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("Tool {name}"),
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -71975,6 +71986,7 @@ async fn mcp_provenance_filter_scopes_only_mcp_tools_to_allowlist() {
 
     fn callback_tool(name: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("Tool {name}"),
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -75235,6 +75247,7 @@ async fn test_external_tools_late_registration() {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: format!("Tool {name}"),
                     input_schema: serde_json::Value::Object(serde_json::Map::new()),

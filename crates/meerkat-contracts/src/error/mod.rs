@@ -303,6 +303,18 @@ impl WireError {
 /// Audience-safe session details, including typed runtime readiness.
 pub fn session_error_details(error: &meerkat_core::SessionError) -> Option<serde_json::Value> {
     match error {
+        meerkat_core::SessionError::WithSettlementFailures { error: primary, .. } => {
+            let mut details = match session_error_details(primary) {
+                Some(serde_json::Value::Object(data)) => data,
+                Some(value) => serde_json::Map::from_iter([("primary_data".into(), value)]),
+                None => serde_json::Map::new(),
+            };
+            details.insert(
+                "settlement_failures".into(),
+                serde_json::json!(error.settlement_failures().collect::<Vec<_>>()),
+            );
+            Some(serde_json::Value::Object(details))
+        }
         meerkat_core::SessionError::RuntimeUnavailable { reason } => Some(serde_json::json!({
             "code": error.code(),
             "reason": crate::wire::WireControllerReadinessFailure::from(*reason),
@@ -311,40 +323,47 @@ pub fn session_error_details(error: &meerkat_core::SessionError) -> Option<serde
     }
 }
 
+fn session_error_code(err: &meerkat_core::SessionError) -> ErrorCode {
+    match err {
+        meerkat_core::SessionError::WithSettlementFailures { error, .. } => {
+            session_error_code(error)
+        }
+        meerkat_core::SessionError::RuntimeUnavailable { .. }
+        | meerkat_core::SessionError::HostingUnavailable { .. } => {
+            ErrorCode::SessionRuntimeUnavailable
+        }
+        meerkat_core::SessionError::NotFound { .. } => ErrorCode::SessionNotFound,
+        meerkat_core::SessionError::Busy { .. }
+        | meerkat_core::SessionError::ServedElsewhere { .. } => ErrorCode::SessionBusy,
+        meerkat_core::SessionError::NotRunning { .. } => ErrorCode::SessionNotRunning,
+        meerkat_core::SessionError::Agent(error) => match error.primary_error() {
+            meerkat_core::AgentError::Cancelled => ErrorCode::RequestCancelled,
+            meerkat_core::AgentError::SkillResolutionFailed { .. } => {
+                ErrorCode::SkillResolutionFailed
+            }
+            _ => ErrorCode::AgentError,
+        },
+        meerkat_core::SessionError::CapabilityUnavailable(_)
+        | meerkat_core::SessionError::PersistenceDisabled
+        | meerkat_core::SessionError::CompactionDisabled
+        | meerkat_core::SessionError::Unsupported(_) => ErrorCode::CapabilityUnavailable,
+        meerkat_core::SessionError::DurableTailHeldForRecovery { .. }
+        | meerkat_core::SessionError::DurableTailRecoveryRefused { .. }
+        | meerkat_core::SessionError::DurableEvidenceQuarantined { .. }
+        | meerkat_core::SessionError::WholeBlobAuditedEndpointDivergence { .. } => {
+            ErrorCode::SessionNotRunning
+        }
+        meerkat_core::SessionError::ExternalWriteFenceConflict { .. } => ErrorCode::StaleFence,
+        meerkat_core::SessionError::ExternalWriteFenceBackoff { .. } => ErrorCode::SessionBusy,
+        meerkat_core::SessionError::Store(_)
+        | meerkat_core::SessionError::FailedWithData { .. } => ErrorCode::InternalError,
+    }
+}
+
 /// Convert from [`meerkat_core::SessionError`] to [`WireError`].
 impl From<meerkat_core::SessionError> for WireError {
     fn from(err: meerkat_core::SessionError) -> Self {
-        let code = match &err {
-            meerkat_core::SessionError::RuntimeUnavailable { .. }
-            | meerkat_core::SessionError::HostingUnavailable { .. } => {
-                ErrorCode::SessionRuntimeUnavailable
-            }
-            meerkat_core::SessionError::NotFound { .. } => ErrorCode::SessionNotFound,
-            meerkat_core::SessionError::Busy { .. }
-            | meerkat_core::SessionError::ServedElsewhere { .. } => ErrorCode::SessionBusy,
-            meerkat_core::SessionError::NotRunning { .. } => ErrorCode::SessionNotRunning,
-            meerkat_core::SessionError::Agent(meerkat_core::AgentError::Cancelled) => {
-                ErrorCode::RequestCancelled
-            }
-            meerkat_core::SessionError::Agent(
-                meerkat_core::AgentError::SkillResolutionFailed { .. },
-            ) => ErrorCode::SkillResolutionFailed,
-            meerkat_core::SessionError::Agent(_) => ErrorCode::AgentError,
-            meerkat_core::SessionError::CapabilityUnavailable(_)
-            | meerkat_core::SessionError::PersistenceDisabled
-            | meerkat_core::SessionError::CompactionDisabled
-            | meerkat_core::SessionError::Unsupported(_) => ErrorCode::CapabilityUnavailable,
-            meerkat_core::SessionError::DurableTailHeldForRecovery { .. }
-            | meerkat_core::SessionError::DurableTailRecoveryRefused { .. }
-            | meerkat_core::SessionError::DurableEvidenceQuarantined { .. }
-            | meerkat_core::SessionError::WholeBlobAuditedEndpointDivergence { .. } => {
-                ErrorCode::SessionNotRunning
-            }
-            meerkat_core::SessionError::ExternalWriteFenceConflict { .. } => ErrorCode::StaleFence,
-            meerkat_core::SessionError::ExternalWriteFenceBackoff { .. } => ErrorCode::SessionBusy,
-            meerkat_core::SessionError::Store(_)
-            | meerkat_core::SessionError::FailedWithData { .. } => ErrorCode::InternalError,
-        };
+        let code = session_error_code(&err);
         let details = session_error_details(&err);
         let wire = WireError::new(code, err.to_string());
         if let Some(details) = details {
@@ -359,6 +378,43 @@ impl From<meerkat_core::SessionError> for WireError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settlement_companions_preserve_wire_class_and_readiness_details() {
+        let marker = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Unknown,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        };
+        for (error, code) in [
+            (
+                meerkat_core::SessionError::NotFound {
+                    id: meerkat_core::SessionId::new(),
+                },
+                ErrorCode::SessionNotFound,
+            ),
+            (
+                meerkat_core::SessionError::Store(Box::new(std::io::Error::other("store failed"))),
+                ErrorCode::InternalError,
+            ),
+            (
+                meerkat_core::SessionError::RuntimeUnavailable {
+                    reason:
+                        meerkat_core::authorization::ControllerReadinessFailure::AuthorityChanged,
+                },
+                ErrorCode::SessionRuntimeUnavailable,
+            ),
+        ] {
+            let wire = WireError::from(error.with_settlement_failures(vec![marker.clone()]));
+            assert_eq!(wire.code, code);
+            let data = wire.details.unwrap();
+            assert_eq!(data["settlement_failures"], serde_json::json!([marker]));
+            if code == ErrorCode::SessionRuntimeUnavailable {
+                assert_eq!(data["reason"]["kind"], "authority_changed");
+            }
+        }
+    }
 
     #[test]
     fn runtime_readiness_keeps_exact_safe_reason_and_distinct_code() {

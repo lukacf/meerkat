@@ -156,7 +156,8 @@ impl Fixture {
             .spawn()
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !ready.exists() {
+            // Redirection creates the marker before printf writes its contents.
+            while !std::fs::read(&ready).is_ok_and(|contents| contents == b"ready") {
                 assert!(
                     child.try_wait().unwrap().is_none(),
                     "child exited before readiness"

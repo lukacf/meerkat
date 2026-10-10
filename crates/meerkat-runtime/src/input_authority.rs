@@ -178,6 +178,16 @@ impl From<NativeAdmissionError> for RuntimeDriverError {
 /// fresh retry authentication observation need not equal the original retained
 /// authentication reference.
 pub trait NativeWorkAuthorizationHost: Send + Sync {
+    /// Compose fresh work authorization for one authenticated tool application
+    /// operation. The default deliberately refuses; old run authority is never
+    /// an admission source for a new UI action.
+    fn tool_application_authorization(
+        &self,
+        _control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<WorkAuthorizationContext, meerkat_core::OperationAuthorizationError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+
     /// Compose actual authenticated non-input control through this installed
     /// host. Unsupported owners must not borrow a current/completed run.
     fn context_control_authorization(

@@ -585,6 +585,14 @@ pub enum AgentError {
     /// [`ToolError::error_code`] and the wire surface.
     #[error("Tool error: {error}")]
     Tool { error: ToolError },
+    /// Settlement diagnostics accompany a typed primary failure without
+    /// changing its classification or presentation.
+    #[error("{error}")]
+    WithSettlementFailures {
+        #[source]
+        error: Box<AgentError>,
+        failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+    },
     /// An operation-local authorization refusal. The agent loop returns safe
     /// feedback through its permitted controller instead of failing the run.
     #[error("{refusal}")]
@@ -786,6 +794,82 @@ impl From<crate::authorization::OperationObservationError> for AgentError {
 }
 
 impl AgentError {
+    /// The original agent failure, independent of admission settlement.
+    #[must_use]
+    pub fn primary_error(&self) -> &Self {
+        let mut current = self;
+        while let Self::WithSettlementFailures { error, .. } = current {
+            current = error;
+        }
+        current
+    }
+
+    pub fn settlement_failures(
+        &self,
+    ) -> impl Iterator<Item = &crate::ops::ToolDispatchSettlementFailure> {
+        std::iter::successors(Some(self), |error| match error {
+            Self::WithSettlementFailures { error, .. } => Some(error.as_ref()),
+            _ => None,
+        })
+        .flat_map(|error| {
+            let failures = match error {
+                Self::WithSettlementFailures { failures, .. }
+                | Self::PolicyIndeterminate {
+                    settlement_failures: failures,
+                    ..
+                } => failures.as_slice(),
+                _ => &[],
+            };
+            let tool = match error {
+                Self::Tool { error } => Some(error),
+                _ => None,
+            };
+            let callbacks = match error {
+                Self::CallbackBatchPending { pending_tool_calls } => pending_tool_calls.as_slice(),
+                _ => &[],
+            };
+            failures
+                .iter()
+                .chain(tool.into_iter().flat_map(ToolError::settlement_failures))
+                .chain(callbacks.iter().flat_map(|call| &call.settlement_failures))
+        })
+    }
+
+    /// Keep the primary error typed while retaining settlement diagnostics.
+    #[must_use]
+    pub fn with_settlement_failures(
+        self,
+        failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+    ) -> Self {
+        if failures.is_empty() {
+            return self;
+        }
+        let mut primary = self;
+        let mut retained = Vec::new();
+        while let Self::WithSettlementFailures { error, failures } = primary {
+            retained.extend(failures);
+            primary = *error;
+        }
+        retained.extend(failures);
+        match primary {
+            Self::Tool { error } => Self::tool(error.with_settlement_failures(retained)),
+            Self::PolicyIndeterminate {
+                failure,
+                mut settlement_failures,
+            } => {
+                settlement_failures.extend(retained);
+                Self::PolicyIndeterminate {
+                    failure,
+                    settlement_failures,
+                }
+            }
+            error => Self::WithSettlementFailures {
+                error: Box::new(error),
+                failures: retained,
+            },
+        }
+    }
+
     pub fn authorization_unavailable() -> Self {
         Self::llm(
             "authorization",
@@ -806,7 +890,7 @@ impl AgentError {
     pub fn operation_review_refusal(
         &self,
     ) -> Option<crate::approval::review::OperationReviewRefusal> {
-        match self {
+        match self.primary_error() {
             Self::Llm {
                 reason: LlmFailureReason::ProviderError(error),
                 ..
@@ -821,7 +905,7 @@ impl AgentError {
 
     /// Typed local authority failure, never inferred from a provider message.
     pub fn operation_authorization_unavailable(&self) -> bool {
-        matches!(self, Self::Llm { reason: LlmFailureReason::ProviderError(error), .. }
+        matches!(self.primary_error(), Self::Llm { reason: LlmFailureReason::ProviderError(error), .. }
             if error.kind == LlmProviderErrorKind::OperationAuthorizationUnavailable)
     }
 
@@ -840,7 +924,7 @@ impl AgentError {
     /// Provider retryability and diagnostic text cannot turn it into a terminal
     /// or retryable provider failure. Missing typed details remain a refusal.
     pub fn operation_refusal(&self) -> Option<crate::OperationRefused> {
-        match self {
+        match self.primary_error() {
             Self::OperationRefused { refusal } => Some(*refusal),
             Self::Llm {
                 reason: LlmFailureReason::ProviderError(error),
@@ -887,7 +971,7 @@ impl AgentError {
     /// `invalid_arguments` survive to the wire instead of being flattened
     /// into an opaque message.
     pub fn tool_error_code(&self) -> Option<&'static str> {
-        match self {
+        match self.primary_error() {
             Self::Tool { error } => Some(error.error_code()),
             _ => None,
         }
@@ -920,7 +1004,7 @@ impl AgentError {
 
     pub fn is_graceful(&self) -> bool {
         matches!(
-            self,
+            self.primary_error(),
             Self::TokenBudgetExceeded { .. }
                 | Self::TimeBudgetExceeded { .. }
                 | Self::ToolCallBudgetExceeded { .. }
@@ -929,7 +1013,7 @@ impl AgentError {
     }
     pub fn is_rate_limited(&self) -> bool {
         matches!(
-            self,
+            self.primary_error(),
             Self::Llm {
                 reason: LlmFailureReason::RateLimited { .. },
                 ..
@@ -938,7 +1022,7 @@ impl AgentError {
     }
 
     pub fn retry_after_hint(&self) -> Option<std::time::Duration> {
-        match self {
+        match self.primary_error() {
             Self::Llm {
                 reason: LlmFailureReason::RateLimited { retry_after },
                 ..
@@ -948,7 +1032,7 @@ impl AgentError {
     }
 
     pub fn is_recoverable(&self) -> bool {
-        match self {
+        match self.primary_error() {
             Self::Llm { reason, .. } => match reason {
                 LlmFailureReason::RateLimited { .. } => true,
                 LlmFailureReason::NetworkTimeout { .. } => true,
@@ -965,7 +1049,7 @@ impl AgentError {
     /// can hand the live executor to canonical teardown.
     pub fn requires_session_teardown(&self) -> bool {
         matches!(
-            self,
+            self.primary_error(),
             Self::StickyModelFallbackAuthorityUnknown { .. }
                 | Self::SessionDurableProjectionAuthorityUnknown { .. }
         )
@@ -984,6 +1068,9 @@ impl AgentError {
     /// internal-error shape.
     pub fn with_ancillary_failure(self, context: &str, failure: impl std::fmt::Display) -> Self {
         match self {
+            Self::WithSettlementFailures { error, failures } => error
+                .with_ancillary_failure(context, failure)
+                .with_settlement_failures(failures),
             Self::StickyModelFallbackAuthorityUnknown { message } => {
                 Self::StickyModelFallbackAuthorityUnknown {
                     message: format!("{message}; additionally {context}: {failure}"),
@@ -1429,6 +1516,197 @@ mod tests {
             AgentError::callback_pending_with_settlement(call),
             AgentError::CallbackPending { .. }
         ));
+    }
+
+    #[test]
+    fn agent_settlement_companion_preserves_hook_classifiers() {
+        let marker = crate::ToolDispatchSettlementFailure {
+            admission_source: crate::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Committed,
+            failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        };
+        for primary in [
+            AgentError::HookTimeout {
+                hook_id: HookId::new("post-tool"),
+                timeout_ms: 10,
+            },
+            AgentError::HookExecutionFailed {
+                hook_id: HookId::new("post-tool"),
+                reason: "infrastructure unavailable".into(),
+            },
+            AgentError::HookConfigInvalid {
+                reason: "required hook missing".into(),
+            },
+            AgentError::HookDenied {
+                hook_id: HookId::new("post-tool"),
+                point: HookPoint::PostToolExecution,
+                reason_code: HookReasonCode::PolicyViolation,
+                message: "publication denied".into(),
+                payload: None,
+            },
+        ] {
+            let message = primary.to_string();
+            let reason = crate::event::AgentErrorReason::from_agent_error(&primary);
+            let source =
+                crate::turn_execution_authority::TurnFailureSourceKind::from_agent_error(&primary);
+            let cause =
+                crate::lifecycle::core_executor::CoreApplyFailureCause::from_agent_error(&primary);
+            let deferred =
+                crate::session::DeferredHookInfrastructureFailure::from_agent_error(&primary);
+            let error = primary
+                .with_settlement_failures(vec![marker.clone()])
+                .with_settlement_failures(vec![marker.clone()]);
+            assert_eq!(error.to_string(), message);
+            assert!(std::error::Error::source(&error).is_some());
+            assert_eq!(
+                crate::AgentErrorClass::from(&error),
+                crate::AgentErrorClass::Hook
+            );
+            assert_eq!(
+                crate::event::AgentErrorReason::from_agent_error(&error),
+                reason
+            );
+            assert_eq!(
+                crate::turn_execution_authority::TurnFailureSourceKind::from_agent_error(&error),
+                source
+            );
+            assert_eq!(
+                crate::lifecycle::core_executor::CoreApplyFailureCause::from_agent_error(&error),
+                cause
+            );
+            assert_eq!(
+                crate::session::DeferredHookInfrastructureFailure::from_agent_error(&error),
+                deferred
+            );
+            assert_eq!(
+                error.settlement_failures().cloned().collect::<Vec<_>>(),
+                vec![marker.clone(), marker.clone()]
+            );
+            assert!(matches!(
+                error,
+                AgentError::WithSettlementFailures { ref error, .. }
+                    if !matches!(error.as_ref(), AgentError::WithSettlementFailures { .. })
+            ));
+        }
+        assert!(matches!(
+            AgentError::HookTimeout {
+                hook_id: HookId::new("post-tool"),
+                timeout_ms: 10,
+            }
+            .with_settlement_failures(Vec::new()),
+            AgentError::HookTimeout { timeout_ms: 10, .. }
+        ));
+    }
+
+    #[test]
+    fn agent_settlement_companion_preserves_tool_and_policy_carriers() {
+        let marker = crate::ToolDispatchSettlementFailure {
+            admission_source: crate::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Unknown,
+            failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        };
+        let error = AgentError::tool(
+            ToolError::access_denied("tool").with_settlement_failures(vec![marker.clone()]),
+        )
+        .with_settlement_failures(vec![marker.clone()]);
+        assert!(matches!(error, AgentError::Tool { .. }));
+        assert_eq!(error.tool_error_code(), Some("access_denied"));
+        assert_eq!(error.settlement_failures().count(), 2);
+        let error = AgentError::PolicyIndeterminate {
+            failure: Box::new(crate::ToolConsequenceFailure::InvalidProvenance {
+                reason: "primary policy failure".into(),
+            }),
+            settlement_failures: vec![marker.clone()],
+        }
+        .with_settlement_failures(vec![marker.clone()]);
+        assert!(matches!(error, AgentError::PolicyIndeterminate { .. }));
+        assert_eq!(error.settlement_failures().count(), 2);
+        let error = AgentError::callback_pending_with_settlement(PendingCallbackToolCall {
+            tool_use_id: "callback".into(),
+            tool_name: "tool".into(),
+            args: serde_json::json!({}),
+            settlement_failures: vec![marker.clone()],
+        })
+        .with_settlement_failures(vec![marker.clone()]);
+        assert!(matches!(
+            error.primary_error(),
+            AgentError::CallbackBatchPending { .. }
+        ));
+        assert_eq!(
+            error.settlement_failures().cloned().collect::<Vec<_>>(),
+            vec![marker.clone(), marker]
+        );
+    }
+
+    #[test]
+    fn agent_settlement_companion_preserves_terminal_and_budget_projections() {
+        use crate::lifecycle::core_executor::{CoreExecutorError, CoreExecutorTeardownReason};
+        use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
+
+        let marker = crate::ToolDispatchSettlementFailure {
+            admission_source: crate::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Unknown,
+            failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        };
+        let budget = crate::budget::BudgetExceeded {
+            dimension: crate::budget::BudgetDimension::Tokens,
+            used: 20,
+            limit: 10,
+        };
+        let error = budget
+            .to_agent_error()
+            .with_settlement_failures(vec![marker.clone()]);
+        assert_eq!(
+            crate::budget::BudgetExceeded::from_agent_error(&error),
+            Some(budget)
+        );
+        assert!(error.is_graceful());
+
+        let error = AgentError::TerminalFailure {
+            outcome: TurnTerminalOutcome::Failed,
+            cause_kind: TurnTerminalCauseKind::LlmFailure,
+            message: "primary terminal failure".into(),
+        };
+        let metadata = crate::TurnErrorMetadata::from_agent_error(&error);
+        let error = error.with_settlement_failures(vec![marker.clone()]);
+        assert_eq!(crate::TurnErrorMetadata::from_agent_error(&error), metadata);
+        assert!(matches!(
+            CoreExecutorError::apply_failed_from_session_error(crate::SessionError::Agent(error)),
+            CoreExecutorError::TerminalFailure {
+                outcome: TurnTerminalOutcome::Failed,
+                cause_kind: TurnTerminalCauseKind::LlmFailure,
+                ..
+            }
+        ));
+
+        for (error, expected_reason) in [
+            (
+                AgentError::StickyModelFallbackAuthorityUnknown {
+                    message: "unknown".into(),
+                },
+                CoreExecutorTeardownReason::SessionUnavailable,
+            ),
+            (
+                AgentError::session_durable_projection_authority_unknown("unknown"),
+                CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown,
+            ),
+        ] {
+            let error = error.with_settlement_failures(vec![marker.clone()]);
+            assert!(error.requires_session_teardown());
+            assert!(matches!(
+                CoreExecutorError::apply_failed_from_session_error(crate::SessionError::Agent(error)),
+                CoreExecutorError::TeardownRequired { reason, .. } if reason == expected_reason
+            ));
+        }
+        assert!(
+            CoreExecutorError::apply_failed_from_session_error(crate::SessionError::Agent(
+                AgentError::Cancelled.with_settlement_failures(vec![marker]),
+            ))
+            .is_cancelled()
+        );
     }
 
     #[test]

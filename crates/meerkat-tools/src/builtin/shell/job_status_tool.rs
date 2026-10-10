@@ -47,6 +47,7 @@ impl BuiltinTool for ShellJobStatusTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "shell_job_status".into(),
             description: "Check status of a background shell job".into(),
             input_schema: crate::schema::schema_for::<JobStatusInput>(),

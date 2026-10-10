@@ -883,6 +883,7 @@ mod tests {
         let request =
             LlmRequest::new("gpt-realtime-1.5", vec![user("run the tool")]).with_tools(vec![
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "read_file".into(),
                     description: "read a file".to_string(),
                     input_schema: serde_json::json!({"type":"object"}),
@@ -912,6 +913,7 @@ mod tests {
         let request =
             LlmRequest::new("gpt-realtime-1.5", vec![user("claim")]).with_tools(vec![Arc::new(
                 ToolDef {
+                    audience: Default::default(),
                     name: "workgraph_claim".into(),
                     description: "Claim a ready WorkGraph item.".to_string(),
                     input_schema: crate::tool_schema::test_fixtures::pre_fix_workgraph_claim_schema(

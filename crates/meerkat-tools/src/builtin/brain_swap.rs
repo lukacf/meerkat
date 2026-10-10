@@ -142,6 +142,7 @@ impl BuiltinTool for BrainSwapTool {
                 .collect(),
         );
         ToolDef {
+            audience: Default::default(),
             name: self.name().into(),
             description: BRAIN_SWAP_TOOL_DOCUMENTATION.to_string(),
             input_schema,

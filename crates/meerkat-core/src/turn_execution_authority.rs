@@ -197,6 +197,9 @@ impl TurnFailureSourceKind {
             return Err(refusal);
         }
         Ok(match error {
+            AgentError::WithSettlementFailures { error, .. } => {
+                return Self::from_agent_error(error);
+            }
             AgentError::OperationRefused { refusal } => return Err(*refusal),
             AgentError::Llm { .. } => Self::Llm,
             AgentError::StoreError(_) => Self::StoreError,

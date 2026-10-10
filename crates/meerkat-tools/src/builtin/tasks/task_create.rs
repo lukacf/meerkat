@@ -104,6 +104,7 @@ impl BuiltinTool for TaskCreateTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "task_create".into(),
             description: "Create a new task in the project task list".into(),
             input_schema: crate::schema::schema_for::<TaskCreateParams>(),

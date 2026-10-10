@@ -134,6 +134,7 @@ impl ScheduleToolDispatcher {
             .into_iter()
             .map(|tool| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: tool["name"].as_str().unwrap_or_default().into(),
                     description: tool["description"].as_str().unwrap_or_default().to_string(),
                     input_schema: tool["inputSchema"].clone(),
@@ -407,6 +408,26 @@ fn map_schedule_plan_rewrite_error(
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        let catalog = self.tool_catalog();
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.tool.name == source_tool)
+            .ok_or_else(|| ToolError::not_found(source_tool))?;
+        if let Some(reason) = entry.callability.unavailable_reason() {
+            return Err(ToolError::unavailable(source_tool, reason));
+        }
+        self.inner
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.tool_catalog()
             .iter()
@@ -1400,6 +1421,7 @@ mod tests {
             )
             .expect("hybrid execution contract");
             let tool = Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "meerkat_schedule_create".into(),
                 description: "Create a schedule.".to_string(),
                 input_schema: create_schedule_schema(),
@@ -1425,6 +1447,7 @@ mod tests {
                 saw_context_image: AtomicBool::new(false),
                 rewritten_target_type: Mutex::new(None),
                 tool: Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: "meerkat_schedule_create".into(),
                     description: "Create a schedule.".to_string(),
                     input_schema: create_schedule_schema(),

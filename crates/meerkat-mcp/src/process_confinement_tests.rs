@@ -352,9 +352,16 @@ done
         })
         .await
         .unwrap();
-        router.add_server(fixture.config("sibling")).await.unwrap();
+        let mut sibling = fixture.config("sibling");
+        sibling
+            .tool_names
+            .insert("echo".into(), "sibling_echo".into());
+        router.add_server(sibling).await.unwrap();
         let result = router
-            .call_tool("echo", &serde_json::json!({"message":"still permitted"}))
+            .call_tool(
+                "sibling_echo",
+                &serde_json::json!({"message":"still permitted"}),
+            )
             .await;
         router.shutdown().await;
         assert_eq!(

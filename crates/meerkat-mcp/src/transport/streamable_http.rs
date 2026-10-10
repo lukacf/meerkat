@@ -138,6 +138,9 @@ fn request_dispatch(message: &ClientJsonRpcMessage) -> Option<RequestDispatch> {
             ClientRequest::CallToolRequest(call) => {
                 call.extensions.get::<RequestDispatch>().cloned()
             }
+            ClientRequest::ReadResourceRequest(read) => {
+                read.extensions.get::<RequestDispatch>().cloned()
+            }
             _ => None,
         },
         _ => None,

@@ -60,6 +60,18 @@ impl std::fmt::Debug for WorkOwnerAllowance {
 /// that is already held by its caller. Real runtime/schedule adapters must bind
 /// this contract to their own admitted records; this trait creates none.
 pub trait AdmittedWorkPolicyOwner: Send + Sync {
+    /// Admit this exact authenticated UI submission for its current native
+    /// member. Resolve the actual ingress actor and mandate independently of
+    /// the original tool result or any earlier run. Unsupported owners refuse.
+    fn authorize_tool_application(
+        &self,
+        _control: &meerkat_core::ToolApplicationControlRequest,
+        _binding: &PreparedAuthorizationBinding,
+        _now_ms: u64,
+    ) -> Result<WorkOwnerAllowance, meerkat_core::OperationAuthorizationError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+
     /// Resolve the actual authenticated control/original or service mandate.
     /// The process receipt is not a claim-derived grant. Validate its exact
     /// requester, executor, source, destination and immutable request against
@@ -100,6 +112,18 @@ pub trait AdmittedWorkPolicyOwner: Send + Sync {
 /// enclosing publication observation. This is a trusted extension seam for
 /// application ABAC, not a generic policy language or an allow-by-default hook.
 pub trait OperationPolicyOwner: Send + Sync {
+    /// Authorize the actual canonical tool/arguments or qualified resource
+    /// bound for a fresh UI submission. Resolve source registration and target
+    /// policy from their actual owners; the original invocation grants nothing.
+    fn authorize_tool_application(
+        &self,
+        _control: &meerkat_core::ToolApplicationControlRequest,
+        _binding: &PreparedAuthorizationBinding,
+        _now_ms: u64,
+    ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+
     /// Independently resolve the actual source or destination bound here for
     /// the exact authenticated control. Called for Source(Hydrate) and for
     /// Publication, in one coherent native publication observation. Neither
@@ -190,6 +214,20 @@ impl std::fmt::Debug for GrantBackedWorkPolicy {
 }
 
 impl GrantBackedWorkPolicy {
+    /// One fresh host UI request, with no synthetic input or borrowed run.
+    pub fn tool_application_authorization(
+        self: &Arc<Self>,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> WorkAuthorizationContext {
+        WorkAuthorizationContext::new(
+            Arc::new(ToolApplicationAuthorization {
+                policy: Arc::clone(self),
+                control,
+            }),
+            OperationExecutionScope::Domain,
+        )
+    }
+
     /// Non-input control composition over these same actual installed owners.
     /// No accepted input, run, grant or original requester is manufactured.
     pub fn context_control_authorization(
@@ -451,6 +489,112 @@ fn grant_refusal(refusal: GrantRefusal) -> meerkat_core::OperationAuthorizationE
 
 #[cfg(test)]
 mod tests;
+
+struct ToolApplicationAuthorization {
+    policy: Arc<GrantBackedWorkPolicy>,
+    control: Arc<meerkat_core::ToolApplicationControlRequest>,
+}
+
+impl meerkat_core::authorization::WorkAuthorization for ToolApplicationAuthorization {
+    fn prepare(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<
+        Arc<dyn meerkat_core::PreparedOperationAuthorization>,
+        meerkat_core::OperationAuthorizationError,
+    > {
+        self.prepare_observed(binding).result
+    }
+
+    fn prepare_observed(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> meerkat_core::authorization::ObservedAuthorizationResult<
+        Arc<dyn meerkat_core::PreparedOperationAuthorization>,
+    > {
+        use meerkat_core::{
+            ToolApplicationOperation,
+            authorization::{ObservedAuthorizationResult, SourceAuthorizationUse},
+        };
+        if let Err(error) = self.control.revalidate() {
+            return ObservedAuthorizationResult::unobserved(Err(error));
+        }
+        let facts = binding.facts();
+        let exact_kind = match (&self.control.request().operation, &facts.operation) {
+            (
+                ToolApplicationOperation::CallTool { arguments, .. },
+                AuthorizationOperation::Tool(tool),
+            ) => serde_json::from_str::<serde_json::Value>(tool.arguments.get())
+                .is_ok_and(|actual| &actual == arguments),
+            (
+                ToolApplicationOperation::ReadResource { .. },
+                AuthorizationOperation::Source(source),
+            ) => source.usage == SourceAuthorizationUse::Read,
+            _ => false,
+        };
+        if !exact_kind
+            || facts.execution_scope != OperationExecutionScope::Domain
+            || facts.run_id.is_some()
+            || facts.context_revision.is_some()
+        {
+            return ObservedAuthorizationResult::unobserved(Err(denied().into()));
+        }
+        self.policy
+            .grants
+            .compile_context_control(binding, |now_ms| {
+                self.control.revalidate()?;
+                let mandate = self.policy.work_owner.authorize_tool_application(
+                    &self.control,
+                    binding,
+                    now_ms,
+                )?;
+                let mut allowance = self.policy.operation_owner.authorize_tool_application(
+                    &self.control,
+                    binding,
+                    now_ms,
+                )?;
+                allowance.restrictions = allowance.restrictions.conjoin(&mandate.restrictions);
+                allowance.expires_at_ms = allowance.expires_at_ms.min(mandate.expires_at_ms);
+                Ok(vec![allowance])
+            })
+            .map(|inner| {
+                Arc::new(ToolApplicationDecision {
+                    inner,
+                    control: Arc::clone(&self.control),
+                }) as Arc<dyn meerkat_core::PreparedOperationAuthorization>
+            })
+    }
+}
+
+struct ToolApplicationDecision {
+    inner: Arc<dyn meerkat_core::PreparedOperationAuthorization>,
+    control: Arc<meerkat_core::ToolApplicationControlRequest>,
+}
+
+impl meerkat_core::PreparedOperationAuthorization for ToolApplicationDecision {
+    fn policy_observation(
+        &self,
+    ) -> Option<meerkat_core::authorization::PolicyPublicationObservation> {
+        self.inner.policy_observation()
+    }
+    fn review_tier(&self) -> meerkat_core::authorization::OperationReviewTier {
+        self.inner.review_tier()
+    }
+    fn check_current(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.control.revalidate()?;
+        self.inner.check_current(binding)
+    }
+    fn observe(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+        observation: meerkat_core::authorization::OperationObservation,
+    ) -> Result<(), meerkat_core::authorization::OperationObservationError> {
+        self.inner.observe(binding, observation)
+    }
+}
 
 /// One exact control; every prepared projection covers both source and audience.
 struct ContextControlAuthorization {

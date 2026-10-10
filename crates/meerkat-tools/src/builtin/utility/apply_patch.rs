@@ -140,6 +140,7 @@ impl BuiltinTool for ApplyPatchTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: self.name().into(),
             description: format!("{APPLY_PATCH_DESCRIPTION}{APPLY_PATCH_EXAMPLE}"),
             input_schema: crate::schema::schema_for::<ApplyPatchArgs>(),

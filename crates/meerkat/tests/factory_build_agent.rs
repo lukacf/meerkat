@@ -388,6 +388,7 @@ impl NamedDispatcher {
     fn new(name: &str) -> Self {
         Self {
             tools: Arc::from(vec![Arc::new(ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: format!("{name} test tool"),
                 input_schema: json!({

@@ -189,6 +189,7 @@ struct LookupTool;
 impl AgentToolDispatcher for LookupTool {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::new([Arc::new(ToolDef {
+            audience: Default::default(),
             name: "lookup".into(),
             description: "returns a fixed observation".to_string(),
             input_schema: serde_json::json!({ "type": "object" }),

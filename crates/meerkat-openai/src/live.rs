@@ -6230,6 +6230,7 @@ async fn execute_openai_live_command_with_budget(
                 content: result.content,
                 is_error: result.is_error,
                 settlement_failures: result.settlement_failures,
+                host_metadata: Default::default(),
             };
             session.submit_tool_result(tool_result).await?;
             Ok(())
@@ -6454,6 +6455,7 @@ mod tests {
     #[test]
     fn openai_realtime_tools_drop_root_level_not_from_pre_fix_workgraph_claim_shape() {
         let tools = openai_realtime_tools(&[ToolDef {
+            audience: Default::default(),
             name: "workgraph_claim".into(),
             description: "Claim a ready WorkGraph item.".to_string(),
             input_schema: crate::tool_schema::test_fixtures::pre_fix_workgraph_claim_schema(),
@@ -7106,6 +7108,7 @@ mod tests {
             turning_mode,
             sample_realtime_identity(),
             vec![ToolDef {
+                audience: Default::default(),
                 name: "send_request".into(),
                 description: "Send a request to another mob member.".to_string(),
                 input_schema: serde_json::json!({
@@ -7548,6 +7551,7 @@ mod tests {
             }),
             Message::ToolResults {
                 results: vec![meerkat_core::ToolResult {
+                    host_metadata: Default::default(),
                     tool_use_id: "call_1".to_string(),
                     content: meerkat_core::ContentBlock::text_vec(
                         "{\"token\":\"birch seventeen\"}".to_string(),
@@ -12457,6 +12461,7 @@ mod tests {
         assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
 
         let mutated_tools = vec![ToolDef {
+            audience: Default::default(),
             name: "fresh_tool".into(),
             description: "Tool added by refresh.".to_string(),
             input_schema: serde_json::json!({"type": "object"}),

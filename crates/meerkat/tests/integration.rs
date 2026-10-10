@@ -232,6 +232,7 @@ mod tool_dispatch {
     #[test]
     fn test_tool_discovery_validates_schema() {
         let valid_tool = ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "A test tool".to_string(),
             input_schema: meerkat_tools::schema_for::<ToolInput>(),
@@ -1106,12 +1107,14 @@ mod combined {
     fn test_llm_request_with_tools() {
         let tools = vec![
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "read_file".into(),
                 description: "Read a file".to_string(),
                 input_schema: meerkat_tools::schema_for::<ReadFileArgs>(),
                 provenance: None,
             }),
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "write_file".into(),
                 description: "Write a file".to_string(),
                 input_schema: meerkat_tools::schema_for::<WriteFileArgs>(),

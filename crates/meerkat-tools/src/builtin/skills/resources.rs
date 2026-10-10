@@ -67,6 +67,7 @@ impl BuiltinTool for SkillListResourcesTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "skill_list_resources".into(),
             description:
                 "List resources exposed by a skill identified by (source_uuid, skill_name).".into(),
@@ -119,6 +120,7 @@ impl BuiltinTool for SkillReadResourceTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "skill_read_resource".into(),
             description:
                 "Read a resource at `path` from a skill identified by (source_uuid, skill_name)."

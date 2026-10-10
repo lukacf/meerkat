@@ -2541,6 +2541,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
 
 fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<ToolDef> {
     Arc::new(ToolDef {
+        audience: Default::default(),
         name: name.into(),
         description: description.to_string(),
         input_schema,
@@ -6979,6 +6980,7 @@ mod tests {
         let parent_comms = service.register_external_comms(&parent_name).await;
         let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
         let snapshot_context = parent_snapshot_context_for_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "read_file".into(),
             description: "read_file tool".to_string(),
             input_schema: json!({"type": "object"}),
@@ -7825,6 +7827,7 @@ mod tests {
         let state = MobMcpState::new_in_memory();
         let snapshot_context = parent_snapshot_context_for_tools(vec![
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "tool_a".into(),
                 description: "Tool A".to_string(),
                 input_schema: json!({"type": "object"}),
@@ -7834,6 +7837,7 @@ mod tests {
                 }),
             }),
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "tool_b".into(),
                 description: "Tool B".to_string(),
                 input_schema: json!({"type": "object"}),
@@ -8097,6 +8101,7 @@ mod tests {
         .iter()
         .map(|name| {
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: (*name).into(),
                 description: format!("{name} tool"),
                 input_schema: json!({"type": "object"}),
@@ -8143,6 +8148,7 @@ mod tests {
 
     async fn surface_with_unprovenanced_parent_tool() -> AgentMobToolSurface {
         let snapshot_context = parent_snapshot_context_for_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "external_ops_tool".into(),
             description: "external ops tool".to_string(),
             input_schema: json!({"type": "object"}),

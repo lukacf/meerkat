@@ -65,6 +65,7 @@ fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
         .into_iter()
         .map(|tool| {
             Arc::new(ToolDef {
+                audience: Default::default(),
                 name: tool["name"].as_str().unwrap_or_default().into(),
                 description: tool["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: tool["inputSchema"].clone(),

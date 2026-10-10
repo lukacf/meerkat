@@ -207,6 +207,7 @@ mod tests {
 
     fn deferred_tool(name: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("Deferred test tool {name}"),
             input_schema: json!({ "type": "object" }),

@@ -68,12 +68,14 @@ impl AgentToolDispatcher for DomainTools {
                 description: "Search three offline documentation fixtures, not real internal documentation. Results are simulated.".to_string(),
                 input_schema: meerkat_tools::schema_for::<SearchDocsArgs>(),
                 provenance: None,
+                audience: Default::default(),
             }),
             Arc::new(ToolDef {
                 name: "create_ticket".into(),
                 description: "Simulate a support ticket using an offline fixture. Does not create anything in an issue tracker.".to_string(),
                 input_schema: meerkat_tools::schema_for::<CreateTicketArgs>(),
                 provenance: None,
+                audience: Default::default(),
             }),
         ]
         .into()

@@ -301,6 +301,7 @@ impl BuiltinTool for BlobSaveFileTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: self.name().into(),
             description: "Save blob bytes from the session blob store to a file inside the project root. For generated-image requests, first call generate_image, then call this tool with the returned blob id. Does not transcode formats and never returns raw bytes.".into(),
             input_schema: crate::schema::schema_for::<BlobSaveFileArgs>(),
@@ -426,6 +427,7 @@ impl BuiltinTool for BlobLoadFileTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: self.name().into(),
             description: "Read a file from inside the project root and store its bytes in the session blob store. Returns a blob id that other blob-aware tools can use.".into(),
             input_schema: crate::schema::schema_for::<BlobLoadFileArgs>(),
@@ -526,6 +528,7 @@ impl BuiltinTool for BlobInspectTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: self.name().into(),
             description: "Inspect a blob in the session blob store without returning raw bytes. Returns blob id, media type, and decoded byte size.".into(),
             input_schema: crate::schema::schema_for::<BlobInspectArgs>(),

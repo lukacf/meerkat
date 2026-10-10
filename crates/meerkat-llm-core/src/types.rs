@@ -1136,6 +1136,7 @@ mod tests {
         use crate::error::ToolChoiceRefusal;
         use meerkat_core::ToolChoice;
         let tool = Arc::new(ToolDef {
+            audience: Default::default(),
             name: "lookup".into(),
             description: String::new(),
             input_schema: serde_json::json!({"type": "object"}),

@@ -86,7 +86,7 @@ use meerkat_runtime::{
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, mpsc, watch};
 
 use crate::SESSION_LABELS_KEY;
 #[cfg(test)]
@@ -2453,6 +2453,11 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// gets a machine of its own on first use, which lives and dies with this
     /// instance.
     runtime_adapter: std::sync::Mutex<Option<Arc<MeerkatMachine>>>,
+    /// Drains the serialized fallback for custom SessionAgent implementations.
+    /// Native Agent executors retain exact-actor custody instead. Fallback
+    /// calls acquire this only after the session mutation guard, so queued
+    /// work cannot prevent shutdown from interrupting the model turn.
+    tool_application_settlement_gate: RwLock<()>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
     /// Gates for active keep-alive checkpointers, keyed by session ID.
@@ -7553,7 +7558,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "reload-required cleanup for session {id} encountered a replacement live actor"
             ))));
         }
-        let discarded = self.inner.discard_live_session_actor(witness).await?;
+        let discarded = match self.inner.discard_live_session_actor(witness).await {
+            Ok(discarded) => discarded,
+            Err(SessionError::Busy { .. }) => {
+                // Durable write authority is already lost. Entered App work
+                // cannot retain this rejected projection or delay the reload.
+                self.inner
+                    .fatalize_live_session_actor_after_durable_convergence_failure(witness)
+                    .await
+            }
+            Err(error) => return Err(error),
+        };
         if discarded {
             self.checkpointer_gates.lock().await.remove(id);
             self.live_checkpointers.lock().await.remove(id);
@@ -7565,11 +7580,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Converge the live actor and every persistent sidecar while the caller
     /// owns the mutation fences appropriate to its operation.
     async fn discard_live_session_unfenced(&self, id: &SessionId) -> Result<(), SessionError> {
-        let result = self.inner.discard_live_session(id).await;
+        let witness = self.inner.live_session_actor_witness(id).await;
+        match self.inner.discard_live_session(id).await {
+            Ok(()) => {}
+            Err(SessionError::Busy { .. }) => {
+                // Internal convergence already owns the mutation/recovery
+                // boundary. An entered App must not keep a stale or failed
+                // projection serving. Explicit public discard reserves the
+                // lifecycle before reaching here and still returns Busy.
+                if let Some(witness) = witness {
+                    if !self
+                        .inner
+                        .fatalize_live_session_actor_after_durable_convergence_failure(&witness)
+                        .await
+                    {
+                        return Err(SessionError::NotFound { id: id.clone() });
+                    }
+                } else {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+            }
+            Err(error) => return Err(error),
+        }
         self.checkpointer_gates.lock().await.remove(id);
         self.live_checkpointers.lock().await.remove(id);
         self.note_live_authority_advanced(id);
-        result
+        Ok(())
     }
 
     pub async fn persist_live_session_now(&self, id: &SessionId) -> Result<usize, SessionError> {
@@ -7688,6 +7724,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<(), SessionError> {
+        let _application_lifecycle = self.inner.reserve_tool_application_lifecycle(id).await?;
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
         self.discard_live_session_unfenced(id).await
     }
@@ -8969,6 +9006,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             runtime_store,
             blob_store,
             runtime_adapter: std::sync::Mutex::new(None),
+            tool_application_settlement_gate: RwLock::new(()),
             event_store: None,
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
@@ -13566,6 +13604,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         machine_archive: MachineSessionArchiveProtocol<'_>,
     ) -> Result<(), SessionError> {
+        machine_archive.require_shared_runtime_store(id, &self.runtime_store)?;
+        let _application_lifecycle = self.inner.reserve_tool_application_lifecycle(id).await?;
         let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
         self.archive_with_machine_protocol_under_runtime_turn_boundary_before(
             id,
@@ -13617,6 +13657,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         post_commit_hook: Option<Arc<dyn meerkat_runtime::MachineSessionArchivePostCommitHook>>,
     ) -> Result<(), SessionError> {
         machine_archive.require_shared_runtime_store(id, &self.runtime_store)?;
+        // Refuse an archive before any durable transition if entered App work
+        // still owns this actor. The reservation closes new entry during the
+        // asynchronous archive, and automatically reopens it on refusal.
+        let _application_lifecycle = self.inner.reserve_tool_application_lifecycle(id).await?;
         // The caller owns the stable outer boundary. Global inner lock order is
         // runtime mutation authority, then the session recovery/checkpointer
         // gates: B -> M -> R -> C. An initially absent runtime can become
@@ -14131,6 +14175,158 @@ impl crate::ephemeral::SessionEventTailSource for EventStoreStreamTail {
 
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
+    async fn read_tool_application_observations(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<meerkat_core::ToolApplicationObservation>, SessionError> {
+        // Display observes accepted, possibly uncommitted live results. Its
+        // owner is the exact hosted actor and run, not a transcript boundary.
+        // Use only body-free lifecycle reads here: a transcript export would
+        // queue behind the running LLM, including during the first run.
+        for _ in 0..OBSERVATION_LOAD_ATTEMPTS {
+            match self.inner.observe_live_tool_applications(id).await {
+                Ok(Some((actor, run_id, observations))) => {
+                    if matches!(
+                        self.observe_live_durable_source(id).await?,
+                        crate::LiveDurableSourceObservation::Archived
+                    ) {
+                        return Err(SessionError::NotFound { id: id.clone() });
+                    }
+                    if self
+                        .inner
+                        .live_tool_application_run_is_current(id, &actor, &run_id)
+                        .await
+                    {
+                        return Ok(observations);
+                    }
+                    continue;
+                }
+                Ok(None) | Err(SessionError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            // No running actor: resolve retained views from the runtime's
+            // committed body, never from the physical latest checkpoint.
+            let loaded = self.load_authoritative_session_base(id).await;
+            if Self::is_transcript_revision_conflict(&loaded) {
+                continue;
+            }
+            let session = loaded?.ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            self.reject_if_archived_session(id, &session)
+                .await
+                .map_err(crate::control_error_into_session_error)?;
+            // A successor run may have started during the committed read.
+            // Resample its native publication instead of returning stale rows
+            // or waiting for that run's finalization boundary.
+            match self.inner.observe_live_tool_applications(id).await {
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(SessionError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            return Ok(meerkat_core::ToolApplicationObservation::from_messages(
+                session.messages(),
+            ));
+        }
+        Err(SessionError::Unsupported(
+            "tool application observation owner changed".into(),
+        ))
+    }
+
+    async fn tool_application(
+        self: Arc<Self>,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<serde_json::Value, SessionError> {
+        control
+            .claim()
+            .map_err(|error| SessionError::Agent(AgentError::InternalError(error.to_string())))?;
+        let owner = self
+            .acquire_canonical_runtime_adapter(None)
+            .map_err(|error| SessionError::Agent(AgentError::InternalError(error.to_string())))?;
+        let context = owner
+            .prepare_tool_application(Arc::clone(&control))
+            .map_err(|error| SessionError::Agent(AgentError::InternalError(error.to_string())))?;
+        // Native ownership lasts through settlement and persistence. Dropping
+        // the caller's delivery future cannot cancel an admitted side effect.
+        tokio::spawn(async move {
+            let id = control.session_id().clone();
+            if let Some(admitted) = self.inner.admit_concurrent_tool_application(&id).await? {
+                // The native live owner already carries its accepted invocation.
+                // Check durable lifecycle without loading the accumulated body
+                // or queueing behind the active model's finalization boundary.
+                if matches!(
+                    self.observe_live_durable_source(&id).await?,
+                    crate::LiveDurableSourceObservation::Archived
+                ) {
+                    return Err(SessionError::NotFound { id });
+                }
+                let outcome = admitted.execute(control.request().clone(), context).await;
+                let outcome = match outcome.into_immediate_result() {
+                    Ok(result) => return result.map_err(SessionError::Agent),
+                    Err(outcome) => *outcome,
+                };
+                // Only actual returned notices/effects need actor mutation and
+                // durable publication. The lease keeps this exact actor alive
+                // while this waits for the model's native boundary.
+                let failures = outcome.settlement_failures();
+                let _mutation_guard = self
+                    .live_persist_mutation_guard(&id)
+                    .await
+                    .map_err(|error| error.with_settlement_failures(failures.clone()))?;
+                if self.inner.live_session_actor_witness(&id).await.as_ref()
+                    != Some(admitted.actor())
+                {
+                    return outcome.into_refused_session_result(SessionError::NotFound { id });
+                }
+                let (result, dirty, failures) =
+                    admitted.settle(Arc::clone(&control), outcome).await?;
+                if dirty && let Err(error) = self.persist_full_session(&id).await {
+                    // Seal synchronously before any registry await. Other
+                    // entered App leases must not keep this failed projection
+                    // serving, and waiting for them while holding the mutation
+                    // boundary would deadlock their own settlement.
+                    admitted.quarantine_after_durable_failure();
+                    if self
+                        .inner
+                        .fatalize_live_session_actor_after_durable_convergence_failure(
+                            admitted.actor(),
+                        )
+                        .await
+                    {
+                        // The mutation guard still fences same-session
+                        // materialization and these actor-owned sidecars.
+                        self.checkpointer_gates.lock().await.remove(&id);
+                        self.live_checkpointers.lock().await.remove(&id);
+                        self.note_live_authority_advanced(&id);
+                    }
+                    return Err(error.with_settlement_failures(failures));
+                }
+                if result.is_ok() {
+                    control.revalidate_async().await.map_err(|error| {
+                        SessionError::Agent(
+                            AgentError::tool(error.into()).with_settlement_failures(failures),
+                        )
+                    })?;
+                }
+                return result.map_err(SessionError::Agent);
+            }
+            // Custom SessionAgent implementations retain their prior serialized
+            // execution contract and conservative persistence behavior.
+            let _mutation_guard = self.live_persist_mutation_guard(&id).await?;
+            let _settlement_guard = self.tool_application_settlement_gate.read().await;
+            let result = self.inner.dispatch_tool_application(control, context).await;
+            if let Err(error) = self.persist_full_session(&id).await {
+                let _ = self.discard_live_session_unfenced(&id).await;
+                return Err(error);
+            }
+            result
+        })
+        .await
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "tool application settlement task failed: {error}"
+            )))
+        })?
+    }
+
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         let actor_seed_authority = self.resolve_actor_session_seed_authority(&req).await?;
         self.create_session_with_admission(
@@ -15426,6 +15622,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Call [`Self::try_shutdown`] when the caller must observe a typed
     /// authorization failure.
     pub async fn shutdown(&self) {
+        if let Err(error) = self.inner.drain_tool_applications_for_shutdown().await {
+            tracing::error!(%error, "session service application drain failed");
+            return;
+        }
+        let _settlement_guard = self.tool_application_settlement_gate.write().await;
         self.inner.shutdown().await;
     }
 
@@ -15451,6 +15652,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Shut down all sessions, returning the first typed authorization failure.
     pub async fn try_shutdown(&self) -> Result<(), SessionError> {
+        self.inner.drain_tool_applications_for_shutdown().await?;
+        let _settlement_guard = self.tool_application_settlement_gate.write().await;
         self.inner.try_shutdown().await
     }
 
@@ -21876,6 +22079,25 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionAgent for BlockingRunAgent {
+        async fn tool_application(
+            &mut self,
+            _request: meerkat_core::ToolApplicationRequest,
+            _context: meerkat_core::ToolDispatchContext,
+        ) -> Result<serde_json::Value, meerkat_core::error::AgentError> {
+            self.entered_runs.fetch_add(1, Ordering::AcqRel);
+            self.entered_notify.notify_waiters();
+            self.release_notify
+                .acquire()
+                .await
+                .expect("application release semaphore should stay open")
+                .forget();
+            self.inner
+                .append_system_messages(vec!["application settlement retained".into()])?;
+            Err(AgentError::InternalError(
+                "application failed after native settlement".into(),
+            ))
+        }
+
         async fn run_with_events(
             &mut self,
             prompt: meerkat_core::types::ContentInput,
@@ -22662,6 +22884,219 @@ mod tests {
             build: None,
             labels: None,
         }
+    }
+
+    #[tokio::test]
+    async fn tool_application_settlement_persists_after_error_and_delivery_cancellation() {
+        struct ApplicationIngress;
+        impl meerkat_core::ToolApplicationIngress for ApplicationIngress {
+            fn revalidate(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
+            fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+                self
+            }
+        }
+
+        for cancel_delivery in [false, true] {
+            let builder = BlockingRunBuilder::new();
+            let service = Arc::new(PersistentSessionService::new(
+                builder.clone(),
+                1,
+                Arc::new(MemoryStore::new()),
+                Arc::new(InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            ));
+            let seed = service
+                .save_normalized_session(recoverable_store_row())
+                .await
+                .unwrap();
+            let id = seed.id().clone();
+            service.create_session(resume_request(seed)).await.unwrap();
+            let control = meerkat_core::ToolApplicationControlRequest::from_trusted_ingress(
+                id.clone(),
+                meerkat_core::ToolApplicationRequest {
+                    tool_call_id: "original-call".into(),
+                    extension: "io.modelcontextprotocol/ui".into(),
+                    operation: meerkat_core::ToolApplicationOperation::CallTool {
+                        name: "action".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                },
+                Arc::new(ApplicationIngress),
+            )
+            .unwrap();
+            let delivery = tokio::spawn(Arc::clone(&service).tool_application(control));
+            builder.wait_for_entered_runs(1).await;
+            if cancel_delivery {
+                delivery.abort();
+                assert!(delivery.await.unwrap_err().is_cancelled());
+            } else {
+                builder.release_notify.add_permits(1);
+                assert!(delivery.await.unwrap().is_err());
+            }
+            if cancel_delivery {
+                builder.release_notify.add_permits(1);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let committed = service
+                        .load_committed_runtime_session_with_authority(&id, "application test")
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .0;
+                    if committed.messages().iter().any(|message| {
+                        matches!(message, Message::System(message)
+                            if message.content == "application settlement retained")
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("native settlement must persist even when delivery fails or disappears");
+            service.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_application_settlement_drains_before_shutdown_or_discard() {
+        struct ApplicationIngress;
+        impl meerkat_core::ToolApplicationIngress for ApplicationIngress {
+            fn revalidate(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
+            fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+                self
+            }
+        }
+
+        for teardown_kind in ["shutdown", "try_shutdown", "discard"] {
+            let builder = BlockingRunBuilder::new();
+            let service = Arc::new(PersistentSessionService::new(
+                builder.clone(),
+                1,
+                Arc::new(MemoryStore::new()),
+                Arc::new(InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            ));
+            let seed = service
+                .save_normalized_session(recoverable_store_row())
+                .await
+                .unwrap();
+            let id = seed.id().clone();
+            service.create_session(resume_request(seed)).await.unwrap();
+            let control = meerkat_core::ToolApplicationControlRequest::from_trusted_ingress(
+                id.clone(),
+                meerkat_core::ToolApplicationRequest {
+                    tool_call_id: "original-call".into(),
+                    extension: "io.modelcontextprotocol/ui".into(),
+                    operation: meerkat_core::ToolApplicationOperation::CallTool {
+                        name: "action".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                },
+                Arc::new(ApplicationIngress),
+            )
+            .unwrap();
+            let delivery = tokio::spawn(Arc::clone(&service).tool_application(control));
+            builder.wait_for_entered_runs(1).await;
+            delivery.abort();
+            assert!(delivery.await.unwrap_err().is_cancelled());
+
+            let mut teardown = Box::pin(async {
+                match teardown_kind {
+                    "shutdown" => {
+                        service.shutdown().await;
+                        Ok(())
+                    }
+                    "try_shutdown" => service.try_shutdown().await,
+                    _ => service.discard_live_session(&id).await,
+                }
+            });
+            // Drive teardown to its first wait while native work is entered.
+            // Its actor must remain reachable by the eventual final persister.
+            assert!(futures::poll!(teardown.as_mut()).is_pending());
+            assert!(
+                service
+                    .inner
+                    .live_session_actor_witness(&id)
+                    .await
+                    .is_some()
+            );
+            builder.release_notify.add_permits(1);
+            tokio::time::timeout(std::time::Duration::from_secs(10), teardown)
+                .await
+                .expect("teardown must drain entered application work")
+                .unwrap();
+
+            let committed = service
+                .load_committed_runtime_session_with_authority(&id, "application teardown test")
+                .await
+                .unwrap()
+                .unwrap()
+                .0;
+            assert!(committed.messages().iter().any(|message| {
+                matches!(message, Message::System(message)
+                    if message.content == "application settlement retained")
+            }));
+            service.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_application_settlement_queued_behind_turn_does_not_block_shutdown() {
+        struct ApplicationIngress;
+        impl meerkat_core::ToolApplicationIngress for ApplicationIngress {
+            fn revalidate(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
+            fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+                self
+            }
+        }
+
+        let builder = BlockingRunBuilder::new();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            1,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let seed = service
+            .save_normalized_session(recoverable_store_row())
+            .await
+            .unwrap();
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let turn_guard = service.acquire_runtime_turn_finalization_guard(&id).await;
+        let control = meerkat_core::ToolApplicationControlRequest::from_trusted_ingress(
+            id.clone(),
+            meerkat_core::ToolApplicationRequest {
+                tool_call_id: "original-call".into(),
+                extension: "io.modelcontextprotocol/ui".into(),
+                operation: meerkat_core::ToolApplicationOperation::CallTool {
+                    name: "action".into(),
+                    arguments: serde_json::json!({}),
+                },
+            },
+            Arc::new(ApplicationIngress),
+        )
+        .unwrap();
+        let mut delivery = Box::pin(Arc::clone(&service).tool_application(control));
+        assert!(futures::poll!(delivery.as_mut()).is_pending());
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), service.try_shutdown())
+            .await
+            .expect("unentered application must not prevent model-turn shutdown")
+            .unwrap();
+        drop(turn_guard);
+        assert!(delivery.await.is_err());
+        assert_eq!(builder.entered_runs.load(Ordering::SeqCst), 0);
     }
 
     fn test_durable_llm_identity(session: &Session) -> meerkat_core::SessionLlmIdentity {
@@ -31697,6 +32132,7 @@ mod tests {
             ])));
             durable.push(Message::ToolResults {
                 results: vec![ToolResult {
+                    host_metadata: Default::default(),
                     tool_use_id: "tool-image".to_string(),
                     content: vec![ContentBlock::Image {
                         media_type: "image/png".to_string(),

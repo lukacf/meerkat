@@ -197,6 +197,7 @@ pub struct CallbackToolDefinition {
 impl From<CallbackToolDefinition> for meerkat_core::ToolDef {
     fn from(value: CallbackToolDefinition) -> Self {
         Self {
+            audience: Default::default(),
             name: value.name,
             description: value.description,
             input_schema: value.input_schema,

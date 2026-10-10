@@ -40,7 +40,7 @@ impl LlmRetryFailure {
         if error.operation_refusal().is_some() {
             return None;
         }
-        match error {
+        match error.primary_error() {
             AgentError::Llm {
                 provider,
                 reason,

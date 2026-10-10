@@ -5299,15 +5299,16 @@ fn create_session_error_to_api(err: SessionError) -> ApiError {
         return busy;
     }
     let message = err.to_string();
-    match &err {
+    match err.primary_error() {
         SessionError::NotFound { .. } => ApiError::NotFound(message),
         SessionError::Busy { .. } => ApiError::BadRequest(message),
-        SessionError::Agent(meerkat_core::error::AgentError::Cancelled) => {
-            ApiError::RequestCancelled { details: None }
-        }
-        SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
-            ApiError::BadRequest(message)
-        }
+        SessionError::Agent(error) => match error.primary_error() {
+            meerkat_core::error::AgentError::Cancelled => {
+                ApiError::RequestCancelled { details: None }
+            }
+            meerkat_core::error::AgentError::ConfigError(_) => ApiError::BadRequest(message),
+            _ => ApiError::Agent(message),
+        },
         _ => ApiError::Agent(message),
     }
 }
@@ -8371,7 +8372,7 @@ pub enum ApiError {
 /// `ApiError::SessionBusyWithData` for a typed retryable runtime teardown
 /// still in progress (`SessionError::runtime_teardown_in_progress`).
 fn session_runtime_unavailable_api_error(error: &SessionError) -> Option<ApiError> {
-    match error {
+    match error.primary_error() {
         // A session whose hosting claim is unavailable (#1813) travels the
         // same 503 class, with `kind = "session_hosting_unavailable"`.
         SessionError::RuntimeUnavailable { .. } | SessionError::HostingUnavailable { .. } => {
@@ -8385,13 +8386,13 @@ fn session_runtime_unavailable_api_error(error: &SessionError) -> Option<ApiErro
 }
 
 fn session_busy_api_error(error: &SessionError) -> Option<ApiError> {
-    match error {
+    match error.primary_error() {
         SessionError::FailedWithData { message, data }
             if error.is_runtime_teardown_in_progress() =>
         {
             Some(ApiError::SessionBusyWithData {
                 message: message.clone(),
-                details: data.clone(),
+                details: error.structured_data().unwrap_or_else(|| data.clone()),
             })
         }
         // Another runtime owner hosts the session (#1813): the busy class

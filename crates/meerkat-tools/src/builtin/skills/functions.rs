@@ -72,6 +72,7 @@ impl BuiltinTool for SkillInvokeFunctionTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "skill_invoke_function".into(),
             description:
                 "Invoke a function exposed by a skill identified by (source_uuid, skill_name)."

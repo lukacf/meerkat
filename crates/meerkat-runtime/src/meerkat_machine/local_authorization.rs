@@ -124,6 +124,28 @@ struct NativeGrantWorkAuthorizationHost {
 }
 
 impl NativeWorkAuthorizationHost for NativeGrantWorkAuthorizationHost {
+    fn tool_application_authorization(
+        &self,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<WorkAuthorizationContext, meerkat_core::OperationAuthorizationError> {
+        control.revalidate()?;
+        let owner = self
+            .machine
+            .upgrade()
+            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
+        owner
+            .require_governed_execution_custody()
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        let context = self.policy.tool_application_authorization(control);
+        Ok(WorkAuthorizationContext::new(
+            Arc::new(NativeControlAuthorization {
+                inner: Arc::clone(context.authorization()),
+                machine: self.machine.clone(),
+            }),
+            OperationExecutionScope::Domain,
+        ))
+    }
+
     fn context_control_authorization(
         &self,
         control: Arc<meerkat_core::service::SystemContextControlRequest>,

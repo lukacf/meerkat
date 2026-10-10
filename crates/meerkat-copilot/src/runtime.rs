@@ -2945,6 +2945,7 @@ mod tests {
         ];
         project_output_schema_instructions(&mut messages, &section);
         let tool = Arc::new(meerkat_core::ToolDef {
+            audience: Default::default(),
             name: "lookup".into(),
             description: "returns a fixed observation".to_string(),
             input_schema: serde_json::json!({"type": "object", "properties": {}}),

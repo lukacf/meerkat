@@ -95,7 +95,7 @@ impl BudgetExceeded {
     }
 
     pub fn from_agent_error(error: &AgentError) -> Option<Self> {
-        match error {
+        match error.primary_error() {
             AgentError::TokenBudgetExceeded { used, limit } => Some(Self {
                 dimension: BudgetDimension::Tokens,
                 used: *used,

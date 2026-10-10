@@ -851,6 +851,21 @@ impl RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl SessionService for RpcMobSessionService {
+    async fn read_tool_application_observations(
+        &self,
+        id: &meerkat_core::SessionId,
+    ) -> Result<Vec<meerkat_core::ToolApplicationObservation>, meerkat_core::service::SessionError>
+    {
+        self.service.read_tool_application_observations(id).await
+    }
+
+    async fn tool_application(
+        self: Arc<Self>,
+        control: Arc<meerkat_core::ToolApplicationControlRequest>,
+    ) -> Result<serde_json::Value, SessionError> {
+        Arc::clone(&self.service).tool_application(control).await
+    }
+
     async fn create_session(
         &self,
         mut req: CreateSessionRequest,
@@ -12290,7 +12305,8 @@ fn instruction_activation_host_error_to_rpc(
 }
 
 pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
-    if let SessionError::RuntimeUnavailable { .. } | SessionError::HostingUnavailable { .. } = &err
+    if let SessionError::RuntimeUnavailable { .. } | SessionError::HostingUnavailable { .. } =
+        err.primary_error()
     {
         return RpcError {
             code: meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
@@ -12298,7 +12314,7 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
             data: meerkat_contracts::error::session_error_details(&err),
         };
     }
-    let code = match &err {
+    let code = match err.primary_error() {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         // Another runtime owner hosts the session (#1813): the busy class,
         // with `kind = "session_served_elsewhere"` in the data.
@@ -12316,7 +12332,7 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         | SessionError::DurableTailRecoveryRefused { .. }
         | SessionError::DurableEvidenceQuarantined { .. }
         | SessionError::WholeBlobAuditedEndpointDivergence { .. } => error::SESSION_NOT_RUNNING,
-        SessionError::Agent(agent_err) => match agent_err {
+        SessionError::Agent(agent_err) => match agent_err.primary_error() {
             meerkat_core::AgentError::TokenBudgetExceeded { .. }
             | meerkat_core::AgentError::TimeBudgetExceeded { .. }
             | meerkat_core::AgentError::ToolCallBudgetExceeded { .. } => error::BUDGET_EXHAUSTED,
@@ -12334,7 +12350,7 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         },
         _ => error::INTERNAL_ERROR,
     };
-    let core_apply_failure_cause = match &err {
+    let core_apply_failure_cause = match err.primary_error() {
         SessionError::Agent(agent_err) => {
             use meerkat_core::lifecycle::core_executor::{
                 CoreApplyFailureCause, CoreApplyFailureCauseKind,
@@ -12348,17 +12364,16 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         }
         _ => None,
     };
-    let core_executor_teardown_reason = match &err {
-        SessionError::Agent(meerkat_core::AgentError::StickyModelFallbackAuthorityUnknown {
-            ..
-        }) => Some(
-            meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable,
-        ),
-        SessionError::Agent(
-            meerkat_core::AgentError::SessionDurableProjectionAuthorityUnknown { .. },
-        ) => Some(
-            meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown,
-        ),
+    let core_executor_teardown_reason = match err.primary_error() {
+        SessionError::Agent(error) => match error.primary_error() {
+            meerkat_core::AgentError::StickyModelFallbackAuthorityUnknown { .. } => Some(
+                meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable,
+            ),
+            meerkat_core::AgentError::SessionDurableProjectionAuthorityUnknown { .. } => Some(
+                meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown,
+            ),
+            _ => None,
+        },
         _ => None,
     };
     RpcError {

@@ -469,8 +469,8 @@ fi
 
 if [[ "$gate_status" -ne 0 ]]; then
   gate_plain="$(sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "$gate_log" 2>/dev/null || true)"
-  failed_names="$(sed -n -E 's/^(.+[^.])[.]{2,}Failed$/\1/p' <<<"$gate_plain")"
-  failed_ids="$(sed -n -E 's/^- hook id: (.+)$/\1/p' <<<"$gate_plain")"
+  failed_names="$(printf '%s\n' "$gate_plain" | sed -n -E 's/^(.+[^.])[.]{2,}Failed$/\1/p')"
+  failed_ids="$(printf '%s\n' "$gate_plain" | sed -n -E 's/^- hook id: (.+)$/\1/p')"
   printf '\n' >&2
   echo "Meerkat pre-push gate FAILED (pre-commit exit ${gate_status})." >&2
   if [[ -n "$failed_names" ]]; then
@@ -479,14 +479,14 @@ if [[ "$gate_status" -ne 0 ]]; then
       if [[ -n "$failed_name" ]]; then
         echo "  - ${failed_name}" >&2
       fi
-    done <<<"$failed_names"
+    done < <(printf '%s\n' "$failed_names")
     if [[ -n "$failed_ids" ]]; then
       echo "Rerun the failing hook alone with:" >&2
       while IFS= read -r failed_id; do
         if [[ -n "$failed_id" ]]; then
           echo "  pre-commit run --hook-stage pre-push --all-files ${failed_id}" >&2
         fi
-      done <<<"$failed_ids"
+      done < <(printf '%s\n' "$failed_ids")
     fi
   else
     echo "No hook reported Failed, so the failure is in the gate harness, not" >&2

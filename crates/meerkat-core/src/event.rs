@@ -412,7 +412,7 @@ impl AgentErrorReason {
     }
 
     pub fn from_agent_error(error: &AgentError) -> Option<Self> {
-        match error {
+        match error.primary_error() {
             AgentError::HookLaunchRefused { hook_id, reason } => Some(Self::HookLaunchRefused {
                 hook_id: hook_id.clone(),
                 reason: reason.clone(),
@@ -492,6 +492,7 @@ impl AgentErrorReason {
 impl From<&AgentError> for AgentErrorClass {
     fn from(error: &AgentError) -> Self {
         match error {
+            AgentError::WithSettlementFailures { error, .. } => Self::from(error.as_ref()),
             AgentError::Llm { .. } => Self::Llm,
             AgentError::OperationRefused { .. } => Self::OperationRefused,
             AgentError::StoreError(_) => Self::Store,
@@ -628,7 +629,7 @@ impl TurnErrorMetadata {
     }
 
     pub fn from_agent_error(error: &AgentError) -> Option<Self> {
-        match error {
+        match error.primary_error() {
             AgentError::Llm {
                 provider,
                 reason,

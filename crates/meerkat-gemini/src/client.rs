@@ -5056,6 +5056,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
@@ -5143,6 +5144,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
@@ -5224,6 +5226,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
@@ -5306,6 +5309,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "conditional_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
@@ -5360,6 +5364,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
@@ -5421,6 +5426,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
@@ -5470,6 +5476,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,
@@ -5516,6 +5523,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "upsert_record".into(),
             description: "test".to_string(),
             input_schema: schema,
@@ -5561,6 +5569,7 @@ mod tests {
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
+            audience: Default::default(),
             name: "test_tool".into(),
             description: "test".to_string(),
             input_schema: schema,

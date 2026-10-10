@@ -16,10 +16,6 @@ use crate::session_document::{
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::tool_execution::{
-    ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner, ToolExecutionResolutionContext,
-    ToolExecutionResolutionError,
-};
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
@@ -29,11 +25,14 @@ use crate::tool_scope::{
 use crate::turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
+#[cfg(test)]
+use crate::types::ToolCallView;
 use crate::types::{
-    BlockAssistantMessage, ContentInput, Message, RunInput, RunResult, ToolCallView, ToolNameSet,
+    BlockAssistantMessage, ContentInput, Message, RunInput, RunResult, ToolNameSet,
     TranscriptMessageIdentity, UserMessage,
 };
 use async_trait::async_trait;
+#[cfg(test)]
 use serde_json::value::to_raw_value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -1034,6 +1033,8 @@ where
         self.config.provider_native_tools = next_provider_native_tools;
         self.auth_credential_identity = next_auth_credential_identity;
         self.session = next_session;
+        self.tool_application_observations
+            .refresh(self.session.messages());
         self.active_model_profile = Some(target_profile);
         Ok(())
     }
@@ -1223,147 +1224,32 @@ where
         {
             return Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error));
         }
-        let args = to_raw_value(&call.args).map_err(|err| {
-            AgentError::InternalError(format!(
-                "failed to serialize external tool-call arguments: {err}"
-            ))
-        })?;
-        let view = ToolCallView {
-            id: &call.id,
-            name: &call.name,
-            args: args.as_ref(),
-        };
-        let dispatch_context = self
+        let context = self
             .tool_dispatch_context
             .clone()
             .with_operation_review(self.operation_review.clone());
-        let resolution_started = crate::time_compat::Instant::now();
-        let caller_deadline = timeout_policy.timeout().map_or_else(
-            || ToolDeadlineContributor::unbounded(ToolDeadlineOwner::DirectCaller),
-            |timeout| ToolDeadlineContributor::finite(ToolDeadlineOwner::DirectCaller, timeout),
-        );
-        let resolution_context = match ToolDeadlineChain::new(vec![caller_deadline])
-            .map(ToolExecutionResolutionContext::new)
-        {
-            Ok(context) => context,
-            Err(error) => {
-                return Ok(crate::ops::terminal_tool_outcome_for_error(
-                    call.id,
-                    ToolError::from(ToolExecutionResolutionError::Deadline(error)),
-                ));
-            }
-        };
-        let plan = match crate::resolve_tool_execution_plan_fenced(
-            &self.tools,
-            view,
-            &dispatch_context,
-            &resolution_context,
-        ) {
-            Ok(plan) => plan,
-            Err(error) => {
-                return Ok(crate::ops::terminal_tool_outcome_for_error(
-                    call.id,
-                    ToolError::from(error),
-                ));
-            }
-        };
-        if let Err(error) =
-            self.tools
-                .validate_resolved_execution_plan(view, &resolution_context, &plan)
-        {
-            return Ok(crate::ops::terminal_tool_outcome_for_error(
-                call.id,
-                ToolError::from(error),
-            ));
+        let outcome = self
+            .dispatch_host_tool_call(call, timeout_policy, context)
+            .await?;
+        if !outcome.session_effects.is_empty() {
+            self.apply_session_effects(&outcome.session_effects, None)?;
         }
-        let effective_timeout = plan.effective_timeout();
-        tracing::debug!(
-            tool = %call.name,
-            execution_mode = ?plan.mode(),
-            effective_deadline_ms = ?effective_timeout
-                .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
-            deadline_winner = ?plan
-                .deadlines()
-                .winner()
-                .map(|winner| winner.owner().as_str()),
-            deadline_chain = %plan.deadlines().diagnostic(),
-            "resolved external tool execution plan"
-        );
-        let remaining_timeout =
-            effective_timeout.map(|timeout| timeout.saturating_sub(resolution_started.elapsed()));
-        let advertised_timeout_ms =
-            effective_timeout.map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX));
-        let dispatch_result = match remaining_timeout {
-            Some(timeout) if timeout.is_zero() => Err(crate::error::ToolError::timeout(
-                call.name.clone(),
-                advertised_timeout_ms.unwrap_or(u64::MAX),
-            )),
-            Some(timeout) => {
-                match tokio::time::timeout(
-                    timeout,
-                    crate::dispatch_tool_execution_plan_fenced(
-                        &self.tools,
-                        view,
-                        &dispatch_context,
-                        &plan,
-                    ),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(crate::error::ToolError::timeout(
-                        call.name.clone(),
-                        advertised_timeout_ms.unwrap_or(u64::MAX),
-                    )),
-                }
-            }
-            None => {
-                crate::dispatch_tool_execution_plan_fenced(
-                    &self.tools,
-                    view,
-                    &dispatch_context,
-                    &plan,
-                )
-                .await
-            }
-        };
+        Ok(outcome)
+    }
 
-        match dispatch_result {
-            Ok(mut outcome) => {
-                outcome.clear_terminal_cause();
-                if outcome.result.tool_use_id.is_empty() {
-                    outcome.result.tool_use_id = call.id;
-                }
-                if !outcome.session_effects.is_empty() {
-                    self.apply_session_effects(&outcome.session_effects, None)?;
-                }
-                Ok(outcome)
-            }
-            Err(error) if error.is_callback_pending() => {
-                let (tool_name, args) = error.as_callback_pending().ok_or_else(|| {
-                    AgentError::InternalError(
-                        "callback classification lost its exact payload".to_string(),
-                    )
-                })?;
-                Err(AgentError::callback_pending_with_settlement(
-                    crate::error::PendingCallbackToolCall {
-                        tool_use_id: call.id,
-                        tool_name: tool_name.to_owned(),
-                        args: args.clone(),
-                        settlement_failures: error.settlement_failures().cloned().collect(),
-                    },
-                ))
-            }
-            Err(error)
-                if matches!(
-                    error.primary_error(),
-                    ToolError::OperationObservationUnavailable
-                ) =>
-            {
-                Err(AgentError::tool(error))
-            }
-            Err(error) => Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error)),
-        }
+    async fn dispatch_host_tool_call(
+        &mut self,
+        call: crate::types::ToolCall,
+        timeout_policy: ToolDispatchTimeoutPolicy,
+        dispatch_context: crate::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, AgentError> {
+        super::tool_application_execution::dispatch_host_tool_call(
+            &self.tools,
+            call,
+            timeout_policy,
+            dispatch_context,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -1390,7 +1276,21 @@ where
 
     /// Get mutable access to the session (for setting metadata)
     pub fn session_mut(&mut self) -> &mut Session {
+        self.tool_application_observations.invalidate();
         &mut self.session
+    }
+
+    /// Read host-only tool observations without borrowing the running Agent.
+    pub fn tool_application_observation_reader(
+        &self,
+    ) -> crate::tool_application::ToolApplicationObservationReader {
+        self.tool_application_observations.reader()
+    }
+
+    /// Publish the canonical transcript between native actor commands.
+    pub fn publish_idle_tool_application_observations(&self) {
+        self.tool_application_observations
+            .publish_idle(self.session.messages());
     }
 
     /// Consume the latest successful provisional write for `run_id`.
@@ -2169,6 +2069,8 @@ where
             .map_err(|error| AgentError::ConfigError(error.to_string()))?;
 
         let canonical_session = std::mem::replace(&mut self.session, snapshot);
+        let saved_tool_application_observations =
+            std::mem::take(&mut self.tool_application_observations);
         let saved_checkpointer = self.checkpointer.take();
         let saved_comms_runtime = self.comms_runtime.take();
         let saved_hook_engine = self.hook_engine.take();
@@ -2276,6 +2178,7 @@ where
         }
 
         self.session = canonical_session;
+        self.tool_application_observations = saved_tool_application_observations;
         self.checkpointer = saved_checkpointer;
         self.comms_runtime = saved_comms_runtime;
         self.hook_engine = saved_hook_engine;
@@ -3192,6 +3095,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             // stage a permanent routing handoff nor commit one.
             model_routing_handoff_staging: None,
             latest_run_checkpoint_receipt: None,
+            tool_application_observations: Default::default(),
             durable_row_floor,
             blob_store: self.blob_store.clone(),
             terminal_error_detail: None,
@@ -4284,6 +4188,1353 @@ mod skill_activation_effect_tests {
                 );
             }
         }
+    }
+
+    struct ObservationLlmClient {
+        first: AtomicBool,
+        final_entered: tokio::sync::Semaphore,
+        final_release: tokio::sync::Semaphore,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for ObservationLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _: &[Arc<ToolDef>],
+            _: u32,
+            _: Option<f32>,
+            _: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            let (blocks, reason) = if self.first.swap(false, Ordering::SeqCst) {
+                (
+                    vec![AssistantBlock::ToolUse {
+                        id: "live-result".into(),
+                        name: "show".into(),
+                        args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )
+            } else {
+                let results: Vec<_> = messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::ToolResults { results, .. } => Some(results),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                assert_eq!(results.len(), 1);
+                assert!(
+                    !results[0].is_error,
+                    "native tool was refused: {}",
+                    results[0].text_content()
+                );
+                assert_eq!(results[0].text_content(), "text fallback");
+                assert!(
+                    results[0].host_metadata.is_empty(),
+                    "host data cannot enter the model request"
+                );
+                self.final_entered.add_permits(1);
+                self.final_release.acquire().await.unwrap().forget();
+                (
+                    vec![AssistantBlock::Text {
+                        text: "done".into(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                )
+            };
+            Ok(super::super::LlmStreamResult::new(
+                blocks,
+                reason,
+                normalized_test_usage(self, Usage::default()),
+            ))
+        }
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+        fn model(&self) -> &'static str {
+            "observation-mock"
+        }
+    }
+
+    struct ObservationTools;
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for ObservationTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::new(ToolDef::new(
+                "show",
+                "show a widget",
+                serde_json::json!({"type":"object"}),
+            ))])
+        }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            let mut result = crate::ToolResult::new(call.id.into(), "text fallback".into(), false);
+            result.host_metadata.insert(
+                "test.app".into(),
+                serde_json::json!({"private":"private-ui"}),
+            );
+            Ok(result.into())
+        }
+        async fn resolve_tool_application(
+            &self,
+            _: &str,
+            _: &crate::ToolApplicationRequest,
+            _: &serde_json::Value,
+            _: &crate::ToolDispatchContext,
+        ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+            Ok(crate::tool_application::ToolApplicationResolution::Value(
+                serde_json::json!("observed"),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn application_observation_is_visible_while_final_model_is_pending_and_clears_on_exit() {
+        for cancel in [false, true] {
+            let client = Arc::new(ObservationLlmClient {
+                first: AtomicBool::new(true),
+                final_entered: tokio::sync::Semaphore::new(0),
+                final_release: tokio::sync::Semaphore::new(0),
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    client.clone(),
+                    Arc::new(ObservationTools),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            let reader = agent.tool_application_observation_reader();
+            agent.publish_idle_tool_application_observations();
+            assert_eq!(reader.idle_snapshot(), Some(Vec::new()));
+            let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(100);
+            let mut run = Box::pin(agent.run_with_events("show a widget".into(), events_tx));
+            tokio::select! {
+                _ = client.final_entered.acquire() => {}
+                result = &mut run => panic!("run ended before final request: {result:?}"),
+                () = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("final request did not enter"),
+            }
+            let (_, observations) = reader.snapshot().expect("native active observation");
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].tool_call_id, "live-result");
+            assert_eq!(observations[0].tool_name, "show");
+            assert_eq!(
+                observations[0].host_metadata["test.app"]["private"],
+                "private-ui"
+            );
+            assert!(reader.idle_snapshot().is_none());
+            while let Ok(event) = events_rx.try_recv() {
+                assert!(
+                    !serde_json::to_string(&event)
+                        .unwrap()
+                        .contains("private-ui")
+                );
+            }
+            if cancel {
+                drop(run);
+            } else {
+                client.final_release.add_permits(1);
+                run.await.expect("completed native run");
+            }
+            assert!(reader.snapshot().is_none());
+            assert!(
+                reader.idle_snapshot().is_none(),
+                "idle publication must be explicit after run settlement"
+            );
+            agent.publish_idle_tool_application_observations();
+            assert_eq!(reader.idle_snapshot().map(|rows| rows.len()), Some(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn app_executor_never_accepts_disposable_live_bridge_results() {
+        let client = Arc::new(ObservationLlmClient {
+            first: AtomicBool::new(true),
+            final_entered: tokio::sync::Semaphore::new(0),
+            final_release: tokio::sync::Semaphore::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                client.clone(),
+                Arc::new(ObservationTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let executor = agent.tool_application_executor();
+        let snapshot = agent.session.clone();
+        let session_id = snapshot.id().clone();
+        let revision = snapshot.canonical_context_revision().unwrap();
+        let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut operation = Box::pin(agent.run_live_bridge_noncommitting(
+            snapshot,
+            "temporary widget".into(),
+            crate::LiveBridgeToolDispatchAdmission::__test_new(
+                "isolated-widget",
+                Arc::new(AllowBridgeDispatch),
+            ),
+            crate::LiveBridgeNoncommittingRunPermit::__test_new(
+                "isolated-widget",
+                session_id.clone(),
+                revision,
+            ),
+            cancel_rx,
+        ));
+        tokio::select! {
+            _ = client.final_entered.acquire() => {},
+            result = &mut operation => panic!("bridge ended before tool result: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("bridge did not accept tool result"),
+        }
+        let request = crate::ToolApplicationRequest {
+            tool_call_id: "live-result".into(),
+            extension: "test.app".into(),
+            operation: crate::ToolApplicationOperation::Resolve,
+        };
+        let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+            session_id,
+            request.clone(),
+            Arc::new(AppTestIngress),
+        )
+        .unwrap();
+        assert!(matches!(
+            executor
+                .execute(
+                    request,
+                    crate::ToolDispatchContext::default().with_tool_application_control(control)
+                )
+                .await
+                .into_immediate_result(),
+            Ok(Err(_))
+        ));
+        client.final_release.add_permits(1);
+        operation.await.unwrap();
+        assert!(
+            agent.session.messages().is_empty(),
+            "disposable tool result must not become canonical"
+        );
+    }
+
+    struct AppTestIngress;
+    impl crate::ToolApplicationIngress for AppTestIngress {
+        fn revalidate(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
+    }
+
+    struct AppTestTools {
+        entered: Arc<AtomicBool>,
+        effects: Vec<crate::ops::SessionEffect>,
+        settlement_failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+    }
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for AppTestTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([
+                Arc::new(ToolDef::new(
+                    "show",
+                    "model source",
+                    serde_json::json!({"type":"object"}),
+                )),
+                Arc::new(
+                    ToolDef::new("action", "app action", serde_json::json!({"type":"object"}))
+                        .with_audience(crate::ToolAudience::App),
+                ),
+            ])
+        }
+        async fn resolve_tool_application(
+            &self,
+            source: &str,
+            _: &crate::ToolApplicationRequest,
+            invocation: &serde_json::Value,
+            _: &crate::ToolDispatchContext,
+        ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+            assert_eq!(source, "show");
+            assert_eq!(invocation, &serde_json::json!({"original":true}));
+            Ok(crate::tool_application::ToolApplicationResolution::Call {
+                name: "action".into(),
+                binding: crate::tool_application::ToolApplicationBinding::new(
+                    "test.app",
+                    serde_json::json!({"bound":true}),
+                ),
+                project_result: |result| Ok(serde_json::json!({"text":result.text_content()})),
+            })
+        }
+        async fn dispatch(&self, _: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            panic!("app dispatch must retain its context")
+        }
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            assert_eq!(call.name, "action");
+            assert!(
+                context.work_authorization().is_none(),
+                "must not borrow previous run authority"
+            );
+            assert_eq!(context.application_binding().unwrap().extension, "test.app");
+            assert!(context.tool_application_control().is_some());
+            self.entered.store(true, Ordering::SeqCst);
+            let mut result = crate::ToolResult::new(call.id.into(), "clicked".into(), false);
+            result
+                .host_metadata
+                .insert("private".into(), serde_json::json!("private-app-result"));
+            result.settlement_failures = self.settlement_failures.clone();
+            Ok(ToolDispatchOutcome::new(
+                result,
+                Vec::new(),
+                self.effects.clone(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn app_action_uses_committed_invocation_and_fresh_context_separate_from_model_visibility()
+    {
+        let entered = Arc::new(AtomicBool::new(false));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(AppTestTools {
+                    entered: entered.clone(),
+                    effects: Vec::new(),
+                    settlement_failures: Vec::new(),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent
+            .session
+            .push(Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "original".into(),
+                    name: "show".into(),
+                    args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )));
+        let mut original = crate::ToolResult::new("original".into(), "text fallback".into(), false);
+        original
+            .host_metadata
+            .insert("test.app".into(), serde_json::json!({"original":true}));
+        agent.session.push(Message::ToolResults {
+            results: vec![original],
+            created_at: crate::types::message_timestamp_now(),
+        });
+        agent.tool_dispatch_context = crate::ToolDispatchContext::default()
+            .with_work_authorization(Some(attachment_context()));
+        let request = crate::ToolApplicationRequest {
+            tool_call_id: "original".into(),
+            extension: "test.app".into(),
+            operation: crate::ToolApplicationOperation::CallTool {
+                name: "raw-action".into(),
+                arguments: serde_json::json!({}),
+            },
+        };
+        let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+            agent.session.id().clone(),
+            request.clone(),
+            Arc::new(AppTestIngress),
+        )
+        .unwrap();
+        let context = crate::ToolDispatchContext::default().with_tool_application_control(control);
+        let result = agent
+            .tool_application(request.clone(), context.clone())
+            .await
+            .unwrap();
+        assert_eq!(result, serde_json::json!({"text":"clicked"}));
+        assert!(entered.load(Ordering::SeqCst));
+        entered.store(false, Ordering::SeqCst);
+        assert!(
+            agent
+                .tool_application(request.clone(), context)
+                .await
+                .is_err(),
+            "direct Agent entry must consume the execution receipt once"
+        );
+        assert!(!entered.load(Ordering::SeqCst));
+        let model = agent
+            .dispatch_external_tool_call(crate::ToolCall::new(
+                "model".into(),
+                "action".into(),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            model.result.is_error,
+            "app-only action must remain hidden from model callers"
+        );
+        assert!(!entered.load(Ordering::SeqCst));
+        let mut forged = request;
+        forged.tool_call_id = "unknown".into();
+        let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+            agent.session.id().clone(),
+            forged.clone(),
+            Arc::new(AppTestIngress),
+        )
+        .unwrap();
+        assert!(
+            agent
+                .tool_application(
+                    forged,
+                    crate::ToolDispatchContext::default().with_tool_application_control(control)
+                )
+                .await
+                .is_err()
+        );
+        assert!(!entered.load(Ordering::SeqCst));
+    }
+
+    struct AppActionHooks {
+        deny: Option<HookPoint>,
+        fail: Option<HookPoint>,
+        revoke: Option<HookPoint>,
+        live: Arc<AtomicBool>,
+        seen: Arc<std::sync::Mutex<Vec<HookInvocation>>>,
+        entered: Arc<AtomicBool>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::HookEngine for AppActionHooks {
+        async fn execute(
+            &self,
+            invocation: HookInvocation,
+            overrides: Option<&crate::HookRunOverrides>,
+        ) -> Result<crate::HookExecutionReport, crate::HookEngineError> {
+            assert!(
+                overrides.is_none(),
+                "an old run cannot disable app guardrails"
+            );
+            assert!(invocation.run_id.is_none());
+            assert!(invocation.turn_number.is_none());
+            assert_eq!(
+                self.entered.load(Ordering::SeqCst),
+                invocation.point == HookPoint::PostToolExecution
+            );
+            assert!(
+                !serde_json::to_string(&invocation)
+                    .unwrap()
+                    .contains("private-app-result")
+            );
+            if let Some(call) = &invocation.tool_call {
+                assert_eq!(call.name, "action");
+                assert!(call.tool_use_id.starts_with("app-"));
+            }
+            if let Some(result) = &invocation.tool_result {
+                assert_eq!(result.name, "action");
+                assert_eq!(result.text_projection(), "clicked");
+            }
+            self.seen.lock().unwrap().push(invocation.clone());
+            if self.revoke == Some(invocation.point) {
+                self.live.store(false, Ordering::SeqCst);
+            }
+            let hook_id = crate::HookId::new("app-guardrail");
+            if self.fail == Some(invocation.point) {
+                return Err(crate::HookEngineError::Timeout {
+                    hook_id,
+                    timeout_ms: 10,
+                });
+            }
+            let mut report = crate::HookExecutionReport::empty();
+            report.started.push(hook_id.clone());
+            if self.deny == Some(invocation.point) {
+                report.decision = Some(crate::HookDecision::deny(
+                    hook_id,
+                    crate::HookReasonCode::PolicyViolation,
+                    "app result policy",
+                    Some(serde_json::json!({"private":"withheld-hook-payload"})),
+                ));
+            }
+            Ok(report)
+        }
+    }
+
+    struct RevocableAppIngress(Arc<AtomicBool>);
+    impl crate::ToolApplicationIngress for RevocableAppIngress {
+        fn revalidate(&self) -> Result<(), crate::OperationAuthorizationError> {
+            if self.0.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(crate::OperationAuthorizationError::Unavailable)
+            }
+        }
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn app_action_hooks_refuse_entry_or_withhold_publication_without_losing_effects() {
+        for (deny, fail, revoke, missing_build_state) in [
+            (Some(HookPoint::PreToolExecution), None, None, false),
+            (None, Some(HookPoint::PreToolExecution), None, false),
+            (Some(HookPoint::PostToolExecution), None, None, false),
+            (None, Some(HookPoint::PostToolExecution), None, false),
+            (None, None, Some(HookPoint::PreToolExecution), false),
+            (None, None, Some(HookPoint::PostToolExecution), false),
+            (None, None, None, false),
+            (None, None, None, true),
+            (Some(HookPoint::PostToolExecution), None, None, true),
+        ] {
+            let entered = Arc::new(AtomicBool::new(false));
+            let live = Arc::new(AtomicBool::new(true));
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let settlement_failures = if deny == Some(HookPoint::PostToolExecution)
+                || fail == Some(HookPoint::PostToolExecution)
+                || revoke == Some(HookPoint::PostToolExecution)
+                || missing_build_state
+            {
+                vec![crate::ops::ToolDispatchSettlementFailure {
+                    admission_source: crate::ops::ToolDispatchAdmissionSource::ContextGate,
+                    effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+                    physical_outcome: crate::LiveBridgeEffectOutcome::Committed,
+                    failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+                }]
+            } else {
+                Vec::new()
+            };
+            let authority = crate::service::MobToolAuthorityContext::generated_for_test(
+                crate::service::OpaquePrincipalToken::new("entered-app-effect"),
+                true,
+                true,
+                true,
+                std::collections::BTreeSet::new(),
+                std::collections::BTreeMap::new(),
+                None,
+                None,
+            );
+            let effects = vec![
+                crate::ops::SessionEffect::ReplaceMobToolAuthorityContext {
+                    authority_context: authority,
+                },
+                crate::ops::SessionEffect::AppendAssistantBlocks {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "private-assistant-publication".into(),
+                        meta: None,
+                    }],
+                },
+            ];
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    Arc::new(StaticLlmClient),
+                    Arc::new(AppTestTools {
+                        entered: entered.clone(),
+                        effects,
+                        settlement_failures: settlement_failures.clone(),
+                    }),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            if missing_build_state {
+                // Keep the same owner identity while exercising the existing
+                // refusal for a malformed session missing its build state.
+                agent.session = crate::Session::with_id(agent.session.id().clone());
+                assert!(agent.session.build_state().is_none());
+            } else {
+                agent
+                    .session
+                    .set_build_state(crate::SessionBuildState::default())
+                    .unwrap();
+            }
+            agent
+                .session
+                .push(Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "original".into(),
+                        name: "show".into(),
+                        args: to_raw_value(&serde_json::json!({})).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )));
+            let mut original = crate::ToolResult::new("original".into(), "fallback".into(), false);
+            original
+                .host_metadata
+                .insert("test.app".into(), serde_json::json!({"original":true}));
+            agent.session.push(Message::tool_results(vec![original]));
+            agent.hook_engine = Some(Arc::new(AppActionHooks {
+                deny,
+                fail,
+                revoke,
+                live: live.clone(),
+                seen: seen.clone(),
+                entered: entered.clone(),
+            }));
+            agent.tool_dispatch_context.bind_run_id(crate::RunId::new());
+            agent
+                .hook_run_overrides
+                .disable
+                .push(crate::HookId::new("app-guardrail"));
+            let request = crate::ToolApplicationRequest {
+                tool_call_id: "original".into(),
+                extension: "test.app".into(),
+                operation: crate::ToolApplicationOperation::CallTool {
+                    name: "raw-action".into(),
+                    arguments: serde_json::json!({}),
+                },
+            };
+            let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+                agent.session.id().clone(),
+                request.clone(),
+                Arc::new(RevocableAppIngress(live)),
+            )
+            .unwrap();
+            let (tx, mut rx) = mpsc::channel(32);
+            *agent.event_tap.lock() = Some(crate::event_tap::EventTapState {
+                tx,
+                truncated: AtomicBool::new(false),
+            });
+            let before_execution = agent.session.messages().to_vec();
+            let outcome = agent
+                .tool_application_executor()
+                .execute(
+                    request.clone(),
+                    crate::ToolDispatchContext::default()
+                        .with_tool_application_control(control.clone()),
+                )
+                .await;
+            assert_eq!(agent.session.messages(), before_execution);
+            let expected_dirty = outcome.requires_settlement();
+            let (result, dirty) = agent.settle_tool_application(outcome).into_parts();
+            assert_eq!(
+                dirty, expected_dirty,
+                "errors retain their persistence obligation"
+            );
+            let pre_refused = deny == Some(HookPoint::PreToolExecution)
+                || fail == Some(HookPoint::PreToolExecution)
+                || revoke == Some(HookPoint::PreToolExecution);
+            assert_eq!(entered.load(Ordering::SeqCst), !pre_refused);
+            assert_eq!(
+                agent
+                    .session
+                    .build_state()
+                    .is_some_and(|state| state.mob_tool_authority_context.is_some()),
+                !pre_refused && !missing_build_state
+            );
+            let transcript = serde_json::to_string(agent.session.messages()).unwrap();
+            assert_eq!(
+                transcript.contains("private-assistant-publication"),
+                deny.is_none() && fail.is_none() && revoke.is_none() && !missing_build_state
+            );
+            assert!(!transcript.contains("private-app-result"));
+            assert_eq!(seen.lock().unwrap().len(), if pre_refused { 1 } else { 2 });
+            if let Err(error) = &result {
+                assert_eq!(
+                    error.settlement_failures().cloned().collect::<Vec<_>>(),
+                    settlement_failures
+                );
+            }
+            if missing_build_state {
+                assert!(matches!(
+                    result.unwrap_err().primary_error(),
+                    AgentError::InternalError(message) if message.contains("missing session build state")
+                ));
+            } else if let Some(point) = deny {
+                let error = result.unwrap_err();
+                let AgentError::Tool { error } = error.primary_error() else {
+                    panic!("expected typed hook denial");
+                };
+                let ToolError::HookDenied { denial } = error.primary_error() else {
+                    panic!("expected typed hook denial");
+                };
+                assert_eq!(denial.point, point);
+                if point == HookPoint::PostToolExecution {
+                    assert!(denial.payload.is_none());
+                    assert!(denial.message.contains("does not undo"));
+                }
+            } else if fail.is_some() {
+                assert!(matches!(
+                    result.unwrap_err().primary_error(),
+                    AgentError::HookTimeout { timeout_ms: 10, .. }
+                ));
+            } else if revoke.is_some() {
+                let error = result.unwrap_err();
+                let AgentError::Tool { error } = error.primary_error() else {
+                    panic!("expected authorization refusal");
+                };
+                assert!(matches!(
+                    error.primary_error(),
+                    ToolError::OperationAuthorizationUnavailable
+                ));
+            } else {
+                assert_eq!(result.unwrap(), serde_json::json!({"text":"clicked"}));
+            }
+            let mut hook_events = 0;
+            while let Ok(event) = rx.try_recv() {
+                if matches!(
+                    event,
+                    AgentEvent::HookStarted { .. }
+                        | AgentEvent::HookFailed { .. }
+                        | AgentEvent::HookDenied { .. }
+                ) {
+                    hook_events += 1;
+                }
+                assert!(!matches!(event, AgentEvent::ToolResultReceived { .. }));
+            }
+            assert!(hook_events > 0);
+            let before = seen.lock().unwrap().len();
+            assert!(
+                agent
+                    .tool_application(
+                        request,
+                        crate::ToolDispatchContext::default()
+                            .with_tool_application_control(control)
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                before,
+                "a receipt cannot repeat an entered or refused action"
+            );
+        }
+    }
+
+    fn seed_app_invocation<C, T, S>(agent: &mut Agent<C, T, S>)
+    where
+        C: AgentLlmClient + ?Sized,
+        T: AgentToolDispatcher + ?Sized,
+        S: AgentSessionStore + ?Sized,
+    {
+        agent
+            .session
+            .push(Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "original".into(),
+                    name: "show".into(),
+                    args: to_raw_value(&serde_json::json!({})).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )));
+        let mut result = crate::ToolResult::new("original".into(), "text fallback".into(), false);
+        result
+            .host_metadata
+            .insert("test.app".into(), serde_json::json!({"original":true}));
+        agent.session.push(Message::tool_results(vec![result]));
+    }
+
+    fn fresh_app_request(
+        session_id: &crate::SessionId,
+    ) -> (crate::ToolApplicationRequest, crate::ToolDispatchContext) {
+        let request = crate::ToolApplicationRequest {
+            tool_call_id: "original".into(),
+            extension: "test.app".into(),
+            operation: crate::ToolApplicationOperation::CallTool {
+                name: "raw-action".into(),
+                arguments: serde_json::json!({}),
+            },
+        };
+        let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+            session_id.clone(),
+            request.clone(),
+            Arc::new(AppTestIngress),
+        )
+        .unwrap();
+        (
+            request,
+            crate::ToolDispatchContext::default().with_tool_application_control(control),
+        )
+    }
+
+    #[tokio::test]
+    async fn app_executor_returns_pure_actions_while_model_holds_agent_and_keeps_results_private() {
+        let client = Arc::new(ObservationLlmClient {
+            first: AtomicBool::new(false),
+            final_entered: tokio::sync::Semaphore::new(0),
+            final_release: tokio::sync::Semaphore::new(0),
+        });
+        let entered = Arc::new(AtomicBool::new(false));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                client.clone(),
+                Arc::new(AppTestTools {
+                    entered: entered.clone(),
+                    effects: Vec::new(),
+                    settlement_failures: Vec::new(),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+        seed_app_invocation(&mut agent);
+        let session_id = agent.session.id().clone();
+        let executor = agent.tool_application_executor();
+        let (tx, _rx) = mpsc::channel(100);
+        let mut run = Box::pin(agent.run_with_events("continue".into(), tx));
+        tokio::select! {
+            _ = client.final_entered.acquire() => {},
+            result = &mut run => panic!("model ended before app IO: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("model did not enter"),
+        }
+        for _ in 0..3 {
+            let (request, context) = fresh_app_request(&session_id);
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                executor.execute(request, context),
+            )
+            .await
+            .unwrap();
+            assert!(!outcome.requires_settlement());
+            let result = match outcome.into_immediate_result() {
+                Ok(result) => result,
+                Err(outcome) => panic!(
+                    "pure call unexpectedly requires actor settlement: {}",
+                    outcome.requires_settlement()
+                ),
+            };
+            assert_eq!(result.unwrap(), serde_json::json!({"text":"clicked"}));
+        }
+        assert!(entered.load(Ordering::SeqCst));
+        client.final_release.add_permits(1);
+        run.await.unwrap();
+        let transcript = serde_json::to_string(agent.session.messages()).unwrap();
+        assert!(!transcript.contains("clicked") && !transcript.contains("private-app-result"));
+    }
+
+    #[tokio::test]
+    async fn app_executor_is_revoked_by_canonical_rewrite_and_exact_agent_drop() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(AppTestTools {
+                    entered: entered.clone(),
+                    effects: Vec::new(),
+                    settlement_failures: Vec::new(),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+        seed_app_invocation(&mut agent);
+        let session_id = agent.session.id().clone();
+        let executor = agent.tool_application_executor();
+        let _ = agent.session_mut();
+        let (request, context) = fresh_app_request(&session_id);
+        assert!(matches!(
+            executor
+                .execute(request, context)
+                .await
+                .into_immediate_result(),
+            Ok(Err(_))
+        ));
+        assert!(!entered.load(Ordering::SeqCst));
+        let executor = agent.tool_application_executor();
+        // A display reader surviving the Agent must not retain execution authority.
+        let _reader = agent.tool_application_observation_reader();
+        drop(agent);
+        let (request, context) = fresh_app_request(&session_id);
+        assert!(matches!(
+            executor
+                .execute(request, context)
+                .await
+                .into_immediate_result(),
+            Ok(Err(_))
+        ));
+        assert!(!entered.load(Ordering::SeqCst));
+    }
+
+    struct AppResolvingTools {
+        inner: AppTestTools,
+        pause: Option<Arc<(tokio::sync::Semaphore, tokio::sync::Semaphore)>>,
+        projection_error: bool,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for AppResolvingTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.inner.tools()
+        }
+        async fn resolve_tool_application(
+            &self,
+            source: &str,
+            request: &crate::ToolApplicationRequest,
+            invocation: &serde_json::Value,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+            let mut result = self
+                .inner
+                .resolve_tool_application(source, request, invocation, context)
+                .await?;
+            if let Some(pause) = &self.pause {
+                pause.0.add_permits(1);
+                pause.1.acquire().await.unwrap().forget();
+            }
+            if self.projection_error
+                && let crate::tool_application::ToolApplicationResolution::Call {
+                    project_result,
+                    ..
+                } = &mut result
+            {
+                *project_result = |_| {
+                    Err(ToolError::execution_failed("protocol projection failed")
+                        .with_settlement_failures(vec![app_projection_failure()]))
+                };
+            }
+            Ok(result)
+        }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            self.inner.dispatch(call).await
+        }
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            self.inner.dispatch_with_context(call, context).await
+        }
+    }
+
+    #[tokio::test]
+    async fn app_executor_revalidates_exact_invocation_after_resolution_and_admission_close() {
+        for close in [false, true] {
+            let pause = Arc::new((
+                tokio::sync::Semaphore::new(0),
+                tokio::sync::Semaphore::new(0),
+            ));
+            let entered = Arc::new(AtomicBool::new(false));
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    Arc::new(StaticLlmClient),
+                    Arc::new(AppResolvingTools {
+                        inner: AppTestTools {
+                            entered: entered.clone(),
+                            effects: Vec::new(),
+                            settlement_failures: Vec::new(),
+                        },
+                        pause: Some(pause.clone()),
+                        projection_error: false,
+                    }),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            seed_app_invocation(&mut agent);
+            let executor = agent.tool_application_executor();
+            let (request, context) = fresh_app_request(agent.session.id());
+            let mut action = Box::pin(executor.execute(request, context));
+            tokio::select! {
+                _ = pause.0.acquire() => {},
+                _ = &mut action => panic!("resolution must be paused"),
+            }
+            if close {
+                executor.close_admission();
+            } else {
+                let _ = agent.session_mut();
+                // Republish identical bytes after invalidation. The old private
+                // invocation token must not be revived by this ABA transition.
+                let _new_executor = agent.tool_application_executor();
+            }
+            pause.1.add_permits(1);
+            assert!(matches!(action.await.into_immediate_result(), Ok(Err(_))));
+            assert!(!entered.load(Ordering::SeqCst));
+        }
+    }
+
+    fn app_projection_failure() -> crate::ops::ToolDispatchSettlementFailure {
+        crate::ops::ToolDispatchSettlementFailure {
+            admission_source: crate::ops::ToolDispatchAdmissionSource::ContextGate,
+            effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Failed,
+            failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        }
+    }
+
+    #[tokio::test]
+    async fn app_executor_projection_error_retains_entered_settlement_diagnostics() {
+        for effects in [
+            Vec::new(),
+            vec![crate::ops::SessionEffect::AppendAssistantBlocks {
+                blocks: vec![AssistantBlock::Text {
+                    text: "entered-effect".into(),
+                    meta: None,
+                }],
+            }],
+        ] {
+            let expected_dirty = !effects.is_empty();
+            let failure = crate::ops::ToolDispatchSettlementFailure {
+                admission_source: crate::ops::ToolDispatchAdmissionSource::ContextGate,
+                effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+                physical_outcome: crate::LiveBridgeEffectOutcome::Committed,
+                failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+            };
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    Arc::new(StaticLlmClient),
+                    Arc::new(AppResolvingTools {
+                        inner: AppTestTools {
+                            entered: Arc::new(AtomicBool::new(false)),
+                            effects,
+                            settlement_failures: vec![failure.clone()],
+                        },
+                        pause: None,
+                        projection_error: true,
+                    }),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            agent
+                .session
+                .set_build_state(crate::SessionBuildState::default())
+                .unwrap();
+            seed_app_invocation(&mut agent);
+            let (request, context) = fresh_app_request(agent.session.id());
+            let outcome = agent
+                .tool_application_executor()
+                .execute(request, context)
+                .await;
+            assert_eq!(outcome.requires_settlement(), expected_dirty);
+            let (result, dirty) = match outcome.into_immediate_result() {
+                Ok(result) => (result, false),
+                Err(outcome) => agent.settle_tool_application(*outcome).into_parts(),
+            };
+            assert_eq!(dirty, expected_dirty);
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("protocol projection failed"));
+            assert_eq!(
+                error.settlement_failures().cloned().collect::<Vec<_>>(),
+                vec![app_projection_failure(), failure.clone()]
+            );
+            let (request, context) = fresh_app_request(agent.session.id());
+            let outcome = agent
+                .tool_application_executor()
+                .execute(request, context)
+                .await;
+            let mut other = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    Arc::new(StaticLlmClient),
+                    Arc::new(NoTools),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            let (result, dirty) = other.settle_tool_application(outcome).into_parts();
+            assert!(!dirty);
+            let error = result.unwrap_err();
+            assert!(matches!(error.primary_error(), AgentError::ConfigError(_)));
+            let failures = error.settlement_failures().cloned().collect::<Vec<_>>();
+            assert_eq!(failures.len(), 2);
+            assert!(failures.contains(&failure) && failures.contains(&app_projection_failure()));
+        }
+    }
+
+    struct ReviewAppTools(Arc<AtomicBool>);
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for ReviewAppTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([
+                Arc::new(ToolDef::new(
+                    "show",
+                    "source",
+                    serde_json::json!({"type":"object"}),
+                )),
+                Arc::new(
+                    ToolDef::new("action", "target", serde_json::json!({"type":"object"}))
+                        .with_audience(crate::ToolAudience::App),
+                ),
+            ])
+        }
+        fn review_entry_support(&self, _: &str) -> crate::approval::review::ReviewEntrySupport {
+            crate::approval::review::ReviewEntrySupport::ConsumesAtEntry
+        }
+        async fn resolve_tool_application(
+            &self,
+            _: &str,
+            _: &crate::ToolApplicationRequest,
+            _: &serde_json::Value,
+            _: &crate::ToolDispatchContext,
+        ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+            Ok(crate::tool_application::ToolApplicationResolution::Call {
+                name: "action".into(),
+                binding: crate::tool_application::ToolApplicationBinding::new(
+                    "test.app",
+                    serde_json::json!({}),
+                ),
+                project_result: |_| Ok(serde_json::json!("done")),
+            })
+        }
+        async fn dispatch(&self, _: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            panic!("needs context")
+        }
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            let _ = context.enter_reviewed_effect(call, None)?;
+            self.0.store(true, Ordering::SeqCst);
+            Ok(crate::ToolResult::new(call.id.into(), "done".into(), false).into())
+        }
+    }
+
+    struct AppReviewAuthorization;
+    impl crate::WorkAuthorization for AppReviewAuthorization {
+        fn prepare(
+            &self,
+            _: &crate::PreparedAuthorizationBinding,
+        ) -> Result<
+            Arc<dyn crate::PreparedOperationAuthorization>,
+            crate::OperationAuthorizationError,
+        > {
+            Ok(Arc::new(Self))
+        }
+    }
+    impl crate::PreparedOperationAuthorization for AppReviewAuthorization {
+        fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+            crate::authorization::OperationReviewTier::R2
+        }
+        fn check_current(
+            &self,
+            _: &crate::PreparedAuthorizationBinding,
+        ) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
+    }
+
+    struct PausedAppReviewer(Arc<(tokio::sync::Semaphore, tokio::sync::Semaphore)>);
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::approval::review::OperationReviewer for PausedAppReviewer {
+        async fn review(
+            &self,
+            _: &crate::approval::review::ReviewCandidate<'_>,
+        ) -> Result<crate::approval::review::ReviewVerdict, crate::approval::review::ReviewerFailure>
+        {
+            self.0.0.add_permits(1);
+            self.0.1.acquire().await.unwrap().forget();
+            Ok(crate::approval::review::ReviewVerdict::Allow)
+        }
+    }
+
+    struct AsyncRevocableAppIngress(Arc<AtomicBool>);
+    impl crate::ToolApplicationIngress for AsyncRevocableAppIngress {
+        fn revalidate(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
+        fn revalidate_async(
+            &self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), crate::OperationAuthorizationError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async {
+                if self.0.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(crate::OperationAuthorizationError::Unavailable)
+                }
+            })
+        }
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn app_executor_revalidates_async_ingress_after_pending_operation_review() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let live = Arc::new(AtomicBool::new(true));
+        let pause = Arc::new((
+            tokio::sync::Semaphore::new(0),
+            tokio::sync::Semaphore::new(0),
+        ));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(ReviewAppTools(entered.clone())),
+                Arc::new(NoopStore),
+            )
+            .await;
+        seed_app_invocation(&mut agent);
+        agent.operation_review = Some(Arc::new(
+            crate::approval::review::BoundOperationReview::new(
+                Arc::new(PausedAppReviewer(pause.clone())),
+                crate::approval::ApprovalService::new(),
+                std::time::Duration::from_secs(5),
+            ),
+        ));
+        let (request, _) = fresh_app_request(agent.session.id());
+        let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+            agent.session.id().clone(),
+            request.clone(),
+            Arc::new(AsyncRevocableAppIngress(live.clone())),
+        )
+        .unwrap();
+        let context = crate::ToolDispatchContext::default()
+            .with_tool_application_control(control)
+            .with_work_authorization(Some(crate::WorkAuthorizationContext::new(
+                Arc::new(AppReviewAuthorization),
+                crate::OperationExecutionScope::Domain,
+            )));
+        let executor = agent.tool_application_executor();
+        let mut action = Box::pin(executor.execute(request, context));
+        tokio::select! {
+            _ = pause.0.acquire() => {},
+            _ = &mut action => panic!("operation review must await"),
+        }
+        live.store(false, Ordering::SeqCst);
+        pause.1.add_permits(1);
+        assert!(matches!(action.await.into_immediate_result(), Ok(Err(_))));
+        assert!(
+            !entered.load(Ordering::SeqCst),
+            "common entry must reject before calling the generic leaf"
+        );
+    }
+
+    struct NoticeFailureHooks(HookPoint);
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::HookEngine for NoticeFailureHooks {
+        async fn execute(
+            &self,
+            invocation: HookInvocation,
+            _: Option<&crate::HookRunOverrides>,
+        ) -> Result<crate::HookExecutionReport, crate::HookEngineError> {
+            let hook_id = crate::HookId::new("app-notice");
+            let mut report = crate::HookExecutionReport::empty();
+            report
+                .background_skips
+                .push(crate::hooks::HookBackgroundSkip {
+                    hook_id: hook_id.clone(),
+                    point: invocation.point,
+                    reason: crate::hooks::HookBackgroundSkipReason::ConcurrencyFull,
+                });
+            if invocation.point == self.0 {
+                Err(crate::HookEngineError::WithReport {
+                    report: Box::new(report),
+                    error: Box::new(crate::HookEngineError::Timeout {
+                        hook_id,
+                        timeout_ms: 17,
+                    }),
+                })
+            } else {
+                Ok(report)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn app_executor_preserves_all_hook_notices_on_pre_and_post_errors_until_actor_settlement()
+    {
+        for failed_point in [HookPoint::PreToolExecution, HookPoint::PostToolExecution] {
+            let entered = Arc::new(AtomicBool::new(false));
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    Arc::new(StaticLlmClient),
+                    Arc::new(AppTestTools {
+                        entered: entered.clone(),
+                        effects: Vec::new(),
+                        settlement_failures: Vec::new(),
+                    }),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            seed_app_invocation(&mut agent);
+            agent.hook_engine = Some(Arc::new(NoticeFailureHooks(failed_point)));
+            let before = agent.session.messages().to_vec();
+            let (request, context) = fresh_app_request(agent.session.id());
+            let outcome = agent
+                .tool_application_executor()
+                .execute(request, context)
+                .await;
+            assert_eq!(agent.session.messages(), before);
+            assert!(outcome.requires_settlement());
+            let outcome = match outcome.into_immediate_result() {
+                Err(outcome) => *outcome,
+                Ok(_) => panic!("notice cannot bypass actor"),
+            };
+            let (result, dirty) = agent.settle_tool_application(outcome).into_parts();
+            assert!(dirty);
+            assert!(matches!(
+                result.unwrap_err(),
+                AgentError::HookTimeout { timeout_ms: 17, .. }
+            ));
+            let entered_expected = failed_point == HookPoint::PostToolExecution;
+            assert_eq!(entered.load(Ordering::SeqCst), entered_expected);
+            assert_eq!(
+                agent.session.messages().len(),
+                before.len() + if entered_expected { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn app_executor_partial_effect_failure_stays_dirty_and_rejects_another_actor() {
+        let authority = crate::service::MobToolAuthorityContext::generated_for_test(
+            crate::service::OpaquePrincipalToken::new("app-partial"),
+            true,
+            true,
+            true,
+            Default::default(),
+            Default::default(),
+            None,
+            None,
+        );
+        let unsealed = serde_json::from_value(serde_json::to_value(authority).unwrap()).unwrap();
+        let tools = Arc::new(AppTestTools {
+            entered: Arc::new(AtomicBool::new(false)),
+            settlement_failures: Vec::new(),
+            effects: vec![
+                crate::ops::SessionEffect::AppendAssistantBlocks {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "settled-before-error".into(),
+                        meta: None,
+                    }],
+                },
+                crate::ops::SessionEffect::ReplaceMobToolAuthorityContext {
+                    authority_context: unsealed,
+                },
+            ],
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                tools.clone(),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent
+            .session
+            .set_build_state(crate::SessionBuildState::default())
+            .unwrap();
+        seed_app_invocation(&mut agent);
+        let (request, context) = fresh_app_request(agent.session.id());
+        let outcome = agent
+            .tool_application_executor()
+            .execute(request, context)
+            .await;
+        let (result, dirty) = agent.settle_tool_application(outcome).into_parts();
+        assert!(dirty && result.is_err());
+        assert!(
+            serde_json::to_string(agent.session.messages())
+                .unwrap()
+                .contains("settled-before-error")
+        );
+        let (request, context) = fresh_app_request(agent.session.id());
+        let outcome = agent
+            .tool_application_executor()
+            .execute(request, context)
+            .await;
+        let mut other = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(Arc::new(StaticLlmClient), tools, Arc::new(NoopStore))
+            .await;
+        other.session = crate::Session::with_id(agent.session.id().clone());
+        let (result, dirty) = other.settle_tool_application(outcome).into_parts();
+        assert!(!dirty && matches!(result, Err(AgentError::ConfigError(_))));
+        assert!(other.session.messages().is_empty());
     }
 
     struct AttachmentOnlyAuthorization;

@@ -99,6 +99,26 @@ impl Deref for ConnectedClient {
 }
 
 impl ConnectedClient {
+    pub(crate) fn supports_mcp_apps(&self) -> bool {
+        let Self::Host(service) = self else {
+            return false;
+        };
+        service
+            .service()
+            .get_info()
+            .capabilities
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get(crate::apps::MCP_APPS_EXTENSION))
+            .and_then(|extension| extension.get("mimeTypes"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|types| {
+                types
+                    .iter()
+                    .any(|mime| mime.as_str() == Some(crate::apps::MCP_APP_RESOURCE_MIME_TYPE))
+            })
+    }
+
     pub(crate) async fn cancel(self) -> Result<QuitReason, tokio::task::JoinError> {
         match self {
             Self::Default(service) => service.cancel().await,
@@ -124,7 +144,17 @@ impl FormClient {
             .as_ref()
             .and_then(|e| e.form.clone());
         let forms_enabled = form.is_some();
+        let ui = info
+            .capabilities
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get(crate::apps::MCP_APPS_EXTENSION))
+            .cloned();
         info.capabilities = ClientCapabilities::default();
+        if let Some(ui) = ui {
+            info.capabilities.extensions =
+                Some([(crate::apps::MCP_APPS_EXTENSION.into(), ui)].into());
+        }
         if forms_enabled {
             info.capabilities.elicitation = Some(ElicitationCapability { form, url: None });
         }

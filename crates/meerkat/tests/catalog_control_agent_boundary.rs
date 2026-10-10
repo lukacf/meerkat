@@ -146,6 +146,7 @@ impl AgentLlmClient for CatalogLoadRouteClient {
 
 fn session_tool(name: &str, description: &str) -> Arc<ToolDef> {
     Arc::new(ToolDef {
+        audience: Default::default(),
         name: name.into(),
         description: description.to_string(),
         input_schema: serde_json::json!({ "type": "object" }),

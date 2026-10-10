@@ -54,6 +54,7 @@ impl BuiltinTool for ShellJobCancelTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: "shell_job_cancel".into(),
             description: "Request cancellation of a running background shell job; live processes acknowledge terminal cancellation only after containment".into(),
             input_schema: crate::schema::schema_for::<JobCancelInput>(),

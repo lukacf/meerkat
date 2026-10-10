@@ -275,6 +275,7 @@ impl AgentToolDispatcher for Leaf {
             .into_iter()
             .map(|name| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: name.into(),
                     description: "test leaf".to_owned(),
                     input_schema: json!({"type":"object"}),

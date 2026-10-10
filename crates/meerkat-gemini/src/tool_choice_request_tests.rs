@@ -14,6 +14,7 @@ use crate::GeminiClient;
 
 fn tool(name: &str) -> Arc<ToolDef> {
     Arc::new(ToolDef {
+        audience: Default::default(),
         name: name.into(),
         description: format!("{name} tool"),
         input_schema: json!({"type": "object", "properties": {}}),

@@ -374,10 +374,11 @@ impl RealtimeSessionOpenConfig {
         turning_mode: RealtimeTurningMode,
         llm_identity: SessionLlmIdentity,
         visible_tools: Vec<ToolDef>,
-        seed_messages: Vec<Message>,
+        mut seed_messages: Vec<Message>,
         canonical_system_messages: Vec<String>,
         canonical_message_cursor: u64,
     ) -> Self {
+        meerkat_core::types::strip_tool_result_host_metadata(&mut seed_messages);
         Self {
             turning_mode,
             llm_identity,
@@ -451,8 +452,9 @@ impl RealtimeSessionOpenConfig {
     /// Replace the canonical seed while atomically re-deriving its System
     /// drift witness.
     pub fn with_seed_messages(mut self, seed_messages: Vec<Message>) -> Result<Self, LlmError> {
-        let seed_messages =
+        let mut seed_messages =
             meerkat_core::types::materialize_latest_system_prompt_versions(&seed_messages);
+        meerkat_core::types::strip_tool_result_host_metadata(&mut seed_messages);
         self.canonical_system_messages = Self::canonical_system_messages(&seed_messages);
         self.seed_messages = seed_messages;
         Ok(self)
@@ -600,6 +602,68 @@ mod tests {
             provider_params: None,
             auth_binding: None,
         }
+    }
+
+    #[test]
+    fn host_metadata_never_enters_realtime_seed_projections() {
+        let mut result =
+            meerkat_core::ToolResult::new("app-call".into(), "Visible result".into(), false);
+        result.host_metadata.insert(
+            "example.test/app".into(),
+            serde_json::json!({"private": "HOST_ONLY_SECRET"}),
+        );
+        let canonical = vec![Message::tool_results(vec![result])];
+        let configs = [
+            RealtimeSessionOpenConfig::new(
+                RealtimeTurningMode::ProviderManaged,
+                sample_identity(),
+                Vec::new(),
+                canonical.clone(),
+            )
+            .unwrap(),
+            RealtimeSessionOpenConfig::for_open_from_messages(
+                RealtimeTurningMode::ProviderManaged,
+                sample_identity(),
+                Vec::new(),
+                canonical.clone(),
+                &canonical,
+            )
+            .unwrap(),
+            RealtimeSessionOpenConfig::for_open_after_covered_prefix(
+                RealtimeTurningMode::ProviderManaged,
+                sample_identity(),
+                Vec::new(),
+                canonical.clone(),
+                1,
+            )
+            .unwrap(),
+            RealtimeSessionOpenConfig::new(
+                RealtimeTurningMode::ProviderManaged,
+                sample_identity(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap()
+            .with_seed_messages(canonical.clone())
+            .unwrap(),
+        ];
+        for config in configs {
+            let Message::ToolResults { results, .. } = &config.seed_messages()[0] else {
+                panic!("tool result seed");
+            };
+            assert!(results[0].host_metadata.is_empty());
+            assert_eq!(results[0].text_content(), "Visible result");
+            assert!(
+                !serde_json::to_string(config.seed_messages())
+                    .unwrap()
+                    .contains("HOST_ONLY_SECRET")
+            );
+        }
+        assert!(
+            serde_json::to_string(&canonical)
+                .unwrap()
+                .contains("HOST_ONLY_SECRET")
+        );
     }
 
     #[test]

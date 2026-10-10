@@ -24,6 +24,7 @@ mod structured_output_tests;
 #[cfg(test)]
 #[doc(hidden)]
 pub(crate) mod test_turn_state_handle;
+mod tool_application_execution;
 #[cfg(test)]
 mod usage_accounting_tests;
 #[cfg(test)]
@@ -795,6 +796,8 @@ pub type CancelAfterBoundarySender = tokio::sync::mpsc::UnboundedSender<CancelAf
 /// metadata into canonical transcript history.
 #[derive(Clone, Default)]
 pub struct ToolDispatchContext {
+    application_binding: Option<crate::tool_application::ToolApplicationBinding>,
+    application_control: Option<Arc<crate::ToolApplicationControlRequest>>,
     current_turn: Option<CurrentTurnContent>,
     turn_metadata: BTreeMap<String, serde_json::Value>,
     origin_session_id: Option<crate::types::SessionId>,
@@ -1126,7 +1129,13 @@ impl std::fmt::Debug for ToolDispatchContext {
 
 impl PartialEq for ToolDispatchContext {
     fn eq(&self, other: &Self) -> bool {
-        self.current_turn == other.current_turn
+        self.application_binding == other.application_binding
+            && match (&self.application_control, &other.application_control) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && self.current_turn == other.current_turn
             && self.turn_metadata == other.turn_metadata
             && self.origin_session_id == other.origin_session_id
             && self.interaction_lineage_id == other.interaction_lineage_id
@@ -1163,6 +1172,28 @@ impl Eq for ToolDispatchContext {}
 pub const TOOL_DISPATCH_OBJECTIVE_ID_KEY: &str = "meerkat.objective_id";
 
 impl ToolDispatchContext {
+    pub fn tool_application_control(&self) -> Option<&Arc<crate::ToolApplicationControlRequest>> {
+        self.application_control.as_ref()
+    }
+
+    pub fn with_tool_application_control(
+        mut self,
+        control: Arc<crate::ToolApplicationControlRequest>,
+    ) -> Self {
+        self.application_control = Some(control);
+        self
+    }
+    pub fn application_binding(&self) -> Option<&crate::tool_application::ToolApplicationBinding> {
+        self.application_binding.as_ref()
+    }
+
+    pub(crate) fn with_application_binding(
+        mut self,
+        binding: crate::tool_application::ToolApplicationBinding,
+    ) -> Self {
+        self.application_binding = Some(binding);
+        self
+    }
     /// Whether an enclosing execution policy requires a positive read-only
     /// declaration at the actual tool binding. This restriction is monotonic.
     pub const fn read_only_execution_required(&self) -> bool {
@@ -1179,6 +1210,8 @@ impl ToolDispatchContext {
             crate::types::ContentInput::Blocks(blocks) => Some(blocks.clone()),
         };
         Self {
+            application_binding: None,
+            application_control: None,
             current_turn: blocks.map(CurrentTurnContent::new),
             turn_metadata: BTreeMap::new(),
             origin_session_id: None,
@@ -1374,6 +1407,9 @@ impl ToolDispatchContext {
         call: ToolCallView<'_>,
         plan: Option<&crate::ResolvedToolExecutionPlan>,
     ) -> Result<Option<Self>, crate::ToolError> {
+        if let Some(control) = self.tool_application_control() {
+            control.revalidate().map_err(crate::ToolError::from)?;
+        }
         match (self.work_authorization(), self.prepared_authorization()) {
             (None, None) => Ok(None),
             (Some(work), Some(prepared)) => prepared
@@ -1667,6 +1703,20 @@ pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
 
+    /// Resolve a host UI request against the leaf that owns the original tool.
+    /// `invocation` is read from the committed result by the session owner.
+    /// A leaf may serve protocol data or select a tool call; it cannot bypass
+    /// core's normal app scope and execution path for that call.
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        _request: &crate::ToolApplicationRequest,
+        _invocation: &serde_json::Value,
+        _context: &ToolDispatchContext,
+    ) -> Result<crate::tool_application::ToolApplicationResolution, crate::ToolError> {
+        Err(crate::ToolError::access_denied(source_tool))
+    }
+
     /// Query exact catalog support for this dispatcher.
     ///
     /// Dispatchers report `exact_catalog=true` only when `tool_catalog()`
@@ -1957,8 +2007,11 @@ pub fn resolve_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized + 'sta
     }
     let witness = crate::ToolExecutionOwnerWitness::new("root-dispatcher", call.name, before)
         .map_err(crate::ToolExecutionResolutionError::from)?;
-    plan.with_owner_witness(witness)?
-        .bind_root_dispatch(Arc::clone(dispatcher), call)
+    let plan = plan.with_owner_witness(witness)?;
+    if let Some(binding) = dispatch_context.application_binding() {
+        binding.validate_execution_plan(call.name, &plan)?;
+    }
+    plan.bind_root_dispatch(Arc::clone(dispatcher), call)
 }
 
 /// Dispatch a plan only through the exact root allocation and exact canonical
@@ -1970,6 +2023,9 @@ pub async fn dispatch_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized
     plan: &crate::ResolvedToolExecutionPlan,
 ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
     plan.validate_root_dispatch(dispatcher, call)?;
+    if let Some(binding) = context.application_binding() {
+        binding.validate_execution_plan(call.name, plan)?;
+    }
     let witness = plan.owner_witness("root-dispatcher").ok_or_else(|| {
         crate::error::ToolError::unavailable(
             call.name,
@@ -2043,6 +2099,15 @@ pub async fn dispatch_tool_execution_plan_fenced<T: AgentToolDispatcher + ?Sized
         .clone()
         .map(crate::approval::review::ReviewDispatchGuard::new);
     let outcome = async {
+        // Review admission can await an operator. Fresh app custody and its
+        // private invocation/scope must still hold immediately before entry,
+        // independently of whether a particular leaf performs another check.
+        if let Some(control) = context.tool_application_control() {
+            control
+                .revalidate_async()
+                .await
+                .map_err(crate::ToolError::from)?;
+        }
         // Forward the binding's own immutable payload and plan all the way to the
         // body. Adapters can then validate exact custody by pointer identity after
         // a wait, without rehashing arguments or scanning policy dependencies.
@@ -2200,6 +2265,28 @@ impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for FilteredToolDispatcher<T> {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &crate::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<crate::tool_application::ToolApplicationResolution, crate::ToolError> {
+        if !self.allowed_tools.contains(source_tool) {
+            return Err(crate::ToolError::access_denied(source_tool));
+        }
+        let resolution = self
+            .inner
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await?;
+        if let crate::tool_application::ToolApplicationResolution::Call { name, .. } = &resolution
+            && !self.allowed_tools.contains(name.as_str())
+        {
+            return Err(crate::ToolError::access_denied(name));
+        }
+        Ok(resolution)
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         if self.inner.tool_catalog_capabilities().exact_catalog {
             return self
@@ -3246,6 +3333,8 @@ where
     /// actor removes it before each checkpoint await and installs only the
     /// exact returned successor.
     pub(crate) latest_run_checkpoint_receipt: Option<crate::RunCheckpointReceipt>,
+    pub(crate) tool_application_observations:
+        crate::tool_application::ToolApplicationInvocationOwner,
     /// Rows `[0, floor)` are committed in the durable store exactly as they
     /// stand in memory (the document loaded at build, the rows a compaction
     /// rewrite installed, or a committed successor the runtime handed over).
@@ -3508,6 +3597,7 @@ mod tests {
     impl AgentToolDispatcher for ContextAwareToolDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::from([Arc::new(ToolDef {
+                audience: Default::default(),
                 name: "inspect_context".into(),
                 description: "inspect context".to_string(),
                 input_schema: json!({"type": "object"}),
@@ -4341,6 +4431,99 @@ mod tests {
         )
         .await
         .expect("equivalent rebuilt catalog projections dispatch");
+    }
+
+    #[tokio::test]
+    async fn app_action_target_owner_is_fenced_across_resolution_and_dispatch() {
+        use crate::{
+            ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+            ToolExecutionResolutionContext, ToolUnavailableReason,
+        };
+
+        let concrete = Arc::new(IdenticalMutationDispatcher {
+            tool: ToolDef::new("action", "action", json!({"type": "object"})),
+            epoch: std::sync::atomic::AtomicU64::new(0),
+            mutate_on_resolve: false,
+        });
+        let dispatcher: Arc<dyn AgentToolDispatcher> = concrete.clone();
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "app-action",
+            name: "action",
+            args: &args,
+        };
+        let resolution = ToolExecutionResolutionContext::new(
+            ToolDeadlineChain::new(vec![ToolDeadlineContributor::unbounded(
+                ToolDeadlineOwner::DirectCaller,
+            )])
+            .unwrap(),
+        );
+        let selected = crate::resolve_tool_execution_plan_fenced(
+            &dispatcher,
+            call,
+            &ToolDispatchContext::default(),
+            &resolution,
+        )
+        .unwrap();
+        let witness = selected.owner_witness("root-dispatcher").unwrap().clone();
+        let binding = crate::tool_application::ToolApplicationBinding::new(
+            "test.app",
+            json!({"opaque": true}),
+        )
+        .with_owner_witness(witness.clone())
+        .unwrap();
+        assert_eq!(binding.payload, json!({"opaque": true}));
+        assert!(binding.clone().with_owner_witness(witness).is_err());
+        let context = ToolDispatchContext::default().with_application_binding(binding.clone());
+
+        let unchanged =
+            crate::resolve_tool_execution_plan_fenced(&dispatcher, call, &context, &resolution)
+                .expect("the selected owner still receives the action");
+        crate::dispatch_tool_execution_plan_fenced(&dispatcher, call, &context, &unchanged)
+            .await
+            .unwrap();
+
+        // Publication changes after app resolution but before the ordinary
+        // execution plan is selected. The new plan is independently valid,
+        // but may never replace the app's original selected target.
+        concrete
+            .epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            crate::resolve_tool_execution_plan_fenced(&dispatcher, call, &context, &resolution),
+            Err(crate::ToolExecutionResolutionError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            })
+        ));
+        let changed = crate::resolve_tool_execution_plan_fenced(
+            &dispatcher,
+            call,
+            &ToolDispatchContext::default(),
+            &resolution,
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::dispatch_tool_execution_plan_fenced(&dispatcher, call, &context, &changed).await,
+            Err(crate::ToolError::Unavailable {
+                reason: ToolUnavailableReason::ExecutionOwnerChanged,
+                ..
+            })
+        ));
+
+        let missing_owner = crate::ToolExecutionOwnerWitness::new(
+            "nested-owner",
+            "original-leaf",
+            dispatcher.execution_binding_fingerprint(call.name).unwrap(),
+        )
+        .unwrap();
+        let nested = binding.with_owner_witness(missing_owner).unwrap();
+        assert_eq!(nested.owner_witnesses().len(), 2);
+        assert!(
+            nested
+                .validate_execution_plan(call.name, &selected)
+                .is_err()
+        );
     }
 
     #[tokio::test]

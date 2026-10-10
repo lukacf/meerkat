@@ -1473,6 +1473,7 @@ mod tests {
 
     fn make_tool_def(name: &str) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("Test tool {name}"),
             input_schema: serde_json::json!({"type": "object"}),

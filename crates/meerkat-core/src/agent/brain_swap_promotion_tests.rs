@@ -159,6 +159,7 @@ impl StagingToolDispatcher {
 impl AgentToolDispatcher for StagingToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::new([Arc::new(ToolDef {
+            audience: Default::default(),
             name: STAGING_TOOL.into(),
             description: "stage a permanent model switch".to_string(),
             input_schema: empty_tool_schema(),

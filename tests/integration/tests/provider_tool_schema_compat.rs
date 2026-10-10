@@ -88,6 +88,7 @@ struct ToolFamily {
 
 fn tool_def_from_listing(entry: &Value) -> Arc<ToolDef> {
     Arc::new(ToolDef {
+        audience: Default::default(),
         name: entry["name"]
             .as_str()
             .expect("tool listing entry carries a name")
@@ -667,6 +668,7 @@ fn anthropic_api_key() -> Option<String> {
 
 fn forced_probe_request(model: &str) -> LlmRequest {
     let probe = Arc::new(ToolDef {
+        audience: Default::default(),
         name: "record_greeting".into(),
         description: "Records a greeting.".to_string(),
         input_schema: json!({
@@ -677,6 +679,7 @@ fn forced_probe_request(model: &str) -> LlmRequest {
         provenance: None,
     });
     let other = Arc::new(ToolDef {
+        audience: Default::default(),
         name: "unrelated_lookup".into(),
         description: "Looks something up.".to_string(),
         input_schema: json!({"type": "object", "properties": {}}),

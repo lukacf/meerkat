@@ -366,6 +366,7 @@ impl BuiltinTool for GenerateImageTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            audience: Default::default(),
             name: self.name().into(),
             description: self.description(),
             input_schema: crate::schema::schema_for::<GenerateImageToolArgs>(),

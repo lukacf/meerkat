@@ -207,11 +207,38 @@ async fn recovered_row_must_match_generated_source_sequence() {
     )
     .await;
 
-    let error = RuntimeDeliveryInbox::new(store)
+    let inbox = RuntimeDeliveryInbox::new(store.clone());
+    let error = inbox
         .list_pending(&runtime_id, 10)
         .await
         .expect_err("row source sequence must match generated authority");
     assert!(matches!(error, RuntimeDeliveryError::Corrupt(_)));
+
+    let retained = RuntimeDeliverySubmission::new(
+        RuntimeDeliveryId::new("job:job_1:terminal:1").expect("delivery id"),
+        RuntimeDeliveryKind::JobTerminal,
+        "job_1",
+        2,
+        "interaction_1",
+        b"one".to_vec(),
+    )
+    .expect("submission matching the retained row");
+    let before = store
+        .load_runtime_delivery_authority(&runtime_id)
+        .await
+        .expect("original authority");
+    let error = inbox
+        .verify_committed_submission(&runtime_id, &retained)
+        .await
+        .expect_err("matching retained bytes cannot override the generated source sequence");
+    assert!(matches!(error, RuntimeDeliveryError::Corrupt(_)));
+    assert_eq!(
+        store
+            .load_runtime_delivery_authority(&runtime_id)
+            .await
+            .expect("unchanged authority"),
+        before
+    );
 }
 
 #[tokio::test]

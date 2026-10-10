@@ -40,12 +40,14 @@ fn get_tool_def(name: &str) -> ToolDef {
         .find(|t| t["name"].as_str() == Some(name))
         .map_or_else(
             || ToolDef {
+                audience: Default::default(),
                 name: name.into(),
                 description: String::new(),
                 input_schema: empty_object_schema(),
                 provenance: comms_provenance(),
             },
             |t| ToolDef {
+                audience: Default::default(),
                 name: t["name"].as_str().unwrap_or_default().into(),
                 description: t["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: t["inputSchema"].clone(),

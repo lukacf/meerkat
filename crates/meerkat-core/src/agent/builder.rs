@@ -756,6 +756,7 @@ impl AgentBuilder {
             checkpointer: self.checkpointer,
             model_routing_handoff_staging: self.model_routing_handoff_staging,
             latest_run_checkpoint_receipt: None,
+            tool_application_observations: Default::default(),
             durable_row_floor,
             blob_store: self.blob_store,
             event_tap: self
@@ -1419,6 +1420,7 @@ mod tests {
 
     fn test_tool_with_provenance(name: &str, source_id: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("{name} tool"),
             input_schema: serde_json::json!({ "type": "object" }),

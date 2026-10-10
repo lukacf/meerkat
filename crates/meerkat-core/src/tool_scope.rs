@@ -1546,23 +1546,57 @@ impl ToolScope {
         let visibility_state = self.visibility_owner.visibility_state()?;
         let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
 
-        let composed =
-            Self::compose_state_filters(&state, &visibility_state, require_filter_witnesses);
+        Ok(Self::visible_tools_for_state(
+            &state,
+            &visibility_state,
+            require_filter_witnesses,
+        ))
+    }
 
+    /// Project source tools for host inspection through the committed member filters.
+    ///
+    /// This includes every audience without loading tools into the model's
+    /// deferred catalog. It authorizes neither a new tool call nor fresh IO.
+    pub fn host_visible_tools_result(&self) -> Result<Arc<[Arc<ToolDef>]>, ToolScopeApplyError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        let visibility_state = self.visibility_owner.visibility_state()?;
+        let composed = Self::compose_state_filters(
+            &state,
+            &visibility_state,
+            self.visibility_owner.requires_filter_witnesses(),
+        );
         Ok(state
             .base_tools
             .iter()
-            .filter(|tool| {
-                state.control_tool_names.contains(tool.name.as_str())
-                    || (Self::is_requested_session_tool_visible(
-                        &state,
-                        &visibility_state,
-                        tool.as_ref(),
-                    ) && composed.allows(tool.name.as_str()))
-            })
+            .filter(|tool| composed.allows(tool.name.as_str()))
             .map(Arc::clone)
             .collect::<Vec<_>>()
             .into())
+    }
+
+    pub fn host_visible_tool_names(&self) -> Result<Vec<ToolName>, ToolScopeApplyError> {
+        self.host_visible_tools_result()
+            .map(|tools| tools.iter().map(|tool| tool.name.clone()).collect())
+    }
+
+    /// Project app-callable targets through the same committed member filters.
+    /// Reading this projection never changes requested tools or revisions.
+    pub fn app_visible_tools_result(&self) -> Result<Arc<[Arc<ToolDef>]>, ToolScopeApplyError> {
+        Ok(self
+            .host_visible_tools_result()?
+            .iter()
+            .filter(|tool| tool.audience.allows_app())
+            .cloned()
+            .collect::<Vec<_>>()
+            .into())
+    }
+
+    pub fn app_visible_tool_names(&self) -> Result<Vec<ToolName>, ToolScopeApplyError> {
+        self.app_visible_tools_result()
+            .map(|tools| tools.iter().map(|tool| tool.name.clone()).collect())
     }
 
     /// Return a handle for thread-safe staged external updates.
@@ -1791,6 +1825,7 @@ impl ToolScope {
         state
             .base_tools
             .iter()
+            .filter(|tool| tool.audience.allows_model())
             .filter(|tool| {
                 state.control_tool_names.contains(tool.name.as_str())
                     || (Self::is_requested_session_tool_visible(
@@ -2923,6 +2958,7 @@ mod tests {
             .iter()
             .map(|name| {
                 Arc::new(ToolDef {
+                    audience: Default::default(),
                     name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: serde_json::json!({ "type": "object" }),
@@ -2938,6 +2974,7 @@ mod tests {
 
     fn tool_with_provenance(name: &str, source_id: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
+            audience: Default::default(),
             name: name.into(),
             description: format!("{name} tool"),
             input_schema: serde_json::json!({ "type": "object" }),
@@ -2981,6 +3018,73 @@ mod tests {
             generated_visibility_owner(),
         )
         .expect("generated test visibility owner should accept projection authority")
+    }
+
+    #[test]
+    fn tool_audience_app_projection_obeys_filters_without_loading_model_tools() {
+        let definitions: Arc<[Arc<ToolDef>]> = [
+            ("model", crate::ToolAudience::Model),
+            ("app", crate::ToolAudience::App),
+            ("deferred_app", crate::ToolAudience::App),
+            ("both", crate::ToolAudience::ModelAndApp),
+            ("hidden", crate::ToolAudience::Hidden),
+        ]
+        .into_iter()
+        .map(|(name, audience)| {
+            Arc::new(
+                ToolDef::new(name, name, serde_json::json!({}))
+                    .with_audience(audience)
+                    .with_provenance(ToolProvenance {
+                        kind: ToolSourceKind::Callback,
+                        source_id: name.into(),
+                    }),
+            )
+        })
+        .collect::<Vec<_>>()
+        .into();
+        let scope = scope_with_generated_projection_names(definitions, raw_set(&["deferred_app"]));
+        let before = scope.visibility_state().unwrap();
+        assert_eq!(
+            scope.host_visible_tool_names().unwrap(),
+            vec![
+                ToolName::from("model"),
+                ToolName::from("app"),
+                ToolName::from("deferred_app"),
+                ToolName::from("both"),
+                ToolName::from("hidden"),
+            ]
+        );
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["both".into(), "model".into()])
+        );
+        assert_eq!(
+            scope.app_visible_tool_names().unwrap(),
+            vec![
+                ToolName::from("app"),
+                ToolName::from("deferred_app"),
+                ToolName::from("both")
+            ]
+        );
+        assert_eq!(
+            scope.visibility_state().unwrap(),
+            before,
+            "app discovery cannot load tools or change revisions"
+        );
+        scope
+            .set_base_filter(ToolFilter::Allow(set(&["app"])))
+            .unwrap();
+        assert_eq!(
+            scope.app_visible_tool_names().unwrap(),
+            vec![ToolName::from("app")]
+        );
+        assert!(scope.visible_tool_names().unwrap().is_empty());
+        scope
+            .handle()
+            .set_turn_overlay(None, raw_set(&["app"]))
+            .unwrap();
+        assert!(scope.app_visible_tool_names().unwrap().is_empty());
+        assert!(scope.host_visible_tool_names().unwrap().is_empty());
     }
 
     fn scope_with_generated_control_tool_names(

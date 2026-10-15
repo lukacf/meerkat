@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Runner-side admission check for Meerkat fast runners (the per-run GCP JIT
+# VMs and the owner's Mac). The runner executes it after a job has been
+# assigned and before any step runs (ACTIONS_RUNNER_HOOK_JOB_STARTED); a
+# non-zero exit fails the job and no step runs.
+#
+# It admits only a workflow_dispatch by the owner of an allowlisted workflow
+# file on refs/heads/main in an allowlisted repository and, unless the policy
+# marks the runner persistent, only the run and attempt the runner was made
+# for. Each fact is read twice: from the runner's GITHUB_* variables (a
+# workflow cannot overwrite them) and from the event payload GitHub sent with
+# the job (GITHUB_EVENT_PATH). Both must agree.
+#
+# Policy: KEY=VALUE lines in MEERKAT_FAST_RUNNER_POLICY (default
+# /etc/meerkat-fast-runner/policy.env). The file must be root-owned and not
+# writable by the runner user.
+#   OWNER=lukacf
+#   OWNER_ID=16124748        optional; checked against the payload sender id
+#   REPOSITORIES=lukacf/meerkat lukacf/meerkat-meta
+#   WORKFLOWS=lukacf/meerkat/.github/workflows/ultrafast.yml@refs/heads/main ...
+#   RUN_ID=<run id>          per-run runners (GCP VMs, Mac JIT runs)
+#   RUN_ATTEMPT=<attempt>    required with RUN_ID
+#   PERSISTENT=1             only for a persistent runner without RUN_ID
+set -euo pipefail
+
+policy="${MEERKAT_FAST_RUNNER_POLICY:-/etc/meerkat-fast-runner/policy.env}"
+
+refuse() {
+  echo "::error title=Fast runner refused this job::$*"
+  exit 1
+}
+
+command -v python3 >/dev/null 2>&1 || refuse "python3 is missing on this runner"
+[[ -r "${policy}" ]] || refuse "runner policy ${policy} is missing or unreadable"
+
+python3 - "${policy}" <<'PY'
+import json
+import os
+import sys
+
+REFUSED = "::error title=Fast runner refused this job::"
+
+
+def refuse(message):
+    print(REFUSED + message)
+    sys.exit(1)
+
+
+policy = {}
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for raw in handle:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            refuse(f"malformed runner policy line {line!r}")
+        policy[key.strip()] = value.strip().strip('"')
+
+owner = policy.get("OWNER", "")
+owner_id = policy.get("OWNER_ID", "")
+repositories = policy.get("REPOSITORIES", "").split()
+workflows = policy.get("WORKFLOWS", "").split()
+run_id = policy.get("RUN_ID", "")
+run_attempt = policy.get("RUN_ATTEMPT", "")
+persistent = policy.get("PERSISTENT", "") == "1"
+
+if not owner or not repositories or not workflows:
+    refuse("runner policy lacks OWNER, REPOSITORIES or WORKFLOWS")
+if run_id and not run_attempt:
+    refuse("runner policy pins RUN_ID without RUN_ATTEMPT")
+if not run_id and not persistent:
+    refuse("runner policy pins no run (RUN_ID) and is not marked PERSISTENT=1")
+
+env = os.environ.get
+for name, want in (
+    ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+    ("GITHUB_REF", "refs/heads/main"),
+    ("GITHUB_ACTOR", owner),
+    ("GITHUB_TRIGGERING_ACTOR", owner),
+    ("GITHUB_REPOSITORY_OWNER", owner),
+):
+    got = env(name, "")
+    if got != want:
+        refuse(f"{name}={got!r}; this runner admits only {want!r}")
+
+repository = env("GITHUB_REPOSITORY", "")
+if repository not in repositories:
+    refuse(f"GITHUB_REPOSITORY={repository!r} is not one of {repositories}")
+workflow_ref = env("GITHUB_WORKFLOW_REF", "")
+if workflow_ref not in workflows:
+    refuse(f"GITHUB_WORKFLOW_REF={workflow_ref!r} is not an allowlisted workflow at refs/heads/main")
+if not workflow_ref.startswith(repository + "/"):
+    refuse(f"GITHUB_WORKFLOW_REF={workflow_ref!r} belongs to another repository than {repository!r}")
+if run_id and (env("GITHUB_RUN_ID", "") != run_id or env("GITHUB_RUN_ATTEMPT", "") != run_attempt):
+    refuse(
+        f"run {env('GITHUB_RUN_ID', '')!r} attempt {env('GITHUB_RUN_ATTEMPT', '')!r}; "
+        f"this runner was made for run {run_id!r} attempt {run_attempt!r}"
+    )
+
+event_path = env("GITHUB_EVENT_PATH", "")
+try:
+    with open(event_path, encoding="utf-8") as handle:
+        event = json.load(handle)
+except (OSError, ValueError) as error:
+    refuse(f"cannot read the event payload ({type(error).__name__})")
+if not isinstance(event, dict):
+    refuse("the event payload is not an object")
+for key in ("pull_request", "pull_request_target", "merge_group", "issue", "comment"):
+    if key in event:
+        refuse(f"the event payload carries {key!r}; only an owner dispatch is admitted")
+sender = event.get("sender") or {}
+if sender.get("login") != owner:
+    refuse(f"the event was sent by {sender.get('login')!r}, not {owner!r}")
+if owner_id and str(sender.get("id", "")) != owner_id:
+    refuse("the event sender id does not match the owner id")
+if (event.get("repository") or {}).get("full_name") != repository:
+    refuse("the event payload names another repository")
+if event.get("ref") != "refs/heads/main":
+    refuse(f"the event payload ref is {event.get('ref')!r}, not 'refs/heads/main'")
+workflow_path = workflow_ref[len(repository) + 1:].rsplit("@", 1)[0]
+if event.get("workflow") != workflow_path:
+    refuse(f"the event payload dispatched {event.get('workflow')!r}, not {workflow_path!r}")
+
+print(
+    f"fast runner admits {repository} run {env('GITHUB_RUN_ID', '')} "
+    f"attempt {env('GITHUB_RUN_ATTEMPT', '')} ({workflow_ref}, dispatched by {owner})"
+)
+PY

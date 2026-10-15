@@ -1,0 +1,769 @@
+#!/usr/bin/env python3
+"""Owner-only ephemeral GCP runner pool for Meerkat Core and Meta.
+
+usage: fast-runners <command>
+
+  check-trigger      exit 0 when this job may use the pool (advisory; the
+                     Workload Identity Federation condition is the boundary)
+  up                 mint one just-in-time (JIT) runner registration per VM,
+                     create this run's VMs, wait until every runner is
+                     online, and write backend/runs_on/attempt to
+                     GITHUB_OUTPUT; with backend 'auto' any failure cleans up
+                     and selects GitHub-hosted runners instead
+  fallback           write the GitHub-hosted outputs; fails for backend 'fast'
+  down               delete this run's VMs and runner registrations by their
+                     deterministic names (idempotent; non-zero on any failure)
+  names              print this run's VM names
+  render-startup     print the VM startup script
+  wif                print the WIF attribute mapping and condition
+  approval-commands  print the gcloud commands the owner must approve (never
+                     runs them)
+
+Nothing here runs unless MEERKAT_FAST_RUNNERS_ENABLED is 'true', the backend
+is not 'hosted', and the job is an owner workflow_dispatch of an allowlisted
+workflow on refs/heads/main on a GitHub-hosted runner.
+
+Every VM gets exactly one runner label, unique to the run, attempt and a
+random nonce (no `self-hosted` label), its JIT registration encrypted with a
+Cloud KMS key only the runner service account can use, no external address,
+no inbound firewall allow, a GCE-enforced max run duration that deletes it,
+and the job-started hook (scripts/fast-runners-job-started-hook) pinned to
+the run it was made for.
+
+Environment:
+  MEERKAT_FAST_RUNNERS_ENABLED   'true' to do anything (repository variable)
+  MEERKAT_FAST_RUNNERS_APP_ID    GitHub App id used to mint runner registrations
+  FAST_RUNNERS_BACKEND           auto | fast | hosted (default auto)
+  FAST_RUNNERS_SPEC              JSON list of {"class": ..., "count": ...}
+  MEERKAT_FAST_RUNNERS_PROJECT / _PROJECT_NUMBER / _REGION / _ZONE
+  FAST_RUNNERS_UP_BACKEND        for down: the backend up reported (empty: settle pass)
+  MEERKAT_FAST_RUNNERS_IMAGE_PROJECT / _IMAGE_FAMILY_X64 / _IMAGE_FAMILY_ARM64
+  MEERKAT_FAST_RUNNERS_MAX_RUN_DURATION   GCE TTL (default 120m)
+  MEERKAT_FAST_RUNNERS_ONLINE_TIMEOUT     seconds to wait for runners (default 300)
+"""
+
+import base64
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import tempfile
+import time
+
+OWNER = "lukacf"
+OWNER_ID = "16124748"
+REPOSITORIES = ("lukacf/meerkat", "lukacf/meerkat-meta")
+# Top-level workflows allowed to put jobs on the pool, at refs/heads/main.
+WORKFLOWS = tuple(f"{repo}/.github/workflows/ultrafast.yml@refs/heads/main" for repo in REPOSITORIES)
+# The only workflow file that may create or delete pool VMs.
+LAUNCHER = "lukacf/meerkat/.github/workflows/fast-runners.yml@refs/heads/main"
+
+PROJECT = os.environ.get("MEERKAT_FAST_RUNNERS_PROJECT") or "king-dnn-training-dev"
+PROJECT_NUMBER = os.environ.get("MEERKAT_FAST_RUNNERS_PROJECT_NUMBER") or "<project-number>"
+REGION = os.environ.get("MEERKAT_FAST_RUNNERS_REGION") or "europe-west4"
+ZONE = os.environ.get("MEERKAT_FAST_RUNNERS_ZONE") or f"{REGION}-a"
+NETWORK = "meerkat-fast-runners"
+SUBNET = f"meerkat-fast-runners-{REGION}"
+ROUTER = f"meerkat-fast-runners-{REGION}"
+RUNNER_SA = f"meerkat-fast-runner@{PROJECT}.iam.gserviceaccount.com"
+LAUNCHER_SA = f"meerkat-fast-launcher@{PROJECT}.iam.gserviceaccount.com"
+CACHE_SA = f"meerkat-fast-cache@{PROJECT}.iam.gserviceaccount.com"
+CACHE_BUCKET = f"meerkat-fast-cache-{PROJECT}"
+KEYRING = "meerkat-fast-runners"
+KMS_KEY = "jit-config"
+KMS_KEY_NAME = f"projects/{PROJECT}/locations/{REGION}/keyRings/{KEYRING}/cryptoKeys/{KMS_KEY}"
+APP_KEY_SECRET = "meerkat-fast-runners-github-app-key"
+WIF_POOL = "meerkat-fast-runners"
+WIF_PROVIDER = "github"
+IMAGE_PROJECT = os.environ.get("MEERKAT_FAST_RUNNERS_IMAGE_PROJECT") or "ubuntu-os-cloud"
+IMAGE_FAMILY = {
+    "x64": os.environ.get("MEERKAT_FAST_RUNNERS_IMAGE_FAMILY_X64") or "ubuntu-2404-lts-amd64",
+    "arm64": os.environ.get("MEERKAT_FAST_RUNNERS_IMAGE_FAMILY_ARM64") or "ubuntu-2404-lts-arm64",
+}
+MAX_RUN_DURATION = os.environ.get("MEERKAT_FAST_RUNNERS_MAX_RUN_DURATION") or "120m"
+ONLINE_TIMEOUT = int(os.environ.get("MEERKAT_FAST_RUNNERS_ONLINE_TIMEOUT") or "300")
+ONLINE_POLL = float(os.environ.get("MEERKAT_FAST_RUNNERS_ONLINE_POLL") or "5")
+SETTLE_SECONDS = int(os.environ.get("MEERKAT_FAST_RUNNERS_DOWN_SETTLE") or "45")
+GITHUB_API = "https://api.github.com"
+RUNNER_GROUP_ID = 1  # the Default group: the only one a personal-account repository has
+RUNNER_WORK = "/home/runner/work"
+
+# Pinned GitHub Actions runner for stock images (a custom image ships it).
+RUNNER_VERSION = "2.338.0"
+RUNNER_SHA256 = {
+    "x64": "af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32",
+    "arm64": "628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b",
+}
+
+# Runner classes. Machines are on-demand (STANDARD); the work area
+# (checkouts, target dirs, Cargo home, temp) is a tmpfs sized well under RAM.
+CLASSES = {
+    "x64-xl": {"machine": "c4d-standard-192", "arch": "x64", "vcpus": 192, "boot_gb": 200, "work": "320g"},
+    "x64-l": {"machine": "c4d-standard-96", "arch": "x64", "vcpus": 96, "boot_gb": 150, "work": "160g"},
+    "arm64-xl": {"machine": "c4a-standard-72", "arch": "arm64", "vcpus": 72, "boot_gb": 200, "work": "120g"},
+}
+MAX_RUNNERS = 8
+MAX_VCPUS = 1536
+DEFAULT_SPEC = '[{"class": "x64-xl", "count": 1}]'
+
+
+class Failure(Exception):
+    pass
+
+
+def log(message):
+    print(message, flush=True)
+
+
+def die(message, code=1):
+    print(f"::error::{message}", flush=True)
+    sys.exit(code)
+
+
+def mask(value):
+    if value:
+        print(f"::add-mask::{value}", flush=True)
+
+
+def env(name, default=""):
+    return os.environ.get(name, default)
+
+
+def write_outputs(**values):
+    path = env("GITHUB_OUTPUT")
+    lines = [f"{key}={value}" for key, value in values.items()]
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    for line in lines:
+        log(f"output {line}")
+
+
+# --- trigger -----------------------------------------------------------------
+
+
+def trigger_problems():
+    problems = []
+    for name, want in (
+        ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+        ("GITHUB_REF", "refs/heads/main"),
+        ("GITHUB_REPOSITORY_OWNER", OWNER),
+        ("GITHUB_ACTOR", OWNER),
+        ("GITHUB_TRIGGERING_ACTOR", OWNER),
+        ("RUNNER_ENVIRONMENT", "github-hosted"),
+    ):
+        if env(name) != want:
+            problems.append(f"{name}={env(name)!r} (needs {want!r})")
+    if env("GITHUB_REPOSITORY") not in REPOSITORIES:
+        problems.append(f"GITHUB_REPOSITORY={env('GITHUB_REPOSITORY')!r} is not allowlisted")
+    if env("GITHUB_WORKFLOW_REF") not in WORKFLOWS:
+        problems.append(f"GITHUB_WORKFLOW_REF={env('GITHUB_WORKFLOW_REF')!r} is not allowlisted")
+    if not re.fullmatch(r"[0-9]+", env("GITHUB_RUN_ID")) or not re.fullmatch(r"[0-9]+", env("GITHUB_RUN_ATTEMPT")):
+        problems.append("GITHUB_RUN_ID / GITHUB_RUN_ATTEMPT are not numeric")
+    return problems
+
+
+def cmd_check_trigger():
+    problems = trigger_problems()
+    if problems:
+        for problem in problems:
+            log(f"not eligible: {problem}")
+        return 1
+    log("eligible: owner workflow_dispatch of an allowlisted workflow on refs/heads/main")
+    return 0
+
+
+# --- spec and names ---------------------------------------------------------------
+
+
+def parse_spec():
+    raw = env("FAST_RUNNERS_SPEC") or DEFAULT_SPEC
+    try:
+        spec = json.loads(raw)
+    except ValueError as error:
+        raise Failure(f"FAST_RUNNERS_SPEC is not JSON: {error}") from error
+    if not isinstance(spec, list) or not spec:
+        raise Failure("FAST_RUNNERS_SPEC must be a non-empty JSON list")
+    runners = []
+    for entry in spec:
+        if not isinstance(entry, dict) or set(entry) - {"class", "count"}:
+            raise Failure(f"unsupported runner entry {entry!r}")
+        cls = entry.get("class")
+        count = entry.get("count", 1)
+        if cls not in CLASSES:
+            raise Failure(f"unknown runner class {cls!r} (known: {sorted(CLASSES)})")
+        if not isinstance(count, int) or count < 1:
+            raise Failure(f"runner class {cls!r} needs a positive integer count")
+        runners.extend([cls] * count)
+    if len(runners) > MAX_RUNNERS:
+        raise Failure(f"{len(runners)} runners requested; at most {MAX_RUNNERS} per run")
+    vcpus = sum(CLASSES[cls]["vcpus"] for cls in runners)
+    if vcpus > MAX_VCPUS:
+        raise Failure(f"{vcpus} vCPUs requested; at most {MAX_VCPUS} per run")
+    return runners
+
+
+def runner_names(runners):
+    run_id, attempt = env("GITHUB_RUN_ID"), env("GITHUB_RUN_ATTEMPT")
+    return [(f"meerkat-fast-{run_id}-{attempt}-{index}", cls) for index, cls in enumerate(runners)]
+
+
+def cmd_names():
+    try:
+        for name, cls in runner_names(parse_spec()):
+            print(f"{name}\t{cls}")
+    except Failure as error:
+        die(str(error))
+    return 0
+
+
+# --- external calls ------------------------------------------------------------------
+
+
+def run(cmd, stdin=None, check=True):
+    proc = subprocess.run(cmd, input=stdin, capture_output=True)
+    if check and proc.returncode != 0:
+        stderr = proc.stderr.decode(errors="replace").strip().splitlines()
+        raise Failure(f"{' '.join(cmd[:4])} failed: {stderr[-1] if stderr else proc.returncode}")
+    return proc
+
+
+def github(method, path, token, body=None, allow_missing=False):
+    """Calls the GitHub REST API with curl; the token travels in a 0600 header file."""
+    with tempfile.NamedTemporaryFile("w", dir=env("RUNNER_TEMP") or None, delete=False) as headers:
+        os.chmod(headers.name, 0o600)
+        headers.write(f"Authorization: Bearer {token}\n")
+        headers.write("Accept: application/vnd.github+json\n")
+        headers.write("X-GitHub-Api-Version: 2022-11-28\n")
+    try:
+        cmd = ["curl", "-sS", "-X", method, "-H", f"@{headers.name}", "-w", "\n%{http_code}"]
+        if body is not None:
+            cmd += ["-H", "Content-Type: application/json", "--data-binary", "@-"]
+        cmd.append(GITHUB_API + path)
+        proc = run(cmd, stdin=json.dumps(body).encode() if body is not None else None)
+    finally:
+        os.unlink(headers.name)
+    text, _, status = proc.stdout.decode().rpartition("\n")
+    if allow_missing and status == "404":
+        return None
+    if not status.startswith("2"):
+        raise Failure(f"GitHub {method} {path} returned HTTP {status}")
+    return json.loads(text) if text.strip() else {}
+
+
+def b64url(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def installation_token(repository):
+    """Mints a one-hour installation token limited to this repository and Administration: write."""
+    app_id = env("MEERKAT_FAST_RUNNERS_APP_ID")
+    if not re.fullmatch(r"[0-9]+", app_id):
+        raise Failure("MEERKAT_FAST_RUNNERS_APP_ID is not set")
+    key = run(["gcloud", "secrets", "versions", "access", "latest", "--secret", APP_KEY_SECRET,
+               "--project", PROJECT]).stdout
+    now = int(time.time())
+    signing_input = (b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()) + "."
+                     + b64url(json.dumps({"iat": now - 60, "exp": now + 540, "iss": app_id}).encode()))
+    with tempfile.NamedTemporaryFile("wb", dir=env("RUNNER_TEMP") or None, delete=False) as key_file:
+        os.chmod(key_file.name, 0o600)
+        key_file.write(key)
+    try:
+        signature = run(["openssl", "dgst", "-sha256", "-sign", key_file.name], stdin=signing_input.encode()).stdout
+    finally:
+        os.unlink(key_file.name)
+    jwt = signing_input + "." + b64url(signature)
+    installation = github("GET", f"/repos/{repository}/installation", jwt)
+    token = github("POST", f"/app/installations/{installation['id']}/access_tokens", jwt, {
+        "repositories": [repository.split("/", 1)[1]],
+        "permissions": {"administration": "write"},
+    })["token"]
+    mask(token)
+    return token
+
+
+def encrypt(plaintext):
+    ciphertext = run(["gcloud", "kms", "encrypt", "--project", PROJECT, "--location", REGION,
+                      "--keyring", KEYRING, "--key", KMS_KEY,
+                      "--plaintext-file", "-", "--ciphertext-file", "-"], stdin=plaintext.encode()).stdout
+    return base64.b64encode(ciphertext).decode()
+
+
+def instance_exists(name):
+    proc = run(["gcloud", "compute", "instances", "describe", name, "--project", PROJECT, "--zone", ZONE,
+                "--format", "value(name)"], check=False)
+    if proc.returncode == 0:
+        return True
+    if b"was not found" in proc.stderr:
+        return False
+    raise Failure(f"cannot describe instance {name}")
+
+
+# --- startup script ------------------------------------------------------------------------
+
+STARTUP = r"""#!/bin/bash
+# Meerkat fast runner boot (rendered by scripts/fast-runners render-startup).
+# Runs as root once. It never prints the runner registration: GCE keeps this
+# output in the serial console and the journal.
+set -euo pipefail
+
+MD=http://metadata.google.internal/computeMetadata/v1
+md() { curl -fsS -H 'Metadata-Flavor: Google' "${MD}/instance/attributes/$1"; }
+
+state=/var/lib/meerkat-fast-runner
+if [[ -e "${state}/booted" ]]; then
+  # One boot, one job: a restarted VM never registers again. It stays up
+  # (powering off would clear the GCE max-run-duration), so runners-down or
+  # that TTL deletes it.
+  echo "meerkat-fast-runner: second boot, not registering"
+  exit 0
+fi
+install -d -m 0700 "${state}"
+touch "${state}/booted"
+
+run_id="$(md meerkat-fast-run-id)"
+run_attempt="$(md meerkat-fast-run-attempt)"
+kms_key="$(md meerkat-fast-kms-key)"
+arch="$(md meerkat-fast-arch)"
+work_size="$(md meerkat-fast-work-size)"
+[[ "${run_id}" =~ ^[0-9]+$ && "${run_attempt}" =~ ^[0-9]+$ ]] || { echo "meerkat-fast-runner: bad run pin"; exit 1; }
+[[ "${work_size}" =~ ^[0-9]+g$ ]] || { echo "meerkat-fast-runner: bad work size"; exit 1; }
+
+# The job-started hook and its policy: root-owned, read-only to the runner user.
+install -d -m 0755 /etc/meerkat-fast-runner /opt/meerkat-fast-runner
+md meerkat-fast-hook > /opt/meerkat-fast-runner/job-started-hook
+chmod 0755 /opt/meerkat-fast-runner/job-started-hook
+cat > /etc/meerkat-fast-runner/policy.env <<EOF
+OWNER=@OWNER@
+OWNER_ID=@OWNER_ID@
+REPOSITORIES=@REPOSITORIES@
+WORKFLOWS=@WORKFLOWS@
+RUN_ID=${run_id}
+RUN_ATTEMPT=${run_attempt}
+EOF
+chmod 0644 /etc/meerkat-fast-runner/policy.env
+
+# GitHub-hosted layout: user `runner`, home /home/runner, work /home/runner/work.
+id runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash runner
+printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner
+chmod 0440 /etc/sudoers.d/runner
+# The work area (checkouts, target dirs, Cargo home, temp) lives in RAM.
+install -d -o runner -g runner /home/runner/work
+mount -t tmpfs -o "size=${work_size},mode=0755" tmpfs /home/runner/work
+install -d -o runner -g runner /home/runner/work/.cargo /home/runner/work/_tmp
+ln -sfn /home/runner/work/.cargo /home/runner/.cargo
+chown -h runner:runner /home/runner/.cargo
+chown runner:runner /home/runner/work
+
+# Runner binary and the build basics hosted images ship: preinstalled in a
+# custom image (it drops the image-ready marker), else installed here.
+if [[ ! -e /opt/meerkat-fast-runner/image-ready ]]; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq build-essential pkg-config libssl-dev git curl jq zstd unzip ca-certificates \
+    python3 python3-venv >/dev/null
+fi
+if [[ ! -x /opt/actions-runner/run.sh ]]; then
+  case "${arch}" in
+    x64) sum=@SHA_X64@ ;;
+    arm64) sum=@SHA_ARM64@ ;;
+    *) echo "meerkat-fast-runner: unknown arch"; exit 1 ;;
+  esac
+  pkg="actions-runner-linux-${arch}-@VERSION@.tar.gz"
+  curl -fsSL -o "/tmp/${pkg}" "https://github.com/actions/runner/releases/download/v@VERSION@/${pkg}"
+  echo "${sum}  /tmp/${pkg}" | sha256sum -c -
+  install -d /opt/actions-runner
+  tar -xzf "/tmp/${pkg}" -C /opt/actions-runner
+  /opt/actions-runner/bin/installdependencies.sh
+fi
+printf 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/meerkat-fast-runner/job-started-hook\nTMPDIR=/home/runner/work/_tmp\n' > /opt/actions-runner/.env
+chown -R runner:runner /opt/actions-runner
+
+# This VM's single-use registration, decrypted with the VM identity (the
+# only Cloud KMS permission it has). Never logged, never written to disk.
+token="$(curl -fsS -H 'Metadata-Flavor: Google' "${MD}/instance/service-accounts/default/token" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
+jit="$(md meerkat-fast-jit-config-kms |
+  python3 -c 'import json,sys; print(json.dumps({"ciphertext": sys.stdin.read().strip()}))' |
+  curl -fsS -X POST -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+    --data-binary @- "https://cloudkms.googleapis.com/v1/${kms_key}:decrypt" |
+  python3 -c 'import base64,json,sys; print(base64.b64decode(json.load(sys.stdin)["plaintext"]).decode())')"
+unset token
+
+# Hardening, not a boundary (jobs have sudo): job processes do not reach the
+# metadata server's token endpoint; DNS on port 53 keeps working.
+iptables -I OUTPUT -p tcp -d 169.254.169.254 --dport 80 -m owner --uid-owner runner -j REJECT || true
+
+# Exactly one job. The VM then idles until runners-down deletes it or the
+# GCE max-run-duration deletes it.
+cd /opt/actions-runner
+sudo -u runner -H env ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/meerkat-fast-runner/job-started-hook \
+  ./run.sh --jitconfig "${jit}" || echo "meerkat-fast-runner: runner exited with $?"
+unset jit
+echo "meerkat-fast-runner: job finished; waiting for deletion"
+"""
+
+
+def render_startup():
+    values = {
+        "@OWNER@": OWNER,
+        "@OWNER_ID@": OWNER_ID,
+        "@REPOSITORIES@": " ".join(REPOSITORIES),
+        "@WORKFLOWS@": " ".join(WORKFLOWS),
+        "@VERSION@": RUNNER_VERSION,
+        "@SHA_X64@": RUNNER_SHA256["x64"],
+        "@SHA_ARM64@": RUNNER_SHA256["arm64"],
+    }
+    script = STARTUP
+    for key, value in values.items():
+        script = script.replace(key, value)
+    return script
+
+
+def cmd_render_startup():
+    sys.stdout.write(render_startup())
+    return 0
+
+
+# --- up / down -----------------------------------------------------------------------------------
+
+
+def hosted(reason):
+    log(f"lanes use GitHub-hosted runners: {reason}")
+    write_outputs(backend="hosted", runs_on="{}", attempt=env("GITHUB_RUN_ATTEMPT", "0"))
+
+
+def hook_source():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fast-runners-job-started-hook")
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def create_instance(name, cls, ciphertext, workdir):
+    spec = CLASSES[cls]
+    startup = os.path.join(workdir, "startup-script")
+    hook = os.path.join(workdir, "job-started-hook")
+    jit = os.path.join(workdir, f"{name}.jit")
+    with open(jit, "w", encoding="utf-8") as handle:
+        handle.write(ciphertext)
+    repo_label = env("GITHUB_REPOSITORY").split("/", 1)[1]
+    metadata = ",".join([
+        "enable-oslogin=TRUE",
+        "block-project-ssh-keys=TRUE",
+        "serial-port-enable=FALSE",
+        f"meerkat-fast-run-id={env('GITHUB_RUN_ID')}",
+        f"meerkat-fast-run-attempt={env('GITHUB_RUN_ATTEMPT')}",
+        f"meerkat-fast-repository={env('GITHUB_REPOSITORY')}",
+        f"meerkat-fast-kms-key={KMS_KEY_NAME}",
+        f"meerkat-fast-arch={spec['arch']}",
+        f"meerkat-fast-work-size={spec['work']}",
+    ])
+    labels = ",".join([
+        "purpose=meerkat-fast-runner",
+        f"repo={repo_label}",
+        f"run-id={env('GITHUB_RUN_ID')}",
+        f"run-attempt={env('GITHUB_RUN_ATTEMPT')}",
+        f"runner-class={cls}",
+    ])
+    cmd = [
+        "gcloud", "compute", "instances", "create", name,
+        "--project", PROJECT,
+        "--zone", ZONE,
+        "--machine-type", spec["machine"],
+        f"--network-interface=subnet={SUBNET},no-address",
+        "--service-account", RUNNER_SA,
+        "--scopes", "cloud-platform",
+        "--image-project", IMAGE_PROJECT,
+        "--image-family", IMAGE_FAMILY[spec["arch"]],
+        "--boot-disk-size", f"{spec['boot_gb']}GB",
+        "--boot-disk-type", "hyperdisk-balanced",
+        "--provisioning-model", "STANDARD",
+        "--max-run-duration", MAX_RUN_DURATION,
+        "--instance-termination-action", "DELETE",
+        "--no-restart-on-failure",
+        "--shielded-secure-boot",
+        "--shielded-vtpm",
+        "--shielded-integrity-monitoring",
+        "--labels", labels,
+        "--metadata", metadata,
+        "--metadata-from-file",
+        f"startup-script={startup},meerkat-fast-hook={hook},meerkat-fast-jit-config-kms={jit}",
+        "--quiet",
+    ]
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def wait_online(token, repository, names):
+    deadline = time.monotonic() + ONLINE_TIMEOUT
+    while True:
+        listing = github("GET", f"/repos/{repository}/actions/runners?per_page=100", token)
+        status = {runner.get("name"): runner.get("status") for runner in listing.get("runners", [])}
+        missing = [name for name in names if status.get(name) != "online"]
+        if not missing:
+            return
+        if time.monotonic() >= deadline:
+            raise Failure(f"runners not online after {ONLINE_TIMEOUT}s: {missing}")
+        time.sleep(ONLINE_POLL)
+
+
+def cleanup(names, token=None, settle=0):
+    """Deletes the named VMs and runner registrations; returns the failures.
+
+    With `settle` > 0, names not found are looked up once more after that
+    many seconds: an insert sent by an `up` that was cancelled can still be
+    in flight.
+    """
+    failures = []
+    repository = env("GITHUB_REPOSITORY")
+    existing = []
+
+    def find(candidates):
+        for name in candidates:
+            try:
+                if instance_exists(name):
+                    existing.append(name)
+            except Failure as error:
+                failures.append(str(error))
+
+    find(names)
+    missing = [name for name in names if name not in existing]
+    if missing and settle > 0:
+        log(f"{len(missing)} VM(s) not found; looking again in {settle}s for inserts still in flight")
+        time.sleep(settle)
+        find(missing)
+    if existing:
+        try:
+            run(["gcloud", "compute", "instances", "delete", *existing, "--project", PROJECT, "--zone", ZONE,
+                 "--delete-disks", "all", "--quiet"])
+            log(f"deleted VMs: {existing}")
+        except Failure as error:
+            failures.append(str(error))
+    try:
+        token = token or installation_token(repository)
+        listing = github("GET", f"/repos/{repository}/actions/runners?per_page=100", token)
+        for runner in listing.get("runners", []):
+            if runner.get("name") in names:
+                github("DELETE", f"/repos/{repository}/actions/runners/{runner['id']}", token, allow_missing=True)
+                log(f"deleted runner registration {runner['name']}")
+    except Failure as error:
+        failures.append(str(error))
+    return failures
+
+
+def cmd_up():
+    backend = env("FAST_RUNNERS_BACKEND", "auto")
+    if backend not in ("auto", "fast", "hosted"):
+        die(f"FAST_RUNNERS_BACKEND={backend!r}; use auto, fast or hosted")
+    if env("MEERKAT_FAST_RUNNERS_ENABLED") != "true":
+        hosted("the repository variable MEERKAT_FAST_RUNNERS_ENABLED is not 'true'; nothing was started")
+        return 1 if backend == "fast" else 0
+    if backend == "hosted":
+        hosted("backend 'hosted' was requested; nothing was started")
+        return 0
+    problems = trigger_problems()
+    if problems:
+        hosted("not an owner dispatch of an allowlisted workflow on main: " + "; ".join(problems))
+        return 1 if backend == "fast" else 0
+    try:
+        runners = parse_spec()
+    except Failure as error:
+        die(str(error))
+    names = runner_names(runners)
+    repository = env("GITHUB_REPOSITORY")
+    nonce = secrets.token_hex(8)
+    mask(nonce)
+    label_prefix = f"meerkat-fast-{env('GITHUB_RUN_ID')}-{env('GITHUB_RUN_ATTEMPT')}-{nonce}"
+    runs_on = {cls: f"{label_prefix}-{cls}" for cls in sorted(set(runners))}
+    token = None
+    try:
+        token = installation_token(repository)
+        with tempfile.TemporaryDirectory(dir=env("RUNNER_TEMP") or None) as workdir:
+            with open(os.path.join(workdir, "startup-script"), "w", encoding="utf-8") as handle:
+                handle.write(render_startup())
+            with open(os.path.join(workdir, "job-started-hook"), "w", encoding="utf-8") as handle:
+                handle.write(hook_source())
+            procs = []
+            for name, cls in names:
+                registration = github("POST", f"/repos/{repository}/actions/runners/generate-jitconfig", token, {
+                    "name": name,
+                    "runner_group_id": RUNNER_GROUP_ID,
+                    "labels": [runs_on[cls]],
+                    "work_folder": RUNNER_WORK,
+                })
+                encoded = registration["encoded_jit_config"]
+                mask(encoded)
+                procs.append((name, create_instance(name, cls, encrypt(encoded), workdir)))
+                del encoded
+            failed = []
+            for name, proc in procs:
+                _, stderr = proc.communicate()
+                if proc.returncode != 0:
+                    lines = stderr.decode(errors="replace").strip().splitlines()
+                    failed.append(f"{name}: {lines[-1] if lines else proc.returncode}")
+            if failed:
+                raise Failure("VM creation failed: " + "; ".join(failed))
+        log(f"created {len(names)} VM(s); waiting for their runners")
+        wait_online(token, repository, [name for name, _ in names])
+    except Failure as error:
+        log(f"::warning title=Fast runners unavailable::{error}")
+        failures = cleanup([name for name, _ in names], token)
+        for failure in failures:
+            log(f"::warning title=Fast runner cleanup::{failure}")
+        if backend == "fast":
+            die(f"backend 'fast' was requested and the pool did not come up: {error}")
+        hosted(f"the pool did not come up ({error}); cleaned up")
+        return 0
+    write_outputs(backend="fast", runs_on=json.dumps(runs_on, separators=(",", ":")),
+                  attempt=env("GITHUB_RUN_ATTEMPT"))
+    return 0
+
+
+def cmd_fallback():
+    hosted("the pool step did not report online runners")
+    if env("FAST_RUNNERS_BACKEND", "auto") == "fast":
+        die("backend 'fast' was requested and the pool did not come up")
+    return 0
+
+
+def cmd_down():
+    if env("MEERKAT_FAST_RUNNERS_ENABLED") != "true":
+        log("MEERKAT_FAST_RUNNERS_ENABLED is not 'true': nothing to delete")
+        return 0
+    if env("FAST_RUNNERS_BACKEND", "auto") == "hosted":
+        log("backend 'hosted': no runner was created, nothing to delete")
+        return 0
+    problems = trigger_problems()
+    if problems:
+        log("not an owner dispatch on main, so no runner was created: " + "; ".join(problems))
+        return 0
+    try:
+        names = [name for name, _ in runner_names(parse_spec())]
+    except Failure as error:
+        die(str(error))
+    # An up that reported its outcome (fast, or hosted after its own cleanup)
+    # left nothing in flight; one that was cancelled or crashed may have.
+    settle = 0 if env("FAST_RUNNERS_UP_BACKEND") in ("fast", "hosted") else SETTLE_SECONDS
+    failures = cleanup(names, settle=settle)
+    if failures:
+        for failure in failures:
+            log(f"::error title=Fast runner cleanup::{failure}")
+        log("the GCE max-run-duration deletes any VM left behind")
+        return 1
+    log(f"nothing of this run is left: {names}")
+    return 0
+
+
+# --- WIF and approval rendering -----------------------------------------------------------------
+
+WIF_MAPPING = {
+    "google.subject": "assertion.sub",
+    "attribute.repository": "assertion.repository",
+    "attribute.actor_id": "assertion.actor_id",
+    "attribute.event_name": "assertion.event_name",
+    "attribute.workflow_ref": "assertion.workflow_ref",
+    "attribute.job_workflow_ref": "assertion.job_workflow_ref",
+    "attribute.runner_environment": "assertion.runner_environment",
+    # Two derived roles; each service account trusts exactly one of them.
+    "attribute.fast_role": (
+        "assertion.runner_environment == 'github-hosted' && assertion.job_workflow_ref == '" + LAUNCHER + "'"
+        " ? 'launcher' : (assertion.runner_environment == 'self-hosted' ? 'lane' : 'none')"
+    ),
+}
+
+
+def wif_condition():
+    repos = ", ".join(f"'{repo}'" for repo in REPOSITORIES)
+    workflows = ", ".join(f"'{workflow}'" for workflow in WORKFLOWS)
+    return " && ".join([
+        f"assertion.repository_owner_id == '{OWNER_ID}'",
+        f"assertion.repository_owner == '{OWNER}'",
+        f"assertion.repository in [{repos}]",
+        "assertion.event_name == 'workflow_dispatch'",
+        "assertion.ref == 'refs/heads/main'",
+        f"assertion.actor_id == '{OWNER_ID}'",
+        f"assertion.actor == '{OWNER}'",
+        f"assertion.workflow_ref in [{workflows}]",
+    ])
+
+
+def cmd_wif():
+    print("attribute-mapping:")
+    for key, value in WIF_MAPPING.items():
+        print(f"  {key}={value}")
+    print("attribute-condition:")
+    print(f"  {wif_condition()}")
+    return 0
+
+
+def approval_commands():
+    member = f"principalSet://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/workloadIdentityPools/{WIF_POOL}"
+    mapping = ",".join(f"{key}={value}" for key, value in WIF_MAPPING.items())
+    p = f"--project={PROJECT}"
+    return [
+        "# 0. APIs (no-op where already enabled)",
+        f"gcloud services enable compute.googleapis.com cloudkms.googleapis.com secretmanager.googleapis.com iamcredentials.googleapis.com sts.googleapis.com {p}",
+        "# 1. Isolated network: no external addresses, Cloud NAT egress, explicit deny of all ingress",
+        f"gcloud compute networks create {NETWORK} --subnet-mode=custom {p}",
+        f"gcloud compute networks subnets create {SUBNET} --network={NETWORK} --region={REGION} --range=10.88.0.0/20 --enable-private-ip-google-access {p}",
+        f"gcloud compute firewall-rules create {NETWORK}-deny-all-ingress --network={NETWORK} --direction=INGRESS --action=DENY --rules=all --source-ranges=0.0.0.0/0 --priority=0 --description='Fast runners are outbound-only' {p}",
+        f"gcloud compute routers create {ROUTER} --network={NETWORK} --region={REGION} {p}",
+        f"gcloud compute routers nats create {ROUTER}-nat --router={ROUTER} --region={REGION} --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges --enable-dynamic-port-allocation --min-ports-per-vm=1024 --max-ports-per-vm=16384 {p}",
+        "# 2. Service accounts (no project-level roles for the runner and cache identities)",
+        f"gcloud iam service-accounts create meerkat-fast-runner --display-name='Meerkat fast runner VMs' {p}",
+        f"gcloud iam service-accounts create meerkat-fast-launcher --display-name='Meerkat fast runner launcher (WIF)' {p}",
+        f"gcloud iam service-accounts create meerkat-fast-cache --display-name='Meerkat fast runner cache writer (WIF)' {p}",
+        "# 3. KMS key for single-use runner registrations: launcher encrypts, runner VMs decrypt",
+        f"gcloud kms keyrings create {KEYRING} --location={REGION} {p}",
+        f"gcloud kms keys create {KMS_KEY} --keyring={KEYRING} --location={REGION} --purpose=encryption --rotation-period=90d --next-rotation-time=+P90D {p}",
+        f"gcloud kms keys add-iam-policy-binding {KMS_KEY} --keyring={KEYRING} --location={REGION} --member=serviceAccount:{LAUNCHER_SA} --role=roles/cloudkms.cryptoKeyEncrypter {p}",
+        f"gcloud kms keys add-iam-policy-binding {KMS_KEY} --keyring={KEYRING} --location={REGION} --member=serviceAccount:{RUNNER_SA} --role=roles/cloudkms.cryptoKeyDecrypter {p}",
+        "# 4. GitHub App key (the App is created by the owner in GitHub; see DESIGN.md) - launcher-only access",
+        f"gcloud secrets create {APP_KEY_SECRET} --replication-policy=user-managed --locations={REGION} {p}",
+        f"gcloud secrets versions add {APP_KEY_SECRET} --data-file=<path-to-app-private-key.pem> {p}",
+        f"gcloud secrets add-iam-policy-binding {APP_KEY_SECRET} --member=serviceAccount:{LAUNCHER_SA} --role=roles/secretmanager.secretAccessor {p}",
+        "# 5. Launcher compute rights: a custom role bound with a name-prefix condition",
+        f"gcloud iam roles create meerkatFastRunnerLauncher {p} --title='Meerkat fast runner launcher' --permissions=compute.instances.create,compute.instances.delete,compute.instances.get,compute.instances.setMetadata,compute.instances.setLabels,compute.instances.setServiceAccount,compute.disks.create,compute.disks.delete,compute.disks.use,compute.subnetworks.use,compute.images.useReadOnly",
+        f"gcloud projects add-iam-policy-binding {PROJECT} --member=serviceAccount:{LAUNCHER_SA} --role=projects/{PROJECT}/roles/meerkatFastRunnerLauncher --condition='title=meerkat-fast-only,expression=resource.name.startsWith(\"projects/{PROJECT}/zones/{ZONE}/instances/meerkat-fast-\") || resource.name.startsWith(\"projects/{PROJECT}/zones/{ZONE}/disks/meerkat-fast-\") || resource.name.startsWith(\"projects/{PROJECT}/regions/{REGION}/subnetworks/{SUBNET}\") || resource.name.startsWith(\"projects/{IMAGE_PROJECT}/global/images/\")'",
+        f"gcloud iam service-accounts add-iam-policy-binding {RUNNER_SA} --member=serviceAccount:{LAUNCHER_SA} --role=roles/iam.serviceAccountUser {p}",
+        "# 6. Pool cache bucket, written only by pool lanes (never by PR CI)",
+        f"gcloud storage buckets create gs://{CACHE_BUCKET} --location={REGION} --uniform-bucket-level-access --public-access-prevention {p}",
+        f"gcloud storage buckets update gs://{CACHE_BUCKET} --lifecycle-file=<lifecycle: delete objects older than 30 days>",
+        f"gcloud storage buckets add-iam-policy-binding gs://{CACHE_BUCKET} --member=serviceAccount:{CACHE_SA} --role=roles/storage.objectUser",
+        "# 7. Dedicated WIF pool: owner workflow_dispatch of ultrafast.yml on main only",
+        f"gcloud iam workload-identity-pools create {WIF_POOL} --location=global --display-name='Meerkat fast runners' {p}",
+        f"gcloud iam workload-identity-pools providers create-oidc {WIF_PROVIDER} --location=global --workload-identity-pool={WIF_POOL} --issuer-uri=https://token.actions.githubusercontent.com --attribute-mapping=\"{mapping}\" --attribute-condition=\"{wif_condition()}\" {p}",
+        f"gcloud iam service-accounts add-iam-policy-binding {LAUNCHER_SA} --role=roles/iam.workloadIdentityUser --member={member}/attribute.fast_role/launcher {p}",
+        f"gcloud iam service-accounts add-iam-policy-binding {CACHE_SA} --role=roles/iam.workloadIdentityUser --member={member}/attribute.fast_role/lane {p}",
+        "# 8. Quota: C4D CPUs in the region (>= 1536) and C4A CPUs (>= 144), via the console quota page",
+    ]
+
+
+def cmd_approval_commands():
+    for line in approval_commands():
+        print(line)
+    return 0
+
+
+COMMANDS = {
+    "check-trigger": cmd_check_trigger,
+    "up": cmd_up,
+    "fallback": cmd_fallback,
+    "down": cmd_down,
+    "names": cmd_names,
+    "render-startup": cmd_render_startup,
+    "wif": cmd_wif,
+    "approval-commands": cmd_approval_commands,
+}
+
+
+def main(argv):
+    if len(argv) != 2 or argv[1] not in COMMANDS:
+        sys.stderr.write(__doc__)
+        return 2
+    return COMMANDS[argv[1]]()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

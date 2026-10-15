@@ -1,0 +1,178 @@
+name: Fast runners
+
+# Owner-only ephemeral GCP runner pool (scripts/fast-runners), called by
+# ultrafast.yml in lukacf/meerkat and lukacf/meerkat-meta: `action: up`
+# before the lanes, `action: down` after them under always().
+#
+# Default OFF: unless the repository variable MEERKAT_FAST_RUNNERS_ENABLED is
+# 'true', no job here starts, nothing in GCP or in the repository's runner
+# list changes, and callers resolve every lane to its GitHub-hosted runner.
+#
+# The guards below only keep ineligible runs from trying. The boundaries are
+# GitHub-signed or runner-side:
+#   - the Workload Identity Federation provider admits only a token of an
+#     owner workflow_dispatch of an allowlisted ultrafast.yml on
+#     refs/heads/main, and the launcher service account only that token from
+#     this file at refs/heads/main on a GitHub-hosted runner
+#     (scripts/fast-runners wif);
+#   - each VM registers one just-in-time runner with one label unique to the
+#     run, attempt and a random nonce, and its job-started hook
+#     (scripts/fast-runners-job-started-hook) fails, before any step, every
+#     job that is not that run's owner dispatch on main.
+
+on:
+  workflow_call:
+    inputs:
+      action:
+        description: up (create this run's runners) or down (delete them).
+        required: true
+        type: string
+      backend:
+        description: auto (pool when it comes up, else GitHub-hosted), fast (pool or fail), hosted (never the pool).
+        required: false
+        default: auto
+        type: string
+      runners:
+        description: JSON list of runner classes and counts; up and down must pass the same value.
+        required: false
+        default: '[{"class":"x64-xl","count":1}]'
+        type: string
+      up_backend:
+        description: For down, the backend up reported (empty when up was cancelled or crashed).
+        required: false
+        default: ""
+        type: string
+    outputs:
+      backend:
+        description: fast when this run's runners are online, otherwise hosted.
+        value: ${{ jobs.runners-up.outputs.backend || 'hosted' }}
+      runs_on:
+        description: JSON object mapping each runner class to this run's runner label ({} when hosted).
+        value: ${{ jobs.runners-up.outputs.runs_on || '{}' }}
+      attempt:
+        description: The run attempt the runners were made for.
+        value: ${{ jobs.runners-up.outputs.attempt || '0' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  runners-up:
+    name: Runners up
+    if: >-
+      ${{ inputs.action == 'up'
+          && inputs.backend != 'hosted'
+          && vars.MEERKAT_FAST_RUNNERS_ENABLED == 'true'
+          && github.event_name == 'workflow_dispatch'
+          && github.ref == 'refs/heads/main'
+          && github.repository_owner == 'lukacf'
+          && github.actor == 'lukacf'
+          && github.triggering_actor == 'lukacf'
+          && (github.repository == 'lukacf/meerkat' || github.repository == 'lukacf/meerkat-meta') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # GitHub-side gate independent of this file's content: the environment's
+    # deployment branch policy admits only main. No required reviewers, so
+    # neither job ever waits.
+    environment: meerkat-fast-runners
+    outputs:
+      backend: ${{ steps.up.outputs.backend || steps.fallback.outputs.backend }}
+      runs_on: ${{ steps.up.outputs.runs_on || steps.fallback.outputs.runs_on }}
+      attempt: ${{ steps.up.outputs.attempt || steps.fallback.outputs.attempt }}
+    env:
+      MEERKAT_FAST_RUNNERS_ENABLED: ${{ vars.MEERKAT_FAST_RUNNERS_ENABLED }}
+      MEERKAT_FAST_RUNNERS_APP_ID: ${{ vars.MEERKAT_FAST_RUNNERS_APP_ID }}
+      FAST_RUNNERS_BACKEND: ${{ inputs.backend }}
+      FAST_RUNNERS_SPEC: ${{ inputs.runners }}
+    steps:
+      # The launcher always comes from Core's main, also for Meta's calls.
+      - name: Check out the launcher
+        uses: actions/checkout@v6
+        with:
+          repository: lukacf/meerkat
+          ref: main
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/fast-runners
+            scripts/fast-runners-job-started-hook
+          sparse-checkout-cone-mode: false
+
+      - name: Check the trigger
+        run: scripts/fast-runners check-trigger
+
+      - name: Authenticate to GCP as the fast-runner launcher
+        id: gcp
+        continue-on-error: ${{ inputs.backend == 'auto' }}
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.MEERKAT_FAST_RUNNERS_WIF_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_FAST_RUNNERS_LAUNCHER_SA }}
+
+      - name: Setup gcloud
+        if: ${{ steps.gcp.outcome == 'success' }}
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Create this run's runners
+        id: up
+        if: ${{ steps.gcp.outcome == 'success' }}
+        continue-on-error: ${{ inputs.backend == 'auto' }}
+        run: scripts/fast-runners up
+
+      # Decided before any lane is queued: a lane gets either this run's
+      # unique pool label (served only by its online JIT runners) or its
+      # GitHub-hosted label, never a timeout race between them.
+      - name: Fall back to GitHub-hosted runners
+        id: fallback
+        if: ${{ steps.up.outputs.backend != 'fast' }}
+        run: scripts/fast-runners fallback
+
+  runners-down:
+    name: Runners down
+    # No `needs` and no status function: the caller's down job runs under
+    # always(), and this job then runs whatever up, the lanes or the run did.
+    if: >-
+      ${{ inputs.action == 'down'
+          && inputs.backend != 'hosted'
+          && vars.MEERKAT_FAST_RUNNERS_ENABLED == 'true'
+          && github.event_name == 'workflow_dispatch'
+          && github.ref == 'refs/heads/main'
+          && github.repository_owner == 'lukacf'
+          && github.actor == 'lukacf'
+          && github.triggering_actor == 'lukacf'
+          && (github.repository == 'lukacf/meerkat' || github.repository == 'lukacf/meerkat-meta') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: meerkat-fast-runners
+    env:
+      MEERKAT_FAST_RUNNERS_ENABLED: ${{ vars.MEERKAT_FAST_RUNNERS_ENABLED }}
+      MEERKAT_FAST_RUNNERS_APP_ID: ${{ vars.MEERKAT_FAST_RUNNERS_APP_ID }}
+      FAST_RUNNERS_BACKEND: ${{ inputs.backend }}
+      FAST_RUNNERS_SPEC: ${{ inputs.runners }}
+      FAST_RUNNERS_UP_BACKEND: ${{ inputs.up_backend }}
+    steps:
+      - name: Check out the launcher
+        uses: actions/checkout@v6
+        with:
+          repository: lukacf/meerkat
+          ref: main
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/fast-runners
+            scripts/fast-runners-job-started-hook
+          sparse-checkout-cone-mode: false
+
+      - name: Authenticate to GCP as the fast-runner launcher
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.MEERKAT_FAST_RUNNERS_WIF_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_FAST_RUNNERS_LAUNCHER_SA }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      # Deletes by the deterministic names up uses, so it also cleans up
+      # after an up that failed or was cancelled half way. The VMs' GCE
+      # max-run-duration deletes anything this misses.
+      - name: Delete this run's runners
+        run: scripts/fast-runners down

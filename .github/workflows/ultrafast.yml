@@ -1,0 +1,121 @@
+name: Ultrafast (owner pool)
+
+# Owner-dispatched lanes on the ephemeral GCP fast-runner pool
+# (.github/workflows/fast-runners.yml, scripts/fast-runners). Dispatch only:
+# pull-request and push CI stay on GitHub-hosted runners in ci.yml, which
+# never routes by actor or to a self-hosted runner.
+#
+# Every pool lane resolves `runs-on` from the up job's outputs before it is
+# queued: this run's unique pool label when its runners are online, else its
+# GitHub-hosted runner. With MEERKAT_FAST_RUNNERS_ENABLED unset (the default),
+# with backend 'hosted', for a dispatch that is not the owner's on main, or
+# for a re-run attempt the pool was not made for, every lane runs
+# GitHub-hosted and nothing in GCP starts. The down job runs under always()
+# and needs every pool lane.
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: auto (pool when it comes up, else GitHub-hosted), fast (pool or fail), hosted (never the pool)
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - fast
+          - hosted
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ultrafast-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fast-up:
+    name: Fast runners up
+    uses: ./.github/workflows/fast-runners.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      action: up
+      backend: ${{ inputs.backend || 'auto' }}
+      runners: '[{"class":"x64-xl","count":1}]'
+
+  # Example lane: the pre-push hook's workspace kind(lib) lane, which a
+  # 4-vCPU hosted runner needs about 64 minutes for. Pool lanes get no
+  # id-token and no secrets.
+  workspace-lib:
+    name: Workspace lib tests
+    needs: [fast-up]
+    runs-on: ${{ (needs.fast-up.outputs.attempt == github.run_attempt && fromJSON(needs.fast-up.outputs.runs_on)['x64-xl']) || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_LANE_ID: ultrafast
+      RUST_MIN_STACK: "33554432"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Workspace lib tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
+          export MEERKAT_MCP_TEST_SERVER
+          ./scripts/repo-cargo nextest run --workspace -E 'kind(lib)' \
+            --profile ci-unit --no-tests=fail --no-fail-fast \
+            --status-level none --final-status-level fail
+
+  fast-down:
+    name: Fast runners down
+    if: ${{ always() }}
+    needs: [fast-up, workspace-lib]
+    uses: ./.github/workflows/fast-runners.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      action: down
+      backend: ${{ inputs.backend || 'auto' }}
+      runners: '[{"class":"x64-xl","count":1}]'
+      up_backend: ${{ needs.fast-up.outputs.backend }}
+
+  gate:
+    name: Ultrafast gate
+    if: ${{ always() }}
+    needs: [fast-up, workspace-lib, fast-down]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check results
+        env:
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+          BACKEND: ${{ needs.fast-up.outputs.backend }}
+          REQUESTED: ${{ inputs.backend || 'auto' }}
+        run: |
+          echo "lanes ran on: ${BACKEND:-hosted} (requested: ${REQUESTED})"
+          if [[ "${FAILED}" == "true" ]]; then
+            echo "::error::an ultrafast job failed or was cancelled"
+            exit 1
+          fi
+          if [[ "${REQUESTED}" == "fast" && "${BACKEND}" != "fast" ]]; then
+            echo "::error::backend 'fast' was requested and the lanes did not run on the pool"
+            exit 1
+          fi

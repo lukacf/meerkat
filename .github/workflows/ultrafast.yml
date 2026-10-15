@@ -5,13 +5,15 @@ name: Ultrafast (owner pool)
 # pull-request and push CI stay on GitHub-hosted runners in ci.yml, which
 # never routes by actor or to a self-hosted runner.
 #
-# Every pool lane resolves `runs-on` from the up job's outputs before it is
-# queued: this run's unique pool label when its runners are online, else its
-# GitHub-hosted runner. With MEERKAT_FAST_RUNNERS_ENABLED unset (the default),
-# with backend 'hosted', for a dispatch that is not the owner's on main, or
-# for a re-run attempt the pool was not made for, every lane runs
-# GitHub-hosted and nothing in GCP starts. The down job runs under always()
-# and needs every pool lane.
+# Every pool lane has its own runner and label and resolves `runs-on` from
+# the up job's outputs before it is queued: its pool label when its runner is
+# online, else its GitHub-hosted runner. With MEERKAT_FAST_RUNNERS_ENABLED
+# unset (the default), with backend 'hosted', for a dispatch that is not the
+# owner's on main, or for a re-run attempt the pool was not made for, every
+# lane runs GitHub-hosted and nothing in GCP starts. The down job runs under
+# always() and needs every pool lane. The gate fails unless every job
+# succeeded (a skipped lane fails it) and, when the pool came up, unless
+# every pool lane ran on its own pool runner.
 
 on:
   workflow_dispatch:
@@ -43,16 +45,18 @@ jobs:
     with:
       action: up
       backend: ${{ inputs.backend || 'auto' }}
-      runners: '[{"class":"x64-xl","count":1}]'
+      runners: '[{"lane":"workspace-lib","class":"x64-xl"}]'
 
   # Example lane: the pre-push hook's workspace kind(lib) lane, which a
   # 4-vCPU hosted runner needs about 64 minutes for. Pool lanes get no
-  # id-token and no secrets.
+  # id-token and no secrets. The timeout stays well inside the VMs' 120-minute
+  # GCE max-run-duration.
   workspace-lib:
     name: Workspace lib tests
     needs: [fast-up]
-    runs-on: ${{ (needs.fast-up.outputs.attempt == github.run_attempt && fromJSON(needs.fast-up.outputs.runs_on)['x64-xl']) || 'ubuntu-24.04' }}
-    timeout-minutes: 120
+    if: ${{ !cancelled() && needs.fast-up.result != 'failure' }}
+    runs-on: ${{ (needs.fast-up.outputs.attempt == github.run_attempt && fromJSON(needs.fast-up.outputs.runs_on)['workspace-lib']) || 'ubuntu-24.04' }}
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
@@ -62,7 +66,7 @@ jobs:
       RUST_MIN_STACK: "33554432"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -71,7 +75,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@2eb6de229bc778f7df20e106e4b34e9a364c73e6 # nextest
 
       - name: Workspace lib tests
         shell: bash
@@ -94,7 +98,7 @@ jobs:
     with:
       action: down
       backend: ${{ inputs.backend || 'auto' }}
-      runners: '[{"class":"x64-xl","count":1}]'
+      runners: '[{"lane":"workspace-lib","class":"x64-xl"}]'
       up_backend: ${{ needs.fast-up.outputs.backend }}
 
   gate:
@@ -103,19 +107,25 @@ jobs:
     needs: [fast-up, workspace-lib, fast-down]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - name: Check results
+      - name: Check out the gate script
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/fast-runners
+          sparse-checkout-cone-mode: false
+
+      - name: Verify every lane ran, on the pool when it came up
         env:
-          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-          BACKEND: ${{ needs.fast-up.outputs.backend }}
-          REQUESTED: ${{ inputs.backend || 'auto' }}
-        run: |
-          echo "lanes ran on: ${BACKEND:-hosted} (requested: ${REQUESTED})"
-          if [[ "${FAILED}" == "true" ]]; then
-            echo "::error::an ultrafast job failed or was cancelled"
-            exit 1
-          fi
-          if [[ "${REQUESTED}" == "fast" && "${BACKEND}" != "fast" ]]; then
-            echo "::error::backend 'fast' was requested and the lanes did not run on the pool"
-            exit 1
-          fi
+          FAST_RUNNERS_NEEDS: ${{ toJSON(needs) }}
+          FAST_RUNNERS_POOL_LANES: '["workspace-lib"]'
+          FAST_RUNNERS_SPEC: '[{"lane":"workspace-lib","class":"x64-xl"}]'
+          FAST_RUNNERS_REQUESTED: ${{ inputs.backend || 'auto' }}
+          FAST_RUNNERS_UP_BACKEND: ${{ needs.fast-up.outputs.backend }}
+          FAST_RUNNERS_RUNS_ON: ${{ needs.fast-up.outputs.runs_on }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/fast-runners verify-lanes

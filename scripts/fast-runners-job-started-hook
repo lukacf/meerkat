@@ -11,9 +11,9 @@
 # workflow cannot overwrite them) and from the event payload GitHub sent with
 # the job (GITHUB_EVENT_PATH). Both must agree.
 #
-# Policy: KEY=VALUE lines in MEERKAT_FAST_RUNNER_POLICY (default
-# /etc/meerkat-fast-runner/policy.env). The file must be root-owned and not
-# writable by the runner user.
+# Policy: KEY=VALUE lines in /etc/meerkat-fast-runner/policy.env (a fixed
+# path; nothing in the job's environment can redirect it). The file must be
+# root-owned and not writable by the runner user.
 #   OWNER=lukacf
 #   OWNER_ID=16124748        optional; checked against the payload sender id
 #   REPOSITORIES=lukacf/meerkat lukacf/meerkat-meta
@@ -23,7 +23,7 @@
 #   PERSISTENT=1             only for a persistent runner without RUN_ID
 set -euo pipefail
 
-policy="${MEERKAT_FAST_RUNNER_POLICY:-/etc/meerkat-fast-runner/policy.env}"
+policy=/etc/meerkat-fast-runner/policy.env
 
 refuse() {
   echo "::error title=Fast runner refused this job::$*"

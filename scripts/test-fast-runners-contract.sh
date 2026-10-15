@@ -2,24 +2,32 @@
 # Contract test for the owner-only fast-runner pool. Nothing here reaches
 # GitHub or GCP: `gcloud` and `curl` are fakes on PATH that record every
 # call, and the GitHub Actions planner below evaluates the workflows' job
-# `if:`, `needs` and `runs-on` expressions the way GitHub schedules them.
+# `if:`, `needs` and `runs-on` expressions the way GitHub schedules them,
+# including cancellation (a job without a status function does not run in a
+# cancelled run).
 #
 #   1. Workflows (ultrafast.yml calling fast-runners.yml):
 #      - nothing starts in GCP while MEERKAT_FAST_RUNNERS_ENABLED is unset,
 #        for any event, and every lane resolves to its GitHub-hosted runner;
 #      - only an owner workflow_dispatch on refs/heads/main plans the GCP
-#        jobs; a fork or same-repository pull request, a push, a branch
-#        dispatch, a collaborator dispatch and a collaborator re-run never
-#        do, and no other workflow can reach the launcher or the pool label;
-#      - runners-down is planned whatever up, the lanes or the run did, and
-#        needs every pool lane;
+#        jobs; fork and same-repository pull requests, pushes, branch
+#        dispatches, collaborators and collaborator re-runs never do, and no
+#        other workflow can reach the launcher or a pool label;
+#      - runners-down runs whatever up, the lanes or the run did, cancelled
+#        runs included, and needs every pool lane;
+#      - every pool lane has its own runner, label and explicit condition;
+#      - the gate fails on any skipped or failed job, and when the pool came
+#        up, on any pool lane that did not run on its own pool runner;
 #      - a re-run attempt the pool was not made for runs GitHub-hosted.
 #   2. The job-started hook admits only the pinned run's owner dispatch on
 #      main and refuses everything else before any step.
-#   3. scripts/fast-runners up/down/fallback against the fakes: one unique
-#      label per runner (no `self-hosted`), the registration only ever
-#      encrypted, outbound-only VMs with a GCE TTL, clean-up on every
-#      failure, and down deleting by deterministic names.
+#   3. scripts/fast-runners against the fakes: KMS-signed App JWTs, revoked
+#      installation tokens, the review precondition, one unique label per
+#      lane and runner (no `self-hosted`, never masked, outputs never
+#      printed), the registration only ever encrypted, outbound-only VMs
+#      with a GCE TTL, clean-up on every failure, down by deterministic
+#      names, paginated listings, the gate's pool check, and a reaper that
+#      deletes stale VMs in any state.
 #   4. The rendered WIF condition and approval commands.
 
 set -euo pipefail
@@ -27,11 +35,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 exec python3 - "${REPO_ROOT}" <<'PY'
 import base64
+import datetime
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
-import stat
 import subprocess
 import sys
 import tempfile
@@ -43,8 +53,18 @@ HOOK = os.path.join(ROOT, "scripts", "fast-runners-job-started-hook")
 GATE_VAR = "MEERKAT_FAST_RUNNERS_ENABLED"
 OWNER = "lukacf"
 CORE = "lukacf/meerkat"
+META = "lukacf/meerkat-meta"
+CORE_ID = "1139800076"
+META_ID = "1171358591"
 ULTRAFAST_REF = f"{CORE}/.github/workflows/ultrafast.yml@refs/heads/main"
+META_ULTRAFAST_REF = f"{META}/.github/workflows/ultrafast.yml@refs/heads/main"
+LAUNCHER_REF = f"{CORE}/.github/workflows/fast-runners.yml@refs/heads/main"
 FAILURES = []
+
+_loader = importlib.machinery.SourceFileLoader("fast_runners", LAUNCHER_SCRIPT)
+_spec = importlib.util.spec_from_loader("fast_runners", _loader)
+LAUNCHER = importlib.util.module_from_spec(_spec)
+_loader.exec_module(LAUNCHER)
 
 
 def fail(message):
@@ -237,7 +257,7 @@ class Parser:
                 self.take("]")
             else:
                 kind, name = self.take()
-                node = ("index", node, ("lit", "*" if name == "*" else name))
+                node = ("index", node, ("lit", name))
         return node
 
     def parse_primary(self):
@@ -312,12 +332,14 @@ def evaluate(node, ctx):
         if name == "cancelled":
             return ctx.results.get("__run__") == "cancelled"
         if name == "success":
-            return all(ctx.results.get(need) == "success" for need in ctx.needs)
+            return ctx.results.get("__run__") != "cancelled" and all(ctx.results.get(need) == "success" for need in ctx.needs)
         if name == "failure":
             return any(ctx.results.get(need) == "failure" for need in ctx.needs)
         values = [evaluate(arg, ctx) for arg in args]
         if name == "fromJSON":
             return json.loads(values[0])
+        if name == "toJSON":
+            return json.dumps(values[0])
         if name == "startsWith":
             return str(values[0] or "").lower().startswith(str(values[1] or "").lower())
         if name == "contains":
@@ -368,17 +390,23 @@ for line in _outputs_block or []:
 if set(CALL_OUTPUTS) != {"backend", "runs_on", "attempt"}:
     sys.exit(f"fast-runners.yml workflow_call outputs not understood: {CALL_OUTPUTS}")
 
-POOL_LABEL = "meerkat-fast-9001-1-0123456789abcdef-x64-xl"
+UP_WITH = mapping(key_value(ULTRA_JOBS["fast-up"], "with"), 4)
+SPEC = json.loads(UP_WITH.get("runners") or "[]")
+POOL_LABELS = {entry["lane"]: f"meerkat-fast-9001-1-0123456789abcdef-{entry['lane']}" for entry in SPEC}
 
 
-def plan_called(github, variables, inputs, up_outcome):
+def plan_called(github, variables, inputs, up_outcome, run_cancelled):
     """Plans fast-runners.yml; returns (planned jobs, call result, call outputs)."""
-    results, planned, jobs_outputs = {}, [], {}
+    results = {"__run__": "cancelled" if run_cancelled else "running"}
+    planned, jobs_outputs = [], {}
     for job in FAST_ORDER:
         lines = FAST_JOBS[job]
         condition = strip_expr(key_value(lines, "if") or "")
         if needs_of(lines):
             sys.exit(f"fast-runners.yml job {job} has needs; the planner does not model it")
+        if run_cancelled and not STATUS.search(condition):
+            results[job] = "skipped"  # the implicit success() is false in a cancelled run
+            continue
         ctx = Context(github, variables, inputs, [], results)
         runs = truthy(expr(condition, ctx)) if condition else True
         if not runs:
@@ -386,16 +414,15 @@ def plan_called(github, variables, inputs, up_outcome):
             continue
         planned.append(job)
         if job == "runners-up":
-            outcome = up_outcome
-            if outcome == "fast":
-                jobs_outputs[job] = {"backend": "fast", "runs_on": json.dumps({"x64-xl": POOL_LABEL}),
+            if up_outcome == "fast":
+                jobs_outputs[job] = {"backend": "fast", "runs_on": json.dumps(POOL_LABELS),
                                      "attempt": github["run_attempt"]}
                 results[job] = "success"
-            elif outcome == "hosted":
+            elif up_outcome == "hosted":
                 jobs_outputs[job] = {"backend": "hosted", "runs_on": "{}", "attempt": github["run_attempt"]}
                 results[job] = "success"
             else:
-                results[job] = outcome
+                results[job] = up_outcome
         else:
             results[job] = "success"
     out_ctx = Context(github, variables, inputs, [], {"__jobs__": {job: jobs_outputs.get(job, {}) for job in FAST_ORDER}})
@@ -431,7 +458,7 @@ def plan(github, variables, inputs, up_outcome="fast", lane_outcome="success", r
                 sys.exit(f"ultrafast job {job} calls {uses}")
             with_block = mapping(key_value(lines, "with"), 4)
             call_inputs = {key: expr(interpolate(value), ctx) for key, value in with_block.items()}
-            planned, status, outputs = plan_called(github, variables, call_inputs, up_outcome)
+            planned, status, outputs = plan_called(github, variables, call_inputs, up_outcome, run_cancelled)
             report["called"][job] = {"inputs": call_inputs, "planned": planned}
             report["gcp_jobs"] += [f"{job}/{inner}" for inner in planned]
             results[job] = status
@@ -439,7 +466,7 @@ def plan(github, variables, inputs, up_outcome="fast", lane_outcome="success", r
             continue
         runs_on = key_value(lines, "runs-on")
         report["runs_on"][job] = expr(interpolate(runs_on), ctx)
-        results[job] = lane_outcome if job != "gate" else "success"
+        results[job] = "success" if job == "gate" else lane_outcome
     report["results"] = results
     return report
 
@@ -450,7 +477,7 @@ def github_ctx(event="workflow_dispatch", ref="refs/heads/main", actor=OWNER, tr
         "event_name": event, "ref": ref, "actor": actor,
         "triggering_actor": triggering_actor or actor,
         "repository": repository, "repository_owner": repository.split("/")[0],
-        "run_attempt": attempt,
+        "run_attempt": attempt, "run_id": "9001",
     }
 
 
@@ -459,6 +486,39 @@ def pool_lanes(report):
 
 
 ENABLED = {GATE_VAR: "true"}
+POOL_JOBS = [job for job in ULTRA_ORDER if "needs.fast-up.outputs.runs_on" in (key_value(ULTRA_JOBS[job], "runs-on") or "")]
+GATE_ENV = mapping(next((key_value(ULTRA_JOBS["gate"], "env", depth=8) for _ in [0]), None), 8)
+
+
+def gate_env_block():
+    lines = ULTRA_JOBS["gate"]
+    for idx, line in enumerate(lines):
+        if line.strip() == "env:" and indent(line) == 8:
+            block = []
+            for nxt in lines[idx + 1:]:
+                if nxt.strip() and indent(nxt) <= 8:
+                    break
+                block.append(nxt)
+            return mapping(block, 8)
+    return {}
+
+
+GATE_ENV = gate_env_block()
+
+
+def run_gate(report, inputs, extra_env=None):
+    """Runs the gate's verify-lanes step the way the workflow wires it (no API: up was not fast)."""
+    results = report["results"]
+    needs = needs_of(ULTRA_JOBS["gate"])
+    ctx = Context(github_ctx(), ENABLED, inputs, needs, results)
+    values = {key: str(expr(interpolate(value), ctx)) for key, value in GATE_ENV.items() if key != "GITHUB_TOKEN"}
+    values["FAST_RUNNERS_NEEDS"] = json.dumps({job: {"result": results.get(job, "skipped"),
+                                                     "outputs": results.get(f"{job}.outputs", {})} for job in needs})
+    values.update(extra_env or {})
+    proc = subprocess.run([sys.executable, LAUNCHER_SCRIPT, "verify-lanes"], capture_output=True, text=True,
+                          env=dict(os.environ, **values))
+    return proc.returncode, proc.stdout + proc.stderr
+
 
 # 1a. variable unset: nothing in GCP for any trigger; lanes hosted.
 _s0 = len(FAILURES)
@@ -473,28 +533,26 @@ for name, github in (
             fail(f"{GATE_VAR} unset, {name}, backend {backend}: GCP jobs planned {report['gcp_jobs']}")
         elif pool_lanes(report):
             fail(f"{GATE_VAR} unset, {name}, backend {backend}: lanes on the pool {pool_lanes(report)}")
-        elif any(label != "ubuntu-24.04" for job, label in report["runs_on"].items()):
+        elif any(label != "ubuntu-24.04" for job, label in report["runs_on"].items() if job in POOL_JOBS):
             fail(f"{GATE_VAR} unset, {name}: a lane is not GitHub-hosted: {report['runs_on']}")
 ok_since(_s0, f"{GATE_VAR} unset: no GCP job is planned for any dispatch or backend and every lane is GitHub-hosted")
 
 # 1b. the eligible route.
+_s1 = len(FAILURES)
 report = plan(github_ctx(), ENABLED, {"backend": "auto"})
 expected_gcp = ["fast-up/runners-up", "fast-down/runners-down"]
 if report["gcp_jobs"] != expected_gcp:
     fail(f"owner dispatch on main: GCP jobs {report['gcp_jobs']}, expected {expected_gcp}")
-lanes = pool_lanes(report)
-if lanes != {"workspace-lib": POOL_LABEL}:
-    fail(f"owner dispatch on main: pool lanes {lanes}, expected the example lane on {POOL_LABEL}")
-else:
-    ok("owner workflow_dispatch on main with the variable set: up, the example lane on this run's label, down")
+if pool_lanes(report) != {job: POOL_LABELS[job] for job in POOL_JOBS}:
+    fail(f"owner dispatch on main: pool lanes {pool_lanes(report)}, expected each lane on its own label {POOL_LABELS}")
 report = plan(github_ctx(), ENABLED, {"backend": "auto"}, up_outcome="hosted")
-if pool_lanes(report) or report["runs_on"].get("workspace-lib") != "ubuntu-24.04":
+if pool_lanes(report) or any(report["runs_on"].get(job) != "ubuntu-24.04" for job in POOL_JOBS):
     fail(f"a pool that did not come up still routes lanes to it: {report['runs_on']}")
-else:
-    ok("a pool that does not come up (auto) leaves every lane on GitHub-hosted runners, decided before queueing")
+ok_since(_s1, "owner workflow_dispatch on main with the variable set: up, each lane on its own pool label, down; "
+         "a pool that does not come up (auto) leaves every lane GitHub-hosted, decided before queueing")
 
 # 1c. ineligible triggers with the variable set: nothing in GCP, lanes hosted.
-_s1 = len(FAILURES)
+_s2 = len(FAILURES)
 for name, github, inputs in (
     ("backend hosted", github_ctx(), {"backend": "hosted"}),
     ("owner dispatch on a branch", github_ctx(ref="refs/heads/feature"), {"backend": "auto"}),
@@ -510,38 +568,60 @@ for name, github, inputs in (
     report = plan(github, ENABLED, inputs)
     if report["gcp_jobs"] or pool_lanes(report):
         fail(f"{name}: GCP jobs {report['gcp_jobs']}, pool lanes {pool_lanes(report)}")
-ok_since(_s1, "with the variable set, only an owner dispatch on main plans GCP jobs: forks, same-repo PRs, pushes, branches, "
-   "tags, collaborators, collaborator re-runs and other repositories never do")
+ok_since(_s2, "with the variable set, only an owner dispatch on main plans GCP jobs: forks, same-repo PRs, pushes, "
+         "branches, tags, collaborators, collaborator re-runs and other repositories never do")
 
 # 1d. a re-run attempt the pool was not made for runs GitHub-hosted.
-report = plan(github_ctx(attempt="2"), ENABLED, {"backend": "auto"})
-report_lane = report["runs_on"].get("workspace-lib")
+_s3 = len(FAILURES)
 github2 = github_ctx(attempt="2")
-stale = {"fast-up": "success", "fast-up.outputs": {"backend": "fast", "attempt": "1",
-                                                   "runs_on": json.dumps({"x64-xl": POOL_LABEL})}}
-lane_runs_on = interpolate(key_value(ULTRA_JOBS["workspace-lib"], "runs-on"))
-resolved = expr(lane_runs_on, Context(github2, ENABLED, {"backend": "auto"}, ["fast-up"], stale))
-if resolved != "ubuntu-24.04":
-    fail(f"a re-run with the previous attempt's pool outputs resolves to {resolved!r}")
-else:
-    ok("re-running failed jobs (attempt 2 with attempt 1's pool outputs) resolves the lane to GitHub-hosted")
+stale = {"fast-up": "success", "fast-up.outputs": {"backend": "fast", "attempt": "1", "runs_on": json.dumps(POOL_LABELS)}}
+for job in POOL_JOBS:
+    resolved = expr(interpolate(key_value(ULTRA_JOBS[job], "runs-on")), Context(github2, ENABLED, {"backend": "auto"}, ["fast-up"], stale))
+    if resolved != "ubuntu-24.04":
+        fail(f"a re-run with the previous attempt's pool outputs resolves {job} to {resolved!r}")
+ok_since(_s3, "re-running failed jobs (attempt 2 with attempt 1's pool outputs) resolves every lane to GitHub-hosted")
 
-# 1e. runners-down always runs.
-_s2 = len(FAILURES)
+# 1e. runners-down always runs, cancelled runs included.
+_s4 = len(FAILURES)
 for up_outcome, lane_outcome, cancelled in (
     ("fast", "success", False), ("fast", "failure", False), ("fast", "cancelled", False),
     ("failure", "skipped", False), ("cancelled", "skipped", False), ("hosted", "success", False),
-    ("fast", "cancelled", True),
+    ("fast", "cancelled", True), ("cancelled", "skipped", True),
 ):
     report = plan(github_ctx(), ENABLED, {"backend": "fast" if up_outcome == "failure" else "auto"},
                   up_outcome=up_outcome, lane_outcome=lane_outcome, run_cancelled=cancelled)
     if "fast-down/runners-down" not in report["gcp_jobs"]:
         fail(f"runners-down not planned after up={up_outcome}, lane={lane_outcome}, run cancelled={cancelled}")
-ok_since(_s2, "runners-down is planned after a successful, failed, cancelled or fallen-back up, a failed or cancelled lane "
-   "and a cancelled run")
+report = plan(github_ctx(), ENABLED, {"backend": "auto"}, run_cancelled=True)
+if "fast-up/runners-up" in report["gcp_jobs"]:
+    fail("runners-up must not start in a cancelled run")
+ok_since(_s4, "runners-down is planned after a successful, failed, cancelled or fallen-back up, a failed or cancelled "
+         "lane and a cancelled run (inner job under always()); runners-up never starts in a cancelled run")
 
-# 1f. static wiring.
-_s3 = len(FAILURES)
+# 1f. the gate fails on any skipped or failed job, and on fast requested but not delivered.
+_s5 = len(FAILURES)
+cases = (
+    ("all lanes ran (variable unset, hosted)", plan(github_ctx(), {}, {"backend": "auto"}), {"backend": "auto"}, True),
+    ("all lanes ran (pool fell back)", plan(github_ctx(), ENABLED, {"backend": "auto"}, up_outcome="hosted"), {"backend": "auto"}, True),
+    ("up failed and the lane was skipped", plan(github_ctx(), ENABLED, {"backend": "fast"}, up_outcome="failure"), {"backend": "fast"}, False),
+    ("a lane was skipped", plan(github_ctx(), ENABLED, {"backend": "auto"}, up_outcome="hosted", lane_outcome="skipped"), {"backend": "auto"}, False),
+    ("a lane failed", plan(github_ctx(), ENABLED, {"backend": "auto"}, up_outcome="hosted", lane_outcome="failure"), {"backend": "auto"}, False),
+    ("fast requested, pool fell back", plan(github_ctx(), ENABLED, {"backend": "fast"}, up_outcome="hosted"), {"backend": "fast"}, False),
+)
+for name, report, inputs, should_pass in cases:
+    code, output = run_gate(report, inputs)
+    if (code == 0) != should_pass:
+        fail(f"gate with {name}: rc={code}, expected {'pass' if should_pass else 'fail'}:\n{output[-400:]}")
+for job in POOL_JOBS:
+    if strip_expr(key_value(ULTRA_JOBS[job], "if") or "") != "!cancelled() && needs.fast-up.result != 'failure'":
+        fail(f"pool lane {job} needs the explicit condition `!cancelled() && needs.fast-up.result != 'failure'`")
+ok_since(_s5, "the gate fails when any lane was skipped or failed or when fast was requested and not delivered, and "
+         "passes when every lane ran; every pool lane has the explicit !cancelled() condition")
+
+# 1g. static wiring.
+_s6 = len(FAILURES)
+
+
 def triggers(top):
     return [re.match(r"^  ([A-Za-z_]+):", line).group(1) for line in top["on"] if re.match(r"^  [A-Za-z_]+:", line)]
 
@@ -558,21 +638,30 @@ for name in sorted(os.listdir(WORKFLOWS)):
     for needle in ("fast-runners.yml", "meerkat-fast-", "ultrafast", "MEERKAT_FAST_RUNNERS"):
         if needle in text:
             fail(f"{name} references {needle!r}; only ultrafast.yml may use the pool")
-for name, lines in (("ultrafast.yml", ULTRA_TOP), ("fast-runners.yml", FAST_TOP)):
+for name in ("ultrafast.yml", "fast-runners.yml"):
     with open(os.path.join(WORKFLOWS, name), encoding="utf-8") as handle:
         text = handle.read()
     if "pull_request" in text.replace("pull requests", "").replace("pull-request", ""):
         fail(f"{name} mentions pull_request")
-    if name == "ultrafast.yml" and any("self-hosted" in line for line in text.splitlines()
-                                       if line.strip().startswith("runs-on:")):
-        fail("ultrafast.yml must target the unique run label, never `self-hosted`")
+    for line in text.splitlines():
+        if line.strip().startswith("runs-on:") and "self-hosted" in line:
+            fail(f"{name} targets `self-hosted`; lanes use their own run label")
+        match = re.match(r"^\s*(?:- )?uses: ([^\s#]+)", line)
+        if match and not match.group(1).startswith("./"):
+            if not re.fullmatch(r"[^@]+@[0-9a-f]{40}", match.group(1)):
+                fail(f"{name} uses {match.group(1)}, not pinned to a commit SHA")
+    if "setup-gcloud" in text:
+        fail(f"{name} uses setup-gcloud; gcloud ships on the hosted image")
 
-pool_jobs = [job for job in ULTRA_ORDER if "needs.fast-up.outputs.runs_on" in (key_value(ULTRA_JOBS[job], "runs-on") or "")]
+spec_lanes = [entry.get("lane") for entry in SPEC]
+if sorted(spec_lanes) != sorted(POOL_JOBS) or len(set(spec_lanes)) != len(spec_lanes):
+    fail(f"each pool lane gets exactly one runner: spec lanes {spec_lanes}, pool lanes {POOL_JOBS}")
 down_needs = needs_of(ULTRA_JOBS["fast-down"])
 down_if = strip_expr(key_value(ULTRA_JOBS["fast-down"], "if") or "")
-if not pool_jobs:
+if not POOL_JOBS:
     fail("ultrafast.yml has no pool lane")
-for job in pool_jobs:
+up_timeout = int(key_value(FAST_JOBS["runners-up"], "timeout-minutes") or 0)
+for job in POOL_JOBS:
     lines = ULTRA_JOBS[job]
     if "fast-up" not in needs_of(lines):
         fail(f"pool lane {job} does not need fast-up")
@@ -581,31 +670,38 @@ for job in pool_jobs:
     text = "\n".join(lines)
     if "secrets." in text or "id-token" in text:
         fail(f"pool lane {job} gets secrets or an id-token")
-    if "github.run_attempt" not in (key_value(lines, "runs-on") or ""):
+    runs_on = key_value(lines, "runs-on") or ""
+    if "github.run_attempt" not in runs_on:
         fail(f"pool lane {job} does not pin the attempt the pool was made for")
+    if f"['{job}']" not in runs_on:
+        fail(f"pool lane {job} must route by its own lane key ['{job}'], not a shared class label")
+    timeout = int(key_value(lines, "timeout-minutes") or 0)
+    if not timeout or up_timeout + timeout + 10 > LAUNCHER.MAX_RUN_MINUTES:
+        fail(f"pool lane {job}: up {up_timeout} + lane {timeout} + 10 min margin exceed the {LAUNCHER.MAX_RUN_MINUTES}-minute VM TTL")
 if down_if != "always()":
     fail(f"fast-down must run under always(); if: {down_if!r}")
 if "fast-up" not in down_needs:
     fail("fast-down must need fast-up")
-up_with = mapping(key_value(ULTRA_JOBS["fast-up"], "with"), 4)
 down_with = mapping(key_value(ULTRA_JOBS["fast-down"], "with"), 4)
-if up_with.get("runners") != down_with.get("runners"):
+if UP_WITH.get("runners") != down_with.get("runners"):
     fail("fast-up and fast-down must pass the same runners spec (down deletes by its names)")
-lanes_per_class = {}
-for job in pool_jobs:
-    match = re.search(r"\['([a-z0-9-]+)'\]", key_value(ULTRA_JOBS[job], "runs-on") or "")
-    if not match:
-        fail(f"pool lane {job} does not name its runner class")
-        continue
-    lanes_per_class[match.group(1)] = lanes_per_class.get(match.group(1), 0) + 1
-spec_counts = {entry["class"]: entry.get("count", 1) for entry in json.loads(up_with.get("runners") or "[]")}
-if lanes_per_class != spec_counts:
-    fail(f"each JIT runner takes one job: pool lanes per class {lanes_per_class} must equal the runner spec {spec_counts}")
 if down_with.get("up_backend") != "${{ needs.fast-up.outputs.backend }}":
     fail("fast-down must pass up's reported backend")
 gate_if = strip_expr(key_value(ULTRA_JOBS["gate"], "if") or "")
-if gate_if != "always()" or "fast-down" not in needs_of(ULTRA_JOBS["gate"]):
-    fail("the ultrafast gate must run under always() after fast-down")
+gate_needs = needs_of(ULTRA_JOBS["gate"])
+if gate_if != "always()" or not {"fast-up", "fast-down", *POOL_JOBS} <= set(gate_needs):
+    fail("the ultrafast gate must run under always() and need fast-up, fast-down and every pool lane")
+gate_text = "\n".join(ULTRA_JOBS["gate"])
+if "run: scripts/fast-runners verify-lanes" not in gate_text or "actions: read" not in gate_text:
+    fail("the gate must run scripts/fast-runners verify-lanes with actions: read")
+if json.loads(GATE_ENV.get("FAST_RUNNERS_POOL_LANES") or "[]") != POOL_JOBS:
+    fail("the gate's FAST_RUNNERS_POOL_LANES must list exactly the pool lanes")
+if GATE_ENV.get("FAST_RUNNERS_SPEC") != UP_WITH.get("runners"):
+    fail("the gate's FAST_RUNNERS_SPEC must equal the up spec")
+for key, want in (("FAST_RUNNERS_NEEDS", "${{ toJSON(needs) }}"), ("FAST_RUNNERS_UP_BACKEND", "${{ needs.fast-up.outputs.backend }}"),
+                  ("FAST_RUNNERS_RUNS_ON", "${{ needs.fast-up.outputs.runs_on }}")):
+    if GATE_ENV.get(key) != want:
+        fail(f"the gate's {key} must be {want}")
 
 REQUIRED_GUARDS = (
     f"vars.{GATE_VAR} == 'true'",
@@ -623,27 +719,36 @@ for job in ("runners-up", "runners-down"):
     for guard in REQUIRED_GUARDS:
         if guard not in conjuncts:
             fail(f"fast-runners.yml {job} lacks the conjunct {guard!r}")
-    if re.search(r"\b(always|success|failure|cancelled)\s*\(", condition):
-        fail(f"fast-runners.yml {job} uses a status function")
-    guards[job] = [part for part in conjuncts if not part.startswith("${{ inputs.action") and "inputs.action" not in part]
+    statuses = STATUS.findall(condition)
+    if job == "runners-up" and statuses:
+        fail("fast-runners.yml runners-up must not use a status function")
+    if job == "runners-down" and (statuses != ["always"] or "always()" not in conjuncts):
+        fail("fast-runners.yml runners-down needs always() as a conjunct, or a cancelled run skips teardown")
+    guards[job] = [part for part in conjuncts if "inputs.action" not in part and part != "always()"]
+    if key_value(FAST_JOBS[job], "environment") != "meerkat-fast-runners":
+        fail(f"fast-runners.yml {job} must use the main-only meerkat-fast-runners environment")
 if guards.get("runners-up") != guards.get("runners-down"):
     fail("runners-up and runners-down must share one eligibility guard")
 fast_text = "\n".join(FAST_JOBS["runners-up"] + FAST_JOBS["runners-down"])
-for needle in ("repository: lukacf/meerkat", "ref: main", "run: scripts/fast-runners up", "run: scripts/fast-runners down",
-               "run: scripts/fast-runners fallback", "vars.MEERKAT_FAST_RUNNERS_WIF_PROVIDER"):
+for needle in ("repository: lukacf/meerkat", "ref: main", "fast-runners-launcher/scripts/fast-runners up",
+               "fast-runners-launcher/scripts/fast-runners down", "fast-runners-launcher/scripts/fast-runners fallback",
+               "vars.MEERKAT_FAST_RUNNERS_WIF_PROVIDER", "FAST_RUNNERS_CODEOWNERS_CALLER", "FAST_RUNNERS_CODEOWNERS_LAUNCHER"):
     if needle not in fast_text:
         fail(f"fast-runners.yml lacks {needle!r}")
 if "secrets." in fast_text:
-    fail("fast-runners.yml must not read repository secrets (the App key lives in Secret Manager behind WIF)")
-for job in ("runners-up", "runners-down"):
-    if key_value(FAST_JOBS[job], "environment") != "meerkat-fast-runners":
-        fail(f"fast-runners.yml {job} must use the main-only meerkat-fast-runners environment")
-ok_since(_s3, "static wiring: dispatch-only caller, call-only launcher, no other workflow reaches the pool, down needs every "
-   "pool lane under always(), identical guards and runner specs for up and down")
+    fail("fast-runners.yml must not read repository secrets")
+with open(os.path.join(ROOT, ".github", "CODEOWNERS"), encoding="utf-8") as handle:
+    problems = LAUNCHER.codeowners_problems(CORE, handle.read())
+if problems:
+    fail(f"the repository's CODEOWNERS does not hold the pool files for the owner: {problems}")
+ok_since(_s6, "static wiring: dispatch-only caller, call-only launcher with SHA-pinned actions, no other workflow "
+         "reaches the pool, one runner per lane routed by its own key, lane timeouts inside the VM TTL, down under "
+         "always() needing every lane, the gate wired to verify-lanes, and CODEOWNERS holding the pool files")
 
 
 # --- 2. the job-started hook --------------------------------------------------------------------
 
+_s7 = len(FAILURES)
 POLICY = """OWNER=lukacf
 OWNER_ID=16124748
 REPOSITORIES=lukacf/meerkat lukacf/meerkat-meta
@@ -651,6 +756,11 @@ WORKFLOWS=lukacf/meerkat/.github/workflows/ultrafast.yml@refs/heads/main lukacf/
 RUN_ID=9001
 RUN_ATTEMPT=1
 """
+with open(HOOK, encoding="utf-8") as handle:
+    HOOK_TEXT = handle.read()
+POLICY_LINE = "policy=/etc/meerkat-fast-runner/policy.env\n"
+if HOOK_TEXT.count(POLICY_LINE) != 1 or "MEERKAT_FAST_RUNNER_POLICY" in HOOK_TEXT:
+    fail("the hook must read its policy from the fixed path only")
 
 
 def hook_env(tmp, overrides=None, payload_overrides=None, drop_payload=()):
@@ -670,7 +780,6 @@ def hook_env(tmp, overrides=None, payload_overrides=None, drop_payload=()):
         json.dump(payload, handle)
     values = {
         "PATH": os.environ["PATH"],
-        "MEERKAT_FAST_RUNNER_POLICY": os.path.join(tmp, "policy.env"),
         "GITHUB_EVENT_NAME": "workflow_dispatch",
         "GITHUB_REF": "refs/heads/main",
         "GITHUB_ACTOR": OWNER,
@@ -688,7 +797,11 @@ def hook_env(tmp, overrides=None, payload_overrides=None, drop_payload=()):
 
 
 def run_hook(tmp, **kwargs):
-    proc = subprocess.run(["bash", HOOK], env=hook_env(tmp, **kwargs), capture_output=True, text=True)
+    # Test seam: a copy of the hook whose fixed policy path points at the scratch policy.
+    hook = os.path.join(tmp, "hook")
+    with open(hook, "w", encoding="utf-8") as handle:
+        handle.write(HOOK_TEXT.replace(POLICY_LINE, f"policy={os.path.join(tmp, 'policy.env')}\n"))
+    proc = subprocess.run(["bash", hook], env=hook_env(tmp, **kwargs), capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -698,8 +811,6 @@ with tempfile.TemporaryDirectory(prefix="fast-runners-hook.") as tmp:
     code, output = run_hook(tmp)
     if code != 0:
         fail(f"the hook refuses the pinned owner dispatch on main:\n{output}")
-    else:
-        ok("the hook admits the pinned run's owner dispatch of ultrafast.yml on main")
     fork_pr = {"pull_request": {"head": {"repo": {"full_name": "attacker/meerkat"}}, "number": 7}}
     refusals = (
         ("a fork pull request", dict(overrides={"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/7/merge",
@@ -714,12 +825,12 @@ with tempfile.TemporaryDirectory(prefix="fast-runners-hook.") as tmp:
                                         payload_overrides={"ref": "refs/heads/feature"})),
         ("a collaborator dispatch", dict(overrides={"GITHUB_ACTOR": "collaborator", "GITHUB_TRIGGERING_ACTOR": "collaborator"},
                                          payload_overrides={"sender": {"login": "collaborator", "id": 2}})),
-        ("a collaborator re-run", dict(overrides={"GITHUB_TRIGGERING_ACTOR": "collaborator", "GITHUB_RUN_ATTEMPT": "1"})),
+        ("a collaborator re-run", dict(overrides={"GITHUB_TRIGGERING_ACTOR": "collaborator"})),
         ("another workflow file", dict(overrides={"GITHUB_WORKFLOW_REF": f"{CORE}/.github/workflows/ci.yml@refs/heads/main"},
                                        payload_overrides={"workflow": ".github/workflows/ci.yml"})),
         ("the allowlisted file at another ref", dict(overrides={"GITHUB_WORKFLOW_REF": f"{CORE}/.github/workflows/ultrafast.yml@refs/heads/feature"})),
         ("another repository", dict(overrides={"GITHUB_REPOSITORY": "attacker/meerkat", "GITHUB_REPOSITORY_OWNER": "attacker"})),
-        ("Meta's workflow in Core's run", dict(overrides={"GITHUB_WORKFLOW_REF": "lukacf/meerkat-meta/.github/workflows/ultrafast.yml@refs/heads/main"})),
+        ("Meta's workflow in Core's run", dict(overrides={"GITHUB_WORKFLOW_REF": META_ULTRAFAST_REF})),
         ("another run", dict(overrides={"GITHUB_RUN_ID": "9002"})),
         ("another attempt of the run", dict(overrides={"GITHUB_RUN_ATTEMPT": "2"})),
         ("a payload that is a pull request behind dispatch variables", dict(payload_overrides=fork_pr)),
@@ -734,8 +845,6 @@ with tempfile.TemporaryDirectory(prefix="fast-runners-hook.") as tmp:
         code, output = run_hook(tmp, **kwargs)
         if code == 0 or "Fast runner refused this job" not in output:
             fail(f"the hook admits {name}:\n{output}")
-    ok(f"the hook refuses, before any step, {len(refusals)} non-owner/non-dispatch/non-main/other-run cases "
-       "including fork and same-repository pull requests")
     for name, policy in (
         ("no policy file", None),
         ("a policy without a pinned run or PERSISTENT=1", POLICY.replace("RUN_ID=9001\n", "").replace("RUN_ATTEMPT=1\n", "")),
@@ -756,23 +865,24 @@ with tempfile.TemporaryDirectory(prefix="fast-runners-hook.") as tmp:
     code_pr, _ = run_hook(tmp, overrides={"GITHUB_EVENT_NAME": "pull_request"}, payload_overrides=fork_pr)
     if code != 0 or code_pr == 0:
         fail(f"a persistent-runner policy must admit any owner dispatch run on main and still refuse pull requests: {output}")
-    ok("the hook fails closed without a policy, without a run pin, or without workflows; a PERSISTENT=1 policy "
-       "(the owner's Mac) admits any owner dispatch on main and still refuses pull requests")
+ok_since(_s7, f"the hook (fixed policy path) admits the pinned run's owner dispatch on main, refuses {len(refusals)} "
+         "other cases before any step, fails closed on a missing or incomplete policy, and a PERSISTENT=1 policy (the "
+         "owner's Mac) still refuses pull requests")
 
 
 # --- 3. scripts/fast-runners against recording fakes --------------------------------------------
 
 FAKE_GCLOUD = r'''#!/usr/bin/env python3
-import hashlib, json, os, sys
+import fcntl, hashlib, json, os, sys
 state_dir = os.environ["FAKE_STATE"]
+_lock = open(os.path.join(state_dir, "fake.lock"), "w")
+fcntl.flock(_lock, fcntl.LOCK_EX)  # the launcher runs VM creates in parallel
 argv = sys.argv[1:]
 record = {"tool": "gcloud", "argv": argv}
 stdin = b""
 if "--plaintext-file" in argv and argv[argv.index("--plaintext-file") + 1] == "-":
     stdin = sys.stdin.buffer.read()
     record["stdin"] = stdin.decode()
-for item in argv:
-    pass
 if "--metadata-from-file" in argv:
     files = {}
     for pair in argv[argv.index("--metadata-from-file") + 1].split(","):
@@ -780,16 +890,19 @@ if "--metadata-from-file" in argv:
         with open(path, encoding="utf-8") as handle:
             files[key] = handle.read()
     record["files"] = files
+if argv[:2] == ["kms", "asymmetric-sign"]:
+    with open(argv[argv.index("--input-file") + 1], "rb") as handle:
+        record["sign_input"] = handle.read().decode()
 with open(os.path.join(state_dir, "calls.jsonl"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
 with open(os.path.join(state_dir, "state.json"), encoding="utf-8") as handle:
     state = json.load(handle)
-words = [a for a in argv if not a.startswith("--")]
 def save():
     with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as handle:
         json.dump(state, handle)
-if argv[:4] == ["secrets", "versions", "access", "latest"]:
-    sys.stdout.write(open(state["app_key_path"], encoding="utf-8").read())
+if argv[:2] == ["kms", "asymmetric-sign"]:
+    with open(argv[argv.index("--signature-file") + 1], "wb") as handle:
+        handle.write(b"SIG(" + hashlib.sha256(record["sign_input"].encode()).hexdigest().encode() + b")")
     sys.exit(0)
 if argv[:2] == ["kms", "encrypt"]:
     sys.stdout.buffer.write(b"KMS(" + hashlib.sha256(stdin).hexdigest().encode() + b")")
@@ -819,12 +932,22 @@ if argv[:3] == ["compute", "instances", "describe"]:
         sys.exit(0)
     sys.stderr.write(f"ERROR: The resource 'projects/p/zones/z/instances/{name}' was not found\n")
     sys.exit(1)
+if argv[:3] == ["compute", "instances", "list"]:
+    for row in state.get("listing", []):
+        print("\t".join(row))
+    sys.exit(0)
 if argv[:3] == ["compute", "instances", "delete"]:
-    names = [a for a in argv[3:] if not a.startswith("--") and a not in (state.get("project"), state.get("zone"), "all")]
     if state.get("fail_delete"):
         sys.stderr.write("ERROR: (gcloud.compute.instances.delete) backend error\n")
         sys.exit(1)
     state["instances"] = [n for n in state.get("instances", []) if n not in argv]
+    state["listing"] = [row for row in state.get("listing", []) if row[0] not in argv]
+    names = []
+    for a in argv[3:]:
+        if a.startswith("--"):
+            break
+        names.append(a)
+    state.setdefault("deleted", []).extend(names)
     save()
     sys.exit(0)
 sys.stderr.write(f"fake gcloud: unexpected {argv}\n")
@@ -832,8 +955,10 @@ sys.exit(2)
 '''
 
 FAKE_CURL = r'''#!/usr/bin/env python3
-import json, os, re, stat, sys
+import fcntl, json, os, re, stat, sys
 state_dir = os.environ["FAKE_STATE"]
+_lock = open(os.path.join(state_dir, "fake.lock"), "w")
+fcntl.flock(_lock, fcntl.LOCK_EX)
 argv = sys.argv[1:]
 method, url, headers, body, header_files = "GET", None, [], None, []
 i = 0
@@ -844,22 +969,22 @@ while i < len(argv):
     if a == "-H":
         h = argv[i + 1]
         if h.startswith("@"):
-            mode = stat.S_IMODE(os.stat(h[1:]).st_mode)
-            header_files.append(mode)
+            header_files.append(stat.S_IMODE(os.stat(h[1:]).st_mode))
             headers += open(h[1:], encoding="utf-8").read().splitlines()
         else:
             headers.append(h)
         i += 2; continue
     if a == "--data-binary":
         body = json.loads(sys.stdin.read()) if argv[i + 1] == "@-" else None; i += 2; continue
-    if a in ("-w",):
+    if a == "-w":
         i += 2; continue
     if a.startswith("-"):
         i += 1; continue
     url = a; i += 1
 auth = [h for h in headers if h.lower().startswith("authorization:")]
+token = auth[0].split(None, 2)[2] if auth else None
 record = {"tool": "curl", "argv": argv, "method": method, "url": url, "body": body,
-          "header_file_modes": header_files, "auth_scheme": auth[0].split()[1] if auth else None}
+          "header_file_modes": header_files, "auth_scheme": auth[0].split()[1] if auth else None, "token": token}
 with open(os.path.join(state_dir, "calls.jsonl"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
 with open(os.path.join(state_dir, "state.json"), encoding="utf-8") as handle:
@@ -870,29 +995,66 @@ def save():
 def reply(obj, status=200):
     sys.stdout.write((json.dumps(obj) if obj is not None else "") + "\n" + str(status))
     sys.exit(0)
-path = url.replace("https://api.github.com", "")
-m = re.fullmatch(r"/repos/([^/]+/[^/]+)/installation", path)
-if m and method == "GET":
-    reply({"id": 4242})
-if path == "/app/installations/4242/access_tokens" and method == "POST":
-    reply({"token": "ghs_FAKEINSTALLATIONTOKEN"}, 201)
-m = re.fullmatch(r"/repos/([^/]+/[^/]+)/actions/runners/generate-jitconfig", path)
-if m and method == "POST":
-    rid = 100 + len(state.setdefault("runners", []))
-    state["runners"].append({"id": rid, "name": body["name"], "status": state.get("runner_status", "online"),
-                             "labels": [{"name": label} for label in body["labels"]]})
+def page(items, query):
+    params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+    per, number = int(params.get("per_page", 30)), int(params.get("page", 1))
+    return items[(number - 1) * per: number * per]
+path, _, query = url.replace("https://api.github.com", "").partition("?")
+repo_match = re.match(r"^/repos/([^/]+/[^/]+)(/.*)?$", path)
+repo, rest = (repo_match.group(1), repo_match.group(2) or "") if repo_match else (None, path)
+repos = state.setdefault("repos", {})
+r = repos.setdefault(repo or "", {})
+if repo and rest == "/installation" and method == "GET":
+    reply({"id": 4242 if repo == "lukacf/meerkat" else 4343})
+if re.fullmatch(r"/app/installations/\d+/access_tokens", path) and method == "POST":
+    count = state.get("token_count", 0) + 1
+    state["token_count"] = count
+    save()
+    reply({"token": f"ghs_FAKETOKEN{count}"}, 201)
+if path == "/installation/token" and method == "DELETE":
+    reply(None, 204)
+if repo and rest == "/collaborators" and method == "GET":
+    reply(page(r.get("collaborators", [{"login": "lukacf", "permissions": {"admin": True, "push": True}}]), query))
+if repo and rest == "/keys" and method == "GET":
+    reply(page(r.get("keys", []), query))
+if repo and rest == "/rulesets" and method == "GET":
+    reply(page([{"id": rs["id"]} for rs in r.get("rulesets", [])], query))
+m = re.fullmatch(r"/rulesets/(\d+)", rest)
+if repo and m and method == "GET":
+    reply(next(rs for rs in r.get("rulesets", []) if str(rs["id"]) == m.group(1)))
+if repo and rest == "/actions/runners/generate-jitconfig" and method == "POST":
+    runners = r.setdefault("runners", [])
+    rid = 100 + len(runners)
+    labels = [{"name": label} for label in body["labels"] + state.get("extra_labels", [])]
+    runners.append({"id": rid, "name": body["name"], "status": state.get("runner_status", "online"), "labels": labels})
     save()
     reply({"runner": {"id": rid, "name": body["name"]}, "encoded_jit_config": "JITCONFIG-SECRET-" + body["name"]}, 201)
-m = re.fullmatch(r"/repos/([^/]+/[^/]+)/actions/runners\?per_page=100", path)
-if m and method == "GET":
-    reply({"total_count": len(state.get("runners", [])), "runners": state.get("runners", [])})
-m = re.fullmatch(r"/repos/([^/]+/[^/]+)/actions/runners/(\d+)", path)
-if m and method == "DELETE":
-    state["runners"] = [r for r in state.get("runners", []) if str(r["id"]) != m.group(2)]
+if repo and rest == "/actions/runners" and method == "GET":
+    runners = r.get("padding", []) + r.get("runners", [])
+    reply({"total_count": len(runners), "runners": page(runners, query)})
+m = re.fullmatch(r"/actions/runners/(\d+)", rest)
+if repo and m and method == "DELETE":
+    r["runners"] = [x for x in r.get("runners", []) if str(x["id"]) != m.group(1)]
+    r["padding"] = [x for x in r.get("padding", []) if str(x["id"]) != m.group(1)]
     save()
     reply(None, 204)
+m = re.fullmatch(r"/actions/runs/(\d+)/attempts/(\d+)/jobs", rest)
+if repo and m and method == "GET":
+    jobs = state.get("jobs", [])
+    reply({"total_count": len(jobs), "jobs": page(jobs, query)})
 reply({"message": "Not Found"}, 404)
 '''
+
+CORE_CODEOWNERS = "* @lukacf\n/.github/ @lukacf\n/scripts/fast-runners* @lukacf\n/scripts/test-fast-runners-contract.sh @lukacf\n"
+GOOD_RULESET = {
+    "id": 11, "target": "branch", "enforcement": "active",
+    "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+    "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+    "rules": [{"type": "pull_request", "parameters": {"require_code_owner_review": True, "dismiss_stale_reviews_on_push": True,
+                                                      "require_last_push_approval": True, "required_approving_review_count": 1}}],
+}
+COLLABORATOR = {"login": "collaborator", "permissions": {"admin": False, "maintain": False, "push": True}}
+OWNER_ONLY = [{"login": "lukacf", "permissions": {"admin": True, "push": True}}]
 
 
 def setup_fakes(tmp, state):
@@ -903,10 +1065,12 @@ def setup_fakes(tmp, state):
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(body)
         os.chmod(path, 0o755)
-    key_path = os.path.join(tmp, "app-key.pem")
-    if not os.path.exists(key_path):
-        subprocess.run(["openssl", "genrsa", "-out", key_path, "2048"], check=True, capture_output=True)
-    state = dict(state, app_key_path=key_path, project="king-dnn-training-dev", zone="europe-west4-a")
+    for name in ("caller", "launcher"):
+        os.makedirs(os.path.join(tmp, name), exist_ok=True)
+        text = state.pop(f"codeowners_{name}", CORE_CODEOWNERS)
+        if text is not None:
+            with open(os.path.join(tmp, name, "CODEOWNERS"), "w", encoding="utf-8") as handle:
+                handle.write(text)
     with open(os.path.join(tmp, "state.json"), "w", encoding="utf-8") as handle:
         json.dump(state, handle)
     open(os.path.join(tmp, "calls.jsonl"), "w").close()
@@ -914,7 +1078,7 @@ def setup_fakes(tmp, state):
 
 
 def run_launcher(tmp, command, extra_env=None, state=None):
-    bin_dir = setup_fakes(tmp, state or {})
+    bin_dir = setup_fakes(tmp, json.loads(json.dumps(state or {})))
     output = os.path.join(tmp, "github_output")
     open(output, "w").close()
     runner_temp = os.path.join(tmp, "runner_temp")
@@ -927,7 +1091,9 @@ def run_launcher(tmp, command, extra_env=None, state=None):
         "MEERKAT_FAST_RUNNERS_ENABLED": "true",
         "MEERKAT_FAST_RUNNERS_APP_ID": "123456",
         "FAST_RUNNERS_BACKEND": "auto",
-        "FAST_RUNNERS_SPEC": '[{"class":"x64-xl","count":1}]',
+        "FAST_RUNNERS_SPEC": '[{"lane":"workspace-lib","class":"x64-xl"}]',
+        "FAST_RUNNERS_CODEOWNERS_CALLER": os.path.join(tmp, "caller", "CODEOWNERS"),
+        "FAST_RUNNERS_CODEOWNERS_LAUNCHER": os.path.join(tmp, "launcher", "CODEOWNERS"),
         "MEERKAT_FAST_RUNNERS_ONLINE_TIMEOUT": "2",
         "MEERKAT_FAST_RUNNERS_ONLINE_POLL": "0.2",
         "MEERKAT_FAST_RUNNERS_DOWN_SETTLE": "1",
@@ -941,6 +1107,7 @@ def run_launcher(tmp, command, extra_env=None, state=None):
         "GITHUB_RUN_ID": "9001",
         "GITHUB_RUN_ATTEMPT": "1",
         "RUNNER_ENVIRONMENT": "github-hosted",
+        "GITHUB_TOKEN": "ghs_RUNTOKEN",
     }
     values.update(extra_env or {})
     proc = subprocess.run([sys.executable, LAUNCHER_SCRIPT, command], env=values, capture_output=True, text=True)
@@ -962,13 +1129,25 @@ def gcloud_calls(calls, *words):
     return [c for c in calls if c["tool"] == "gcloud" and c["argv"][:len(words)] == list(words)]
 
 
-def curl_calls(calls, method=None, suffix=None):
+def curl_calls(calls, method=None, contains=None):
     return [c for c in calls if c["tool"] == "curl" and (method is None or c["method"] == method)
-            and (suffix is None or c["url"].endswith(suffix))]
+            and (contains is None or contains in c["url"])]
 
 
-# 3a. variable unset or backend hosted or ineligible: no call at all.
-_s4 = len(FAILURES)
+def runners_of(final_state, repo=CORE):
+    return [r["name"] for r in final_state.get("repos", {}).get(repo, {}).get("runners", [])]
+
+
+def minted(calls):
+    return [f"ghs_FAKETOKEN{i + 1}" for i in range(len(curl_calls(calls, "POST", "/access_tokens")))]
+
+
+def revoked(calls):
+    return [c["token"] for c in curl_calls(calls, "DELETE", "/installation/token")]
+
+
+# 3a. variable unset, backend hosted or an ineligible trigger: no call at all.
+_s8 = len(FAILURES)
 for name, extra in (
     ("the variable unset", {"MEERKAT_FAST_RUNNERS_ENABLED": ""}),
     ("backend hosted", {"FAST_RUNNERS_BACKEND": "hosted"}),
@@ -993,63 +1172,79 @@ proc, calls, outputs, _ = scenario("up", {"FAST_RUNNERS_BACKEND": "fast", "GITHU
                                           "GITHUB_ACTOR": "attacker", "GITHUB_TRIGGERING_ACTOR": "attacker"})
 if proc.returncode == 0 or calls:
     fail("up with backend fast for a pull request must fail without calling anything")
-ok_since(_s4, "up and down call nothing (no GitHub registration, no GCP) while the variable is unset, for backend hosted, "
-   "a fork pull request, a collaborator re-run, a self-hosted launcher or another caller workflow")
+ok_since(_s8, "up and down call nothing (no GitHub, no GCP) while the variable is unset, for backend hosted, a fork "
+         "pull request, a collaborator re-run, a push, a branch, another actor, repository or owner, a self-hosted "
+         "launcher or another caller workflow")
 
 # 3b. the eligible up.
-_s5 = len(FAILURES)
+_s9 = len(FAILURES)
 proc, calls, outputs, final_state = scenario("up")
 transcript = proc.stdout + proc.stderr
 if proc.returncode != 0 or outputs.get("backend") != "fast":
     fail(f"eligible up failed: rc={proc.returncode}\n{transcript[-800:]}")
 else:
     runs_on = json.loads(outputs["runs_on"])
-    label = runs_on.get("x64-xl", "")
-    if not re.fullmatch(r"meerkat-fast-9001-1-[0-9a-f]{16}-x64-xl", label) or set(runs_on) != {"x64-xl"}:
-        fail(f"runs_on {runs_on} is not one unique run/attempt/nonce label per class")
+    label = runs_on.get("workspace-lib", "")
+    if set(runs_on) != {"workspace-lib"} or not re.fullmatch(r"meerkat-fast-9001-1-[0-9a-f]{16}-workspace-lib", label):
+        fail(f"runs_on {runs_on} is not one run/attempt/nonce label per lane")
+    masked = re.findall(r"::add-mask::(\S+)", transcript)
+    for key, value in outputs.items():
+        for secret in masked:
+            if secret in value:
+                fail(f"output {key} contains the masked value {secret[:16]}...; GitHub drops such outputs")
+    for value in outputs.values():
+        if len(value) > 4 and value in transcript:
+            fail("up printed a job output value")
+    if label and label in transcript:
+        fail("up printed the lane label")
     registrations = curl_calls(calls, "POST", "/actions/runners/generate-jitconfig")
     if len(registrations) != 1:
-        fail(f"{len(registrations)} JIT registrations for one runner")
+        fail(f"{len(registrations)} JIT registrations for one lane")
     else:
         body = registrations[0]["body"]
         if body.get("labels") != [label]:
             fail(f"the JIT runner labels are {body.get('labels')}, expected exactly [{label!r}] (no self-hosted)")
-        if body.get("runner_group_id") != 1 or body.get("name") != "meerkat-fast-9001-1-0":
+        if body.get("runner_group_id") != 1 or body.get("name") != "meerkat-fast-9001-1-0" or body.get("work_folder") != "_work":
             fail(f"unexpected registration body {body}")
-    tokens = curl_calls(calls, "POST", "/app/installations/4242/access_tokens")
-    if not tokens or tokens[0]["body"] != {"repositories": ["meerkat"], "permissions": {"administration": "write"}}:
-        fail(f"the installation token is not limited to this repository and Administration: write: {tokens}")
+    if gcloud_calls(calls, "secrets"):
+        fail("up read Secret Manager; the App key lives only in Cloud KMS")
+    signs = gcloud_calls(calls, "kms", "asymmetric-sign")
+    if not signs or any("--key" not in c["argv"] or c["argv"][c["argv"].index("--key") + 1] != "github-app-jwt" for c in signs):
+        fail("the App JWT must be signed by the Cloud KMS key github-app-jwt")
+    tokens = curl_calls(calls, "POST", "/access_tokens")
+    if [c["body"] for c in tokens] != [{"repositories": ["meerkat"], "permissions": {"administration": "write"}}]:
+        fail(f"the installation token is not limited to this repository and Administration: write: {[c['body'] for c in tokens]}")
+    if revoked(calls) != minted(calls) or curl_calls(calls)[-1]["url"] != "https://api.github.com/installation/token":
+        fail(f"up must revoke every installation token at the end: minted {minted(calls)}, revoked {revoked(calls)}")
+    if not curl_calls(calls, "GET", "/collaborators"):
+        fail("up must check the review precondition (collaborators)")
     for call in curl_calls(calls):
         if any("ghs_" in arg or "Bearer" in arg for arg in call["argv"]):
             fail("a GitHub token travelled in curl's argv")
-        if call["header_file_modes"] != [0o600]:
-            fail(f"curl header file mode {call['header_file_modes']}, expected 0600")
-        if call["auth_scheme"] != "Bearer":
-            fail("a GitHub call without a bearer token")
+        if call["header_file_modes"] != [0o600] or call["auth_scheme"] != "Bearer":
+            fail(f"curl header file mode {call['header_file_modes']} / auth {call['auth_scheme']}")
     creates = gcloud_calls(calls, "compute", "instances", "create")
     if len(creates) != 1:
-        fail(f"{len(creates)} VM creations for one runner")
+        fail(f"{len(creates)} VM creations for one lane")
     else:
         argv = creates[0]["argv"]
         joined = " ".join(argv)
-        for needle in ("--network-interface=subnet=meerkat-fast-runners-europe-west4,no-address",
+        for needle in ("--project meerkat-fast-runners", "--network-interface=subnet=meerkat-fast-runners-europe-west4,no-address",
                        "--max-run-duration 120m", "--instance-termination-action DELETE",
                        "--provisioning-model STANDARD", "--no-restart-on-failure", "--shielded-secure-boot",
-                       "--service-account meerkat-fast-runner@king-dnn-training-dev.iam.gserviceaccount.com",
+                       "--service-account meerkat-fast-runner@meerkat-fast-runners.iam.gserviceaccount.com",
                        "--machine-type c4d-standard-192", "block-project-ssh-keys=TRUE", "enable-oslogin=TRUE",
-                       "meerkat-fast-run-id=9001", "meerkat-fast-run-attempt=1", "purpose=meerkat-fast-runner"):
+                       "meerkat-fast-run-id=9001", "meerkat-fast-run-attempt=1", "purpose=meerkat-fast-runner",
+                       "lane=workspace-lib"):
             if needle not in joined:
                 fail(f"VM creation lacks {needle!r}")
         for forbidden in ("--tags", "--address", "--network-tier", "--can-ip-forward", "--scopes default"):
             if forbidden in joined:
                 fail(f"VM creation has {forbidden!r}")
         files = creates[0].get("files", {})
-        startup = subprocess.run([sys.executable, LAUNCHER_SCRIPT, "render-startup"], capture_output=True, text=True).stdout
-        with open(HOOK, encoding="utf-8") as handle:
-            hook_text = handle.read()
-        if files.get("startup-script") != startup:
+        if files.get("startup-script") != LAUNCHER.render_startup():
             fail("the VM startup script is not the rendered one")
-        if files.get("meerkat-fast-hook") != hook_text:
+        if files.get("meerkat-fast-hook") != HOOK_TEXT:
             fail("the VM hook is not scripts/fast-runners-job-started-hook")
         expected_ct = base64.b64encode(b"KMS(" + hashlib.sha256(b"JITCONFIG-SECRET-meerkat-fast-9001-1-0").hexdigest().encode() + b")").decode()
         if files.get("meerkat-fast-jit-config-kms") != expected_ct:
@@ -1066,90 +1261,224 @@ else:
             leaks.append(" ".join(call["argv"][:3]))
     if leaks:
         fail(f"the plaintext registration leaked into {leaks}")
-    if re.search(r"JITCONFIG-SECRET|ghs_FAKE", transcript.replace("::add-mask::JITCONFIG-SECRET-meerkat-fast-9001-1-0", "")
-                 .replace("::add-mask::ghs_FAKEINSTALLATIONTOKEN", "")):
-        fail("up printed the registration or the token outside an ::add-mask:: command")
-    for value in ("JITCONFIG-SECRET-meerkat-fast-9001-1-0", "ghs_FAKEINSTALLATIONTOKEN", label.split("-")[-3]):
-        if f"::add-mask::{value}" not in transcript:
+    unmasked = transcript
+    for secret in masked:
+        unmasked = unmasked.replace(f"::add-mask::{secret}", "")
+    if re.search(r"JITCONFIG-SECRET|ghs_FAKE", unmasked):
+        fail("up printed the registration or a token outside an ::add-mask:: command")
+    for value in ("JITCONFIG-SECRET-meerkat-fast-9001-1-0", "ghs_FAKETOKEN1"):
+        if value not in masked:
             fail(f"up does not mask {value[:12]}...")
-    if any("JITCONFIG" in value for value in outputs.values()):
-        fail("the registration reached GITHUB_OUTPUT")
     if final_state.get("instances") != ["meerkat-fast-9001-1-0"]:
         fail(f"unexpected instances after up: {final_state.get('instances')}")
-    ok_since(_s5, "eligible up: one installation token limited to the repository and Administration: write (header file, never "
-       "argv), one JIT runner with exactly the unique label, its registration only on KMS stdin and as ciphertext in "
-       "metadata, an outbound-only shielded VM with the runner identity, the rendered boot script and hook, a "
-       "120m GCE TTL that deletes it, and masked secrets")
+ok_since(_s9, "eligible up: KMS-signed App JWT (no Secret Manager), a repository-scoped Administration token revoked at "
+         "the end, the review precondition checked, one JIT runner with exactly its lane's label in the relative work "
+         "folder, outputs that contain no masked value and are never printed, the registration only on KMS stdin and "
+         "as ciphertext in metadata, an outbound-only shielded VM in the dedicated project with a 120m GCE TTL")
 
-# 3c. failures in auto clean up and fall back; in fast they fail after cleaning up.
-_s6 = len(FAILURES)
+# 3c. one runner and one label per lane; runners with any extra label are refused.
+_s10 = len(FAILURES)
+two_lanes = '[{"lane":"inventory","class":"x64-xl"},{"lane":"clippy","class":"x64-l"}]'
+proc, calls, outputs, final_state = scenario("up", {"FAST_RUNNERS_SPEC": two_lanes})
+runs_on = json.loads(outputs.get("runs_on") or "{}")
+bodies = [c["body"] for c in curl_calls(calls, "POST", "/actions/runners/generate-jitconfig")]
+if (outputs.get("backend") != "fast" or set(runs_on) != {"inventory", "clippy"} or len(set(runs_on.values())) != 2
+        or [b["labels"] for b in bodies] != [[runs_on["inventory"]], [runs_on["clippy"]]]
+        or not runs_on.get("inventory", "").endswith("-inventory") or not runs_on.get("clippy", "").endswith("-clippy")):
+    fail(f"two lanes must get two runners with one distinct label each: {runs_on} {bodies}")
+for backend in ("auto", "fast"):
+    proc, calls, outputs, final_state = scenario("up", {"FAST_RUNNERS_BACKEND": backend},
+                                                 {"extra_labels": ["self-hosted", "Linux", "X64"]})
+    if final_state.get("instances") or runners_of(final_state):
+        fail(f"a runner with default labels ({backend}) was left behind")
+    if (backend == "auto" and outputs.get("backend") != "hosted") or (backend == "fast" and proc.returncode == 0):
+        fail(f"a runner carrying default labels must be refused ({backend}): rc={proc.returncode} {outputs}")
+for spec in ('[{"lane":"a","class":"x64-xl"},{"lane":"a","class":"x64-l"}]', '[{"class":"x64-xl","count":2}]',
+             '[{"lane":"Bad_Lane","class":"x64-xl"}]', '[{"lane":"a","class":"n2-highcpu-4"}]',
+             json.dumps([{"lane": f"l{i}", "class": "x64-l"} for i in range(9)])):
+    proc, calls, outputs, _ = scenario("up", {"FAST_RUNNERS_SPEC": spec})
+    if proc.returncode == 0 or calls:
+        fail(f"up must refuse the spec {spec[:60]} before any call")
+ok_since(_s10, "every pool lane gets its own runner and label; a runner reporting any label besides its own (such as "
+         "default self-hosted/OS/arch labels) is deleted and refused; repeated lanes, class counts, bad ids, unknown "
+         "classes and oversized specs are refused before any call")
+
+# 3d. the review precondition.
+_s11 = len(FAILURES)
+precondition_cases = (
+    ("another writer and no review ruleset", {"repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR]}}}, False),
+    ("another writer behind the review ruleset and CODEOWNERS", {"repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR], "rulesets": [GOOD_RULESET]}}}, True),
+    ("a ruleset that keeps stale reviews", {"repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR], "rulesets": [dict(GOOD_RULESET, rules=[{"type": "pull_request", "parameters": dict(GOOD_RULESET["rules"][0]["parameters"], dismiss_stale_reviews_on_push=False)}])]}}}, False),
+    ("a ruleset without last-push approval", {"repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR], "rulesets": [dict(GOOD_RULESET, rules=[{"type": "pull_request", "parameters": dict(GOOD_RULESET["rules"][0]["parameters"], require_last_push_approval=False)}])]}}}, False),
+    ("a ruleset the write role bypasses", {"repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR], "rulesets": [dict(GOOD_RULESET, bypass_actors=[{"actor_id": 4, "actor_type": "RepositoryRole", "bypass_mode": "always"}])]}}}, False),
+    ("an evaluate-only ruleset", {"repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR], "rulesets": [dict(GOOD_RULESET, enforcement="evaluate")]}}}, False),
+    ("CODEOWNERS handing workflows to someone else", {"codeowners_caller": CORE_CODEOWNERS + "/.github/workflows/ @collaborator\n", "repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR], "rulesets": [GOOD_RULESET]}}}, False),
+    ("no CODEOWNERS", {"codeowners_caller": None, "repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR], "rulesets": [GOOD_RULESET]}}}, False),
+    ("a write deploy key and no review ruleset", {"repos": {CORE: {"keys": [{"id": 9, "read_only": False}]}}}, False),
+    ("a read-only deploy key", {"repos": {CORE: {"keys": [{"id": 9, "read_only": True}]}}}, True),
+)
+for name, state, admitted in precondition_cases:
+    for backend in ("auto", "fast"):
+        proc, calls, outputs, final_state = scenario("up", {"FAST_RUNNERS_BACKEND": backend}, state)
+        registered = bool(curl_calls(calls, "POST", "generate-jitconfig")) or bool(gcloud_calls(calls, "compute", "instances", "create"))
+        if admitted and outputs.get("backend") != "fast":
+            fail(f"precondition met ({name}, {backend}) but up did not bring the pool up: {proc.stdout[-300:]}")
+        if not admitted:
+            if registered:
+                fail(f"precondition not met ({name}, {backend}) but up registered runners or created VMs")
+            if backend == "auto" and outputs.get("backend") != "hosted":
+                fail(f"precondition not met ({name}): auto must fall back to hosted")
+            if backend == "fast" and proc.returncode == 0:
+                fail(f"precondition not met ({name}): fast must fail")
+        if revoked(calls) != minted(calls):
+            fail(f"{name} ({backend}): tokens not all revoked: minted {minted(calls)}, revoked {revoked(calls)}")
+meta_env = {"GITHUB_REPOSITORY": META, "GITHUB_WORKFLOW_REF": META_ULTRAFAST_REF}
+meta_owners = "* @lukacf\n/.github/ @lukacf\n"
+proc, calls, outputs, final_state = scenario("up", meta_env, {"codeowners_caller": meta_owners})
+token_bodies = [c["body"] for c in curl_calls(calls, "POST", "/access_tokens")]
+if outputs.get("backend") != "fast" or token_bodies != [
+        {"repositories": ["meerkat-meta"], "permissions": {"administration": "write"}},
+        {"repositories": ["meerkat"], "permissions": {"administration": "read"}}] or revoked(calls) != minted(calls):
+    fail(f"a Meta run must check Meta and the Core launcher with separate scoped tokens and revoke both: {token_bodies}")
+proc, calls, outputs, final_state = scenario("up", meta_env, {"codeowners_caller": meta_owners,
+                                                              "repos": {CORE: {"collaborators": OWNER_ONLY + [COLLABORATOR]}}})
+if outputs.get("backend") != "hosted" or curl_calls(calls, "POST", "generate-jitconfig"):
+    fail("a Meta run must refuse while the Core launcher's other writers are not held behind review")
+ok_since(_s11, "review precondition: another writer (collaborator or write deploy key) is admitted only behind an "
+         "active main ruleset with code-owner review, stale-review dismissal, last-push approval and admin-only bypass "
+         "plus CODEOWNERS giving the pool files to the owner alone; otherwise nothing is registered; Meta runs also "
+         "check the Core launcher; every token is revoked")
+
+# 3e. failures clean up and revoke; in fast they fail after cleaning up.
+_s12 = len(FAILURES)
 for name, state, extra in (
     ("runners that never come online", {"runner_status": "offline"}, {}),
     ("a VM creation failure", {"fail_create": ["meerkat-fast-9001-1-1"]},
-     {"FAST_RUNNERS_SPEC": '[{"class":"x64-xl","count":2}]'}),
+     {"FAST_RUNNERS_SPEC": '[{"lane":"a","class":"x64-xl"},{"lane":"b","class":"x64-xl"}]'}),
 ):
     for backend in ("auto", "fast"):
         proc, calls, outputs, final_state = scenario("up", dict(extra, FAST_RUNNERS_BACKEND=backend), state)
-        if final_state.get("instances") or final_state.get("runners"):
-            fail(f"{name} ({backend}) leaves instances {final_state.get('instances')} / runners {final_state.get('runners')}")
+        if final_state.get("instances") or runners_of(final_state):
+            fail(f"{name} ({backend}) leaves instances {final_state.get('instances')} / runners {runners_of(final_state)}")
+        if revoked(calls) != minted(calls):
+            fail(f"{name} ({backend}): tokens not revoked")
         if backend == "auto" and (proc.returncode != 0 or outputs.get("backend") != "hosted" or outputs.get("runs_on") != "{}"):
             fail(f"{name} (auto) must clean up and select GitHub-hosted runners: rc={proc.returncode} {outputs}")
         if backend == "fast" and (proc.returncode == 0 or outputs.get("backend") == "fast"):
             fail(f"{name} (fast) must fail")
-ok_since(_s6, "runners that never come online or a failed VM creation: up deletes every VM and registration it made, then "
-   "selects GitHub-hosted runners (auto) or fails (fast)")
-
-proc, calls, outputs, _ = scenario("up", {"FAST_RUNNERS_SPEC": '[{"class":"x64-xl","count":9}]'})
-if proc.returncode == 0 or calls:
-    fail("up must refuse more than 8 runners before any call")
-proc, calls, outputs, _ = scenario("up", {"FAST_RUNNERS_SPEC": '[{"class":"n2-highcpu-4","count":1}]'})
-if proc.returncode == 0 or calls:
-    fail("up must refuse an unknown runner class before any call")
 proc, calls, outputs, _ = scenario("fallback", {"FAST_RUNNERS_BACKEND": "fast"})
 if proc.returncode == 0 or outputs.get("backend") != "hosted":
     fail("fallback for backend fast must fail")
-ok("up refuses oversized or unknown runner specs before any call; fallback fails for backend fast")
+ok_since(_s12, "runners that never come online or a failed VM creation: up deletes every VM and registration it made "
+         "and revokes its tokens, then selects GitHub-hosted runners (auto) or fails (fast)")
 
-# 3d. down.
-_s7 = len(FAILURES)
+# 3f. down, with paginated listings.
+_s13 = len(FAILURES)
+padding = [{"id": 1000 + i, "name": f"someone-else-{i}", "status": "online", "labels": []} for i in range(150)]
 state = {"instances": ["meerkat-fast-9001-1-0", "meerkat-fast-9001-1-1", "meerkat-fast-9000-1-0"],
-         "runners": [{"id": 7, "name": "meerkat-fast-9001-1-0", "status": "offline"},
-                     {"id": 8, "name": "meerkat-fast-9001-1-1", "status": "online"},
-                     {"id": 9, "name": "someone-else", "status": "online"}]}
-proc, calls, outputs, final_state = scenario("down", {"FAST_RUNNERS_SPEC": '[{"class":"x64-xl","count":2}]',
-                                                      "FAST_RUNNERS_UP_BACKEND": "fast"}, state)
+         "repos": {CORE: {"padding": padding, "runners": [
+             {"id": 7, "name": "meerkat-fast-9001-1-0", "status": "offline", "labels": []},
+             {"id": 8, "name": "meerkat-fast-9001-1-1", "status": "online", "labels": []}]}}}
+two = '[{"lane":"a","class":"x64-xl"},{"lane":"b","class":"x64-xl"}]'
+proc, calls, outputs, final_state = scenario("down", {"FAST_RUNNERS_SPEC": two, "FAST_RUNNERS_UP_BACKEND": "fast"}, state)
 if proc.returncode != 0:
     fail(f"down failed: {proc.stdout[-500:]}")
 if final_state.get("instances") != ["meerkat-fast-9000-1-0"]:
     fail(f"down must delete exactly this run's VMs; left {final_state.get('instances')}")
-if [r["name"] for r in final_state.get("runners", [])] != ["someone-else"]:
-    fail(f"down must delete exactly this run's registrations; left {final_state.get('runners')}")
+if runners_of(final_state) or len(final_state["repos"][CORE]["padding"]) != 150:
+    fail("down must delete exactly this run's registrations, found on the second page of the listing")
 if gcloud_calls(calls, "compute", "instances", "list"):
     fail("down must not list the project's instances")
+if revoked(calls) != minted(calls) or not minted(calls):
+    fail("down must revoke its installation token")
 proc, calls, outputs, final_state = scenario("down", {"FAST_RUNNERS_UP_BACKEND": ""},
                                              {"late_instances": {"meerkat-fast-9001-1-0": 1}})
 if proc.returncode != 0 or final_state.get("instances"):
     fail(f"down after a cancelled up must find and delete a VM whose insert was still in flight: {final_state}")
-proc, calls, outputs, final_state = scenario("down", {"FAST_RUNNERS_SPEC": '[{"class":"x64-xl","count":2}]'},
-                                             dict(state, fail_delete=True))
+proc, calls, outputs, final_state = scenario("down", {"FAST_RUNNERS_SPEC": two}, dict(state, fail_delete=True))
 if proc.returncode == 0:
     fail("down must fail when a VM delete fails")
-if any(r["name"].startswith("meerkat-fast-9001-1-") for r in final_state.get("runners", [])):
+if runners_of(final_state):
     fail("down must still delete the registrations after a failed VM delete")
-ok_since(_s7, "down deletes exactly this run's VMs and registrations by name (no project listing), finds an insert still in "
-   "flight after a cancelled up, and keeps going but fails when a delete fails")
+state = {"repos": {CORE: {"padding": padding, "runners": []}}}
+proc, calls, outputs, final_state = scenario("up", {}, state)
+if outputs.get("backend") != "fast" or len(curl_calls(calls, "GET", "/actions/runners?")) < 2:
+    fail("up must find its runner beyond the first page of the runner listing")
+ok_since(_s13, "down deletes exactly this run's VMs and registrations by name (paginated, no project listing), finds an "
+         "insert still in flight after a cancelled up, keeps going but fails when a delete fails, and revokes its token")
+
+# 3g. the gate's pool check against this run's jobs.
+_s14 = len(FAILURES)
+LABEL = "meerkat-fast-9001-1-0123456789abcdef-workspace-lib"
+gate_base = {
+    "FAST_RUNNERS_NEEDS": json.dumps({"fast-up": {"result": "success"}, "workspace-lib": {"result": "success"},
+                                      "fast-down": {"result": "success"}}),
+    "FAST_RUNNERS_POOL_LANES": '["workspace-lib"]',
+    "FAST_RUNNERS_REQUESTED": "auto",
+    "FAST_RUNNERS_UP_BACKEND": "fast",
+    "FAST_RUNNERS_RUNS_ON": json.dumps({"workspace-lib": LABEL}),
+}
+for name, jobs, should_pass in (
+    ("the lane on its pool runner", [{"name": "Workspace lib tests", "labels": [LABEL], "runner_name": "meerkat-fast-9001-1-0", "conclusion": "success"}], True),
+    ("the lane silently GitHub-hosted while the pool was up", [{"name": "Workspace lib tests", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 7", "conclusion": "success"}], False),
+    ("the lane on another runner", [{"name": "Workspace lib tests", "labels": [LABEL], "runner_name": "meerkat-fast-9001-1-5", "conclusion": "success"}], False),
+    ("the pool lane's job missing", [], False),
+):
+    proc, calls, outputs, _ = scenario("verify-lanes", gate_base, {"jobs": [{"name": "Fast runners up / Runners up", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "conclusion": "success"}] * 120 + jobs})
+    if (proc.returncode == 0) != should_pass:
+        fail(f"verify-lanes with {name}: rc={proc.returncode}, expected {'pass' if should_pass else 'fail'}\n{proc.stdout[-300:]}")
+ok_since(_s14, "the gate's pool check (paginated jobs listing) passes only when each pool lane ran on its own pool "
+         "runner and fails when a lane silently ran GitHub-hosted, ran elsewhere or is missing")
+
+# 3h. boot script hardening and the reaper.
+_s15 = len(FAILURES)
+startup = LAUNCHER.render_startup()
+if re.search(r"NOPASSWD|>\s*/etc/sudoers", startup) or "rm -f /etc/sudoers.d/runner" not in startup:
+    fail("the job user must have no sudo (it could stop its VM and clear the TTL)")
+startup_code = "\n".join(line for line in startup.splitlines() if not line.lstrip().startswith("#"))
+if re.search(r"\bsudo\b", startup_code.replace("sudoers", "")):
+    fail("the boot script must not start the runner through sudo (its log records command lines)")
+if "--jitconfig" in startup or "ACTIONS_RUNNER_INPUT_JITCONFIG" not in startup or "runuser -u runner" not in startup:
+    fail("the registration must reach the runner through ACTIONS_RUNNER_INPUT_JITCONFIG from a runner-only file, never argv")
+if "chmod 0400 /run/meerkat-fast-runner/jit" not in startup or "rm -f /run/meerkat-fast-runner/jit" not in startup:
+    fail("the registration file must be runner-only (0400) and removed before the runner starts")
+if "--uid-owner runner -j REJECT" not in startup:
+    fail("job processes must not reach the metadata token endpoint")
+reaper = LAUNCHER.render_reaper()
+now = datetime.datetime.now(datetime.timezone.utc)
+old = (now - datetime.timedelta(minutes=LAUNCHER.REAP_AFTER_MINUTES + 30)).strftime("%Y-%m-%dT%H:%M:%S.000-00:00")
+young = (now - datetime.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000-00:00")
+listing = [["old-running", "europe-west4-a", old, "RUNNING"], ["old-stopped", "europe-west4-a", old, "TERMINATED"],
+           ["old-suspended", "europe-west4-b", old, "SUSPENDED"], ["young-running", "europe-west4-a", young, "RUNNING"]]
+with tempfile.TemporaryDirectory(prefix="fast-runners-reaper.") as tmp:
+    bin_dir = setup_fakes(tmp, {"listing": listing})
+    script = os.path.join(tmp, "reaper.sh")
+    with open(script, "w", encoding="utf-8") as handle:
+        handle.write(reaper)
+    proc = subprocess.run(["bash", script], env=dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"], FAKE_STATE=tmp),
+                          capture_output=True, text=True)
+    with open(os.path.join(tmp, "state.json"), encoding="utf-8") as handle:
+        reaped = json.load(handle).get("deleted", [])
+    with open(os.path.join(tmp, "calls.jsonl"), encoding="utf-8") as handle:
+        lists = [json.loads(line)["argv"] for line in handle if '"list"' in line]
+    if proc.returncode != 0 or sorted(reaped) != ["old-running", "old-stopped", "old-suspended"]:
+        fail(f"the reaper must delete stale pool VMs in any state and keep young ones: rc={proc.returncode} {reaped} {proc.stdout[-300:]}")
+    if not lists or any("status" in arg.lower() and "filter" in arg.lower() for argv in lists for arg in argv):
+        fail("the reaper must list pool VMs by label in every state (no status filter)")
+ok_since(_s15, "boot hardening: no sudo for the job user, the registration via a runner-only file into "
+         "ACTIONS_RUNNER_INPUT_JITCONFIG (never argv or sudo), metadata token endpoint blocked; the reaper deletes "
+         "stale pool VMs in any state (stopped and suspended included) and keeps young ones")
 
 
 # --- 4. WIF condition and approval commands ----------------------------------------------------
 
-_s8 = len(FAILURES)
-
+_s16 = len(FAILURES)
 wif = subprocess.run([sys.executable, LAUNCHER_SCRIPT, "wif"], capture_output=True, text=True).stdout.splitlines()
 condition = wif[wif.index("attribute-condition:") + 1].strip()
 mapping_lines = [line.strip() for line in wif[1:wif.index("attribute-condition:")]]
 role_mapping = next(line.split("=", 1)[1] for line in mapping_lines if line.startswith("attribute.fast_role="))
 
-CEL = re.compile(r"\s*(?:('(?:[^'\\]|\\.)*')|(==|!=|&&|\|\||[?:()\[\],])|(assertion\.[a-z_]+|in\b))")
+CEL = re.compile(r"\s*(?:('(?:[^'\\]|\\.)*')|(==|!=|&&|\|\||[?:()\[\],+])|(assertion\.[a-z_]+|assertion\b|in\b))")
 
 
 def cel(text, claims):
@@ -1189,32 +1518,63 @@ def cel(text, claims):
             return items
         if token.startswith("'"):
             return token[1:-1]
+        if token == "assertion":
+            return claims
         if token.startswith("assertion."):
             key = token.split(".", 1)[1]
             if key not in claims:
-                sys.exit(f"CEL reads a claim the sample lacks: {key}")
+                raise KeyError(key)  # a missing claim is a CEL error
             return claims[key]
         sys.exit(f"CEL: unexpected {token}")
 
+    def additive():
+        value = primary()
+        while peek() == "+":
+            take()
+            value = value + primary()
+        return value
+
     def comparison():
-        left = primary()
+        left = additive()
         op = peek()
         if op in ("==", "!="):
             take()
-            right = primary()
+            right = additive()
             return (left == right) if op == "==" else (left != right)
         if op == "in":
             take()
-            return left in primary()
+            return left in additive()
         return left
 
     def conjunction():
-        value = comparison()
-        while peek() == "&&":
+        # CEL &&: false wins over an error on either side.
+        values, errors = [], 0
+        while True:
+            try:
+                values.append(comparison())
+            except KeyError:
+                errors += 1
+                skip_operand()
+            if peek() != "&&":
+                break
             take()
-            right = comparison()
-            value = value and right
-        return value
+        if any(v is False for v in values):
+            return False
+        if errors:
+            raise KeyError("missing claim")
+        return True if len(values) > 1 else values[0]
+
+    def skip_operand():
+        depth = 0
+        while peek() is not None:
+            token = peek()
+            if depth == 0 and token in ("&&", "||", "?", ":", ")", ","):
+                return
+            if token in ("(", "["):
+                depth += 1
+            if token in (")", "]"):
+                depth -= 1
+            take()
 
     def disjunction():
         value = conjunction()
@@ -1241,15 +1601,14 @@ def cel(text, claims):
 
 
 BASE = {
-    "repository_owner_id": "16124748", "repository_owner": "lukacf", "repository": CORE,
+    "repository_owner_id": "16124748", "repository_owner": "lukacf", "repository": CORE, "repository_id": CORE_ID,
     "event_name": "workflow_dispatch", "ref": "refs/heads/main", "actor_id": "16124748", "actor": "lukacf",
     "workflow_ref": ULTRAFAST_REF, "runner_environment": "github-hosted",
-    "job_workflow_ref": "lukacf/meerkat/.github/workflows/fast-runners.yml@refs/heads/main",
+    "job_workflow_ref": LAUNCHER_REF, "environment": "meerkat-fast-runners",
 }
 admitted = (
     ("the Core launcher job", {}),
-    ("the Meta launcher job", {"repository": "lukacf/meerkat-meta",
-                               "workflow_ref": "lukacf/meerkat-meta/.github/workflows/ultrafast.yml@refs/heads/main"}),
+    ("the Meta launcher job", {"repository": META, "repository_id": META_ID, "workflow_ref": META_ULTRAFAST_REF}),
 )
 rejected = (
     ("a fork pull request", {"event_name": "pull_request", "ref": "refs/pull/7/merge", "actor": "attacker", "actor_id": "1"}),
@@ -1263,6 +1622,7 @@ rejected = (
     ("the owner's id with another login", {"actor": "collaborator"}),
     ("a repository owner id that is not the owner's", {"repository_owner_id": "3"}),
     ("a repository owner login that is not the owner's", {"repository_owner": "attacker"}),
+    ("a recreated repository under the same name", {"repository_id": "42"}),
     ("ci.yml on main", {"workflow_ref": f"{CORE}/.github/workflows/ci.yml@refs/heads/main"}),
     ("ultrafast.yml on a branch", {"workflow_ref": f"{CORE}/.github/workflows/ultrafast.yml@refs/heads/feature"}),
     ("another repository", {"repository": "lukacf/other"}),
@@ -1273,51 +1633,109 @@ for name, change in admitted:
 for name, change in rejected:
     if cel(condition, dict(BASE, **change)) is not False:
         fail(f"the WIF condition admits {name}")
+
+
+def role(change, drop=()):
+    claims = dict(BASE, **change)
+    for key in drop:
+        claims.pop(key, None)
+    try:
+        return cel(role_mapping, claims)
+    except KeyError:
+        return "error"
+
+
 roles = (
-    ("the launcher job", {}, "launcher"),
-    ("a GitHub-hosted job outside the launcher", {"job_workflow_ref": ULTRAFAST_REF}, "none"),
-    ("the launcher file at a branch", {"job_workflow_ref": "lukacf/meerkat/.github/workflows/fast-runners.yml@refs/heads/feature"}, "none"),
-    ("a pool lane", {"runner_environment": "self-hosted", "job_workflow_ref": ULTRAFAST_REF}, "lane"),
+    ("the launcher job", {}, (), "launcher"),
+    ("the launcher job without its environment", {}, ("environment",), "none"),
+    ("the launcher job in another environment", {"environment": "staging - docs"}, (), "none"),
+    ("a GitHub-hosted job outside the launcher", {"job_workflow_ref": ULTRAFAST_REF}, ("environment",), "none"),
+    ("the launcher file at a branch", {"job_workflow_ref": f"{CORE}/.github/workflows/fast-runners.yml@refs/heads/feature"}, (), "none"),
+    ("a Core pool lane", {"runner_environment": "self-hosted", "job_workflow_ref": ULTRAFAST_REF}, ("environment",), f"ci-{CORE_ID}"),
+    ("a Meta pool lane", {"runner_environment": "self-hosted", "repository": META, "repository_id": META_ID,
+                          "job_workflow_ref": META_ULTRAFAST_REF}, ("environment",), f"ci-{META_ID}"),
+    ("a Core release lane", {"runner_environment": "self-hosted", "job_workflow_ref": ULTRAFAST_REF,
+                             "environment": "meerkat-fast-release"}, (), f"release-{CORE_ID}"),
 )
-for name, change, want in roles:
-    got = cel(role_mapping, dict(BASE, **change))
+for name, change, drop, want in roles:
+    got = role(change, drop)
     if got != want:
         fail(f"WIF fast_role for {name} is {got!r}, expected {want!r}")
-ok_since(_s8, f"the WIF condition admits only the owner's dispatch of an allowlisted ultrafast.yml on main ({len(rejected)} "
-   "rejections incl. fork and same-repo PRs, pushes, branches, collaborators, a reused login), and only the "
-   "launcher file at main on a GitHub-hosted runner maps to the launcher role")
+ok_since(_s16, f"the WIF condition admits only the owner's dispatch of an allowlisted ultrafast.yml on main in an "
+         f"allowlisted repository id ({len(rejected)} rejections); the launcher role needs the launcher file at main, "
+         "a GitHub-hosted runner and the meerkat-fast-runners environment; cache roles are per repository and tier")
 
+_s17 = len(FAILURES)
 commands = subprocess.run([sys.executable, LAUNCHER_SCRIPT, "approval-commands"], capture_output=True, text=True).stdout.splitlines()
-runnable = [line for line in commands if line.startswith("gcloud ")]
+fallback_at = next((i for i, line in enumerate(commands) if line.startswith("# FALLBACK ONLY")), len(commands))
+main_plan, fallback = commands[:fallback_at], commands[fallback_at:]
+runnable = [line for line in main_plan if line.startswith("gcloud ")]
+if LAUNCHER.PROJECT == "king-dnn-training-dev" or not any(line.startswith(f"gcloud projects create {LAUNCHER.PROJECT}") for line in runnable):
+    fail("the default plan must create a dedicated pool project")
+if not any(line.startswith(f"gcloud projects get-iam-policy {LAUNCHER.PROJECT}") for line in runnable):
+    fail("the dedicated project's IAM policy must be audited")
+if any(line.startswith("gcloud secrets") for line in commands):
+    fail("the App key must not live in Secret Manager")
+app_key = [line for line in runnable if line.startswith("gcloud kms keys create github-app-jwt")]
+if not app_key or not all(flag in app_key[0] for flag in ("--purpose=asymmetric-signing", "--import-only", "--protection-level=hsm")):
+    fail("the App key must be an imported, non-exportable HSM signing key")
+if not any("kms keys versions import" in line for line in runnable) or not any(line.startswith("shred -u") for line in main_plan):
+    fail("the App key must be imported and the PEM destroyed")
+if not any("github-app-jwt" in line and "roles/cloudkms.signer" in line and "meerkat-fast-launcher@" in line for line in runnable):
+    fail("only the launcher may sign with the App key")
 project_bindings = [line for line in runnable if line.startswith("gcloud projects add-iam-policy-binding")]
-if len(project_bindings) != 1 or "meerkat-fast-launcher@" not in project_bindings[0] \
-        or "--condition=" not in project_bindings[0] or "instances/meerkat-fast-" not in project_bindings[0]:
-    fail(f"the only project-level binding must be the launcher's name-prefix-conditioned custom role: {project_bindings}")
-for line in runnable:
+members = [re.search(r"--member=serviceAccount:([^@]+)@", line).group(1) for line in project_bindings]
+if sorted(members) != ["meerkat-fast-launcher", "meerkat-fast-reaper"]:
+    fail(f"project-level bindings may name only the launcher (conditioned) and the reaper: {members}")
+launcher_binding = next((line for line in project_bindings if "meerkat-fast-launcher@" in line), "")
+if ("--condition=" not in launcher_binding or "instances/meerkat-fast-" not in launcher_binding or "/operations/" not in launcher_binding
+        or f'resource.name == \\"projects/{LAUNCHER.PROJECT}/regions/{LAUNCHER.REGION}/subnetworks/{LAUNCHER.SUBNET}\\"' not in launcher_binding.replace('"', '\\"').replace('\\\\"', '\\"')
+        or "/global/images/" in launcher_binding):
+    fail("the launcher binding must be conditioned on its instances, disks and zone operations and the exact subnet, with no image clause")
+role_lines = [line for line in runnable if line.startswith("gcloud iam roles create meerkatFastRunnerLauncher")]
+if not role_lines or "compute.zoneOperations.get" not in role_lines[0]:
+    fail("the launcher role must let gcloud poll the zone operations of its creates and deletes")
+for line in commands:
     for forbidden in ("roles/owner", "roles/editor", "roles/compute.admin", "roles/compute.instanceAdmin",
                       "roles/iam.serviceAccountTokenCreator", "roles/storage.admin", "allUsers", "allAuthenticatedUsers"):
         if forbidden in line:
             fail(f"approval command grants {forbidden}: {line}")
-    if "meerkat-fast-runner@" in line and "--member=serviceAccount:meerkat-fast-runner@" in line \
-            and "roles/cloudkms.cryptoKeyDecrypter" not in line:
+    if "--member=serviceAccount:meerkat-fast-runner@" in line and "roles/cloudkms.cryptoKeyDecrypter" not in line:
         fail(f"the runner identity gets more than the KMS decrypter: {line}")
+    if "roles/storage.objectUser" in line and "sccache_check" not in line:
+        fail(f"cache writers may create but never overwrite objects: {line}")
+buckets = sorted(set(re.findall(r"gs://(meerkat-fast-cache-[a-z0-9-]+)", "\n".join(runnable))))
+if buckets != sorted(f"meerkat-fast-cache-ci-{short}-{LAUNCHER.PROJECT}" for short in ("core", "meta")):
+    fail(f"one CI cache bucket per repository: {buckets}")
+for repo, short in (("core", "core"), ("meta", "meta")):
+    bucket = f"meerkat-fast-cache-ci-{short}-{LAUNCHER.PROJECT}"
+    sa = f"meerkat-fast-cache-{short}@"
+    granted = [line for line in runnable if f"gs://{bucket} " in line + " " and "add-iam-policy-binding" in line]
+    if any(sa not in line for line in granted) or not any("objectCreator" in line for line in granted) or not any("objectViewer" in line for line in granted):
+        fail(f"bucket {bucket} must be writable (create only) and readable by {sa} alone")
+for repo_id, short in ((CORE_ID, "core"), (META_ID, "meta")):
+    if not any(f"meerkat-fast-cache-{short}@" in line and f"attribute.fast_role/ci-{repo_id}" in line for line in runnable):
+        fail(f"the {short} cache account must trust only that repository's CI lanes")
+if not any("attribute.fast_role/launcher" in line and "meerkat-fast-launcher@" in line for line in runnable):
+    fail("the launcher account must trust only the launcher role")
 firewalls = [line for line in runnable if line.startswith("gcloud compute firewall-rules")]
-if len(firewalls) != 1 or "--action=DENY" not in firewalls[0] or "--direction=INGRESS" not in firewalls[0] \
-        or "--priority=0" not in firewalls[0]:
+if len(firewalls) != 1 or "--action=DENY" not in firewalls[0] or "--direction=INGRESS" not in firewalls[0] or "--priority=0" not in firewalls[0]:
     fail(f"the network must have exactly one firewall rule, an explicit priority-0 deny of all ingress: {firewalls}")
-if any("--action=ALLOW" in line or "--allow" in line for line in runnable):
+if any("--action=ALLOW" in line or "--allow" in line for line in commands):
     fail("an approval command opens ingress")
-role_lines = [line for line in runnable if line.startswith("gcloud iam roles create meerkatFastRunnerLauncher")]
-if not role_lines or "compute.zoneOperations.get" not in role_lines[0]:
-    fail("the launcher role must let gcloud poll the zone operations of its creates and deletes")
-if not project_bindings or "/operations/" not in project_bindings[0]:
-    fail("the launcher role condition must cover the zone's operations, or gcloud cannot wait for its inserts")
-for needle in ("--enable-private-ip-google-access", "routers nats create", "--attribute-condition=",
-               "attribute.fast_role/launcher", "attribute.fast_role/lane", "--public-access-prevention"):
-    if not any(needle in line for line in runnable):
+for needle in ("--enable-private-ip-google-access", "routers nats create", "--attribute-condition=", "gcloud run jobs create meerkat-fast-reaper",
+               "gcloud scheduler jobs create http meerkat-fast-reaper", "render-reaper"):
+    if not any(needle in line for line in main_plan):
         fail(f"approval commands lack {needle!r}")
-ok("approval commands: no project-wide role (one name-prefix-conditioned launcher role), the runner identity only "
-   "decrypts its registration, one priority-0 deny-all-ingress rule and no allow, NAT egress, a dedicated WIF pool")
+for needle in ("gcloud projects get-iam-policy king-dnn-training-dev", "meerkat-fast-runner@king-dnn-training-dev",
+               "meerkat-fast-launcher@king-dnn-training-dev", "meerkat-fast-reaper@king-dnn-training-dev",
+               "gcloud iam policies create", "--kind=denypolicies"):
+    if not any(needle in line for line in fallback):
+        fail(f"the shared-project fallback lacks {needle!r}")
+ok_since(_s17, "approval commands: a dedicated owner-only project with an IAM audit, the App key imported into a "
+         "non-exportable HSM signing key (no Secret Manager), only the conditioned launcher and the reaper bound at "
+         "project level, exact subnet, per-repository create-only cache buckets, the scheduled reaper, one deny-all "
+         "ingress rule, and a shared-project fallback with IAM audits and a deny policy")
 
 if FAILURES:
     print(f"{len(FAILURES)} failure(s)")

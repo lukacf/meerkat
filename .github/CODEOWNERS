@@ -1,1 +1,8 @@
 * @lukacf
+
+# Owner-only fast-runner pool: workflow, launcher and contract-test changes
+# need the owner's review (the pool's review precondition, see
+# scripts/fast-runners). /.github/ covers this file too.
+/.github/ @lukacf
+/scripts/fast-runners* @lukacf
+/scripts/test-fast-runners-contract.sh @lukacf

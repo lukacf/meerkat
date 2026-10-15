@@ -591,6 +591,16 @@ up_with = mapping(key_value(ULTRA_JOBS["fast-up"], "with"), 4)
 down_with = mapping(key_value(ULTRA_JOBS["fast-down"], "with"), 4)
 if up_with.get("runners") != down_with.get("runners"):
     fail("fast-up and fast-down must pass the same runners spec (down deletes by its names)")
+lanes_per_class = {}
+for job in pool_jobs:
+    match = re.search(r"\['([a-z0-9-]+)'\]", key_value(ULTRA_JOBS[job], "runs-on") or "")
+    if not match:
+        fail(f"pool lane {job} does not name its runner class")
+        continue
+    lanes_per_class[match.group(1)] = lanes_per_class.get(match.group(1), 0) + 1
+spec_counts = {entry["class"]: entry.get("count", 1) for entry in json.loads(up_with.get("runners") or "[]")}
+if lanes_per_class != spec_counts:
+    fail(f"each JIT runner takes one job: pool lanes per class {lanes_per_class} must equal the runner spec {spec_counts}")
 if down_with.get("up_backend") != "${{ needs.fast-up.outputs.backend }}":
     fail("fast-down must pass up's reported backend")
 gate_if = strip_expr(key_value(ULTRA_JOBS["gate"], "if") or "")

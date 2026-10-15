@@ -480,6 +480,23 @@ async function main() {
       check(document.getElementById("statusBadge").textContent==="ERROR"&&!office.state().running&&!office.state().stopped,"No optimistic failed-stop badge");
     `);
 
+    await test("F04b pending resume retains disabled controls until acknowledged", `
+      const f=fixture();await boot(f);click("pauseBtn");await until(()=>!office.state().lifecycleBusy);
+      const lifecycle=f.mod.mob_lifecycle;let attempts=0;
+      f.mod.mob_lifecycle=async(id,action)=>{
+        if(action==="resume"&&++attempts<=2)throw JSON.stringify({code:"SESSION_BUSY",data:{kind:"mob_lifecycle_operation_pending",retryable:true,authority_retained:true}});
+        return lifecycle(id,action);
+      };
+      click("pauseBtn");await until(()=>document.getElementById("statusBadge").textContent==="RESUMING");
+      check(document.getElementById("chatSend").disabled&&document.getElementById("startBtn").disabled,"No overlapping work while resume is pending");
+      await until(()=>!office.state().lifecycleBusy);
+      check(attempts===3&&office.state().running&&f.handles.size===10,"Pending resume joins the same operation then renews subscriptions");
+      click("pauseBtn");await until(()=>!office.state().lifecycleBusy);
+      attempts=0;f.mod.mob_lifecycle=async()=>{attempts++;throw JSON.stringify({code:"SESSION_BUSY",data:{kind:"mob_lifecycle_operation_pending",retryable:false,authority_retained:true}});};
+      click("pauseBtn");await until(()=>!office.state().lifecycleBusy);
+      check(attempts===1&&!office.state().running&&document.getElementById("statusBadge").textContent==="ERROR","Nonretryable failure remains visible and closed");
+    `);
+
     await test("F03 authentication recovery uses actual polling/dialog", `
       const f=fixture();await boot(f);
       f.push("gate",{type:"run_failed",error_report:{message:"Anthropic authentication 401 invalid API key"}});
@@ -677,7 +694,7 @@ async function main() {
       check(text.indexOf("Synthetic chat")<text.indexOf("Delayed reply"),"Chronological order");
       check(document.querySelectorAll(".scenario-btn").length===6&&["tabLog","tabCases","tabGraph","pauseBtn","startBtn"].every(visible),"Documented controls exist");
     `);
-    console.log("All 21 deterministic regression groups passed (actual TS/DOM; controlled runtime boundaries).");
+    console.log("All 22 deterministic regression groups passed (actual TS/DOM; controlled runtime boundaries).");
     return;
     }
 

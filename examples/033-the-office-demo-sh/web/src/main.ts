@@ -551,6 +551,28 @@ async function subscribeOffice(mod: RuntimeModule, id: string): Promise<void> {
   }
 }
 
+async function resumeOffice(mod: RuntimeModule, id: string): Promise<string> {
+  const deadline = performance.now() + 90_000;
+  for (;;) {
+    try {
+      return await mod.mob_lifecycle(id, "resume");
+    } catch (error) {
+      let pending;
+      try { pending = JSON.parse(String(error)); }
+      catch { throw error; }
+      // Rejoin only the runtime-owned pending operation. Other failures still
+      // require Restart, and no new work is admitted while this is pending.
+      if (pending.code !== "SESSION_BUSY"
+        || pending.data?.kind !== "mob_lifecycle_operation_pending"
+        || pending.data?.retryable !== true
+        || pending.data?.authority_retained !== true
+        || performance.now() >= deadline) throw error;
+      setStatus("Resuming agents...");
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+}
+
 async function pauseOffice(): Promise<void> {
   if (!runtime || !mobId || starting || lifecycleBusy || (!running && !stopped)) return;
   const resume = stopped;
@@ -560,7 +582,9 @@ async function pauseOffice(): Promise<void> {
   setBadge(resume ? "RESUMING" : "STOPPING", true);
   try {
     await topology?.settled();
-    const receipt = JSON.parse(await runtime.mob_lifecycle(mobId, resume ? "resume" : "stop"));
+    const receipt = JSON.parse(resume
+      ? await resumeOffice(runtime, mobId)
+      : await runtime.mob_lifecycle(mobId, "stop"));
     if (!receipt.ok) throw new Error("Lifecycle command was not acknowledged");
     stopped = !resume;
     if (resume) {

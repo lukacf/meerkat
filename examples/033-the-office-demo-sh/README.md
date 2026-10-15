@@ -138,6 +138,9 @@ runtime to drain before showing **STOPPED**; an outstanding provider response
 or the current turn's tool batch can still delay that drain. The runtime retries
 retained pending cleanup until those turns finish or its existing stop deadline
 is reached; the UI stays **STOPPING** while it waits.
+If resume reports a retained, retryable lifecycle operation, the UI stays
+**RESUMING** and rejoins that operation for up to 90 seconds. New work remains
+disabled until the runtime acknowledges resume; other errors require Restart.
 The static Boss-mode policy is included in every initial role skill, before the
 first turn. Startup does not append it as a later System message; support for
 mid-conversation System messages depends on the selected model.
@@ -163,7 +166,7 @@ npm run test:offline
 The tests run Playwright's bundled headless Chromium (install it once with
 `npx --prefix web playwright install chromium`; `CHROME_BIN` overrides the
 binary, and `CHROME_SANDBOX=1` keeps the Chromium sandbox on), actual compiled
-TypeScript/DOM handlers and real Cytoscape. The 21 regression groups include
+TypeScript/DOM handlers and real Cytoscape. The 22 regression groups include
 Graph, Records and Log geometry and scrolling at 650x735 and 1280x900, and
 check that the office wires only after every kickoff resolves.
 The separate `test:offline` lane

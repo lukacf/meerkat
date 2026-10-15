@@ -1297,6 +1297,11 @@ if len(firewalls) != 1 or "--action=DENY" not in firewalls[0] or "--direction=IN
     fail(f"the network must have exactly one firewall rule, an explicit priority-0 deny of all ingress: {firewalls}")
 if any("--action=ALLOW" in line or "--allow" in line for line in runnable):
     fail("an approval command opens ingress")
+role_lines = [line for line in runnable if line.startswith("gcloud iam roles create meerkatFastRunnerLauncher")]
+if not role_lines or "compute.zoneOperations.get" not in role_lines[0]:
+    fail("the launcher role must let gcloud poll the zone operations of its creates and deletes")
+if not project_bindings or "/operations/" not in project_bindings[0]:
+    fail("the launcher role condition must cover the zone's operations, or gcloud cannot wait for its inserts")
 for needle in ("--enable-private-ip-google-access", "routers nats create", "--attribute-condition=",
                "attribute.fast_role/launcher", "attribute.fast_role/lane", "--public-access-prevention"):
     if not any(needle in line for line in runnable):

@@ -1,56 +1,85 @@
 ---
 title: "Introduction"
-description: "Meerkat is a library-first Rust platform for building, hosting, and operating agents."
+description: "Run agents from the command line, embed them in applications, or operate an agent system."
 icon: "rocket"
 ---
 
-Meerkat is a library-first agent platform built in Rust. It provides the agent
-loop, typed events, provider adapters, tools, persistence, runtime control, and
-multi-agent orchestration needed to build an agent product without adopting a
-fixed user experience.
+Meerkat is an open-source, provider-agnostic platform for building and running
+AI agents. Use `rkat` to process files or automate a task, embed agents in your
+application, or operate a coordinated system that works continuously. The same
+runtime supports each approach, with the capabilities you choose to include.
 
-The same runtime contracts power embedded Rust applications, command-line
-workflows, HTTP services, SDK clients, and browser/WASM delivery.
+<CardGroup cols={3}>
+  <Card title="Use the CLI" icon="terminal" href="/quickstart">
+    Install rkat, give it a task, and use tools, files and structured output
+    from your shell.
+  </Card>
+  <Card title="Build into your application" icon="code" href="#use-it-from-anywhere">
+    Choose Rust, Python, TypeScript, browser/WASM or a service API.
+  </Card>
+  <Card title="Operate an agent system" icon="users" href="/mobkit/introduction">
+    Combine agent identities, memory, routing, policy and an adaptable console
+    with Meerkat Meta.
+  </Card>
+</CardGroup>
 
-## What Meerkat Owns
+## What You Can Build With
 
-- **Agent execution.** Streaming model calls, tool batches, retries, budgets,
-  structured output, compaction, and explicit terminal outcomes.
-- **Realm-scoped state.** Sessions, config, auth bindings, runtime state,
-  schedules, WorkGraph, jobs, blobs, artifacts, and mob state share one
-  isolation boundary.
-- **Provider resolution.** Anthropic, OpenAI, Gemini, Azure and cloud-hosted
-  variants, plus configured OpenAI-compatible self-hosted models.
-- **Runtime authority.** Generated state-machine integration coordinates
-  session lifecycle, scheduling, recovery, auth leases, and other transitions
-  before stores commit the corresponding physical facts.
-- **Tools and policy.** Builtins, MCP, shell policy, hooks, skills, live tool
-  updates, provider-native tools, and application-defined dispatchers.
-- **Multi-agent systems.** Session-backed mob members, signed peer
-  communication, profiles, flows, durable schedules, and WorkGraph
-  commitments.
+- **A full agent harness.** Streaming, tool use, structured output, skills,
+  hooks, context compaction, semantic memory, image generation and live voice.
+  Configure built-in tools, attach MCP servers or supply your own tools.
+- **Your choice of models.** Use Anthropic, OpenAI, Gemini, Azure and other
+  cloud-hosted backends, or connect self-hosted OpenAI-compatible models.
+  Choose models per agent, including different providers in the same team.
+- **Automation over time.** Persist and resume sessions, respond to external
+  events, schedule work and manage background jobs. These services are
+  available when your application needs them.
+- **Agent collaboration.** Delegate work, run specialist teams and exchange
+  signed peer messages within one process or across machines. Mobs provide
+  stable member identities, communication topology and repeatable workflows.
+- **Control over execution and access.** Configure tool policy, credential
+  bindings, delegated permissions and process confinement. Meta adds
+  application access control and approval interfaces. See
+  [authorization](/concepts/authorization) for the contracts and setup paths.
 
-Meerkat keeps provider-specific capability differences explicit. Changing the
-model can change the effective tool, multimodal, reasoning, or realtime
-surface, and unsupported combinations fail with typed errors instead of being
-silently approximated.
+The [capability matrix](/reference/capability-matrix) describes build profiles
+and runtime capabilities; [providers](/concepts/providers) covers model-specific
+features.
 
-## Library-First, Runtime-Backed
+## Asynchronous Execution And Verified Lifecycles
 
-There are two useful construction profiles:
+Native asynchronous execution lets agents receive work, call tools and
+coordinate without tying their lifecycle to one blocking request. Durable
+runtime services manage recovery, scheduling and delivery when work needs to
+continue beyond a single run.
 
-- The public `meerkat::AgentBuilder` routes through `AgentFactory` but defaults
-  to `StandaloneEphemeral`, a convenient profile for one embedded component.
-- `SessionService` plus `FactoryAgentBuilder` is the normal path for durable,
-  runtime-backed products. It adds realm config, credential leases, recovery,
-  scheduling, live coordination, and shared surface behavior.
+Critical lifecycles use shared state-machine definitions that generate both
+TLA+ specifications and the Rust kernels used by the runtime. Model checking
+verifies their safety properties across the reachable states of the configured
+models. See [machine authority](/reference/machine-authority) for the machinery
+behind session execution, orchestration, scheduling and recovery.
 
-The lower-level `meerkat_core::AgentBuilder` is an internal/test escape hatch,
-not a second public composition pipeline.
+## Choose How Much You Need
 
-The CLI and service binaries use the runtime-backed profile. A session created
-through one surface can be resumed through another when both use the same realm
-and persistence location.
+Meerkat Core is the composable runtime, written in Rust. Compile-time features
+select optional capabilities; host configuration selects the services, tools
+and policies used by each application. This supports small embedded agents,
+browser/WASM applications and full-featured services in a data center. See
+[composability](/concepts/composability) for the available construction paths.
+
+The platform also brings together application operations, integration setup
+and shared knowledge:
+
+| Component | What it provides |
+| --- | --- |
+| **Core** | Agent execution, tools, providers, sessions, communication and orchestration through the CLI, SDKs and service APIs. |
+| **[Meta](/mobkit/introduction)** | Lasting agent identities, memory, routing, access policy and a console framework you can adapt to your application. |
+| **[Connect](/connect/introduction)** | Agent-led discovery, configuration and use of service integrations, including packages beyond its integration library. |
+| **[Recall](/recall/introduction)** | Shared, access-controlled knowledge with source evidence, relationships, cited retrieval and maintained views. |
+
+Use the components that serve your application. A command-line task or an
+embedded agent can use Core directly; larger applications can combine the
+platform's services around it.
 
 ## Use It From Anywhere
 
@@ -81,36 +110,9 @@ and persistence location.
   </Card>
 </CardGroup>
 
-## Build The Product Layer With Meta
+## Continue
 
-[Meta](/mobkit/introduction) is Meerkat's companion application layer for
-operated multi-agent products. It adds durable identities, routing, approval
-gates, memory, flows, and an operator console while using the Meerkat runtime
-underneath.
-
-<Card title="Explore Meta" icon="boxes-stacked" href="/mobkit/introduction">
-  Build and operate coordinated groups of Meerkat agents.
-</Card>
-
-## Get Started
-
-<CardGroup cols={3}>
-  <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Install Meerkat and complete a first run.
-  </Card>
-  <Card title="Concepts" icon="compass" href="/concepts/overview">
-    Learn realms, sessions, config, providers, and orchestration.
-  </Card>
-  <Card title="Examples Gallery" icon="code" href="/examples/gallery">
-    Choose a maintained example by language or workflow.
-  </Card>
-  <Card title="Auth Setup" icon="key" href="/guides/auth">
-    Move from environment variables to scoped bindings and OAuth.
-  </Card>
-  <Card title="Self-Hosted Models" icon="microchip" href="/guides/self-hosting-models">
-    Register an OpenAI-compatible model server.
-  </Card>
-  <Card title="Architecture" icon="layer-group" href="/reference/architecture">
-    Understand crate ownership and runtime authority.
-  </Card>
-</CardGroup>
+Start with the [quickstart](/quickstart), explore the
+[examples gallery](/examples/gallery), or follow the
+[concepts overview](/concepts/overview). The [architecture reference](/reference/architecture)
+explains how execution, storage, providers and orchestration fit together.

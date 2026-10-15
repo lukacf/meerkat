@@ -1,44 +1,39 @@
 ---
 title: "Composability"
-description: "Why Meerkat is both a composable library and a practical product layer."
+description: "Choose capabilities and integration paths for command-line tasks, embedded agents and agent systems."
 icon: "cubes"
 ---
 
-Composability is the core idea that explains almost everything else in Meerkat.
+Meerkat can be a command-line tool, an agent inside your application, or the
+runtime for an ongoing agent system. Composability lets you choose the
+capabilities and integration path that fit your use case.
 
-Meerkat is:
+## Choose Your Integration Path
 
-- a **library-first runtime**
-- with a **practical product layer**
-- exposed through **multiple peer surfaces**
+| Use case | Starting point |
+| --- | --- |
+| Process files, automate a task or work interactively | The `rkat` [CLI](/cli/commands) |
+| Add agents to an application | [Rust](/rust/overview), [Python](/sdks/python/overview), [TypeScript](/sdks/typescript/overview), [Web/WASM](/examples/wasm), or the [service APIs](/api/rpc) |
+| Build an application around ongoing agent work | Core's runtime services, with [Meta](/mobkit/introduction) for identities, memory, routing and an adaptable console |
 
-That means the same underlying system can be used as:
+Each path uses the same session, provider and tool contracts. A session can be
+created through one surface and resumed through another when both use the same
+realm and persistence location.
 
-- a Rust crate embedded in your app
-- a Python or TypeScript SDK backend
-- a CLI for hands-on work
-- a REST / JSON-RPC / MCP integration surface
-- a multi-agent runtime
+## Choose Your Capabilities
 
-## Why this matters
+Composition happens at two levels:
 
-Because Meerkat is composable:
+- **Build configuration** selects optional providers and subsystems through
+  Cargo features. Use a small embedded configuration or a full native harness;
+  the [capability matrix](/reference/capability-matrix) describes the profiles.
+- **Host and agent configuration** selects models, tools, stores, skills,
+  hooks, memory and runtime services. Different agents in one application can
+  have different capabilities and permissions.
 
-- the surfaces are not separate products with separate semantics
-- examples should usually treat the major surfaces as peers
-- concepts such as realms, sessions, tools, and mobs should make sense across surfaces
-- advanced builder/developer docs can still be part of the public docs set, because the “developer” and “operator” roles often overlap
-
-## The Practical Consequence
-
-Composability means the same decisions show up across surfaces:
-
-- model and provider choice is resolved through one model registry
-- tools, skills, hooks, and memory are composed into one agent build path
-- persistent state is scoped by realm rather than by one CLI invocation
-- mobs coordinate multiple sessions without inventing a second agent runtime
-- release and deployment choices affect real users because SDKs and binaries
-  share the same runtime surfaces
+You can supply your own implementations through typed interfaces, use the
+provided implementations, or combine them. Shared contracts carry session
+lifecycle and provider behavior across these choices.
 
 ## One construction path
 

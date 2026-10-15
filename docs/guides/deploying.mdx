@@ -4,14 +4,13 @@ description: "What a from-source build of Meerkat costs, how to keep it inside a
 icon: "server"
 ---
 
-Meerkat is a large Rust workspace. The featured install paths are prebuilt:
-the [Homebrew tap](/guides/cd-and-distribution#homebrew-tap), the GitHub
-Release archives, and the SDKs' automatic `rkat-rpc` download. This page is for
-everyone else: people who run `cargo install rkat`, embed the crates in their
-own binary, build inside a container, or need to know where the prebuilt
-binaries will and will not run. Every number below was measured against this
-repository; the memory and time figures come from one cold build described in
-[Build Cost](#build-cost).
+Deploy Meerkat with prebuilt binaries or a build tailored to your application.
+The [Homebrew tap](/guides/cd-and-distribution#homebrew-tap), GitHub Release
+archives and SDKs' automatic `rkat-rpc` download provide ready-to-run installs.
+
+This guide covers source builds, Rust embedding, container packaging and
+release-binary platform requirements. The [build measurements](#build-cost)
+help size a build host and choose compilation settings.
 
 ## What A Build Compiles
 

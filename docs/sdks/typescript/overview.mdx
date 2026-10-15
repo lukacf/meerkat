@@ -4,7 +4,12 @@ description: "Getting started with the Meerkat TypeScript SDK: sessions, turns, 
 icon: "js"
 ---
 
-The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtime-backed contracts. It spawns a local `rkat-rpc` subprocess and exposes the same session lifecycle used by the CLI, REST, JSON-RPC, and MCP surfaces as TypeScript-native `Session` and `DeferredSession` handles.
+The TypeScript SDK (`@rkat/sdk`) brings Meerkat agents into Node.js
+applications. Create and resume sessions, stream typed events, schedule work
+or coordinate teams through `Session`, `DeferredSession` and `Mob` handles.
+It spawns a local `rkat-rpc` subprocess using the same runtime as the CLI and
+service APIs. For agents that run in the browser itself, use the
+[Web SDK](/examples/wasm).
 
 ## Getting started
 

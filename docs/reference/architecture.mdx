@@ -4,10 +4,11 @@ description: "A high-level map of Meerkat's runtime, surfaces, machines, storage
 icon: "layer-group"
 ---
 
-Meerkat is a library-first agent runtime with one execution pipeline and
-multiple host surfaces. The CLI, REST server, JSON-RPC server, MCP server, Rust
-facade, Python SDK, TypeScript SDK, and Web/WASM runtime all converge on the
-same session, provider, tool, and transcript model.
+Meerkat Core supplies the shared execution foundation for command-line tasks,
+embedded agents and ongoing agent systems. The CLI, REST server, JSON-RPC
+server, MCP server, Rust facade, Python SDK, TypeScript SDK and Web/WASM
+runtime use one execution pipeline and the same session, provider, tool and
+transcript model.
 
 The architecture is strict about ownership: runtime-backed surfaces route
 through `MeerkatMachine`, multi-agent work routes through `MobMachine`, and

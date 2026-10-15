@@ -1,7 +1,7 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "name": "Meerkat",
-  "description": "A library-first Rust platform for agents, durable sessions, and multi-agent orchestration",
+  "description": "An open-source, provider-agnostic agent platform for CLI automation, application embedding and ongoing operations",
   "theme": "maple",
   "colors": {
     "primary": "#A46921",
@@ -19,7 +19,7 @@
         "href": "https://github.com/lukacf/meerkat"
       },
       {
-        "label": "MobKit GitHub",
+        "label": "Meta GitHub",
         "href": "https://github.com/lukacf/meerkat-meta"
       }
     ]
@@ -28,7 +28,7 @@
     "products": [
       {
         "product": "Meerkat",
-        "description": "Library-first agent runtime",
+        "description": "Agent runtime, CLI, SDKs and APIs",
         "icon": "/logo.png",
         "tabs": [
           {

@@ -4,8 +4,12 @@ description: "Embed Meerkat as a Rust library: the full engine with no subproces
 icon: "code"
 ---
 
-The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API
-servers are thin wrappers over this same engine. A production Rust host
+The Rust SDK embeds Meerkat's runtime directly in your application. Choose
+providers, tools and storage through feature flags and typed interfaces, from
+a small agent to a host with persistent sessions and runtime services.
+The CLI, other SDKs and service APIs use the same engine.
+
+A production Rust host
 composes `PersistentSessionService` with `MeerkatMachine`; the service is the
 session substrate and the machine owns runtime transitions. The direct
 `EphemeralSessionService` path remains useful for small embedded programs and

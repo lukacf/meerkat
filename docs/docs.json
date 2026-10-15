@@ -38,6 +38,7 @@
                 "group": "Getting started",
                 "pages": [
                   "introduction",
+                  "why-meerkat",
                   "quickstart",
                   "guides/auth"
                 ]

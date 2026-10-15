@@ -1,0 +1,153 @@
+---
+title: "Why Meerkat?"
+description: "How Meerkat differs from Claude Code and Codex, and what its design gives you."
+icon: "scale-balanced"
+---
+
+Claude Code and Codex are powerful tools for delegating complex work: building
+applications, changing large codebases and working through difficult problems.
+Their [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) and
+[Codex SDK](https://learn.chatgpt.com/docs/codex-sdk) also let applications use
+those harnesses programmatically.
+
+Meerkat is designed as the runtime for software that uses agents. Your
+application controls their lifecycle, integrations and policy, whether it runs
+one task or coordinates an operation for months. A full agent harness,
+composable runtime and integrated platform services support that range.
+
+The distinction is the combination: **provider independence, control over
+composition and deployment, formally verified lifecycle models, and native
+asynchronous operation**. You can use it through `rkat`, embed it in your
+software, or operate a persistent agent system.
+
+## Choose Models Without Changing The Agent System
+
+Meerkat has native provider integrations for Anthropic, OpenAI and Gemini,
+cloud-hosted backends, and support for self-hosted OpenAI-compatible models.
+You choose the model for each agent. A team can mix providers, and a
+single-agent application can change models while keeping its tools, storage
+and integration code.
+
+This is useful even for a shell command: choose a model for its capability,
+cost or data requirements while keeping the same `rkat` workflow. In an
+application, provider choice becomes configuration alongside the other agent
+capabilities. Model-specific features are described in the
+[provider catalog](/concepts/providers).
+
+## Fit The Runtime To Your Application
+
+Core is written in Rust and supports composition at build time and runtime.
+Compile in optional capabilities, supply your own tools and storage, and
+choose how the agent connects to your application.
+
+That gives you several deployment shapes:
+
+- A ready-to-run **CLI** for processing files, generating structured results
+  and automating work.
+- An **in-process Rust runtime** with typed interfaces for models, tools,
+  stores and runtime services.
+- **Python and TypeScript SDKs**, or REST, JSON-RPC and MCP APIs, for
+  applications that run agents as a service.
+- A **WebAssembly runtime** that executes the harness in the browser, with
+  model calls going to the configured provider.
+- A **small embedded configuration** or a full-featured host in a data center,
+  using the capabilities that deployment needs.
+
+The runtime and platform components are open source. You control their
+configuration, deployment and integration with the rest of your software.
+See [composability](/concepts/composability) and the
+[build profiles](/reference/capability-matrix).
+
+## Mathematically Checked Lifecycles
+
+An agent runtime has to make precise decisions around uncertain work. A tool
+can finish while cancellation is arriving. A process can restart after work
+was accepted but before completion was recorded. Several agents can contend
+for the same scheduled job.
+
+Meerkat defines critical lifecycle decisions as state machines. The same
+definitions generate TLA+ specifications and Rust kernels used in the runtime.
+Model checking verifies safety properties across the reachable states of the
+configured models. The resulting rules govern session execution, coordination,
+scheduling, authorization lifecycles and recovery.
+
+This makes the runtime's behavior explicit and checkable: which transitions
+are legal, who may commit them, and what completion means. The
+[machine authority reference](/reference/machine-authority) links the definitions,
+generated artifacts and verification process.
+
+## Native Async Execution, From One Agent To A Team
+
+Meerkat is designed around asynchronous agents and events. An agent can receive
+work from a person, another agent, a schedule or an external system. The runtime
+coordinates model calls, tool execution, interruption and completion through
+shared lifecycle rules.
+
+For a single agent, this provides a runtime you can drive from your application.
+For a team, the same foundation provides signed peer communication, explicit
+communication topology and execution across hosts. Delegated workers and
+lasting team members use the same agent machinery.
+
+See [comms](/concepts/comms), [mobs](/concepts/mobs) and
+[durable jobs](/guides/durable-jobs).
+
+## An Agent Can Outlive Its Tasks
+
+A complex task may take days. An ongoing operation needs agents that can
+finish that task, wait for new work, and keep their identity and responsibilities
+as the work changes.
+
+Meerkat separates an agent's lasting identity from its current execution.
+A member can restart or move to another host while applications continue to
+address the same identity. Durable sessions, schedules and shared work records
+provide continuity; Meta adds the agent memory and application services around
+that runtime.
+
+For example, a release coordinator can handle today's build, retain what it
+learned, and return to the next release under the same identity and policy.
+New workers can join for individual tasks. This is the operating model for
+systems intended to keep running for months.
+
+You can use this when the work calls for it. A one-shot CLI command or a small
+embedded agent can use Core directly.
+
+## Carry Application Identity And Policy Into Agent Work
+
+Applications need to distinguish who requested work, which agent executes it,
+on whose behalf it acts, and which account supplies credentials.
+
+Meerkat's authorization model represents those separately. A host can bind
+work to delegated authority, narrow permissions as work is handed on, and
+check the concrete operation against current policy. Process confinement
+controls execution access. Meta supplies application access policy and approval
+interfaces; Recall applies access control to shared knowledge.
+
+For a calendar agent, access to an account and permission to perform a specific
+calendar operation are separate decisions. The application can authorize
+reading availability on behalf of a user without granting that user every
+action the connected account could perform.
+
+The [authorization guide](/concepts/authorization) explains the contracts and
+host integration, including attribute-based policy and delegation.
+
+## A Broad Platform You Can Use In Parts
+
+Core includes tools, MCP, skills, hooks, structured output, compaction, semantic
+memory, image generation and live voice alongside execution and coordination.
+The wider platform connects these capabilities to application operations:
+
+- **[Meta](/mobkit/introduction)** supplies agent identities, memory, routing,
+  access policy and a console framework you can adapt to your application.
+- **[Connect](/connect/introduction)** lets agents find and prepare integrations,
+  using its library or researching packages for the job.
+- **[Recall](/recall/introduction)** is a knowledge system with source evidence,
+  relationships, access-controlled retrieval and maintained views.
+
+The combination lets you start at the level your problem requires. For a CLI
+workflow, that might be model choice and structured output. For an embedded
+agent, it might be the runtime, your own tools and your own storage. For an
+operational system, it can include the full platform.
+
+Start with the [quickstart](/quickstart), choose an
+[application interface](/introduction#use-it-from-anywhere), or explore
+[Meta](/mobkit/introduction) for ongoing agent applications.

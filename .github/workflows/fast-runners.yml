@@ -9,15 +9,17 @@ name: Fast runners
 # list changes, and callers resolve every lane to its GitHub-hosted runner.
 #
 # The guards below only keep ineligible runs from trying. The boundaries are
-# GitHub-signed or runner-side:
+# GitHub-signed, GitHub-enforced or runner-side:
 #   - the Workload Identity Federation provider admits only a token of an
 #     owner workflow_dispatch of an allowlisted ultrafast.yml on
-#     refs/heads/main, and the launcher identity only this file at
-#     refs/heads/main on a GitHub-hosted runner in the environment below
-#     (scripts/fast-runners wif);
-#   - up refuses unless every other writer of the repository is held behind
-#     owner code review of the pool files (scripts/fast-runners, the review
-#     precondition);
+#     refs/heads/main; the launcher identity needs this file at
+#     refs/heads/main on a GitHub-hosted runner in the meerkat-fast-runners
+#     environment, and the delete-only teardown identity the same in the
+#     meerkat-fast-teardown environment (scripts/fast-runners wif);
+#   - the main ruleset (owner code review, see DESIGN.md) guards what this
+#     file and the launcher scripts contain; up refuses while it is missing;
+#   - both jobs run the launcher scripts from exactly the commit of this file
+#     (their token's job_workflow_sha), never from main's moving tip;
 #   - each VM registers one just-in-time runner with one label unique to its
 #     lane, the run, the attempt and a nonce, and its job-started hook
 #     (scripts/fast-runners-job-started-hook) fails, before any step, every
@@ -77,8 +79,7 @@ jobs:
     timeout-minutes: 15
     # GitHub-side gate independent of this file's content: the environment's
     # deployment branch policy admits only main, and the launcher identity
-    # requires the environment claim. No required reviewers, so neither job
-    # ever waits.
+    # requires the environment claim. No required reviewers.
     environment: meerkat-fast-runners
     outputs:
       backend: ${{ steps.up.outputs.backend || steps.fallback.outputs.backend }}
@@ -93,12 +94,38 @@ jobs:
       FAST_RUNNERS_CODEOWNERS_CALLER: fast-runners-caller/.github/CODEOWNERS
       FAST_RUNNERS_CODEOWNERS_LAUNCHER: fast-runners-launcher/.github/CODEOWNERS
     steps:
-      # The launcher always comes from Core's main, also for Meta's calls.
+      # The launcher scripts come from exactly the commit of this workflow
+      # file (the job_workflow_sha of this job's GitHub-signed token), never
+      # from main's current tip, and that commit must be on main.
+      - name: Resolve the launcher commit
+        id: launcher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          token="$(curl -fsS -H @<(printf 'Authorization: bearer %s\n' "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}") \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=meerkat-fast-runners-launcher" |
+            python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+          sha="$(printf '%s' "${token}" | python3 -c '
+          import base64, json, sys
+          part = sys.stdin.read().split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+          if claims.get("job_workflow_ref") != "lukacf/meerkat/.github/workflows/fast-runners.yml@refs/heads/main":
+              sys.exit("this job does not run the launcher at refs/heads/main")
+          print(claims["job_workflow_sha"])')"
+          [[ "${sha}" =~ ^[0-9a-f]{40}$ ]]
+          status="$(gh api "repos/lukacf/meerkat/compare/${sha}...main" --jq .status)"
+          if [[ "${status}" != "identical" && "${status}" != "ahead" ]]; then
+            echo "::error::launcher commit ${sha} is not on main (${status})"
+            exit 1
+          fi
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Check out the launcher
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: lukacf/meerkat
-          ref: main
+          ref: ${{ steps.launcher.outputs.sha }}
           path: fast-runners-launcher
           persist-credentials: false
           sparse-checkout: |
@@ -108,7 +135,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       # The calling repository's CODEOWNERS at the dispatched commit, for the
-      # review precondition.
+      # review tripwire.
       - name: Check out the caller's CODEOWNERS
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -162,20 +189,45 @@ jobs:
           && (github.repository == 'lukacf/meerkat' || github.repository == 'lukacf/meerkat-meta') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment: meerkat-fast-runners
+    # Its own environment selects the delete-only teardown identity: no KMS,
+    # no App key, no create.
+    environment: meerkat-fast-teardown
     env:
       MEERKAT_FAST_RUNNERS_ENABLED: ${{ vars.MEERKAT_FAST_RUNNERS_ENABLED }}
-      MEERKAT_FAST_RUNNERS_APP_ID: ${{ vars.MEERKAT_FAST_RUNNERS_APP_ID }}
       MEERKAT_FAST_RUNNERS_PROJECT: ${{ vars.MEERKAT_FAST_RUNNERS_PROJECT }}
       FAST_RUNNERS_BACKEND: ${{ inputs.backend }}
       FAST_RUNNERS_SPEC: ${{ inputs.runners }}
       FAST_RUNNERS_UP_BACKEND: ${{ inputs.up_backend }}
     steps:
+      - name: Resolve the launcher commit
+        id: launcher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          token="$(curl -fsS -H @<(printf 'Authorization: bearer %s\n' "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}") \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=meerkat-fast-runners-launcher" |
+            python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+          sha="$(printf '%s' "${token}" | python3 -c '
+          import base64, json, sys
+          part = sys.stdin.read().split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+          if claims.get("job_workflow_ref") != "lukacf/meerkat/.github/workflows/fast-runners.yml@refs/heads/main":
+              sys.exit("this job does not run the launcher at refs/heads/main")
+          print(claims["job_workflow_sha"])')"
+          [[ "${sha}" =~ ^[0-9a-f]{40}$ ]]
+          status="$(gh api "repos/lukacf/meerkat/compare/${sha}...main" --jq .status)"
+          if [[ "${status}" != "identical" && "${status}" != "ahead" ]]; then
+            echo "::error::launcher commit ${sha} is not on main (${status})"
+            exit 1
+          fi
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Check out the launcher
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: lukacf/meerkat
-          ref: main
+          ref: ${{ steps.launcher.outputs.sha }}
           path: fast-runners-launcher
           persist-credentials: false
           sparse-checkout: |
@@ -183,11 +235,11 @@ jobs:
             scripts/fast-runners-job-started-hook
           sparse-checkout-cone-mode: false
 
-      - name: Authenticate to GCP as the fast-runner launcher
+      - name: Authenticate to GCP as the teardown identity
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ vars.MEERKAT_FAST_RUNNERS_WIF_PROVIDER }}
-          service_account: ${{ vars.MEERKAT_FAST_RUNNERS_LAUNCHER_SA }}
+          service_account: ${{ vars.MEERKAT_FAST_RUNNERS_TEARDOWN_SA }}
 
       # Deletes by the deterministic names up uses, so it also cleans up
       # after an up that failed or was cancelled half way. The VMs' GCE

@@ -36,15 +36,22 @@ command -v python3 >/dev/null 2>&1 || refuse "python3 is missing on this runner"
 python3 - "${policy}" <<'PY'
 import json
 import os
+import stat
 import sys
 
 REFUSED = "::error title=Fast runner refused this job::"
+POLICY_OWNER_UID = 0  # the policy must be root-owned and writable by its owner only
 
 
 def refuse(message):
     print(REFUSED + message)
     sys.exit(1)
 
+
+info = os.stat(sys.argv[1])
+if info.st_uid != POLICY_OWNER_UID or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    refuse(f"runner policy must be owned by uid {POLICY_OWNER_UID} and not group/other-writable "
+           f"(uid {info.st_uid}, mode {stat.S_IMODE(info.st_mode):o})")
 
 policy = {}
 with open(sys.argv[1], encoding="utf-8") as handle:

@@ -126,6 +126,7 @@ jobs:
           FAST_RUNNERS_SPEC: '[{"lane":"workspace-lib","class":"x64-xl"}]'
           FAST_RUNNERS_REQUESTED: ${{ inputs.backend || 'auto' }}
           FAST_RUNNERS_UP_BACKEND: ${{ needs.fast-up.outputs.backend }}
+          FAST_RUNNERS_UP_ATTEMPT: ${{ needs.fast-up.outputs.attempt }}
           FAST_RUNNERS_RUNS_ON: ${{ needs.fast-up.outputs.runs_on }}
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/fast-runners verify-lanes

@@ -259,8 +259,16 @@ else
   bad "repo-cargo does not resolve stable pinned Rust toolchain wrappers"
 fi
 
+# setup-rust-ci may name the pinned toolchain by ref, or pin the action to a
+# commit SHA and pass the pinned toolchain explicitly.
+setup_rust_ci_toolchain_pinned() {
+  grep -Fq "dtolnay/rust-toolchain@${rust_channel}" .github/actions/setup-rust-ci/action.yml ||
+    { grep -Eq 'uses: dtolnay/rust-toolchain@[0-9a-f]{40}( |$)' .github/actions/setup-rust-ci/action.yml &&
+      grep -Eq "^ +toolchain: ${rust_channel//./\\.}$" .github/actions/setup-rust-ci/action.yml; }
+}
+
 if [[ -n "${rust_channel}" ]] &&
-  grep -Fq "dtolnay/rust-toolchain@${rust_channel}" .github/actions/setup-rust-ci/action.yml &&
+  setup_rust_ci_toolchain_pinned &&
   grep -Fq "dtolnay/rust-toolchain@${rust_channel}" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq "uses: ./.github/actions/setup-rust-ci" .github/workflows/cargo.yml &&
   ! grep -Fq 'dtolnay/rust-toolchain@stable' .github/workflows/cargo.yml &&

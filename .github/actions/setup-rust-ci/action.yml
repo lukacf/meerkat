@@ -11,8 +11,12 @@ runs:
   using: composite
   steps:
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@1.94.1
+      # Pinned to the commit of dtolnay/rust-toolchain's 1.94.1 ref (the
+      # owner-only fast-runner pool runs only SHA-pinned third-party actions);
+      # the toolchain is therefore named explicitly.
+      uses: dtolnay/rust-toolchain@b31b393ee3a9000c6a2886412d0787436f5b6d2d # 1.94.1
       with:
+        toolchain: 1.94.1
         # The CI lanes run fmt/clippy directly; the dtolnay action installs a
         # minimal profile, so name the components explicitly.
         components: ${{ inputs.components }}

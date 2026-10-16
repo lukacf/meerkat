@@ -90,7 +90,7 @@ fn normalized_for_redaction(raw: &str) -> (String, bool) {
     (normalized, source_truncated)
 }
 
-fn is_ascii_word_byte(byte: u8) -> bool {
+pub(crate) fn is_ascii_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
 }
 
@@ -123,7 +123,7 @@ fn ascii_key_at(input: &str, start: usize) -> Option<usize> {
     })
 }
 
-fn bearer_at(input: &str, start: usize) -> Option<usize> {
+pub(crate) fn bearer_at(input: &str, start: usize) -> Option<usize> {
     let bytes = input.as_bytes();
     let end = start.checked_add("bearer".len())?;
     let candidate = bytes.get(start..end)?;
@@ -156,7 +156,7 @@ fn provider_credential_prefix_at(input: &str, start: usize) -> bool {
         .any(|prefix| tail.starts_with(prefix.as_bytes()))
 }
 
-fn assignment_value_start(input: &str, key_end: usize) -> Option<usize> {
+pub(crate) fn assignment_value_start(input: &str, key_end: usize) -> Option<usize> {
     let bytes = input.as_bytes();
     let mut cursor = key_end;
     if bytes
@@ -215,7 +215,7 @@ fn secret_value_end(input: &str, start: usize) -> (usize, Option<u8>) {
     (cursor, None)
 }
 
-fn push_redacted_value(output: &mut String, input: &str, start: usize) -> usize {
+pub(crate) fn push_redacted_value(output: &mut String, input: &str, start: usize) -> usize {
     let (end, quote) = secret_value_end(input, start);
     if let Some(quote) = quote {
         output.push(char::from(quote));
@@ -417,6 +417,38 @@ impl PanicPayloadLogGate {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Pins this boundary's exact output, byte for byte, for a fixed corpus:
+    /// the line-preserving diagnostic redaction in `crate::redact` shares
+    /// this module's scanner and must not change what `panic_safe_detail`
+    /// returns (its over-redaction of `task-runner` included).
+    #[test]
+    fn panic_safe_detail_output_is_pinned() {
+        let long = "x".repeat(600);
+        let long_expected = format!("{}{TRUNCATION_MARKER}", "x".repeat(509));
+        let corpus: [(&str, &str); 8] = [
+            ("boom", "boom"),
+            (
+                "Authorization: Bearer abc.def",
+                "Authorization: Bearer [REDACTED]",
+            ),
+            (
+                r"api_key=xyz secret: 'q\'w' tail",
+                "api_key=[REDACTED] secret: '[REDACTED]' tail",
+            ),
+            ("task-runner", "ta[REDACTED]"),
+            ("a\n\tb", "a b"),
+            ("token = \"abc\" done", "token = \"[REDACTED]\" done"),
+            (
+                "see ghp_ABCDEF and AKIA123",
+                "see [REDACTED] and [REDACTED]",
+            ),
+            (&long, &long_expected),
+        ];
+        for (input, expected) in corpus {
+            assert_eq!(panic_safe_detail(input), expected, "{input:?}");
+        }
+    }
 
     #[test]
     fn payload_detail_recovers_str_string_and_degrades_other_types() {

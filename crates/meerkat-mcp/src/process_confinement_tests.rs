@@ -652,4 +652,73 @@ done
             Some(CustodyNotHeld::ClosedElsewhere)
         );
     }
+
+    /// A confined server's stderr is a fresh pipe its custody drains into
+    /// the attempt's own record: the failure is classified, the tail holds
+    /// the server's output, and the returned error never carries it.
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+    )]
+    async fn confined_mcp_stderr_reaches_only_its_attempt_tail() {
+        const SENTINEL: &str = "CONFINED-STDERR-SENTINEL-c0f1";
+        let fixture = Fixture::new();
+        let profile = fixture.profile();
+        assert!(profile.capabilities().unwrap().is_some());
+        let config = McpServerConfig::stdio(
+            "confined-stderr",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                format!("printf 'confined failure {SENTINEL}\\n' >&2; exit 7"),
+            ],
+            HashMap::new(),
+        );
+        let record = crate::stdio_diagnostics::StdioAttemptRecord::new();
+        let custody = StdioChildCustody::default().with_diagnostics(Arc::downgrade(&record));
+        let result = tokio::time::timeout(
+            BOUND,
+            McpConnection::connect_and_enumerate_with_custody(
+                &config,
+                McpAuthMode::Stored,
+                None,
+                None,
+                Some(custody.clone()),
+                &profile,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        let Err(error) = result else {
+            panic!("the server exits before initialize");
+        };
+        assert!(!error.to_string().contains(SENTINEL), "{error}");
+        let (phase, class) = record.failure().expect("the failure is classified");
+        assert_eq!(
+            phase,
+            meerkat_core::mcp_attachment::McpStdioSetupPhase::Initialize
+        );
+        assert!(
+            matches!(
+                class,
+                meerkat_core::mcp_attachment::McpStdioSetupFailureClass::Closed { .. }
+            ),
+            "{class:?}"
+        );
+        let tail = tokio::time::timeout(BOUND, async {
+            loop {
+                if let Some(tail) = record.stderr_tail()
+                    && tail.text.contains(SENTINEL)
+                {
+                    return tail;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the confined stderr reaches the attempt tail");
+        assert!(tail.text.contains("confined failure"), "{tail:?}");
+    }
 }

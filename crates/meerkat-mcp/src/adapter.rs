@@ -889,6 +889,71 @@ impl McpRouterAdapter {
         }
     }
 
+    /// Host status: the typed setup failure of `server`'s latest failed
+    /// stdio attempt that this router still retains
+    /// ([`meerkat_core::mcp_attachment::McpStdioSetupFailure`]): the failure
+    /// behind that server's latest `Failed` lifecycle notice. Host Rust API
+    /// only; it carries no server text.
+    ///
+    /// The router retains at most one failed attempt per server, from its
+    /// accepted failure until the next attempt for the server is admitted,
+    /// the next accepted completion, its removal, its connection's close,
+    /// shutdown, or the router's drop; `None` after any of those, or when
+    /// the latest failure was not a classified stdio setup failure. It
+    /// reflects results already drained by the normal lifecycle polling and
+    /// drains nothing itself.
+    pub async fn stdio_setup_failure(
+        &self,
+        server: &str,
+    ) -> Option<meerkat_core::mcp_attachment::McpStdioSetupFailure> {
+        self.router
+            .read()
+            .await
+            .as_ref()?
+            .stdio_setup_failure(server)
+    }
+
+    /// Host status: the bounded, redacted stderr tail of the same retained
+    /// attempt as [`Self::stdio_setup_failure`], under the same retention.
+    ///
+    /// SENSITIVE: host and operator only, never model context, events or
+    /// untrusted clients; redaction is defence in depth only
+    /// ([`meerkat_core::mcp_attachment::McpStdioStderrTail`]).
+    pub async fn stdio_stderr_tail(
+        &self,
+        server: &str,
+    ) -> Option<meerkat_core::mcp_attachment::McpStdioStderrTail> {
+        self.router
+            .read()
+            .await
+            .as_ref()?
+            .stdio_stderr_tail(server, None)
+    }
+
+    /// The retained stderr tail of `server`'s exact failed `attempt`, for
+    /// that attempt's observer; `None` once released or the router is gone.
+    pub(crate) async fn stdio_stderr_tail_of(
+        &self,
+        server: &str,
+        attempt: u64,
+    ) -> Option<meerkat_core::mcp_attachment::McpStdioStderrTail> {
+        self.router
+            .read()
+            .await
+            .as_ref()?
+            .stdio_stderr_tail(server, Some(attempt))
+    }
+
+    /// Whether the router still retains the stderr tail of `server`'s exact
+    /// failed `attempt`.
+    pub(crate) async fn retains_stdio_tail(&self, server: &str, attempt: u64) -> bool {
+        self.router
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|router| router.retains_stdio_tail(server, attempt))
+    }
+
     /// After a successful login for `target`, stage again the failed
     /// operation awaiting exactly that target ([`McpRouter::retry_authorized`]).
     /// It takes the router write lock that shutdown takes, so a router
@@ -1811,6 +1876,10 @@ impl meerkat_core::McpOperationObserver for McpRouterAdapter {
 #[cfg(test)]
 #[path = "shutdown_observer_tests.rs"]
 mod shutdown_observer_tests;
+
+#[cfg(all(test, unix))]
+#[path = "stdio_diagnostics_tests.rs"]
+mod stdio_diagnostics_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

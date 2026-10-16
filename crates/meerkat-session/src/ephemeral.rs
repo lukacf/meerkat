@@ -1715,6 +1715,24 @@ impl meerkat_core::mcp_attachment::McpAttachmentAttemptObserver for ActorBoundAt
         let readiness = self.inner.wait(tool, timeout).await;
         self.current(readiness)
     }
+
+    async fn setup_failure(&self) -> Option<meerkat_core::mcp_attachment::McpStdioSetupFailure> {
+        if !self.actor.is_live() {
+            return None;
+        }
+        let failure = self.inner.setup_failure().await;
+        self.actor.is_live().then_some(failure).flatten()
+    }
+
+    /// Host and operator only, never model context
+    /// ([`meerkat_core::mcp_attachment::McpStdioStderrTail`]).
+    async fn stderr_tail(&self) -> Option<meerkat_core::mcp_attachment::McpStdioStderrTail> {
+        if !self.actor.is_live() {
+            return None;
+        }
+        let tail = self.inner.stderr_tail().await;
+        self.actor.is_live().then_some(tail).flatten()
+    }
 }
 
 #[cfg(test)]
@@ -1722,7 +1740,8 @@ mod actor_bound_attempt_tests {
     use super::*;
     use meerkat_core::mcp_attachment::{
         LiveMcpAttachmentReceipt, McpAttachmentAttempt, McpAttachmentAttemptObserver,
-        McpAttachmentOutcome, McpAttachmentReadiness,
+        McpAttachmentOutcome, McpAttachmentReadiness, McpStdioSetupFailure,
+        McpStdioSetupFailureClass, McpStdioSetupPhase, McpStdioStderrTail,
     };
 
     /// Always usable; revokes `revoke_during` while it reads, when set.
@@ -1749,6 +1768,22 @@ mod actor_bound_attempt_tests {
 
         async fn wait(&self, _tool: &str, _timeout: std::time::Duration) -> McpAttachmentReadiness {
             self.answer()
+        }
+
+        async fn setup_failure(&self) -> Option<McpStdioSetupFailure> {
+            self.answer();
+            Some(McpStdioSetupFailure::new(
+                "tools",
+                3,
+                McpStdioSetupPhase::Initialize,
+                McpStdioSetupFailureClass::TimedOut,
+                true,
+            ))
+        }
+
+        async fn stderr_tail(&self) -> Option<McpStdioStderrTail> {
+            self.answer();
+            Some(McpStdioStderrTail::new("tail".to_string(), 4, false, true))
         }
     }
 
@@ -1819,6 +1854,37 @@ mod actor_bound_attempt_tests {
                 .await,
             McpAttachmentReadiness::NotCurrent
         );
+    }
+
+    /// The attempt's setup failure and stderr tail are forwarded only while
+    /// the attaching actor is live, checked before and after each read.
+    #[tokio::test]
+    async fn setup_diagnostics_answer_only_while_the_attaching_actor_is_live() {
+        let live = actor();
+        let receipt = bound(&live, None);
+        assert_eq!(
+            receipt
+                .attempt
+                .setup_failure()
+                .await
+                .map(|failure| failure.attempt),
+            Some(3)
+        );
+        assert_eq!(
+            receipt.attempt.stderr_tail().await.map(|tail| tail.text),
+            Some("tail".to_string())
+        );
+        live.revoke();
+        assert!(receipt.attempt.setup_failure().await.is_none());
+        assert!(receipt.attempt.stderr_tail().await.is_none());
+
+        // Replaced while the read was in flight: caught after it.
+        let replaced = actor();
+        let receipt = bound(&replaced, Some(replaced.clone()));
+        assert!(receipt.attempt.setup_failure().await.is_none());
+        let replaced = actor();
+        let receipt = bound(&replaced, Some(replaced.clone()));
+        assert!(receipt.attempt.stderr_tail().await.is_none());
     }
 }
 

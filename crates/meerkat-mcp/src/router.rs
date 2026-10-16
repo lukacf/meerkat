@@ -131,10 +131,35 @@ pub struct McpApplyResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AttemptState {
     Pending,
-    Installed { connection_generation: u64 },
+    Installed {
+        connection_generation: u64,
+    },
     Rejected(String),
-    Failed(String),
+    /// The attempt failed: its detail, and the typed stdio setup failure its
+    /// transport established, if any. The class has no server text and
+    /// stays with the attempt; its stderr tail is retained by the router
+    /// only (see [`McpRouter::stdio_stderr_tail`]).
+    Failed {
+        detail: String,
+        failure: Option<meerkat_core::mcp_attachment::McpStdioSetupFailure>,
+    },
     Superseded,
+}
+
+impl AttemptState {
+    fn failed(detail: impl Into<String>) -> Self {
+        Self::Failed {
+            detail: detail.into(),
+            failure: None,
+        }
+    }
+}
+
+/// The one failed stdio attempt a router retains per server: its typed
+/// failure and its diagnostics record (with the stderr tail).
+struct RetainedStdioFailure {
+    failure: meerkat_core::mcp_attachment::McpStdioSetupFailure,
+    record: Arc<crate::stdio_diagnostics::StdioAttemptRecord>,
 }
 
 pub(crate) type AttemptSender = tokio::sync::watch::Sender<AttemptState>;
@@ -1471,6 +1496,18 @@ pub struct McpRouter {
     /// `shutdown` terminates it and observes its exit even when the attempt is
     /// aborted mid-handshake.
     pending_child_custody: HashMap<(String, u64), StdioChildCustody>,
+    /// The setup diagnostics of every stdio connect attempt whose result
+    /// the router has not processed yet, keyed like
+    /// `pending_child_custody`: their only strong owner while in flight.
+    pending_stdio_diagnostics:
+        HashMap<(String, u64), Arc<crate::stdio_diagnostics::StdioAttemptRecord>>,
+    /// Host status: per server, the latest accepted stdio setup failure the
+    /// transport classified, with its stderr tail. At most one per server,
+    /// from its accepted failure until the next attempt for the server is
+    /// admitted, the next accepted completion, its removal, its
+    /// connection's close, shutdown or the router's drop. Never projected
+    /// to the agent.
+    failed_stdio_attempts: HashMap<String, RetainedStdioFailure>,
     /// Connection closes the router started (remove, reload, replace, and
     /// rejected completions). Finished closes are reaped on each effect pass;
     /// `shutdown` joins the rest, so every closed server has exited by the
@@ -1883,6 +1920,8 @@ impl McpRouter {
             pending_obligations: HashMap::new(),
             connect_tasks: tokio::task::JoinSet::new(),
             pending_child_custody: HashMap::new(),
+            pending_stdio_diagnostics: HashMap::new(),
+            failed_stdio_attempts: HashMap::new(),
             closing: tokio::task::JoinSet::new(),
             closing_servers: HashMap::new(),
             indexed_closes: std::collections::HashSet::new(),
@@ -2300,6 +2339,8 @@ impl McpRouter {
         );
         // An accepted removal withdraws any pending human-authorization ask.
         self.awaiting_authorization.remove(&server_name);
+        // And releases the server's retained setup failure and stderr tail.
+        self.failed_stdio_attempts.remove(&server_name);
         Ok(())
     }
 
@@ -2564,6 +2605,7 @@ impl McpRouter {
                         entry.connection.take()
                     });
                     self.spawn_close(surface_id.0.clone(), conn);
+                    self.failed_stdio_attempts.remove(&surface_id.0);
                     // K14: the close effect comes from an already-accepted
                     // surface transition, so it must execute; a rejected
                     // lifecycle mirror apply propagates as a typed Failed
@@ -2602,7 +2644,7 @@ impl McpRouter {
         // leaves its attempt nothing to wait for.
         resolve_attempt(
             attempt.as_ref(),
-            AttemptState::Failed("the accepted boundary scheduled no connection".to_string()),
+            AttemptState::failed("the accepted boundary scheduled no connection"),
         );
     }
 
@@ -2616,6 +2658,8 @@ impl McpRouter {
     ) {
         let server_name = config.name.clone();
         let refused = self.refused_payloads.remove(&server_name);
+        // A newer attempt for the server supersedes its retained failure.
+        self.failed_stdio_attempts.remove(&server_name);
         if let Some(attempt) = attempt {
             self.pending_attempts.insert(
                 (server_name.clone(), obligation.pending_task_sequence),
@@ -2638,11 +2682,21 @@ impl McpRouter {
             client: client_custody,
             stop,
             end,
+            diagnostics,
         } = self.close_index.admit(
             &obligation.surface_id,
             matches!(config.transport, McpTransportConfig::Stdio(_))
                 .then_some(self.stdio_close_bounds),
         );
+        if let Some(record) = diagnostics {
+            self.pending_stdio_diagnostics.insert(
+                (
+                    obligation.surface_id.clone(),
+                    obligation.pending_task_sequence,
+                ),
+                record,
+            );
+        }
         if let Some(custody) = &stdio_custody {
             self.pending_child_custody.insert(
                 (
@@ -2785,6 +2839,11 @@ impl McpRouter {
         let attempt_custody = self
             .pending_child_custody
             .remove(&(server_name.clone(), obligation.pending_task_sequence));
+        // A success or a stale result drops it here; only an accepted
+        // failure keeps it.
+        let attempt_diagnostics = self
+            .pending_stdio_diagnostics
+            .remove(&(server_name.clone(), obligation.pending_task_sequence));
         match result {
             Ok((conn, tools)) => {
                 let tool_count = tools.len();
@@ -2803,6 +2862,7 @@ impl McpRouter {
                         // The owner accepted this attempt's success: any
                         // authorization ask for the server is answered.
                         self.awaiting_authorization.remove(&server_name);
+                        self.failed_stdio_attempts.remove(&server_name);
                         let Some(operation) = lifecycle_operation_from_effects(
                             &transition.effects,
                             SurfaceDeltaPhase::Applied,
@@ -2813,8 +2873,8 @@ impl McpRouter {
                             );
                             resolve_attempt(
                                 attempt.as_ref(),
-                                AttemptState::Failed(
-                                    "the accepted connection carried no applied delta".to_string(),
+                                AttemptState::failed(
+                                    "the accepted connection carried no applied delta",
                                 ),
                             );
                             return None;
@@ -2831,7 +2891,7 @@ impl McpRouter {
                         if let Err(error) = self.notify_lifecycle_connected(&server_name) {
                             resolve_attempt(
                                 attempt.as_ref(),
-                                AttemptState::Failed(error.to_string()),
+                                AttemptState::failed(error.to_string()),
                             );
                             self.spawn_close(server_name.clone(), Some(conn));
                             self.completed_updates.push_back(CompletedLifecycleUpdate {
@@ -2935,8 +2995,39 @@ impl McpRouter {
                 ) {
                     Ok(transition) => {
                         self.pending_obligations.remove(&server_name);
-                        resolve_attempt(attempt.as_ref(), AttemptState::Failed(err.to_string()));
+                        let stdio_failure = attempt_diagnostics.and_then(|record| {
+                            let (phase, class) = record.failure()?;
+                            Some(RetainedStdioFailure {
+                                failure: meerkat_core::mcp_attachment::McpStdioSetupFailure::new(
+                                    server_name.clone(),
+                                    obligation.pending_task_sequence,
+                                    phase,
+                                    class,
+                                    record.captured(),
+                                ),
+                                record,
+                            })
+                        });
+                        resolve_attempt(
+                            attempt.as_ref(),
+                            AttemptState::Failed {
+                                detail: err.to_string(),
+                                failure: stdio_failure
+                                    .as_ref()
+                                    .map(|retained| retained.failure.clone()),
+                            },
+                        );
                         self.record_accepted_failure(&server_name, &err, config, &obligation);
+                        // The latest accepted failure is the one retained.
+                        match stdio_failure {
+                            Some(retained) => {
+                                self.failed_stdio_attempts
+                                    .insert(server_name.clone(), retained);
+                            }
+                            None => {
+                                self.failed_stdio_attempts.remove(&server_name);
+                            }
+                        }
                         let Some(operation) = lifecycle_operation_from_effects(
                             &transition.effects,
                             SurfaceDeltaPhase::Failed,
@@ -3019,6 +3110,43 @@ impl McpRouter {
             .values()
             .map(|awaiting| awaiting.target.clone())
             .collect()
+    }
+
+    /// The typed setup failure of `server`'s retained failed stdio attempt
+    /// (see `failed_stdio_attempts`): host status, never projected to the
+    /// agent. It reflects results already drained and drains nothing.
+    pub(crate) fn stdio_setup_failure(
+        &self,
+        server: &str,
+    ) -> Option<meerkat_core::mcp_attachment::McpStdioSetupFailure> {
+        self.failed_stdio_attempts
+            .get(server)
+            .map(|retained| retained.failure.clone())
+    }
+
+    /// The redacted stderr tail of `server`'s retained failed stdio attempt,
+    /// when it is that exact `attempt` (any attempt for `None`). SENSITIVE:
+    /// host and operator only.
+    pub(crate) fn stdio_stderr_tail(
+        &self,
+        server: &str,
+        attempt: Option<u64>,
+    ) -> Option<meerkat_core::mcp_attachment::McpStdioStderrTail> {
+        let retained = self.failed_stdio_attempts.get(server)?;
+        if attempt.is_some_and(|attempt| attempt != retained.failure.attempt) {
+            return None;
+        }
+        retained.record.stderr_tail()
+    }
+
+    /// Whether the router still retains the stderr tail of `server`'s exact
+    /// failed `attempt`.
+    pub(crate) fn retains_stdio_tail(&self, server: &str, attempt: u64) -> bool {
+        self.failed_stdio_attempts
+            .get(server)
+            .is_some_and(|retained| {
+                retained.failure.attempt == attempt && retained.record.captured()
+            })
     }
 
     /// Record the authorization outcome of a failure the surface owner just
@@ -3475,6 +3603,7 @@ impl McpRouter {
             client: client_custody,
             stop,
             end,
+            diagnostics: _diagnostics,
         } = self.close_index.admit(
             &server_name,
             matches!(config.transport, McpTransportConfig::Stdio(_))
@@ -4567,6 +4696,8 @@ impl McpRouter {
         self.completed_updates.clear();
         self.staged_payloads.clear();
         self.awaiting_authorization.clear();
+        self.failed_stdio_attempts.clear();
+        self.pending_stdio_diagnostics.clear();
         self.staged_controls.clear();
         self.staged_attempts.clear();
         self.pending_attempts.clear();

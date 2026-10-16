@@ -188,6 +188,169 @@ pub trait McpAttachmentAttemptObserver: Send + Sync {
     /// The timeout bounds the observation only: it cancels nothing, and
     /// `Pending` after it is a local not-ready answer.
     async fn wait(&self, tool: &str, timeout: std::time::Duration) -> McpAttachmentReadiness;
+
+    /// The typed setup failure of this attempt, when it failed as a stdio
+    /// server launch, handshake or tool discovery the transport could
+    /// classify ([`McpStdioSetupFailure`]). Host and operator facing; it
+    /// carries no server text. `None` when the attempt did not fail that way,
+    /// has not resolved, or the observer cannot tell.
+    async fn setup_failure(&self) -> Option<McpStdioSetupFailure> {
+        None
+    }
+
+    /// The bounded, redacted tail of this exact attempt's stderr, while the
+    /// attaching router still retains it ([`McpStdioStderrTail`]).
+    ///
+    /// SENSITIVE and host or operator only: see [`McpStdioStderrTail`]. It
+    /// must never be placed in model context. `None` once the attempt is
+    /// superseded or retired, the router is gone, or no tail was captured.
+    async fn stderr_tail(&self) -> Option<McpStdioStderrTail> {
+        None
+    }
+}
+
+/// The stage of a stdio MCP server's setup that a failure happened in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum McpStdioSetupPhase {
+    /// Before the server process existed: launch preparation and the spawn.
+    Launch,
+    /// The process existed and the initialize handshake had not completed.
+    Initialize,
+    /// The handshake completed and the server's tools were being listed and
+    /// checked.
+    ToolDiscovery,
+}
+
+/// How a stdio MCP server process ended, as its own exit (see
+/// [`McpStdioSetupFailureClass::Closed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum McpStdioExit {
+    /// It exited with this status code.
+    Code(i32),
+    /// It was terminated by this signal number (Unix only).
+    Signal(i32),
+}
+
+/// What the transport established about a failed stdio MCP server setup. A
+/// class is set only where the transport can prove it; anything else is
+/// [`Self::Unknown`], never a guess. No variant carries server text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum McpStdioSetupFailureClass {
+    /// The server process could not be started: the spawn itself failed, or
+    /// the started process lacked its protocol pipes. Confinement and other
+    /// typed refusals before the spawn keep their own typed errors and are
+    /// not reported here.
+    SpawnFailed,
+    /// The server's side of the protocol pipes closed: its stdout ended, or
+    /// a write to its stdin found the pipe broken. `exit` is the server's own
+    /// exit status when the close of its process proved it exited before any
+    /// escalation; `None` when that could not be established (for example on
+    /// macOS, where the exit cannot be observed without reaping it).
+    Closed { exit: Option<McpStdioExit> },
+    /// The server answered with a JSON-RPC error; `code` is its error code
+    /// (`-32601` is "method not found"). The error message is not carried.
+    Rejected { code: i32 },
+    /// The server answered, but not with a valid response: an unexpected
+    /// result, a conflicting response id, or an unreadable or oversized
+    /// frame.
+    ProtocolError,
+    /// The setup's deadline expired during the reported phase.
+    TimedOut,
+    /// The setup failed in a way the transport did not classify.
+    Unknown,
+}
+
+/// The typed failure of one stdio MCP server setup attempt: the exact server
+/// and attempt, the phase it failed in, and what the transport established.
+/// Host and operator facing; it carries no server text, so it contains no
+/// server output, paths or secrets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct McpStdioSetupFailure {
+    /// The server name.
+    pub server: String,
+    /// The attaching router's sequence for this exact attempt.
+    pub attempt: u64,
+    pub phase: McpStdioSetupPhase,
+    pub class: McpStdioSetupFailureClass,
+    /// Whether the router still retains this attempt's stderr tail
+    /// ([`McpAttachmentAttemptObserver::stderr_tail`]).
+    pub stderr_tail_retained: bool,
+}
+
+impl McpStdioSetupFailure {
+    #[must_use]
+    pub fn new(
+        server: impl Into<String>,
+        attempt: u64,
+        phase: McpStdioSetupPhase,
+        class: McpStdioSetupFailureClass,
+        stderr_tail_retained: bool,
+    ) -> Self {
+        Self {
+            server: server.into(),
+            attempt,
+            phase,
+            class,
+            stderr_tail_retained,
+        }
+    }
+}
+
+/// The bounded tail of one stdio MCP server setup attempt's stderr.
+///
+/// SENSITIVE. Server stderr is arbitrary process output: it can contain
+/// secrets, host paths, headers and other host details. A redaction pass for
+/// obvious secret shapes and for the attempt's own launch environment values
+/// has run over `text`, but redaction is defence in depth only and does not
+/// make arbitrary stderr safe. Show it only to the host or its operator,
+/// under the host's current authority; never place it in model context,
+/// events or messages that reach the model or untrusted clients. Its `Debug`
+/// prints sizes only.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct McpStdioStderrTail {
+    /// The newest retained bytes as lossy UTF-8, redacted, with control
+    /// characters (C0, DEL and C1) other than line feed and tab removed, so
+    /// it carries no terminal escape sequences. When earlier bytes were
+    /// dropped it starts after the first line break past the cut (or after
+    /// the first whitespace when the retained bytes hold no line break), so
+    /// nothing cut at the edge is shown in part, and a private key cut at
+    /// the edge is redacted up to its END marker.
+    pub text: String,
+    /// The bytes the server wrote to stderr while it was captured.
+    pub total_bytes: u64,
+    /// Whether earlier bytes were dropped because of the size bound.
+    pub truncated: bool,
+    /// Whether the capture reached the end of the stream (every writer
+    /// closed it) rather than stopping at its bound after the process ended.
+    pub complete: bool,
+}
+
+impl McpStdioStderrTail {
+    #[must_use]
+    pub fn new(text: String, total_bytes: u64, truncated: bool, complete: bool) -> Self {
+        Self {
+            text,
+            total_bytes,
+            truncated,
+            complete,
+        }
+    }
+}
+
+impl std::fmt::Debug for McpStdioStderrTail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpStdioStderrTail")
+            .field("text_bytes", &self.text.len())
+            .field("total_bytes", &self.total_bytes)
+            .field("truncated", &self.truncated)
+            .field("complete", &self.complete)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The exact attempt one live attachment started on its member's router.
@@ -236,6 +399,17 @@ impl McpAttachmentAttempt {
     /// See [`McpAttachmentAttemptObserver::wait`].
     pub async fn wait(&self, tool: &str, timeout: std::time::Duration) -> McpAttachmentReadiness {
         self.observer.wait(tool, timeout).await
+    }
+
+    /// See [`McpAttachmentAttemptObserver::setup_failure`].
+    pub async fn setup_failure(&self) -> Option<McpStdioSetupFailure> {
+        self.observer.setup_failure().await
+    }
+
+    /// See [`McpAttachmentAttemptObserver::stderr_tail`]. SENSITIVE: host and
+    /// operator only, never model context ([`McpStdioStderrTail`]).
+    pub async fn stderr_tail(&self) -> Option<McpStdioStderrTail> {
+        self.observer.stderr_tail().await
     }
 }
 

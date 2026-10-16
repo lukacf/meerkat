@@ -51,6 +51,9 @@ impl Default for McpStdioLaunchProfile {
 impl McpStdioLaunchProfile {
     /// Preserve the legacy host-managed process boundary, including ambient
     /// environment inheritance. This is an explicit absence of OS confinement.
+    /// The server's stderr is drained by its custody and written on to this
+    /// process's own stderr, as an inherited stderr showed it; the newest
+    /// bytes are also kept as the attempt's host-only stderr tail.
     #[must_use]
     pub fn trusted_host() -> Self {
         Self {
@@ -62,9 +65,13 @@ impl McpStdioLaunchProfile {
     /// directory. No rule is weakened when compilation or path validation fails.
     /// Hosts can inspect [`Self::capabilities`] before admitting a required
     /// deployment; optional unavailable servers instead fail their own launch.
-    /// Required stdio launches discard server diagnostics through null stderr.
-    /// They neither inherit a host diagnostic descriptor nor retain an unread
-    /// diagnostic pipe. MCP protocol stdin and stdout remain piped.
+    /// A required stdio launch's stderr is a fresh pipe its custody drains
+    /// continuously and bounds: never a host diagnostic descriptor, never
+    /// forwarded to the host's stderr, never left unread while the process
+    /// is held. Only the newest bytes are kept, as the attempt's host-only
+    /// stderr tail. Shortly after the process is gone the drain closes its
+    /// end, so a descendant still writing to stderr then gets `EPIPE` (or
+    /// `SIGPIPE`). MCP protocol stdin and stdout remain piped.
     #[must_use]
     pub fn required(requirement: ExecutionConfinement, working_directory: PathBuf) -> Self {
         let compiled = CompiledConfinement::compile(&requirement).and_then(|compiled| {

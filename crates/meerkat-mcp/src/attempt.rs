@@ -3,7 +3,9 @@
 
 use std::sync::Weak;
 
-use meerkat_core::mcp_attachment::{McpAttachmentAttemptObserver, McpAttachmentReadiness};
+use meerkat_core::mcp_attachment::{
+    McpAttachmentAttemptObserver, McpAttachmentReadiness, McpStdioSetupFailure, McpStdioStderrTail,
+};
 
 use crate::McpRouterAdapter;
 use crate::router::{AttemptReceiver, AttemptState, InstalledOperation};
@@ -42,7 +44,7 @@ impl RouterAttemptObserver {
                 }
             }
             AttemptState::Rejected(detail) => McpAttachmentReadiness::Rejected { detail },
-            AttemptState::Failed(detail) => McpAttachmentReadiness::Failed { detail },
+            AttemptState::Failed { detail, .. } => McpAttachmentReadiness::Failed { detail },
             AttemptState::Superseded => McpAttachmentReadiness::Superseded,
             AttemptState::Installed {
                 connection_generation,
@@ -64,6 +66,17 @@ impl RouterAttemptObserver {
                     Some(InstalledOperation::Replaced) => McpAttachmentReadiness::Superseded,
                 }
             }
+        }
+    }
+
+    /// The typed stdio setup failure this attempt resolved with, if any.
+    fn resolved_failure(&self) -> Option<McpStdioSetupFailure> {
+        match &*self.state.borrow() {
+            AttemptState::Failed {
+                failure: Some(failure),
+                ..
+            } => Some(failure.clone()),
+            _ => None,
         }
     }
 }
@@ -110,5 +123,29 @@ impl McpAttachmentAttemptObserver for RouterAttemptObserver {
                 _ = state.changed() => {}
             }
         }
+    }
+
+    /// The class stays with the attempt; whether its tail is still retained
+    /// is read from the router now (`false` once it is gone).
+    async fn setup_failure(&self) -> Option<McpStdioSetupFailure> {
+        let mut failure = self.resolved_failure()?;
+        failure.stderr_tail_retained = match self.adapter.upgrade() {
+            Some(adapter) => {
+                adapter
+                    .retains_stdio_tail(&self.server, failure.attempt)
+                    .await
+            }
+            None => false,
+        };
+        Some(failure)
+    }
+
+    /// Only this exact attempt's tail, while the router retains it.
+    async fn stderr_tail(&self) -> Option<McpStdioStderrTail> {
+        let failure = self.resolved_failure()?;
+        self.adapter
+            .upgrade()?
+            .stdio_stderr_tail_of(&self.server, failure.attempt)
+            .await
     }
 }

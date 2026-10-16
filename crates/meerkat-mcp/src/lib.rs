@@ -16,6 +16,7 @@ pub mod generated;
 mod process_confinement;
 mod protocol;
 mod router;
+mod stdio_diagnostics;
 mod transport;
 
 pub use adapter::McpRouterAdapter;

@@ -457,6 +457,9 @@ impl Encoder<ClientJsonRpcMessage> for ProtectedOutputCodec {
 pub(crate) struct ProtectedStdioTransport<R: AsyncRead, W: AsyncWrite> {
     read: FramedRead<R, ProtectedInputCodec>,
     write: Arc<Mutex<Option<ProtectedWriter<W>>>>,
+    /// Where the attempt records why receiving ended, while its router
+    /// holds it.
+    end: std::sync::Weak<crate::stdio_diagnostics::StdioAttemptRecord>,
 }
 
 /// The stdio writer and the custody of every request whose bytes it may
@@ -496,6 +499,22 @@ impl<R: AsyncRead, W: AsyncWrite> ProtectedStdioTransport<R, W> {
                 framed: FramedWrite::new(write, ProtectedOutputCodec),
                 unflushed: Vec::new(),
             }))),
+            end: std::sync::Weak::new(),
+        }
+    }
+
+    /// This transport, recording why receiving ended in `record`.
+    pub(crate) fn with_end_record(
+        mut self,
+        record: std::sync::Weak<crate::stdio_diagnostics::StdioAttemptRecord>,
+    ) -> Self {
+        self.end = record;
+        self
+    }
+
+    fn record_end(&self, end: crate::stdio_diagnostics::TransportEnd) {
+        if let Some(record) = self.end.upgrade() {
+            record.record_transport_end(end);
         }
     }
 }
@@ -534,14 +553,19 @@ where
                         None,
                     );
                     if self.write.lock().await.as_mut()?.send(error).await.is_err() {
+                        self.record_end(crate::stdio_diagnostics::TransportEnd::ReplyWriteFailed);
                         return None;
                     }
                 }
                 Some(Err(_)) => {
                     tracing::warn!("MCP input refused: unreadable or oversized JSON-RPC frame");
+                    self.record_end(crate::stdio_diagnostics::TransportEnd::BadFrame);
                     return None;
                 }
-                None => return None,
+                None => {
+                    self.record_end(crate::stdio_diagnostics::TransportEnd::Eof);
+                    return None;
+                }
             }
         }
     }

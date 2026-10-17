@@ -104,6 +104,11 @@ machine_authority_path() {
     crates/xtask/Cargo.toml|crates/xtask/BUILD.bazel|crates/xtask/src/lib.rs|crates/xtask/src/main.rs|crates/xtask/src/machines*.rs|crates/xtask/src/protocol_codegen.rs|crates/xtask/src/audit_generated_headers.rs|crates/xtask/src/public_contracts.rs|crates/xtask/src/runtime_authority_bypass.rs)
       return 0
       ;;
+    # The writer both generators call (write_if_changed): how it writes or
+    # skips an artifact decides what the drift checks compare.
+    crates/xtask/src/generated_files.rs)
+      return 0
+      ;;
     crates/xtask/src/rmat_policy.rs|crates/xtask/src/seam_inventory.rs|crates/xtask/src/ownership_ledger.rs|crates/xtask/src/rmat_audit.rs|crates/xtask/rmat-baseline.toml|crates/xtask/ownership-baseline.toml|docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md)
       return 0
       ;;

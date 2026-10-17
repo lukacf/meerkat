@@ -59,6 +59,10 @@ them.
   inventory's guard fails a reader whose named test the reader's features
   compile out (meerkat-store's 0.8.10 corpus test needs `sqlite`, not a
   default feature of the crate). CI only.
+- **The live gate skips xtask changes.** `scripts/live-gate-changed` no
+  longer counts a change under `crates/xtask/` as live-relevant: no live
+  gate target compiles or runs xtask, so a pull request that changes only
+  xtask passes the gate without running the GPT Live scenarios. CI only.
 - **CI starts its long rows first.** The Clippy, main unit, closure-tests
   and feature-check lanes run in two waves: the rows that took 8 minutes or
   more on a green run (`scripts/ci-row-durations.json`, regenerated with

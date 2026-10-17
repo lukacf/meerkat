@@ -2,10 +2,11 @@ name: Live gate
 
 # Pull-request gate for the live stack. A PR whose change touches the live
 # stack (scripts/live-gate-changed: the provider adapter, live host and channel
-# code, live delegation, the GPT Live e2e harness, or Rust changes naming live
-# state) runs the GPT Live Turbo S scenarios (S97-S107) against the real
-# provider on BuildBuddy before it can merge. Every scenario runs exactly once:
-# no Bazel retry, so a scenario that would pass only on a retry is red.
+# code, live delegation, the GPT Live e2e harness, or Rust changes outside
+# crates/xtask/ naming live state) runs the GPT Live Turbo S scenarios
+# (S97-S107) against the real provider on BuildBuddy before it can merge.
+# Every scenario runs exactly once: no Bazel retry, so a scenario that would
+# pass only on a retry is red.
 #
 # The check is always reported under the same name so it can be required in
 # branch protection: a PR that does not touch the live stack passes it at once

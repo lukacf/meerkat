@@ -15,6 +15,11 @@
 # (live_*, Live*, gpt_live, GptLive, realtime). The second rule covers shared
 # files such as the MeerkatMachine catalog or the session service, where one
 # file holds both live and unrelated state.
+#
+# crates/xtask/ is never live-relevant: no live gate target compiles or runs
+# xtask (no package depends on it, no build script or Bazel rule builds it,
+# and the Turbo S targets carry its files only as workspace runfiles), so a
+# change there cannot change a scenario's result.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -36,6 +41,7 @@ live_content_pattern='live_|Live[A-Z]|gpt_live|GptLive|realtime|Realtime'
 matched=0
 while IFS= read -r path; do
   [[ -z "$path" ]] && continue
+  [[ "$path" == crates/xtask/* ]] && continue
   if [[ "$path" =~ $live_path_pattern ]]; then
     echo "$path"
     matched=1

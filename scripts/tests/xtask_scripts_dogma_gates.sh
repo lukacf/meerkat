@@ -70,6 +70,13 @@ if scripts/machine-authority-changed -- crates/xtask/src/rmat_policy.rs >/dev/nu
 else
   bad "machine-authority-changed did not flag crates/xtask/src/rmat_policy.rs"
 fi
+# The machine and protocol generators both write through generated_files.rs;
+# a change there changes what the drift checks compare.
+if scripts/machine-authority-changed -- crates/xtask/src/generated_files.rs >/dev/null; then
+  ok "machine-authority-changed exits 0 (changed) for the generators' writer crates/xtask/src/generated_files.rs"
+else
+  bad "machine-authority-changed did not flag the generators' writer crates/xtask/src/generated_files.rs"
+fi
 if scripts/machine-authority-changed -- crates/meerkat-mob/src/runtime/actor.rs >/dev/null; then
   ok "machine-authority-changed exits 0 (changed) for mob runtime authority"
 else

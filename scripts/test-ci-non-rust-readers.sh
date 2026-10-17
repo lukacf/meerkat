@@ -11,7 +11,10 @@
 #        a scratch copy of the checkout, each from the clean tree: a new,
 #        unlisted reader target fails, naming its file and line; so does a
 #        reader in a support file a test target reaches only through
-#        include!(concat!(env!("CARGO_MANIFEST_DIR"), "...")); and an
+#        include!(concat!(env!("CARGO_MANIFEST_DIR"), "...")); a test in a
+#        module that an open and a feature-gated module path both reach
+#        counts as compiled in (GREEN), and only through the gated path as
+#        compiled out; and an
 #        include!() or include_str!() the guard cannot resolve is refused.
 #        The scratch copy is a throwaway clone; nothing synthetic touches this
 #        checkout.
@@ -152,6 +155,50 @@ printf '%s\n' 'include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/h1_r
 expect_red "reader reached through include!(concat!(env!(CARGO_MANIFEST_DIR), ...))" "${TEST_ROOT}/include.log" \
   "missing reader: ${H1_SUPPORT}:3 reads docs/docs.json (meerkat-core test:hooks_contracts" \
   node "$SCRATCH_GUARD"
+
+# A module file two module paths reach with different cfg gates: the modules
+# it declares inherit both. meerkat-store's lib gets an open and a
+# feature-gated path to one module; the gated one, declared last, is walked
+# first. The reader test in that module's child is compiled in through the
+# open path (GREEN); with the open path gone it is compiled out (RED).
+reset_scratch_crates
+STORE_LIB="crates/meerkat-store/src/lib.rs"
+PROBE="crates/meerkat-store/src/gates_probe"
+mkdir -p "${SCRATCH}/${PROBE}"
+printf '%s\n' 'mod inner;' >"${SCRATCH}/${PROBE}/mod.rs"
+cat >"${SCRATCH}/${PROBE}/inner.rs" <<'RUST'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gates_probe_reads_the_docs_navigation() {
+        let navigation = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/docs.json"));
+        assert!(navigation.is_ok());
+    }
+}
+RUST
+node - "${SCRATCH}/scripts/ci-non-rust-readers.json" "${TEST_ROOT}/gates-probe.json" <<'NODE'
+const fs = require("node:fs");
+const [from, to] = process.argv.slice(2);
+const doc = JSON.parse(fs.readFileSync(from, "utf8"));
+doc.paths["docs/docs.json"].push({
+  package: "meerkat-store",
+  target: "lib",
+  scope: "target",
+  tests: ["gates_probe_reads_the_docs_navigation"],
+  sources: ["crates/meerkat-store/src/gates_probe/inner.rs"],
+});
+fs.writeFileSync(to, JSON.stringify(doc, null, 2));
+NODE
+cp "${SCRATCH}/${STORE_LIB}" "${TEST_ROOT}/store-lib.rs"
+printf '%s\n' '#[path = "gates_probe/mod.rs"]' 'mod gates_probe_open;' '#[cfg(feature = "gates-probe-off")]' '#[path = "gates_probe/mod.rs"]' 'mod gates_probe_gated;' >>"${SCRATCH}/${STORE_LIB}"
+node "$SCRATCH_GUARD" --inventory "${TEST_ROOT}/gates-probe.json" >"${TEST_ROOT}/gates-probe.log" 2>&1 \
+  || { cat "${TEST_ROOT}/gates-probe.log" >&2; fail "a test reached through an open module path counted as compiled out"; }
+printf 'GREEN test reached through an open and a gated module path: %s\n' "$(grep -F 'ci-non-rust-readers: OK' "${TEST_ROOT}/gates-probe.log")"
+cp "${TEST_ROOT}/store-lib.rs" "${SCRATCH}/${STORE_LIB}"
+printf '%s\n' '#[cfg(feature = "gates-probe-off")]' '#[path = "gates_probe/mod.rs"]' 'mod gates_probe_gated;' >>"${SCRATCH}/${STORE_LIB}"
+expect_red "test reached only through a gated module path" "${TEST_ROOT}/gates-probe-red.log" \
+  'names test gates_probe_reads_the_docs_navigation, which its build (default features) compiles out: cfg(feature = "gates-probe-off")' \
+  node "$SCRATCH_GUARD" --inventory "${TEST_ROOT}/gates-probe.json"
 
 # An include the guard cannot resolve is refused, not skipped: an include!
 # of generated source under OUT_DIR, and an include_str! of a path from the

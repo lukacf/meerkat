@@ -53,6 +53,14 @@ echo "pub fn e(live_channel_id: u32) -> u32 { live_channel_id }" >> "$repo/crate
 g commit -qam livecontent
 [[ "$(classify "$(g rev-parse HEAD)")" == 0 ]] || fail "a Rust change naming live state classified not live"
 
+# xtask builds into no live gate target: its change is not live, even when
+# its changed lines name live state.
+g checkout -q "$base" && g checkout -qb xtask
+mkdir -p "$repo/crates/xtask/src"
+echo "pub fn live_docs_carry_no_stale_language() -> bool { true }" > "$repo/crates/xtask/src/audit.rs"
+g add -A && g commit -qm xtask
+[[ "$(classify "$(g rev-parse HEAD)")" == 1 ]] || fail "an xtask change classified live"
+
 # An unknown revision is an error, never "not live".
 [[ "$(classify deadbeefdeadbeef)" == 2 ]] || fail "an unknown revision did not fail closed"
 

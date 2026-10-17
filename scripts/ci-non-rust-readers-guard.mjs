@@ -361,7 +361,9 @@ export function cfgText(expr) {
 // dev-dependency of the package on itself requests (the repository's way
 // to give package-scoped test lanes their features), closed over the
 // package's feature table (an optional dependency is a feature of its own
-// name).
+// name). A feature another dev-dependency would turn on through Cargo's
+// feature unification is not counted: a row whose test needs one lists it,
+// so the row does not depend on what its dev-dependencies happen to enable.
 export function enabledFeatures(pkg, listed) {
   const enabled = new Set();
   const queue = ["default", ...listed];
@@ -647,20 +649,26 @@ export function workspaceModel() {
     for (const target of pkg.targets) {
       const id = targetId(target);
       const rootTestOnly = id.startsWith("test:") || id.startsWith("bench:");
-      const visited = new Map(); // file -> testOnly
-      const queue = [[target.src_path, true, rootTestOnly, null, []]];
+      // file -> Map<cfg gate list, testOnly>. A file is walked once for each
+      // distinct gate list a module path brings to it, so the modules it
+      // declares inherit every such list, and again when a non-test path
+      // reaches it after a test-only one. A path that returns to a file it
+      // already passed through is a module cycle; it stops there.
+      const visited = new Map();
+      const queue = [[target.src_path, true, rootTestOnly, null, [], []]];
       while (queue.length) {
-        const [file, isRoot, testOnly, modDir, gates] = queue.pop();
-        if (!existsSync(file)) continue;
+        const [file, isRoot, testOnly, modDir, gates, chain] = queue.pop();
+        if (!existsSync(file) || chain.includes(file)) continue;
+        const gatesKey = JSON.stringify(gates);
+        const seen = visited.get(file) ?? new Map();
+        if (seen.has(gatesKey) && (seen.get(gatesKey) === false || testOnly)) continue;
         const byPkg = files.get(file) ?? new Map();
         const entry = byPkg.get(pkg.name) ?? { pkg, targets: new Map(), gates: new Map() };
-        entry.gates.set(id, [...(entry.gates.get(id) ?? []), gates]);
+        if (!seen.has(gatesKey)) entry.gates.set(id, [...(entry.gates.get(id) ?? []), gates]);
+        seen.set(gatesKey, testOnly);
+        visited.set(file, seen);
         byPkg.set(pkg.name, entry);
         files.set(file, byPkg);
-        // Re-walk a file first reached through test-only code when a
-        // non-test path reaches it too.
-        if (visited.has(file) && (visited.get(file) === false || testOnly)) continue;
-        visited.set(file, testOnly);
         entry.targets.set(id, entry.targets.has(id) ? entry.targets.get(id) && testOnly : testOnly);
         const { tokens, regions, index } = parse(file);
         for (const child of moduleChildren(file, tokens, regions, index, isRoot, crateDir, modDir)) {
@@ -670,7 +678,7 @@ export function workspaceModel() {
           }
           const found = child.candidates.find((candidate) => existsSync(candidate));
           if (found) {
-            queue.push([found, false, testOnly || child.testOnly, child.include ? child.include.modDir : null, [...gates, ...child.cfgs]]);
+            queue.push([found, false, testOnly || child.testOnly, child.include ? child.include.modDir : null, [...gates, ...child.cfgs], [...chain, file]]);
           } else if (child.include) {
             refuse(file, { ...child.include, why: `its file ${normalizePath(relative(root, child.candidates[0]))} does not exist` }, pkg, id);
           }
@@ -1347,7 +1355,7 @@ export function checkInventory(refs, inventory, model) {
       if (!sites.some((site) => site.every((cfg) => evalCfg(cfg, enabled) !== false))) {
         const gates = [...new Set(sites.flatMap((site) => site.filter((cfg) => evalCfg(cfg, enabled) === false).map(cfgText)))];
         const build = row.features.length ? `--features ${row.features.join(",")}` : "default features";
-        problems.push(`inventory row "${row.path}" (${row.package} ${row.target}) names test ${test}, which its build (${build}) compiles out: cfg(${gates.join("), cfg(")})`);
+        problems.push(`inventory row "${row.path}" (${row.package} ${row.target}) names test ${test}, which its build (${build}) compiles out: cfg(${gates.join("), cfg(")}); list the feature that compiles it in the row's "features" (a feature another dev-dependency turns on is not counted)`);
       }
     }
   }

@@ -6,6 +6,7 @@ use crate::clock::{LocalAuthorizationTime, LocalClockError};
 use crate::publication::{LocalPublicationStamp, PublicationError};
 use meerkat_core::time_compat::Instant;
 use meerkat_core::{PrincipalKind, TrustDomainId};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
@@ -640,4 +641,99 @@ fn a_child_issued_before_an_owner_poison_is_recovered_after_reconstruction() {
         owner.issue_or_recover_child_under_exclusion(&intent, || Ok(open())),
         Ok(ChildGrantOutcome::Recovered { lineage })
     );
+}
+
+/// Blocks the first clock read after the issuance's conjunct arms it: the
+/// final read before the append, which follows the pre-append check.
+struct ArmedGateClock {
+    armed: AtomicBool,
+    gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
+}
+impl LocalAuthorizationClock for ArmedGateClock {
+    fn now(&self) -> Result<LocalAuthorizationTime, LocalClockError> {
+        if self.armed.load(Ordering::SeqCst) {
+            let gate = self.gate.lock().expect("test gate").take();
+            if let Some((entered, release)) = gate {
+                entered
+                    .send(())
+                    .expect("the issuance reached its final clock read");
+                release
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release the issuance");
+            }
+        }
+        Ok(now())
+    }
+}
+
+/// A poison another thread raises after the pre-append check cannot stop the
+/// append that follows: the child is issued, stays unusable while the
+/// publication is poisoned, and the same intent recovers it after
+/// reconstruction.
+#[test]
+fn a_poison_after_the_pre_append_check_leaves_the_issued_child_unusable_until_reconstruction() {
+    let (entered_tx, entered_rx) = sync_channel(1);
+    let (release_tx, release_rx) = sync_channel(1);
+    let clock = Arc::new(ArmedGateClock {
+        armed: AtomicBool::new(false),
+        gate: Mutex::new(Some((entered_tx, release_rx))),
+    });
+    let mut owner = authority(clock.clone());
+    let parent = issue(&owner, "parent");
+    let before = stamp(&owner);
+    let intent = child_intent(&parent, "child");
+    let issuing_owner = Arc::clone(&owner);
+    let issuing_intent = intent.clone();
+    let issuer = std::thread::spawn(move || {
+        issuing_owner.issue_or_recover_child_under_exclusion(&issuing_intent, || {
+            // The next clock read is the final one before the append.
+            clock.armed.store(true, Ordering::SeqCst);
+            Ok(open())
+        })
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the issuance passed its pre-append check");
+    owner.publication.poison();
+    release_tx.send(()).expect("release the issuance");
+    let issued = issuer
+        .join()
+        .expect("issuing thread")
+        .expect("an append past its pre-append check lands");
+    assert!(
+        matches!(issued, ChildGrantOutcome::Issued { .. }),
+        "{issued:?}"
+    );
+    let lineage = issued.lineage().to_vec();
+    assert_eq!(
+        before.check_current(),
+        Err(PublicationError::Unavailable),
+        "the append's publication does not overwrite the poison"
+    );
+    assert!(matches!(
+        owner.publication.observe(|| ()),
+        Err(PublicationError::Unavailable)
+    ));
+    assert!(matches!(
+        owner.resolve_controller_lineage(&lineage, &who("helper"), None),
+        Err(GrantRefusal::Unavailable)
+    ));
+    assert_eq!(
+        owner.issue_or_recover_child_under_exclusion(&intent, || Ok(open())),
+        Err(ChildGrantRefusal::Unavailable)
+    );
+
+    Arc::get_mut(&mut owner)
+        .expect("the only reference to the owner")
+        .reconstruct(LocalAuthorizationPublication::new())
+        .expect("reconstructed under a new publication");
+    assert_eq!(
+        owner.issue_or_recover_child_under_exclusion(&intent, || Ok(open())),
+        Ok(ChildGrantOutcome::Recovered {
+            lineage: lineage.clone()
+        })
+    );
+    owner
+        .resolve_controller_lineage(&lineage, &who("helper"), None)
+        .expect("the recovered child is valid after reconstruction");
 }

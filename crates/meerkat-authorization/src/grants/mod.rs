@@ -565,8 +565,9 @@ impl LocalGrantAuthority {
     /// read inside the conjunct's window. A recovery takes the same final
     /// read. Nothing here waits.
     ///
-    /// A poison of the publication raised since the reservation was taken,
-    /// `originating`'s own included, refuses the call before the grant-state
+    /// A poison of the publication raised after the reservation and before
+    /// the pre-append check that follows `originating` (always so for
+    /// `originating`'s own poison) refuses the call before the grant-state
     /// mutex: nothing is appended. A poison another thread raises after that
     /// check cannot stop the append it follows: that child was decided from
     /// consistent reads, stays unusable until the owners are reconstructed,
@@ -577,8 +578,9 @@ impl LocalGrantAuthority {
     /// # Errors
     /// [`ChildGrantRefusal::Uncertain`] when the append's outcome is unknown;
     /// recover with the same intent from the restored owner.
-    /// [`ChildGrantRefusal::Unavailable`] when the publication is poisoned,
-    /// with nothing appended.
+    /// [`ChildGrantRefusal::Unavailable`] when the publication was poisoned
+    /// after the reservation and before the pre-append check (always so for
+    /// `originating`'s own poison), with nothing appended.
     pub fn issue_or_recover_child_under_exclusion(
         &self,
         intent: &ChildGrantIntent,

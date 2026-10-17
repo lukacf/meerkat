@@ -194,10 +194,10 @@ them.
   current, and no new observation or owner change is admitted until the
   owners are reconstructed under a new publication. A child grant issuance
   under exclusion refuses (`Unavailable`, appending nothing) when the
-  publication was poisoned after its reservation, including by its own
-  conjunct. Effects that already passed their final entry keep their
-  outcomes. A revocation refused while the publication is poisoned did not
-  happen; retry it after reconstruction.
+  publication was poisoned after its reservation and before its pre-append
+  check (always so for its own conjunct's poison). Effects that already
+  passed their final entry keep their outcomes. A revocation refused while
+  the publication is poisoned did not happen; retry it after reconstruction.
 - `LocalAuthorizationPublication::poison_on_unwind` returns an
   `OwnerPoisonSentinel` that poisons the publication when it is dropped during
   an unwind. An owner creates it right after acquiring its own entry lock, in

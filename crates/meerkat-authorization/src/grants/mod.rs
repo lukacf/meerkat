@@ -450,8 +450,10 @@ impl LocalGrantAuthority {
         )
         .map_err(|refusal| issue_refusal(&owner, refusal, &record.id, may_issue))?;
         // Generated rejection precedes every update. Successful issuance is
-        // hidden by the actual owner mutex until this publication point.
-        publication.publish();
+        // hidden by the actual owner mutex until this publication point. A
+        // poison since the reservation leaves it retained but unusable until
+        // reconstruction.
+        let _ = publication.publish();
         lineage_ref(&owner, &record)
     }
 
@@ -532,8 +534,10 @@ impl LocalGrantAuthority {
         )
         .map_err(|refusal| issue_refusal(&owner, refusal, &record.id, may_issue))?;
         // Generated rejection precedes every update. Successful issuance is
-        // hidden by the actual owner mutex until this publication point.
-        publication.publish();
+        // hidden by the actual owner mutex until this publication point. A
+        // poison since the reservation leaves it retained but unusable until
+        // reconstruction.
+        let _ = publication.publish();
         lineage_ref(&owner, &record)
     }
 
@@ -561,9 +565,20 @@ impl LocalGrantAuthority {
     /// read inside the conjunct's window. A recovery takes the same final
     /// read. Nothing here waits.
     ///
+    /// A poison of the publication raised since the reservation was taken,
+    /// `originating`'s own included, refuses the call before the grant-state
+    /// mutex: nothing is appended. A poison another thread raises after that
+    /// check cannot stop the append it follows: that child was decided from
+    /// consistent reads, stays unusable until the owners are reconstructed,
+    /// and is valid (recovered by the same intent) after. A conjunct that
+    /// finds its own entry lock poisoned, or catches a panic, returns `Err`
+    /// and never reads through `PoisonError::into_inner`.
+    ///
     /// # Errors
     /// [`ChildGrantRefusal::Uncertain`] when the append's outcome is unknown;
     /// recover with the same intent from the restored owner.
+    /// [`ChildGrantRefusal::Unavailable`] when the publication is poisoned,
+    /// with nothing appended.
     pub fn issue_or_recover_child_under_exclusion(
         &self,
         intent: &ChildGrantIntent,
@@ -622,6 +637,11 @@ impl LocalGrantAuthority {
         )
         .map_err(refused)?;
         let validity = originating().map_err(refused)?;
+        // A poison since the reservation refuses before any append. This
+        // thread raised any poison of the conjunct's own before this load.
+        if !publication.reservation_is_intact() {
+            return Err(ChildGrantRefusal::Unavailable);
+        }
 
         let mut owner = self
             .owner
@@ -721,8 +741,10 @@ impl LocalGrantAuthority {
             });
         }
         // Generated rejection precedes every update. Successful issuance is
-        // hidden by the actual owner mutex until this publication point.
-        publication.publish();
+        // hidden by the actual owner mutex until this publication point. A
+        // poison since the reservation leaves it retained but unusable until
+        // reconstruction.
+        let _ = publication.publish();
         let leaf = lineage_ref(&owner, &record).map_err(refused)?;
         let mut lineage = intent.parent_lineage.clone();
         lineage.push(leaf);
@@ -901,7 +923,9 @@ impl LocalGrantAuthority {
         // advances this owner's revision, so no second semantic decision is
         // made here and repeated revocation does not churn observations.
         if owner.state().revision != revision {
-            publication.publish();
+            // A poison since the reservation leaves the revocation retained,
+            // through reconstruction, with every check unavailable meanwhile.
+            let _ = publication.publish();
         }
         Ok(())
     }

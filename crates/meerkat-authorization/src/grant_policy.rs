@@ -414,8 +414,13 @@ pub struct ControllerPolicyChange<'a> {
 impl ControllerPolicyChange<'_> {
     /// Publish only after successful replacement, while the policy mutex still
     /// hides the changed facts. Retain native custody until this guard drops.
+    ///
+    /// After a [poison](crate::publication::LocalAuthorizationPublication::poison)
+    /// of the grant publication this publishes nothing: the replaced policy
+    /// stays retained but unusable until its owners are reconstructed.
     pub fn publish(&mut self) {
-        self.publication.publish();
+        // Poisoned, nothing is published and every check stays unavailable.
+        let _ = self.publication.publish();
     }
 }
 

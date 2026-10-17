@@ -186,6 +186,24 @@ them.
   - Bounds default to 10 s to begin and 5 s to cancel or settle. A zero
     bound, or one above 60 s, is refused.
   - Without an installation nothing changes.
+- `meerkat_authorization::publication::LocalAuthorizationPublication::poison`
+  permanently poisons a publication without taking its writer, so an owner
+  that shares the publication can call it from a callback that runs under a
+  held reservation. Every retained stamp, prepared final entry and grant check
+  then answers `Unavailable`, retained consent eligibility is no longer
+  current, and no new observation or owner change is admitted until the
+  owners are reconstructed under a new publication. A child grant issuance
+  under exclusion refuses (`Unavailable`, appending nothing) when the
+  publication was poisoned after its reservation, including by its own
+  conjunct. Effects that already passed their final entry keep their
+  outcomes. A revocation refused while the publication is poisoned did not
+  happen; retry it after reconstruction.
+- `LocalAuthorizationPublication::poison_on_unwind` returns an
+  `OwnerPoisonSentinel` that poisons the publication when it is dropped during
+  an unwind. An owner creates it right after acquiring its own entry lock, in
+  the same scope, and holds it as long as that lock, reads included: the panic
+  that poisons the lock then poisons the publication before any outer
+  `catch_unwind` can swallow it.
 
 ### Changed
 
@@ -394,6 +412,14 @@ them.
   tests now also run a host that keeps its parent's procfs wherever
   unprivileged user and pid namespaces exist, and skip only on unshare(1)'s
   own namespace setup refusals: a failure to execute the host fails them.
+- Guard writes no longer overwrite a poisoned authorization publication. A
+  poison that lands while an owner change holds the publication's writer
+  stands when that change publishes or completes, instead of becoming current
+  again. `begin_owner_change` and `try_begin_owner_change` return
+  `Unavailable` when the publication was poisoned before the change published,
+  and `LocalGrantAuthority::reconstruct` returns
+  `ReplacementPublicationUnavailable`, installing nothing, when its
+  replacement publication is poisoned during the reconstruction.
 
 ## [0.9.2] - 2026-10-16
 

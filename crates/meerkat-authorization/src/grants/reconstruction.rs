@@ -1,7 +1,7 @@
 //! Cold verification of the actual retained owner after local custody loss.
 
 use super::{LocalGrantAuthority, chain};
-use crate::publication::LocalAuthorizationPublication;
+use crate::publication::{LocalAuthorizationPublication, LocalPublicationGuard};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
@@ -35,8 +35,9 @@ impl LocalGrantAuthority {
     /// `RestartRequired` means retained state cannot be verified. It remains
     /// untouched and unavailable; the host must not reuse its old references in
     /// a new owner. `ReplacementPublicationUnavailable` means the replacement
-    /// was the old instance, poisoned, retired or exhausted. A failed attempt
-    /// never clears poison or publishes the retained state under that instance.
+    /// was the old instance, poisoned (even while this call held it), retired
+    /// or exhausted. A failed attempt never clears poison or publishes the
+    /// retained state under that instance.
     pub fn reconstruct(
         &mut self,
         replacement: LocalAuthorizationPublication,
@@ -45,10 +46,19 @@ impl LocalGrantAuthority {
         if self.publication.same_instance(&replacement) {
             return Err(GrantReconstructionError::ReplacementPublicationUnavailable);
         }
-        let mut publication = replacement
+        let publication = replacement
             .reserve_owner_change()
             .map_err(|_| GrantReconstructionError::ReplacementPublicationUnavailable)?;
+        self.reconstruct_reserved(&replacement, publication)
+    }
 
+    /// [`reconstruct`](Self::reconstruct) once the old publication is retired
+    /// and `publication` holds the writer of `replacement`.
+    pub(super) fn reconstruct_reserved(
+        &mut self,
+        replacement: &LocalAuthorizationPublication,
+        mut publication: LocalPublicationGuard<'_>,
+    ) -> Result<(), GrantReconstructionError> {
         // Exclusive access permits inspection of the actual poisoned value,
         // not acceptance of an externally supplied snapshot. Never clear its
         // poison: only a completely verified replacement mutex becomes usable.
@@ -64,7 +74,10 @@ impl LocalGrantAuthority {
 
         // Verification and all fallible allocation precede publication. Keep
         // the replacement writer held through installation and old-value drop.
-        publication.publish();
+        // A replacement poisoned since its reservation installs nothing.
+        if !publication.publish() {
+            return Err(GrantReconstructionError::ReplacementPublicationUnavailable);
+        }
         self.owner = Mutex::new(reconstructed);
         self.publication = replacement.clone();
         Ok(())

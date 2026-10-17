@@ -64,8 +64,11 @@ impl LocalAuthorizationPublication {
     /// A poisoned or exhausted publication cannot issue fresh projections.
     pub fn begin_owner_change(&self) -> Result<LocalPublicationGuard<'_>, PublicationError> {
         let mut guard = self.reserve_owner_change()?;
-        guard.publish();
-        Ok(guard)
+        if guard.publish() {
+            Ok(guard)
+        } else {
+            Err(PublicationError::Unavailable)
+        }
     }
 
     /// [`Self::begin_owner_change`] without waiting, for a synchronous step
@@ -83,8 +86,56 @@ impl LocalAuthorizationPublication {
     /// publication stays unavailable, as for [`Self::begin_owner_change`].
     pub fn try_begin_owner_change(&self) -> Result<LocalPublicationGuard<'_>, PublicationError> {
         let mut guard = self.try_reserve_owner_change()?;
-        guard.publish();
-        Ok(guard)
+        if guard.publish() {
+            Ok(guard)
+        } else {
+            Err(PublicationError::Unavailable)
+        }
+    }
+
+    /// Permanently poison this publication because an owner that shares it
+    /// can no longer be trusted, for example a host owner whose own entry
+    /// lock a panic poisoned. From then on every retained stamp, prepared
+    /// final entry and grant check answers `Unavailable`, retained consent
+    /// eligibility is no longer current, and no new observation or owner
+    /// change is admitted. A change reserved before the poison may still
+    /// apply its facts, but no guard write overwrites the poison, so those
+    /// facts stay unusable too. Effects that already passed their final entry
+    /// keep their outcomes. Idempotent.
+    ///
+    /// Takes no lock and never waits, so an owner can call it from a callback
+    /// that runs under a held reservation of this publication.
+    ///
+    /// To recover, quiesce every owner that shares this publication, then
+    /// reconstruct each of them under one new replacement publication (for
+    /// the grant owner,
+    /// [`LocalGrantAuthority::reconstruct`](crate::grants::LocalGrantAuthority::reconstruct)).
+    /// Reconstruction keeps every retained row and revocation. A revocation
+    /// refused while poisoned (`Unavailable`) did not happen and its row
+    /// stays unrevoked: a caller holding a revocation intent must retry it
+    /// after reconstruction, never drop it.
+    pub fn poison(&self) {
+        self.inner.sequence.store(INVALID, Ordering::Release);
+    }
+
+    /// A sentinel that [`poisons`](Self::poison) this publication when it is
+    /// dropped during an unwind, for an owner that shares this publication
+    /// and guards its own state with an entry lock. Dropped normally, it does
+    /// nothing.
+    ///
+    /// Create it immediately after acquiring the entry lock, in the same
+    /// scope, and hold it for as long as the lock is held, reads included:
+    /// the unwind that poisons the lock then poisons this publication before
+    /// any outer `catch_unwind` can swallow the panic. A `catch_unwind`
+    /// placed between the lock guard and the sentinel would poison the lock
+    /// and leave this publication healthy.
+    ///
+    /// As defense in depth, an owner callback that finds its entry lock
+    /// poisoned, or catches a panic, returns an error and never reads the
+    /// owner's state through `PoisonError::into_inner`.
+    #[must_use = "the sentinel poisons only while it is held"]
+    pub fn poison_on_unwind(&self) -> OwnerPoisonSentinel<'_> {
+        OwnerPoisonSentinel { publication: self }
     }
 
     /// Reserve the writer without invalidating observations yet. This private
@@ -190,16 +241,43 @@ pub struct LocalPublicationGuard<'a> {
 }
 
 impl LocalPublicationGuard<'_> {
-    /// Infallible after reservation. For the deferred path this is the mutation
-    /// linearization point: canonical apply has succeeded, but the actual owner
-    /// lock must still hide its facts. Keep that lock until this returns.
-    pub(crate) fn publish(&mut self) {
+    /// Publish this reservation and return whether it is published. This
+    /// cannot fail after reservation unless the publication was
+    /// [poisoned](LocalAuthorizationPublication::poison) since: the guard then
+    /// stays unpublished, this returns `false` and the poison stands, so facts
+    /// already applied under this reservation stay unusable until their owners
+    /// are reconstructed. A caller that installs owners under this
+    /// publication must check the result.
+    ///
+    /// For the deferred path this is the mutation linearization point:
+    /// canonical apply has succeeded, but the actual owner lock must still
+    /// hide its facts. Keep that lock until this returns.
+    #[must_use = "a poisoned publication stays unpublished; say why the result is not needed"]
+    pub(crate) fn publish(&mut self) -> bool {
         if !self.published {
-            self.inner
+            // While this guard holds the writer, only a poison can move the
+            // sequence, and the poison stays.
+            self.published = self
+                .inner
                 .sequence
-                .swap(self.completed_sequence - 1, Ordering::AcqRel);
-            self.published = true;
+                .compare_exchange(
+                    self.completed_sequence - 2,
+                    self.completed_sequence - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok();
         }
+        self.published
+    }
+
+    /// Whether the publication is still exactly as this reservation found
+    /// it: not published and not poisoned since. One `Acquire` load. A poison
+    /// raised earlier on this thread, for example by a caught panic in a
+    /// callback run under this reservation, is always seen here; one raised
+    /// by another thread after this check is not.
+    pub(crate) fn reservation_is_intact(&self) -> bool {
+        self.inner.sequence.load(Ordering::Acquire) == self.completed_sequence - 2
     }
 
     /// Whether `stamp` was observed on this same publication and no owner
@@ -217,13 +295,38 @@ impl Drop for LocalPublicationGuard<'_> {
     fn drop(&mut self) {
         // Even a deferred reservation poisons publication on panic: the owner
         // may have been partially mutated. Ordinary rejected inputs changed no
-        // state and leave the sequence intact.
+        // state and leave the sequence intact. Completion fails only on a
+        // poison since publication, which stays.
         if std::thread::panicking() {
             self.inner.sequence.store(INVALID, Ordering::Release);
         } else if self.published {
-            self.inner
-                .sequence
-                .store(self.completed_sequence, Ordering::Release);
+            let _ = self.inner.sequence.compare_exchange(
+                self.completed_sequence - 1,
+                self.completed_sequence,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
+}
+
+/// Poisons its publication when dropped during a panic. See
+/// [`LocalAuthorizationPublication::poison_on_unwind`].
+pub struct OwnerPoisonSentinel<'a> {
+    publication: &'a LocalAuthorizationPublication,
+}
+
+impl fmt::Debug for OwnerPoisonSentinel<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnerPoisonSentinel")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for OwnerPoisonSentinel<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.publication.poison();
         }
     }
 }
@@ -545,5 +648,215 @@ mod tests {
             Err(PublicationError::Unavailable)
         ));
         assert_eq!(stamp.check_current(), Err(PublicationError::Unavailable));
+    }
+
+    #[test]
+    fn poison_takes_no_writer_and_refuses_every_stamp_and_owner_change() {
+        let publication = LocalAuthorizationPublication::new();
+        let ((), stamp) = publication.observe(|| ()).expect("initial stamp");
+        let eligibility = PublishedConsentEligibility::observe(&publication, || true)
+            .expect("eligible before the poison");
+        assert!(eligibility.check_current().is_ok());
+        // This thread holds the writer: poison must return, not wait on it.
+        let reservation = publication
+            .try_reserve_owner_change()
+            .expect("a held reservation");
+        publication.poison();
+        assert_eq!(stamp.check_current(), Err(PublicationError::Unavailable));
+        drop(reservation);
+        assert_eq!(stamp.check_current(), Err(PublicationError::Unavailable));
+        assert!(
+            eligibility.check_current().is_err(),
+            "retained consent eligibility is no longer current"
+        );
+        assert!(matches!(
+            publication.observe(|| ()),
+            Err(PublicationError::Unavailable)
+        ));
+        assert!(matches!(
+            publication.try_begin_owner_change(),
+            Err(PublicationError::Unavailable)
+        ));
+        assert!(matches!(
+            publication.begin_owner_change(),
+            Err(PublicationError::Unavailable)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::panic)] // Deliberately poison an owner's own lock.
+    fn the_sentinel_poisons_only_during_an_unwind() {
+        let publication = LocalAuthorizationPublication::new();
+        let ((), stamp) = publication.observe(|| ()).expect("initial stamp");
+        drop(publication.poison_on_unwind());
+        assert_eq!(
+            stamp.check_current(),
+            Ok(()),
+            "a normal drop poisons nothing"
+        );
+
+        let owner = Mutex::new(());
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _entry = owner.lock().expect("owner entry");
+            let _sentinel = publication.poison_on_unwind();
+            panic!("simulated owner callback panic");
+        }));
+        assert!(caught.is_err(), "an outer catch swallowed the panic");
+        assert!(owner.is_poisoned(), "the owner's own lock is poisoned");
+        assert_eq!(
+            stamp.check_current(),
+            Err(PublicationError::Unavailable),
+            "the same unwind poisoned the publication"
+        );
+    }
+
+    #[test]
+    fn a_sentinel_dropped_without_a_panic_poisons_nothing() {
+        let publication = LocalAuthorizationPublication::new();
+        let owner = Mutex::new("before");
+        let (_, stamp) = publication
+            .observe(|| *owner.lock().expect("owner"))
+            .expect("initial view");
+        {
+            let entry = owner.lock().expect("owner entry");
+            let _sentinel = publication.poison_on_unwind();
+            assert_eq!(*entry, "before", "an ordinary read under the sentinel");
+        }
+        assert_eq!(
+            stamp.check_current(),
+            Ok(()),
+            "a normal drop poisons nothing"
+        );
+        let ((), unchanged) = publication
+            .observe(|| ())
+            .expect("observations are still admitted");
+        assert_eq!(
+            unchanged.observation_sequence(),
+            stamp.observation_sequence()
+        );
+
+        let change = publication
+            .begin_owner_change()
+            .expect("later owner changes are still admitted");
+        {
+            let mut entry = owner.lock().expect("owner entry");
+            let _sentinel = publication.poison_on_unwind();
+            *entry = "after";
+        }
+        drop(change);
+        assert_eq!(
+            stamp.check_current(),
+            Err(PublicationError::Changed),
+            "the change published; nothing poisoned it"
+        );
+        let (after, current) = publication
+            .observe(|| *owner.lock().expect("owner"))
+            .expect("a coherent view of the new facts");
+        assert_eq!(after, "after");
+        assert_eq!(current.check_current(), Ok(()));
+    }
+
+    #[test]
+    fn a_poison_during_a_published_owner_change_survives_its_completion() {
+        let publication = LocalAuthorizationPublication::new();
+        let ((), stamp) = publication.observe(|| ()).expect("initial stamp");
+        let change = publication
+            .begin_owner_change()
+            .expect("an owner change in progress");
+        publication.poison();
+        drop(change);
+        assert_eq!(
+            stamp.check_current(),
+            Err(PublicationError::Unavailable),
+            "the completed change must not overwrite the poison"
+        );
+        assert!(
+            matches!(
+                publication.observe(|| ()),
+                Err(PublicationError::Unavailable)
+            ),
+            "no observation is admitted after the poison"
+        );
+    }
+
+    #[test]
+    fn a_poison_under_an_unpublished_reservation_survives_its_later_publication() {
+        let publication = LocalAuthorizationPublication::new();
+        let ((), stamp) = publication.observe(|| ()).expect("initial stamp");
+        let mut reservation = publication
+            .try_reserve_owner_change()
+            .expect("an unpublished reservation");
+        publication.poison();
+        assert!(
+            !reservation.publish(),
+            "a poisoned reservation does not publish"
+        );
+        assert_eq!(
+            stamp.check_current(),
+            Err(PublicationError::Unavailable),
+            "the publication point must not overwrite the poison"
+        );
+        drop(reservation);
+        assert_eq!(stamp.check_current(), Err(PublicationError::Unavailable));
+        assert!(matches!(
+            publication.observe(|| ()),
+            Err(PublicationError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn a_poison_from_another_thread_between_publish_and_drop_stands() {
+        let barrier = std::sync::Barrier::new(2);
+
+        let publication = LocalAuthorizationPublication::new();
+        let ((), stamp) = publication.observe(|| ()).expect("initial stamp");
+        std::thread::scope(|scope| {
+            let owner = scope.spawn(|| {
+                let change = publication
+                    .begin_owner_change()
+                    .expect("a published owner change");
+                barrier.wait();
+                // The other thread poisons here.
+                barrier.wait();
+                drop(change);
+            });
+            barrier.wait();
+            publication.poison();
+            barrier.wait();
+            owner.join().expect("owner thread");
+        });
+        assert_eq!(stamp.check_current(), Err(PublicationError::Unavailable));
+        assert!(matches!(
+            publication.observe(|| ()),
+            Err(PublicationError::Unavailable)
+        ));
+
+        let publication = LocalAuthorizationPublication::new();
+        let ((), stamp) = publication.observe(|| ()).expect("initial stamp");
+        std::thread::scope(|scope| {
+            let owner = scope.spawn(|| {
+                let mut reservation = publication
+                    .try_reserve_owner_change()
+                    .expect("an unpublished reservation");
+                barrier.wait();
+                // The other thread poisons here.
+                barrier.wait();
+                let published = reservation.publish();
+                drop(reservation);
+                published
+            });
+            barrier.wait();
+            publication.poison();
+            barrier.wait();
+            assert!(
+                !owner.join().expect("owner thread"),
+                "a reservation poisoned from another thread does not publish"
+            );
+        });
+        assert_eq!(stamp.check_current(), Err(PublicationError::Unavailable));
+        assert!(matches!(
+            publication.observe(|| ()),
+            Err(PublicationError::Unavailable)
+        ));
     }
 }

@@ -234,7 +234,10 @@ impl DurableCustody {
                 Err(GrantStoreError::Refused) => return Err(GrantRefusal::Unavailable),
                 Err(_) => {
                     self.failed.store(true, Ordering::Release);
-                    publication.publish();
+                    // Invalidates every observation of the owner. Poisoned,
+                    // the publication is unavailable already, so the result
+                    // changes nothing.
+                    let _ = publication.publish();
                     return Err(GrantRefusal::Unavailable);
                 }
             }

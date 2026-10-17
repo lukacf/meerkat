@@ -400,3 +400,45 @@ fn expired_and_unknown_retained_rows_are_preserved_not_reauthorized() {
         Err(GrantRefusal::Denied)
     ));
 }
+
+#[test]
+fn a_replacement_poisoned_during_reconstruction_installs_nothing() {
+    let (mut owner, _) = fixture();
+    let retained = issue(&owner, "retained", ExecutionRestrictions::unrestricted());
+    let before = owner.owner.lock().expect("owner").state().clone();
+    let old = owner.publication.clone();
+    // Reconstruction's own steps up to its publication point: the old
+    // publication is retired and the replacement's writer is held. Another
+    // owner sharing the replacement poisons it now.
+    old.retire();
+    let replacement = LocalAuthorizationPublication::new();
+    let reservation = replacement
+        .reserve_owner_change()
+        .expect("the replacement is reserved");
+    replacement.poison();
+    assert_eq!(
+        owner.reconstruct_reserved(&replacement, reservation),
+        Err(GrantReconstructionError::ReplacementPublicationUnavailable)
+    );
+    assert!(
+        owner.publication.same_instance(&old),
+        "no owner was installed under the poisoned replacement"
+    );
+    assert!(matches!(
+        replacement.observe(|| ()),
+        Err(PublicationError::Unavailable)
+    ));
+    assert!(matches!(
+        owner.resolve_lineage(std::slice::from_ref(&retained), &who("holder"), None),
+        Err(GrantRefusal::Unavailable)
+    ));
+    assert_eq!(owner.owner.lock().expect("owner").state(), &before);
+
+    owner
+        .reconstruct(LocalAuthorizationPublication::new())
+        .expect("a fresh replacement reconstructs the same retained owner");
+    assert_eq!(owner.owner.lock().expect("owner").state(), &before);
+    owner
+        .resolve_lineage(&[retained], &who("holder"), None)
+        .expect("the retained grant resolves under the fresh replacement");
+}

@@ -302,7 +302,7 @@ impl RegistrationCustody {
 /// A running watch: custody of its worker thread and of its notification
 /// registration.
 ///
-/// Dropping it requests the stop and never blocks or joins: the worker
+/// Dropping it requests the stop and never joins its worker: the worker
 /// returns at its next wake, after any tick that is running, unjoined. Use
 /// [`Self::stop_and_join`] to wait for the worker.
 pub struct SqliteChangeWatch {

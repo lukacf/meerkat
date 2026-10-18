@@ -1549,92 +1549,128 @@ mod tests {
         );
     }
 
+    /// Set in the child process that runs one test of this module alone.
+    const ALONE_CHILD: &str = "MEERKAT_TEST_SQLITE_WATCH_ALONE_CHILD";
+    /// What that child prints once the test passed.
+    const ALONE_CHILD_DONE: &str = "SQLITE_WATCH_ALONE_TEST_PASSED";
+
+    /// Run `body`, the body of this module's test `test`, alone in a child
+    /// process of this test binary, and require it to pass there. The
+    /// registrations in flight are counted across the process, so a test
+    /// that takes every place shares its process with no other watch test,
+    /// whatever runs the tests: nextest's process per test, or plain `cargo
+    /// test`'s concurrent threads in one process.
+    fn alone_in_child_process(test: &str, body: impl FnOnce()) {
+        if std::env::var_os(ALONE_CHILD).is_some() {
+            body();
+            println!("\n{ALONE_CHILD_DONE}");
+            return;
+        }
+        #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("watch::tests::{test}"),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ALONE_CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(ALONE_CHILD_DONE),
+            "{test} failed alone in its child process ({}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn registrations_past_the_cap_leave_new_watches_on_their_sweep() {
-        // The cap counts registrations across the process: let any that an
-        // earlier test in this process left running finish first.
-        let deadline = Instant::now() + HANG_GUARD;
-        while REGISTRATIONS_IN_FLIGHT.load(Ordering::Acquire) > 0 {
-            assert!(
-                Instant::now() < deadline,
-                "earlier registrations end within the hang guard"
-            );
-            thread::sleep(Duration::from_millis(2));
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let held = test_support::hold_registrations_in(dir.path()).unwrap();
-        let watches: Vec<_> = (0..MAX_REGISTRATIONS_IN_FLIGHT)
-            .map(|index| {
-                start_sqlite_change_watch(
-                    &dir.path().join(format!("store-{index}.sqlite3")),
-                    "test-cap-held",
+        alone_in_child_process(
+            "registrations_past_the_cap_leave_new_watches_on_their_sweep",
+            || {
+                // Alone in its process: no other registration holds a place.
+                assert_eq!(REGISTRATIONS_IN_FLIGHT.load(Ordering::Acquire), 0);
+                let dir = tempfile::tempdir().unwrap();
+                let held = test_support::hold_registrations_in(dir.path()).unwrap();
+                let watches: Vec<_> = (0..MAX_REGISTRATIONS_IN_FLIGHT)
+                    .map(|index| {
+                        start_sqlite_change_watch(
+                            &dir.path().join(format!("store-{index}.sqlite3")),
+                            "test-cap-held",
+                            SQLITE_WATCH_SWEEP,
+                            |_| SqliteWatchControl::Handled,
+                        )
+                        .expect("watch starts")
+                    })
+                    .collect();
+                assert!(
+                    held.wait_entered(MAX_REGISTRATIONS_IN_FLIGHT, HANG_GUARD),
+                    "every registration under the cap reached its platform call"
+                );
+
+                // One more watch starts with no registration thread, on its sweep
+                // alone.
+                let (tick_tx, tick_rx) = mpsc::channel();
+                let over = start_sqlite_change_watch(
+                    &dir.path().join("store-over.sqlite3"),
+                    "test-cap-over",
+                    Duration::from_millis(20),
+                    move |tick| {
+                        let _ = tick_tx.send(tick);
+                        SqliteWatchControl::Handled
+                    },
+                )
+                .expect("a watch past the cap still starts");
+                let registration = over.registration();
+                assert!(
+                    matches!(
+                        &registration,
+                        SqliteWatchRegistration::Failed(reason) if reason.contains("already pending")
+                    ),
+                    "{registration:?}"
+                );
+                assert!(
+                    over.registration.thread.is_none(),
+                    "no registration thread started past the cap"
+                );
+                assert_eq!(held.live_sources(), MAX_REGISTRATIONS_IN_FLIGHT);
+                assert_eq!(tick_rx.recv_timeout(HANG_GUARD), Ok(SqliteWatchTick::Sweep));
+
+                // Released, every held registration settles and gives its place back,
+                // and a fresh watch registers again.
+                held.release();
+                for watch in &watches {
+                    assert_eq!(
+                        settled_registration(watch),
+                        SqliteWatchRegistration::Registered
+                    );
+                }
+                let deadline = Instant::now() + HANG_GUARD;
+                while REGISTRATIONS_IN_FLIGHT.load(Ordering::Acquire) > 0
+                    && Instant::now() < deadline
+                {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                let fresh_dir = tempfile::tempdir().unwrap();
+                let fresh = start_sqlite_change_watch(
+                    &fresh_dir.path().join("store.sqlite3"),
+                    "test-cap-fresh",
                     SQLITE_WATCH_SWEEP,
                     |_| SqliteWatchControl::Handled,
                 )
-                .expect("watch starts")
-            })
-            .collect();
-        assert!(
-            held.wait_entered(MAX_REGISTRATIONS_IN_FLIGHT, HANG_GUARD),
-            "every registration under the cap reached its platform call"
-        );
-
-        // One more watch starts with no registration thread, on its sweep
-        // alone.
-        let (tick_tx, tick_rx) = mpsc::channel();
-        let over = start_sqlite_change_watch(
-            &dir.path().join("store-over.sqlite3"),
-            "test-cap-over",
-            Duration::from_millis(20),
-            move |tick| {
-                let _ = tick_tx.send(tick);
-                SqliteWatchControl::Handled
+                .expect("watch starts");
+                assert_eq!(
+                    settled_registration(&fresh),
+                    SqliteWatchRegistration::Registered,
+                    "a fresh watch registers once every place is given back"
+                );
+                drop(watches);
+                drop(over);
             },
-        )
-        .expect("a watch past the cap still starts");
-        let registration = over.registration();
-        assert!(
-            matches!(
-                &registration,
-                SqliteWatchRegistration::Failed(reason) if reason.contains("already pending")
-            ),
-            "{registration:?}"
         );
-        assert!(
-            over.registration.thread.is_none(),
-            "no registration thread started past the cap"
-        );
-        assert_eq!(held.live_sources(), MAX_REGISTRATIONS_IN_FLIGHT);
-        assert_eq!(tick_rx.recv_timeout(HANG_GUARD), Ok(SqliteWatchTick::Sweep));
-
-        // Released, every held registration settles and gives its place back,
-        // and a fresh watch registers again.
-        held.release();
-        for watch in &watches {
-            assert_eq!(
-                settled_registration(watch),
-                SqliteWatchRegistration::Registered
-            );
-        }
-        let deadline = Instant::now() + HANG_GUARD;
-        while REGISTRATIONS_IN_FLIGHT.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(2));
-        }
-        let fresh_dir = tempfile::tempdir().unwrap();
-        let fresh = start_sqlite_change_watch(
-            &fresh_dir.path().join("store.sqlite3"),
-            "test-cap-fresh",
-            SQLITE_WATCH_SWEEP,
-            |_| SqliteWatchControl::Handled,
-        )
-        .expect("watch starts");
-        assert_eq!(
-            settled_registration(&fresh),
-            SqliteWatchRegistration::Registered,
-            "a fresh watch registers once every place is given back"
-        );
-        drop(watches);
-        drop(over);
     }
 
     /// Every WARN event this test process emitted, with the name of the

@@ -74,6 +74,12 @@ them.
   (at an inotify instance or watch limit, for example) keeps its sweep.
   Before, the watch did not start at all, and a mob event observer then ran
   with no cross-process catch-up.
+- `meerkat-sqlite`: registering a change watch's notifications no longer
+  aborts the process when notify's inotify event-loop thread could not
+  start (the process at its thread limit). notify 8.2.0 ignores that failed
+  spawn, then panics in `watch()` and again in its `Drop` while the first
+  panic unwinds. The registration now contains the panic, leaks that
+  watcher instead of dropping it, and leaves the watch on its sweep.
 
 ## [0.9.2] - 2026-10-16
 

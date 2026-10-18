@@ -34,6 +34,7 @@
 //! watch and, once the watch is dropped, with the process
 //! ([`retained_registrations`]) until it returns.
 
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
@@ -679,10 +680,27 @@ fn register(
             return;
         }
     };
-    if let Err(reason) = source.watch(&targets.parent) {
-        drop(source);
-        settle_failed(slot, reason);
-        return;
+    // notify 8.2.0's inotify watcher ignores a failed start of its event-loop
+    // thread; registering then panics, and so would its drop, aborting the
+    // process. Contain the panic and leak that source (a sender and a waker)
+    // instead of dropping it. An error, unlike a panic, comes from a live
+    // event loop, so its source drops normally.
+    match std::panic::catch_unwind(AssertUnwindSafe(|| source.watch(&targets.parent))) {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            drop(source);
+            settle_failed(slot, reason);
+            return;
+        }
+        Err(_) => {
+            std::mem::forget(source);
+            settle_failed(
+                slot,
+                "registering the notification source panicked: its event loop is not running"
+                    .to_string(),
+            );
+            return;
+        }
     }
     {
         // The stop side sets its flag before it reads the slot, so a flag
@@ -1387,6 +1405,91 @@ mod tests {
                     if reason.contains("the watch limit is reached")
             ),
             "{registration:?}"
+        );
+    }
+
+    /// Set in the child process of the panicking-registration test.
+    const PANIC_CHILD: &str = "MEERKAT_TEST_SQLITE_WATCH_PANIC_CHILD";
+    /// What that child prints once its watch has survived.
+    const PANIC_CHILD_DONE: &str = "SQLITE_WATCH_PANIC_CONTAINED";
+
+    /// A source whose registration panics and whose drop panics again, as
+    /// notify 8.2.0's inotify watcher does when its event-loop thread never
+    /// started: dropping it while the first panic unwinds aborts the process.
+    struct PanickingBackend;
+
+    struct PanickingSource;
+
+    impl WatchBackend for PanickingBackend {
+        fn create(
+            &self,
+            _targets: &WatchTargets,
+            _wake: mpsc::Sender<()>,
+        ) -> Result<Box<dyn WatchSource>, String> {
+            Ok(Box::new(PanickingSource))
+        }
+    }
+
+    #[allow(clippy::panic)]
+    impl WatchSource for PanickingSource {
+        fn watch(&mut self, _directory: &Path) -> Result<(), String> {
+            panic!("the notification event loop is gone");
+        }
+    }
+
+    #[allow(clippy::panic)]
+    impl Drop for PanickingSource {
+        fn drop(&mut self) {
+            panic!("the notification event loop is gone");
+        }
+    }
+
+    /// The registration panics in a child process: a panic during a panic
+    /// aborts the whole process, so only a child can show the watch survives.
+    #[test]
+    fn a_panicking_registration_leaves_the_sweep_running() {
+        if std::env::var_os(PANIC_CHILD).is_some() {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("store.sqlite3");
+            let (tick_tx, tick_rx) = mpsc::channel();
+            let watch = start_with_backend(
+                &db,
+                "test-panicking-registration",
+                Duration::from_millis(20),
+                move |tick| {
+                    let _ = tick_tx.send(tick);
+                    SqliteWatchControl::Handled
+                },
+                |_| Box::new(PanickingBackend),
+            )
+            .expect("watch starts");
+            let registration = settled_registration(&watch);
+            assert!(
+                matches!(registration, SqliteWatchRegistration::Failed(_)),
+                "{registration:?}"
+            );
+            assert_eq!(tick_rx.recv_timeout(HANG_GUARD), Ok(SqliteWatchTick::Sweep));
+            drop(watch);
+            println!("\n{PANIC_CHILD_DONE}");
+            return;
+        }
+        #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "watch::tests::a_panicking_registration_leaves_the_sweep_running",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PANIC_CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(PANIC_CHILD_DONE),
+            "the watch did not survive its panicking registration ({}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

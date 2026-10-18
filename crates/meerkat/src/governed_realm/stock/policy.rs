@@ -87,7 +87,7 @@ use meerkat_authorization::grant_policy::{
     AdmittedWorkPolicyOwner, ControllerAdmissionAllowance, OperationPolicyOwner,
     WorkOwnerAllowance, operation_grant_target,
 };
-use meerkat_authorization::grants::{GrantRefusal, LocalGrantAuthority};
+use meerkat_authorization::grants::{GrantRefusal, LineageResolutionRefusal, LocalGrantAuthority};
 use meerkat_authorization::mcp_installation::mcp_connector_action;
 use meerkat_authorization::policy::{
     LocalOperationValues, LocalPolicyAllowance, LocalPolicyPurpose,
@@ -419,7 +419,9 @@ impl AdmittedWorkPolicyOwner for StockInvocationPolicy {
     /// long one decision stands and is not stated as a grant lifetime. A
     /// revoked, expired or otherwise not current lineage, and a targeted
     /// selection with none for this target, are refused as at
-    /// authorization; an owner that cannot say now is unavailable.
+    /// authorization; an owner that cannot say now is unavailable. An owner
+    /// change published while the grant is read inside the review's own
+    /// observation is a stale refusal (`ReprepareRequired`).
     fn review_mandate(
         &self,
         association: &InputAuthorityAssociation,
@@ -441,16 +443,26 @@ impl AdmittedWorkPolicyOwner for StockInvocationPolicy {
         };
         let grant = self
             .grants
-            .resolve_lineage(
+            .resolve_lineage_observed(
                 lineage,
                 &claims.logical_executor,
                 claims.represented_subject.as_ref(),
             )
             .map_err(|refusal| match refusal {
-                GrantRefusal::Denied => OperationAuthorizationError::from(denied()),
-                GrantRefusal::ControllerInUse
-                | GrantRefusal::Duplicate
-                | GrantRefusal::Unavailable => OperationAuthorizationError::Unavailable,
+                // Read inside the review's own observation of the grant
+                // publication, which is stale too: a stale refusal it
+                // classifies, never an unavailable review context.
+                LineageResolutionRefusal::Changed => {
+                    OperationRefused::new(OperationRefusalKind::ReprepareRequired).into()
+                }
+                LineageResolutionRefusal::Refused(GrantRefusal::Denied) => {
+                    OperationAuthorizationError::from(denied())
+                }
+                LineageResolutionRefusal::Refused(
+                    GrantRefusal::ControllerInUse
+                    | GrantRefusal::Duplicate
+                    | GrantRefusal::Unavailable,
+                ) => OperationAuthorizationError::Unavailable,
             })?;
         let bounds = review_bounds_text(
             &grant.restrictions().conjoin(&claims.admitted_ceiling),
@@ -3456,5 +3468,148 @@ mod tests {
         let error = prepare(granted(&session, &lineage)).expect_err("unmapped under one grant");
         assert_eq!(error, OperationAuthorizationError::Unavailable);
         assert_eq!(owner.1.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The stock operation owner, whose review account read interferes
+    /// once: inside the review observation and before the work owner reads
+    /// the work's grant for its mandate.
+    struct InterferingReview {
+        inner: Arc<StockInvocationPolicy>,
+        pending: std::sync::Mutex<Option<ReviewInterference>>,
+    }
+
+    enum ReviewInterference {
+        /// A helper thread begins an owner change on the grant publication
+        /// and holds it until the test releases it.
+        HoldOwnerChange {
+            begin: std::sync::mpsc::SyncSender<()>,
+            held: std::sync::mpsc::Receiver<()>,
+        },
+        Poison(meerkat_authorization::publication::LocalAuthorizationPublication),
+    }
+
+    impl OperationPolicyOwner for InterferingReview {
+        fn authorize_operation(
+            &self,
+            association: &InputAuthorityAssociation,
+            binding: &PreparedAuthorizationBinding,
+            purpose: LocalPolicyPurpose,
+            now_ms: u64,
+        ) -> Result<LocalPolicyAllowance, OperationAuthorizationError> {
+            self.inner
+                .authorize_operation(association, binding, purpose, now_ms)
+        }
+
+        fn review_action_account(
+            &self,
+            association: &InputAuthorityAssociation,
+            binding: &PreparedAuthorizationBinding,
+            now_ms: u64,
+        ) -> Result<Option<String>, OperationAuthorizationError> {
+            match self.pending.lock().expect("interference").take() {
+                Some(ReviewInterference::HoldOwnerChange { begin, held }) => {
+                    begin.send(()).expect("start the owner change");
+                    held.recv_timeout(std::time::Duration::from_secs(5))
+                        .expect("the owner change is in progress");
+                }
+                Some(ReviewInterference::Poison(publication)) => publication.poison(),
+                None => {}
+            }
+            self.inner
+                .review_action_account(association, binding, now_ms)
+        }
+    }
+
+    /// A review read whose work grant is resolved while an owner change is
+    /// in progress is a stale refusal the review observation classifies,
+    /// never an unavailable review context; once the change completes the
+    /// review reads its material. A poison at the same point stays
+    /// unavailable.
+    #[test]
+    fn an_owner_change_during_the_review_mandate_read_is_a_stale_refusal() {
+        let publication = meerkat_authorization::publication::LocalAuthorizationPublication::new();
+        let grants = Arc::new(
+            LocalGrantAuthority::new(
+                meerkat_authorization::grants::LocalGrantConfiguration {
+                    root: operator(),
+                    namespace: id("stock-grants"),
+                    generation: 1,
+                },
+                publication.clone(),
+                Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
+            )
+            .expect("grant owner"),
+        );
+        let policy = policy_over(Arc::clone(&grants));
+        let session = SessionId::new();
+        let work = granted(
+            &session,
+            &issue(
+                &grants,
+                "stock-grant",
+                ExecutionRestrictions::unrestricted(),
+            ),
+        );
+        let read = operation(&session);
+        let review = |interference: Option<ReviewInterference>| {
+            Arc::new(
+                meerkat_authorization::grant_policy::GrantBackedWorkPolicy::new(
+                    Arc::clone(&grants),
+                    Arc::clone(&policy) as Arc<dyn AdmittedWorkPolicyOwner>,
+                    Arc::new(InterferingReview {
+                        inner: Arc::clone(&policy),
+                        pending: std::sync::Mutex::new(interference),
+                    }) as Arc<dyn OperationPolicyOwner>,
+                ),
+            )
+            .work_context(vec![work.clone()].into(), OperationExecutionScope::Domain)
+            .expect("the work")
+            .authorization()
+            .review_operation_context(&read)
+        };
+
+        let (begin_tx, begin_rx) = std::sync::mpsc::sync_channel(1);
+        let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let changer = publication.clone();
+        let helper = std::thread::spawn(move || {
+            begin_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("asked to change an owner");
+            let change = changer
+                .begin_owner_change()
+                .expect("an owner change in progress");
+            held_tx.send(()).expect("the change is held");
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("released by the test");
+            drop(change);
+        });
+        let stale = review(Some(ReviewInterference::HoldOwnerChange {
+            begin: begin_tx,
+            held: held_rx,
+        }));
+        release_tx.send(()).expect("release the owner change");
+        helper.join().expect("helper thread");
+        assert!(
+            matches!(
+                &stale,
+                Err(OperationAuthorizationError::Refused(refusal))
+                    if refusal.kind() == OperationRefusalKind::ReprepareRequired
+            ),
+            "a change in progress is a stale review read, never an unavailable context: \
+             {stale:?}"
+        );
+        let fresh = review(None);
+        assert!(
+            fresh.is_ok(),
+            "the review reads its material once the change completes: {fresh:?}"
+        );
+
+        let poisoned = review(Some(ReviewInterference::Poison(publication)));
+        assert!(
+            matches!(poisoned, Err(OperationAuthorizationError::Unavailable)),
+            "a poison stays unavailable: {poisoned:?}"
+        );
     }
 }

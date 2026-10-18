@@ -400,14 +400,15 @@ fn an_observed_resolution_reports_failed_custody_as_unavailable() {
     );
     assert_eq!(
         owner
-            .resolve_executor_lineage_observed(
-                std::slice::from_ref(&kept),
-                &who("holder"),
-                None,
-                false
-            )
+            .resolve_lineage_observed(std::slice::from_ref(&kept), &who("holder"), None)
             .err(),
-        Some(ObservedGrantRefusal::Refused(GrantRefusal::Unavailable))
+        Some(LineageResolutionRefusal::Refused(GrantRefusal::Unavailable))
+    );
+    assert_eq!(
+        owner
+            .resolve_lineage_ceiling_observed(std::slice::from_ref(&kept))
+            .err(),
+        Some(LineageResolutionRefusal::Refused(GrantRefusal::Unavailable))
     );
 }
 

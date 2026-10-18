@@ -204,6 +204,13 @@ them.
   the same scope, and holds it as long as that lock, reads included: the panic
   that poisons the lock then poisons the publication before any outer
   `catch_unwind` can swallow it.
+- `LocalGrantAuthority::resolve_lineage_observed`,
+  `resolve_controller_lineage_observed` and
+  `resolve_lineage_ceiling_observed` resolve a lineage for a caller inside
+  its own observation of the grant publication, and return
+  `LineageResolutionRefusal`: `Changed` when an owner change published
+  during the resolution, which that caller classifies as a stale read, or
+  `Refused` with the refusal the standalone resolution reports.
 
 ### Changed
 
@@ -424,11 +431,14 @@ them.
   owner change published during the preparation now refuses it as a stale
   read (`OperationRefusalKind::ReprepareRequired`) and rebuilds once, as for
   any other concurrent owner change, instead of reporting the grant
-  authority as unavailable. Controller admission does the same. A poisoned
-  publication, failed durable grant custody and a clock failure still
-  answer `Unavailable` and are never retried, and a standalone
-  `LocalGrantAuthority::resolve_lineage` still reports a concurrent change
-  as `GrantRefusal::Unavailable`.
+  authority as unavailable. Controller admission does the same, and so do
+  the contributor ceilings of work that names other originals (a helper's
+  source) and the stock governed realm's review mandate, which reports
+  such a change as a stale review read instead of an unavailable review
+  context. A poisoned publication, failed durable grant custody and a clock
+  failure still answer `Unavailable` and are never retried, and a
+  standalone `LocalGrantAuthority::resolve_lineage` still reports a
+  concurrent change as `GrantRefusal::Unavailable`.
 
 ## [0.9.2] - 2026-10-16
 

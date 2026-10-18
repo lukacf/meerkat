@@ -182,6 +182,8 @@ struct Fixture {
     originals: Arc<Originals>,
     mandates: Arc<Mandates>,
     grants: Arc<LocalGrantAuthority>,
+    /// The grant owner's publication, shared by every owner of the work.
+    publication: LocalAuthorizationPublication,
     root: PrincipalRef,
     input: Input,
     ingress: Arc<NativeIngressContext>,
@@ -218,6 +220,7 @@ fn fixture() -> Fixture {
         },
     ];
     let root = principal("grant-owner");
+    let publication = LocalAuthorizationPublication::new();
     let grants = Arc::new(
         LocalGrantAuthority::new(
             LocalGrantConfiguration {
@@ -225,7 +228,7 @@ fn fixture() -> Fixture {
                 namespace: id("work"),
                 generation: 1,
             },
-            LocalAuthorizationPublication::new(),
+            publication.clone(),
             Arc::new(Clock),
         )
         .expect("real generated grant owner"),
@@ -275,6 +278,7 @@ fn fixture() -> Fixture {
         originals,
         mandates,
         grants,
+        publication,
         root,
         input,
         ingress,
@@ -2187,5 +2191,175 @@ fn a_current_source_original_is_retained_and_its_mandate_resolves() {
         refusal(current()),
         Some(OperationRefusalKind::Denied),
         "an original the source owner no longer retains is not current"
+    );
+}
+
+/// The fixture's source owner, interfering once when a contributor's
+/// retained custody is read: inside the preparation's observation of the
+/// grant publication, just before contributor lineages are resolved.
+struct InterferingOriginals {
+    inner: Arc<Originals>,
+    pending: Mutex<Option<ContributorInterference>>,
+}
+
+enum ContributorInterference {
+    /// A helper thread begins an owner change on the grant publication and
+    /// holds it until the test releases it.
+    HoldOwnerChange {
+        begin: std::sync::mpsc::SyncSender<()>,
+        held: std::sync::mpsc::Receiver<()>,
+    },
+    Poison(LocalAuthorizationPublication),
+}
+
+impl AuthenticatedOriginalSource for InterferingOriginals {
+    fn authenticated_original(
+        &self,
+        ingress: &NativeIngressContext,
+        namespace: &meerkat_authorization_contracts::work_association::QualifiedIngressNamespace,
+        original: &OriginalWorkRef,
+    ) -> Result<Option<AuthenticatedOriginal>, ControllerReadinessFailure> {
+        self.inner
+            .authenticated_original(ingress, namespace, original)
+    }
+
+    fn retained_original(
+        &self,
+        namespace: &meerkat_authorization_contracts::work_association::QualifiedIngressNamespace,
+        original: &OriginalWorkRef,
+    ) -> Result<Option<WorkAuthorityBasis>, ControllerReadinessFailure> {
+        match self.pending.lock().expect("interference").take() {
+            Some(ContributorInterference::HoldOwnerChange { begin, held }) => {
+                begin.send(()).expect("start the owner change");
+                held.recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the owner change is in progress");
+            }
+            Some(ContributorInterference::Poison(publication)) => publication.poison(),
+            None => {}
+        }
+        self.inner.retained_original(namespace, original)
+    }
+
+    fn original_disposition(
+        &self,
+        namespace: &meerkat_authorization_contracts::work_association::QualifiedIngressNamespace,
+        original: &OriginalWorkRef,
+    ) -> Result<OriginalDisposition, ControllerReadinessFailure> {
+        self.inner.original_disposition(namespace, original)
+    }
+}
+
+impl Fixture {
+    /// [`Self::operation_policy`] over a source owner that interferes once.
+    fn interfering_policy(
+        &self,
+        operation: LocalOperationValues,
+        interference: ContributorInterference,
+    ) -> Arc<GrantBackedWorkPolicy> {
+        let configuration = ScopedGrantComposition {
+            grants: Arc::clone(&self.grants),
+            ingress_domain: self.claims.ingress_namespace.ingress.clone(),
+            originals: Arc::new(InterferingOriginals {
+                inner: self.originals.clone(),
+                pending: Mutex::new(Some(interference)),
+            }),
+            invocation: ScopedInvocation::from_policy(Arc::new(AllowWork)),
+            operation_owner: Arc::new(ExactOperation(operation)),
+            retained_resume: None,
+        }
+        .into_configuration();
+        Arc::new(GrantBackedWorkPolicy::new(
+            Arc::clone(&self.grants),
+            Arc::clone(&configuration.invocation_owner),
+            Arc::clone(&configuration.operation_owner),
+        ))
+    }
+}
+
+/// A helper names its source's admitted original. While the helper's
+/// operation is prepared, an owner change is in progress when the
+/// contributor's lineage is resolved: the preparation's own observation is
+/// stale too, so the preparation refuses it as a stale read it may rebuild,
+/// never as an unavailable owner, and a fresh preparation succeeds once the
+/// change completes. A poison at the same point stays unavailable.
+#[test]
+fn a_contributor_resolved_during_an_owner_change_is_a_stale_refusal() {
+    let f = fixture();
+    let source = f.claims.contributing_work[1].clone();
+    let executor = f.claims.logical_executor.clone();
+    let covering = || {
+        bounds(
+            &["setup-report"],
+            &["helper"],
+            std::slice::from_ref(&executor),
+        )
+    };
+    let contributor = f.issue_source_grant("source-live", covering());
+    f.hold_contributor(&source, vec![contributor]);
+    let helper = InputAuthorityAssociation::new(f.helper_claims_under(covering()))
+        .expect("well-formed claims");
+    let prepare = |policy: &Arc<GrantBackedWorkPolicy>| {
+        policy
+            .work_context(
+                vec![helper.clone()].into(),
+                meerkat_core::exact_operation::OperationExecutionScope::Domain,
+            )
+            .expect("the helper's work")
+            .authorization()
+            .prepare(&read_binding())
+            .err()
+    };
+
+    let (begin_tx, begin_rx) = std::sync::mpsc::sync_channel(1);
+    let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let publication = f.publication.clone();
+    let changer = std::thread::spawn(move || {
+        begin_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("asked to change an owner");
+        let change = publication
+            .begin_owner_change()
+            .expect("an owner change in progress");
+        held_tx.send(()).expect("the change is held");
+        release_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("released by the test");
+        drop(change);
+    });
+    let stale = prepare(&f.interfering_policy(
+        f.helper_operation("setup-report"),
+        ContributorInterference::HoldOwnerChange {
+            begin: begin_tx,
+            held: held_rx,
+        },
+    ));
+    release_tx.send(()).expect("release the owner change");
+    changer.join().expect("changer thread");
+    assert!(
+        matches!(
+            &stale,
+            Some(meerkat_core::OperationAuthorizationError::Refused(refusal))
+                if refusal.kind() == OperationRefusalKind::ReprepareRequired
+        ),
+        "a contributor resolved during a change is a stale read, never unavailable: {stale:?}"
+    );
+    let (_, current) = f.operation_policy(f.helper_operation("setup-report"));
+    let fresh = prepare(&Arc::new(current));
+    assert!(
+        fresh.is_none(),
+        "a fresh preparation succeeds once the change completes: {fresh:?}"
+    );
+
+    let poisoned = prepare(&f.interfering_policy(
+        f.helper_operation("setup-report"),
+        ContributorInterference::Poison(f.publication.clone()),
+    ));
+    assert!(
+        matches!(
+            poisoned,
+            Some(meerkat_core::OperationAuthorizationError::Unavailable)
+        ),
+        "a poison stays unavailable: {poisoned:?}"
     );
 }

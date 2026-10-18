@@ -48,7 +48,7 @@
 use std::sync::Arc;
 
 use meerkat_authorization::grant_policy::{AdmittedWorkPolicyOwner, OperationPolicyOwner};
-use meerkat_authorization::grants::{GrantRefusal, LocalGrantAuthority};
+use meerkat_authorization::grants::{GrantRefusal, LineageResolutionRefusal, LocalGrantAuthority};
 use meerkat_authorization_contracts::constraints::ResourceDomain;
 use meerkat_authorization_contracts::evidence::{EvidenceId, HistoricalEvidenceRef};
 use meerkat_authorization_contracts::work_association::{
@@ -245,7 +245,9 @@ pub fn original_operation_grant(
 /// # Errors
 /// A cancelled, no longer retained or no longer current original, or a
 /// targeted basis with no lineage for this target, is denied; an owner that
-/// cannot say now is unavailable.
+/// cannot say now is unavailable. An owner change published while the
+/// lineage is read inside the caller's own observation of the grant
+/// publication is a stale refusal (`ReprepareRequired`).
 fn contributor_operation_ceiling(
     grants: &LocalGrantAuthority,
     originals: &dyn AuthenticatedOriginalSource,
@@ -277,13 +279,19 @@ fn contributor_operation_ceiling(
         }
     };
     grants
-        .resolve_lineage_ceiling(lineage)
+        .resolve_lineage_ceiling_observed(lineage)
         .map(Some)
         .map_err(|refusal| match refusal {
-            GrantRefusal::Denied => denied(),
-            GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
-                meerkat_core::OperationAuthorizationError::Unavailable
+            // Read inside the caller's own observation of the grant
+            // publication, which is stale too: a stale read it classifies
+            // and may rebuild once, never an unavailable owner.
+            LineageResolutionRefusal::Changed => {
+                OperationRefused::new(OperationRefusalKind::ReprepareRequired).into()
             }
+            LineageResolutionRefusal::Refused(GrantRefusal::Denied) => denied(),
+            LineageResolutionRefusal::Refused(
+                GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable,
+            ) => meerkat_core::OperationAuthorizationError::Unavailable,
         })
 }
 

@@ -87,7 +87,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meerkat_core::SessionId;
 use meerkat_sqlite::watch::{
-    SqliteChangeWatch, SqliteWatchControl, SqliteWatchJoin, SqliteWatchStopHandle, SqliteWatchTick,
+    SqliteChangeWatch, SqliteWatchControl, SqliteWatchJoin, SqliteWatchRegistration,
+    SqliteWatchStopHandle, SqliteWatchTick,
 };
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -2572,7 +2573,9 @@ impl std::fmt::Debug for SqliteMobEventBus {
 impl SqliteMobEventBus {
     /// A new owner of `catch_up` with its own watch, plus watches of this
     /// observer whose workers already returned (the caller joins them outside
-    /// every lock). Called under the registry lock.
+    /// every lock). Called under the registry lock: starting the watch never
+    /// waits for its notification registration, which runs on a thread of its
+    /// own.
     fn attach(catch_up: Arc<SqliteMobEventCatchUp>) -> (Arc<Self>, Vec<SqliteChangeWatch>) {
         let (watch_stop, returned_workers) = catch_up.start_external_watch();
         let bus = Arc::new(Self {
@@ -2830,6 +2833,7 @@ impl SqliteMobEventCatchUp {
             unjoined_workers: 0,
             joining_elsewhere: 0,
             replacement_registered: false,
+            retained_registrations: 0,
         };
         let current = std::thread::current().id();
         let taken = {
@@ -2850,6 +2854,11 @@ impl SqliteMobEventCatchUp {
                     watch.request_stop();
                 }
                 report.unjoined_workers = custody.watches.len();
+                report.retained_registrations = custody
+                    .watches
+                    .iter()
+                    .filter(|watch| watch.registration() == SqliteWatchRegistration::Pending)
+                    .count();
                 None
             } else {
                 let watches = std::mem::take(&mut custody.watches);
@@ -2871,6 +2880,11 @@ impl SqliteMobEventCatchUp {
             for mut watch in watches {
                 let worker = watch.worker_thread_id();
                 let outcome = watch.stop_and_join();
+                if watch.registration() == SqliteWatchRegistration::Pending {
+                    // Its thread outlives this drain: with the watch, or with
+                    // the process once the watch is dropped below.
+                    report.retained_registrations += 1;
+                }
                 let mut custody = lock_unpoisoned(&self.custody);
                 if let Some(worker) = worker
                     && let Some(index) = custody.joining.iter().position(|id| *id == worker)
@@ -2947,7 +2961,9 @@ pub enum SqliteMobObserverDrain {
     /// identity (its canonical path, or the exact registered key when the
     /// path no longer resolves). A watch worker releases that state only as
     /// it returns, so none can still run a tick; such a worker was never
-    /// joined.
+    /// joined. A notification registration of its watches that the
+    /// operating system still holds stays with the process
+    /// ([`meerkat_sqlite::watch::retained_registrations`]).
     NotFound,
     /// The observer was found and closed: from then on no owner attaches to
     /// it and no catch-up of it opens the database. The report says what was
@@ -2979,6 +2995,15 @@ pub struct SqliteMobObserverDrainReport {
     /// finished: an opener attached after this drain closed the old one.
     /// This drain does not cover it.
     pub replacement_registered: bool,
+    /// Notification registrations of this observer's watches still running
+    /// when the drain stopped those watches. The operating system can hold a
+    /// registration without bound and nothing can interrupt it, so the stop
+    /// cancels it instead: its thread discards its result when the platform
+    /// call returns, and until then stays in custody, with its watch or, once
+    /// the watch is gone, with the process
+    /// ([`meerkat_sqlite::watch::retained_registrations`]). It never reads or
+    /// writes the database.
+    pub retained_registrations: usize,
 }
 
 /// Why [`SqliteMobStores::drain_observers`] refused. A refusal closes, stops
@@ -3041,7 +3066,10 @@ impl SqliteMobStores {
     /// (an opener from then on gets a replacement observer, which the report
     /// names), waits out a catch-up read in flight on any thread, and joins
     /// every watch worker, waiting for a tick that is running. It holds no
-    /// registry, catch-up or custody lock across that wait or a join.
+    /// registry, catch-up or custody lock across that wait or a join. It
+    /// never waits for a watch's notification registration, which the
+    /// operating system can hold without bound: one still running is counted
+    /// in the report (`retained_registrations`).
     ///
     /// Blocking and unbounded by design: it waits as long as a running
     /// catch-up read or tick runs. From async code run it on a blocking
@@ -12072,7 +12100,26 @@ mod tests {
             unjoined_workers,
             joining_elsewhere: 0,
             replacement_registered,
+            retained_registrations: 0,
         })
+    }
+
+    /// Wait, within the hang guard, until no watch of the observer at `path`
+    /// is still registering its notifications, so a drain retains none.
+    fn wait_for_watch_registrations(path: &Path) {
+        let catch_up = registered_catch_up(path);
+        let deadline = std::time::Instant::now() + OBSERVER_HANG_GUARD;
+        while lock_unpoisoned(&catch_up.custody)
+            .watches
+            .iter()
+            .any(|watch| watch.registration() == SqliteWatchRegistration::Pending)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a watch registration did not end within the hang guard"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// The observer state registered for `path`. Holding it is not ownership,
@@ -12143,6 +12190,7 @@ mod tests {
     fn observer_drain_waits_for_a_held_catch_up_and_joins_its_worker() {
         let (dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
         let closed = signal_drain_closed(&stores.event_bus.catch_up);
         let held = hold_next_catch_up(&stores.event_bus.catch_up);
         raw_append(&path, 1);
@@ -12179,6 +12227,7 @@ mod tests {
         // and a run store, which keeps the bus its terminal CAS publishes on.
         let storage = crate::MobStorage::persistent(&path).unwrap();
         let reader = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
         let event_reader = reader.event_store();
         let run_store = reader.run_store();
         // A path-only public reader counts as an owner too.
@@ -12237,6 +12286,7 @@ mod tests {
     fn observer_drain_on_its_own_watch_worker_stays_unjoined_and_keeps_custody() {
         let (_dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
         let catch_up = Arc::clone(&stores.event_bus.catch_up);
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -12277,6 +12327,7 @@ mod tests {
     async fn an_opener_during_an_observer_drain_gets_a_replacement_the_report_names() {
         let (_dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
         let closed = signal_drain_closed(&stores.event_bus.catch_up);
         let held = hold_next_catch_up(&stores.event_bus.catch_up);
         raw_append(&path, 1);
@@ -12325,6 +12376,7 @@ mod tests {
     async fn observer_drain_does_not_cover_a_cancelled_unguarded_read() {
         let (_dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
         let catch_up = Arc::clone(&stores.event_bus.catch_up);
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -12373,6 +12425,7 @@ mod tests {
     fn a_drain_on_a_worker_that_another_drain_is_joining_returns_without_waiting() {
         let (_dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
         let catch_up = Arc::clone(&stores.event_bus.catch_up);
         let (taken_tx, taken_rx) = mpsc::channel();
         let (entered_tx, entered_rx) = mpsc::channel();
@@ -12420,6 +12473,7 @@ mod tests {
                     unjoined_workers: 0,
                     joining_elsewhere: 1,
                     replacement_registered: false,
+                    retained_registrations: 0,
                 }
             ))
         );
@@ -12441,6 +12495,7 @@ mod tests {
         let alias = alias_dir.join("mob.db");
         // Opened through the alias, the observer registers its canonical path.
         let stores = SqliteMobStores::open(&alias).unwrap();
+        wait_for_watch_registrations(&alias);
         let canonical = std::fs::canonicalize(&path).unwrap();
         let catch_up = registered_catch_up(&canonical);
 
@@ -12476,6 +12531,171 @@ mod tests {
             Ok(closed_report(true, 1, 0, false))
         );
         drop(catch_up);
+    }
+
+    /// A notification registration held in the operating system, as macOS
+    /// FSEvents can hold one for tens of seconds, holds neither storage open,
+    /// nor the opens of other databases, nor the sweep that catches up
+    /// commits from other writers.
+    #[tokio::test]
+    async fn a_held_watch_registration_holds_neither_storage_open_nor_its_sweep() {
+        const OPEN_BOUND: Duration = Duration::from_secs(5);
+        let (dir, path) = temp_db_path();
+        let held = meerkat_sqlite::watch::test_support::hold_registrations_in(dir.path()).unwrap();
+        let open_path = path.clone();
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let opener = std::thread::spawn(move || {
+            let stores = SqliteMobStores::open(&open_path);
+            let _ = opened_tx.send(());
+            stores
+        });
+        assert!(
+            held.wait_entered(1, OBSERVER_HANG_GUARD),
+            "the watch registration reached its platform call"
+        );
+        let opened = opened_rx.recv_timeout(OPEN_BOUND);
+        // Another database, whose registration nothing holds.
+        let (_other_dir, other_path) = temp_db_path();
+        let (other_tx, other_rx) = mpsc::channel();
+        let other = std::thread::spawn(move || {
+            let stores = SqliteMobStores::open(&other_path);
+            let _ = other_tx.send(());
+            stores
+        });
+        let other_opened = other_rx.recv_timeout(OPEN_BOUND);
+        assert!(
+            opened.is_ok() && other_opened.is_ok(),
+            "storage open waited for the held watch registration \
+             (this database: {opened:?}, another database: {other_opened:?})"
+        );
+        let stores = opener.join().unwrap().expect("storage opens");
+        drop(other.join().unwrap().expect("the other database opens"));
+
+        // Only the sweep can see a commit by another writer while the
+        // registration is held.
+        let mut rx = stores.event_store().subscribe().unwrap();
+        raw_append(&path, 1);
+        let observed = tokio::time::timeout(OBSERVER_HANG_GUARD, rx.recv())
+            .await
+            .expect("the sweep catches up another writer's commit while the registration is held")
+            .expect("subscription stays open");
+        assert_eq!(observed.cursor, 1);
+        held.release();
+    }
+
+    /// The notification registrations the process retains for watches in
+    /// `directory`.
+    fn retained_registrations_in(directory: &Path) -> usize {
+        meerkat_sqlite::watch::retained_registrations()
+            .into_iter()
+            .filter(|retained| retained.directory == directory)
+            .count()
+    }
+
+    /// Wait, within the hang guard, until the process retains `count`
+    /// registrations for watches in `directory`.
+    fn wait_for_retained_registrations(directory: &Path, count: usize) -> usize {
+        let deadline = std::time::Instant::now() + OBSERVER_HANG_GUARD;
+        loop {
+            let retained = retained_registrations_in(directory);
+            if retained == count || std::time::Instant::now() >= deadline {
+                return retained;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A drain never waits for a notification registration the operating
+    /// system holds: it reports the registration as retained, and the
+    /// process keeps its thread until it returns and discards its result.
+    #[test]
+    fn observer_drain_reports_and_retains_a_held_watch_registration() {
+        let (dir, path) = temp_db_path();
+        let held = meerkat_sqlite::watch::test_support::hold_registrations_in(dir.path()).unwrap();
+        let directory = dir.path().canonicalize().unwrap();
+        let retained_here = || retained_registrations_in(&directory);
+        let stores = SqliteMobStores::open(&path).unwrap();
+        assert!(
+            held.wait_entered(1, OBSERVER_HANG_GUARD),
+            "the watch registration reached its platform call"
+        );
+        // The observer state stays reachable for the drain, as in the other
+        // drain tests: its worker returns on the stop, and would otherwise
+        // free it.
+        let catch_up = registered_catch_up(&path);
+        drop(stores);
+
+        let drain_path = path.clone();
+        let outcome = std::thread::spawn(move || SqliteMobStores::drain_observers(&drain_path))
+            .join()
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Ok(SqliteMobObserverDrain::Closed(
+                SqliteMobObserverDrainReport {
+                    catch_up_settled: true,
+                    joined_workers: 1,
+                    panicked_workers: 0,
+                    unjoined_workers: 0,
+                    joining_elsewhere: 0,
+                    replacement_registered: false,
+                    retained_registrations: 1,
+                }
+            ))
+        );
+        assert_eq!(
+            retained_here(),
+            1,
+            "the process keeps the registration's thread"
+        );
+        assert_eq!(held.live_sources(), 1);
+
+        // Once the platform call returns, the registration discards its
+        // source, and the process joins its thread.
+        held.release();
+        assert_eq!(
+            wait_for_retained_registrations(&directory, 0),
+            0,
+            "the process joins the registration once it returns"
+        );
+        assert_eq!((held.live_sources(), held.dropped_sources()), (0, 1));
+        drop(catch_up);
+    }
+
+    /// When the last owner goes, the observer's worker returns and frees the
+    /// observer: its watch is dropped with a registration the operating
+    /// system still holds. The process retains that registration, and a
+    /// later drain finds no observer.
+    #[test]
+    fn a_freed_observer_leaves_its_held_watch_registration_with_the_process() {
+        let (dir, path) = temp_db_path();
+        let held = meerkat_sqlite::watch::test_support::hold_registrations_in(dir.path()).unwrap();
+        let directory = dir.path().canonicalize().unwrap();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        assert!(
+            held.wait_entered(1, OBSERVER_HANG_GUARD),
+            "the watch registration reached its platform call"
+        );
+        drop(stores);
+
+        assert_eq!(
+            wait_for_retained_registrations(&directory, 1),
+            1,
+            "the freed observer's registration stays with the process"
+        );
+        assert_eq!(
+            SqliteMobStores::drain_observers(&path),
+            Ok(SqliteMobObserverDrain::NotFound)
+        );
+        assert_eq!(held.live_sources(), 1);
+
+        held.release();
+        assert_eq!(
+            wait_for_retained_registrations(&directory, 0),
+            0,
+            "the process joins the registration once it returns"
+        );
+        assert_eq!((held.live_sources(), held.dropped_sources()), (0, 1));
     }
 
     #[tokio::test]

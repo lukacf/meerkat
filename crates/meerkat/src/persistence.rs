@@ -549,8 +549,10 @@ impl PersistenceBundle {
     /// Require the realm's declared hosting mode (#1813). `Multiprocess`
     /// refuses, typed, unless the runtime store offers trusted cross-process
     /// hosting (decorators forward the capability) AND its store watch (the
-    /// delivery owners' cross-process wake) can be established.
-    /// `SingleProcess` always holds.
+    /// delivery owners' cross-process wake) can start its sweep. File
+    /// notifications only shorten that wake: a store whose notifications
+    /// cannot be registered still holds `Multiprocess`. `SingleProcess`
+    /// always holds.
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     pub fn require_hosting_mode(
         &self,

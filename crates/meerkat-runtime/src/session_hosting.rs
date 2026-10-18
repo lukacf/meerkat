@@ -158,10 +158,13 @@ mod native {
 
     /// Start the wake watch over `capability`'s store database, ticking at
     /// least every `sweep`. `Ok(None)` for a store without cross-process
-    /// hosting; an error when the watch cannot be established (including a
-    /// build without this crate's `sqlite-store` feature), which an owner
-    /// reports as unavailable cross-process wake and explicit multi-process
-    /// startup refuses.
+    /// hosting; an error when the watch's sweep cannot start (no database
+    /// file named, an unresolvable directory, no thread, or a build without
+    /// this crate's `sqlite-store` feature), which an owner reports as
+    /// unavailable cross-process wake and explicit multi-process startup
+    /// refuses. It never waits for file notifications: they register on a
+    /// thread of their own, and a store whose notifications cannot be
+    /// registered still ticks every `sweep`.
     pub fn watch_delivery_store(
         capability: &meerkat_core::session_hosting::HostingCapability,
         sweep: std::time::Duration,

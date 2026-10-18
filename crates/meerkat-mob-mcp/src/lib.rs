@@ -1771,9 +1771,12 @@ impl MobMcpState {
     }
 
     /// Whether a drain of the destroyed mob's database observer left
-    /// nothing of it running in this process: no observer was live, or it
-    /// was closed with its catch-up settled, every worker joined and no
-    /// replacement attached. Otherwise what is still open.
+    /// nothing of it that touches the database running in this process: no
+    /// observer was live, or it was closed with its catch-up settled, every
+    /// worker joined and no replacement attached. A notification
+    /// registration the operating system still holds
+    /// (`retained_registrations`) never reads or writes the database, so it
+    /// does not keep the cleanup owed. Otherwise what is still open.
     #[cfg(not(target_arch = "wasm32"))]
     fn observer_drain_settled(
         drained: Result<
@@ -17813,7 +17816,9 @@ mod tests {
     /// Storage is released only by a drain that left nothing of the
     /// database's observer in this process: none was live, or it closed with
     /// its catch-up settled, every worker joined and no replacement
-    /// attached. A refusal or anything left open keeps the cleanup owed.
+    /// attached. A refusal or anything left open keeps the cleanup owed; a
+    /// retained notification registration, which never touches the
+    /// database, does not.
     #[test]
     fn only_a_settled_observer_drain_releases_destroyed_storage() {
         use meerkat_mob::{
@@ -17827,9 +17832,17 @@ mod tests {
             unjoined_workers: 0,
             joining_elsewhere: 0,
             replacement_registered: false,
+            retained_registrations: 0,
         };
         assert!(MobMcpState::observer_drain_settled(Ok(Drain::NotFound)).is_ok());
         assert!(MobMcpState::observer_drain_settled(Ok(Drain::Closed(settled))).is_ok());
+        assert!(
+            MobMcpState::observer_drain_settled(Ok(Drain::Closed(Report {
+                retained_registrations: 1,
+                ..settled
+            })))
+            .is_ok()
+        );
         for open in [
             Report {
                 replacement_registered: true,

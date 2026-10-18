@@ -13,6 +13,14 @@
 //! ever defines permission, custody or expiry: correctness rests with the
 //! consumer's durable reads and its own fences.
 //!
+//! Registering for notifications is a hint too, and nothing waits for it. The
+//! operating system can hold a registration without bound (macOS FSEvents
+//! registration has taken over 30 seconds) and nothing can interrupt it, so
+//! the sweep worker starts first and the registration runs on a thread of its
+//! own: starting a watch returns at once, and a registration that fails leaves
+//! the watch on its sweep alone. [`SqliteChangeWatch::registration`] reports
+//! where it stands.
+//!
 //! This is the contract the mob event bus has used since its external watch
 //! landed, extracted so every store shares one implementation.
 //!
@@ -20,11 +28,15 @@
 //! only asks the worker to return and never blocks: a tick already running
 //! finishes on its own thread, unjoined. [`SqliteChangeWatch::stop_and_join`]
 //! is the one operation that waits for the worker, and it cannot do so from
-//! the worker's own thread.
+//! the worker's own thread. Neither waits for a registration that is still
+//! running: a stop cancels it, and its thread discards its result when the
+//! platform call returns. That thread is never detached: it stays with its
+//! watch and, once the watch is dropped, with the process
+//! ([`retained_registrations`]) until it returns.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -78,6 +90,25 @@ pub enum SqliteWatchJoin {
     UnjoinedOnWorkerThread,
 }
 
+/// Where a watch's notification registration stands
+/// ([`SqliteChangeWatch::registration`]). Notifications only shorten a wake:
+/// the sweep runs whatever this says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SqliteWatchRegistration {
+    /// Running on its own thread, which the operating system can hold without
+    /// bound. Until it ends, only the sweep wakes the consumer.
+    Pending,
+    /// Registered. Its notifications stop when the watch does.
+    Registered,
+    /// Failed, or its thread could not start: only the sweep wakes the
+    /// consumer.
+    Failed(String),
+    /// The watch stopped before the registration ended; its thread discarded
+    /// the result.
+    Cancelled,
+}
+
 /// Asks a watch's worker to return, without owning the worker. Cheap to clone;
 /// never blocks and never joins.
 #[derive(Debug, Clone)]
@@ -114,16 +145,123 @@ enum WorkerCustody {
     Joined(SqliteWatchJoin),
 }
 
-/// A running watch: the notification source plus custody of its worker
-/// thread.
+/// A registration's result, shared by its thread and its watch.
+enum RegistrationSlot {
+    Pending,
+    /// Registered; the source until the watch stops.
+    Registered(Option<Box<dyn WatchSource>>),
+    Failed(String),
+    Cancelled,
+}
+
+/// A registration thread and what it registers.
+struct RegistrationThread {
+    handle: thread::JoinHandle<()>,
+    directory: PathBuf,
+    name: String,
+    started: Instant,
+}
+
+/// Custody of a watch's notification registration: its result, and its
+/// thread until that is joined.
+struct RegistrationCustody {
+    slot: Arc<Mutex<RegistrationSlot>>,
+    /// `None` once joined, or when the thread never started.
+    thread: Option<RegistrationThread>,
+}
+
+impl RegistrationCustody {
+    /// Register `targets` on a thread of its own, named after the watch. A
+    /// thread that cannot start leaves the registration failed: the sweep
+    /// alone wakes the consumer.
+    fn spawn(
+        watch_name: &str,
+        backend: Box<dyn WatchBackend>,
+        targets: WatchTargets,
+        wake: mpsc::Sender<()>,
+        stop_requested: Arc<AtomicBool>,
+    ) -> Self {
+        let slot = Arc::new(Mutex::new(RegistrationSlot::Pending));
+        let thread_slot = Arc::clone(&slot);
+        let directory = targets.parent.clone();
+        let name = format!("{watch_name}-register");
+        let started = Instant::now();
+        let spawned = thread::Builder::new().name(name.clone()).spawn(move || {
+            register(
+                backend.as_ref(),
+                &targets,
+                wake,
+                &stop_requested,
+                &thread_slot,
+            );
+        });
+        match spawned {
+            Ok(handle) => Self {
+                slot,
+                thread: Some(RegistrationThread {
+                    handle,
+                    directory,
+                    name,
+                    started,
+                }),
+            },
+            Err(error) => {
+                settle_failed(
+                    &slot,
+                    format!("cannot start the sqlite change watch registration thread: {error}"),
+                );
+                Self { slot, thread: None }
+            }
+        }
+    }
+
+    fn state(&self) -> SqliteWatchRegistration {
+        match &*lock(&self.slot) {
+            RegistrationSlot::Pending => SqliteWatchRegistration::Pending,
+            RegistrationSlot::Registered(_) => SqliteWatchRegistration::Registered,
+            RegistrationSlot::Failed(reason) => SqliteWatchRegistration::Failed(reason.clone()),
+            RegistrationSlot::Cancelled => SqliteWatchRegistration::Cancelled,
+        }
+    }
+
+    /// Stop the notifications, once the stop flag is set: drop a registered
+    /// source, and join the thread if it has returned. A registration still
+    /// running discards its result when it ends.
+    fn stop(&mut self) {
+        let source = match &mut *lock(&self.slot) {
+            RegistrationSlot::Registered(source) => source.take(),
+            _ => None,
+        };
+        drop(source);
+        if self
+            .thread
+            .as_ref()
+            .is_some_and(|thread| thread.handle.is_finished())
+            && let Some(thread) = self.thread.take()
+        {
+            let _ = thread.handle.join();
+        }
+    }
+
+    /// The watch is going: stop, and hand a thread still running to the
+    /// process's custody.
+    fn release(&mut self) {
+        self.stop();
+        if let Some(thread) = self.thread.take() {
+            retain_registration(thread);
+        }
+    }
+}
+
+/// A running watch: custody of its worker thread and of its notification
+/// registration.
 ///
 /// Dropping it requests the stop and never blocks or joins: the worker
 /// returns at its next wake, after any tick that is running, unjoined. Use
 /// [`Self::stop_and_join`] to wait for the worker.
 pub struct SqliteChangeWatch {
     control: Arc<WatchControl>,
-    /// The notification source, until the watch stops.
-    source: Mutex<Option<Box<dyn WatchSource>>>,
+    registration: RegistrationCustody,
     worker: WorkerCustody,
 }
 
@@ -170,9 +308,21 @@ impl SqliteChangeWatch {
         }
     }
 
+    /// Where the notification registration stands. The sweep runs whatever
+    /// it says.
+    pub fn registration(&self) -> SqliteWatchRegistration {
+        self.registration.state()
+    }
+
     /// Request the stop, stop the notifications, and wait for the worker to
     /// return: a tick that is running finishes first. Unbounded by design: it
     /// waits exactly as long as that tick runs.
+    ///
+    /// It never waits for a notification registration that is still running:
+    /// the stop cancels it, and its thread stays in this watch until it
+    /// returns ([`Self::registration`] says
+    /// [`SqliteWatchRegistration::Pending`] until then). A later call joins
+    /// that thread once it has.
     ///
     /// On the worker's own thread it cannot wait; it returns
     /// [`SqliteWatchJoin::UnjoinedOnWorkerThread`] and keeps the join handle
@@ -180,8 +330,7 @@ impl SqliteChangeWatch {
     /// Calling it again after a join returns the recorded outcome.
     pub fn stop_and_join(&mut self) -> SqliteWatchJoin {
         self.control.request_stop();
-        let source = lock(&self.source).take();
-        drop(source);
+        self.registration.stop();
         if self.on_worker_thread() {
             return SqliteWatchJoin::UnjoinedOnWorkerThread;
         }
@@ -202,9 +351,65 @@ impl SqliteChangeWatch {
 
 impl Drop for SqliteChangeWatch {
     fn drop(&mut self) {
-        // Never block or join here: the last owner can drop a watch on any
-        // thread, including its own worker's.
+        // Never wait here: the last owner can drop a watch on any thread,
+        // including its own worker's. A registration still running goes to
+        // the process's custody.
         self.control.request_stop();
+        self.registration.release();
+    }
+}
+
+/// Registration threads still running after their watch was dropped.
+static RETAINED_REGISTRATIONS: OnceLock<Mutex<Vec<RegistrationThread>>> = OnceLock::new();
+
+fn retained() -> &'static Mutex<Vec<RegistrationThread>> {
+    RETAINED_REGISTRATIONS.get_or_init(Mutex::default)
+}
+
+/// A notification registration still running after its watch was dropped
+/// ([`retained_registrations`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SqliteWatchRetainedRegistration {
+    /// The directory it registers.
+    pub directory: PathBuf,
+    /// The name of its thread.
+    pub thread_name: String,
+    /// How long it has been running.
+    pub running_for: Duration,
+}
+
+/// The notification registrations this process still holds for watches that
+/// are gone. Each one is blocked in the operating system, which nothing can
+/// interrupt, and discards its result when that call returns. Joins the ones
+/// that have returned; never waits.
+pub fn retained_registrations() -> Vec<SqliteWatchRetainedRegistration> {
+    let mut retained = lock(retained());
+    reap(&mut retained);
+    retained
+        .iter()
+        .map(|thread| SqliteWatchRetainedRegistration {
+            directory: thread.directory.clone(),
+            thread_name: thread.name.clone(),
+            running_for: thread.started.elapsed(),
+        })
+        .collect()
+}
+
+fn retain_registration(thread: RegistrationThread) {
+    let mut retained = lock(retained());
+    reap(&mut retained);
+    retained.push(thread);
+}
+
+/// Join the retained threads that have returned.
+fn reap(retained: &mut Vec<RegistrationThread>) {
+    let (returned, running): (Vec<_>, Vec<_>) = std::mem::take(retained)
+        .into_iter()
+        .partition(|thread| thread.handle.is_finished());
+    *retained = running;
+    for thread in returned {
+        let _ = thread.handle.join();
     }
 }
 
@@ -350,6 +555,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `thread_name`, once per coalesced notification and once per `sweep`
 /// without one, until the watch is stopped or `on_tick` returns
 /// [`SqliteWatchControl::Stop`].
+///
+/// Returns as soon as that worker runs. The notification registration runs
+/// on a thread of its own, `<thread_name>-register`, which ends once the
+/// platform has registered (at once with inotify);
+/// [`SqliteChangeWatch::registration`] reports it. While the platform holds
+/// registrations, every watch started holds that thread, and on macOS
+/// notify's run-loop thread too, until the platform call returns: a process
+/// that starts watches repeatedly during such a stall holds two threads per
+/// start for its length. Errors only when the database's directory cannot be
+/// resolved or the worker cannot start.
 pub fn start_sqlite_change_watch(
     db_path: &Path,
     thread_name: &str,
@@ -376,9 +591,8 @@ fn start_with_backend(
     let stop_requested = Arc::new(AtomicBool::new(false));
     let worker_stop_requested = Arc::clone(&stop_requested);
 
-    let mut source = backend.create(&targets, wake_tx.clone())?;
-    source.watch(&targets.parent)?;
-
+    // The sweep is the guarantee: its worker starts first, before anything
+    // that can block.
     let worker = thread::Builder::new()
         .name(thread_name.to_string())
         .spawn(move || {
@@ -428,14 +642,69 @@ fn start_with_backend(
         })
         .map_err(|error| format!("cannot start the sqlite change watch thread: {error}"))?;
 
+    let registration = RegistrationCustody::spawn(
+        thread_name,
+        backend,
+        targets,
+        wake_tx.clone(),
+        Arc::clone(&stop_requested),
+    );
     Ok(SqliteChangeWatch {
         control: Arc::new(WatchControl {
             stop_requested,
             wake: wake_tx,
         }),
-        source: Mutex::new(Some(source)),
+        registration,
         worker: WorkerCustody::Running(worker),
     })
+}
+
+/// The registration thread: create the source and register it, then hand it
+/// to the watch, or discard it when the watch stopped meanwhile.
+fn register(
+    backend: &dyn WatchBackend,
+    targets: &WatchTargets,
+    wake: mpsc::Sender<()>,
+    stop_requested: &AtomicBool,
+    slot: &Mutex<RegistrationSlot>,
+) {
+    if stop_requested.load(Ordering::Acquire) {
+        *lock(slot) = RegistrationSlot::Cancelled;
+        return;
+    }
+    let mut source = match backend.create(targets, wake) {
+        Ok(source) => source,
+        Err(reason) => {
+            settle_failed(slot, reason);
+            return;
+        }
+    };
+    if let Err(reason) = source.watch(&targets.parent) {
+        drop(source);
+        settle_failed(slot, reason);
+        return;
+    }
+    {
+        // The stop side sets its flag before it reads the slot, so a flag
+        // read under the slot lock never leaves a source live past a stop.
+        let mut settled = lock(slot);
+        if !stop_requested.load(Ordering::Acquire) {
+            *settled = RegistrationSlot::Registered(Some(source));
+            return;
+        }
+    }
+    // The watch stopped while the platform registered: discard the source
+    // here, so its notifications never start, then settle.
+    drop(source);
+    *lock(slot) = RegistrationSlot::Cancelled;
+}
+
+fn settle_failed(slot: &Mutex<RegistrationSlot>, reason: String) {
+    tracing::warn!(
+        %reason,
+        "sqlite change watch notifications are unavailable; the watch runs on its sweep alone"
+    );
+    *lock(slot) = RegistrationSlot::Failed(reason);
 }
 
 /// Held watch registrations, for tests of code that starts SQLite change
@@ -602,14 +871,39 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    /// Wait, within the hang guard, until the watch's registration ends.
+    fn settled_registration(watch: &SqliteChangeWatch) -> SqliteWatchRegistration {
+        let deadline = Instant::now() + HANG_GUARD;
+        loop {
+            let registration = watch.registration();
+            if registration != SqliteWatchRegistration::Pending || Instant::now() >= deadline {
+                return registration;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn retained_in(directory: &Path) -> Vec<SqliteWatchRetainedRegistration> {
+        retained_registrations()
+            .into_iter()
+            .filter(|retained| retained.directory == directory)
+            .collect()
+    }
+
     fn assert_database_write_ticks_changed(db: &Path) {
         std::fs::write(db, b"").unwrap();
         let (tick_tx, tick_rx) = mpsc::channel();
-        let _watch = start_sqlite_change_watch(db, "test-watch", SQLITE_WATCH_SWEEP, move |tick| {
+        let watch = start_sqlite_change_watch(db, "test-watch", SQLITE_WATCH_SWEEP, move |tick| {
             let _ = tick_tx.send(tick);
             SqliteWatchControl::Handled
         })
         .expect("watch starts");
+        // Notifications are registered after the start returns: a write
+        // before that is seen by the sweep alone.
+        assert_eq!(
+            settled_registration(&watch),
+            SqliteWatchRegistration::Registered
+        );
         std::fs::write(sidecar_path(db, "-wal"), b"frame").unwrap();
         let tick = tick_rx
             .recv_timeout(Duration::from_secs(10))
@@ -887,6 +1181,212 @@ mod tests {
             ticks.load(Ordering::SeqCst),
             1,
             "no tick starts after the stop request"
+        );
+    }
+
+    /// How long a held registration may keep a start from returning, or the
+    /// sweep from ticking, before the test calls it held.
+    const HELD_BOUND: Duration = Duration::from_secs(5);
+    const HANG_GUARD: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn a_held_registration_does_not_hold_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = test_support::hold_registrations_in(dir.path()).unwrap();
+        let db = dir.path().join("store.sqlite3");
+        let (started_tx, started_rx) = mpsc::channel();
+        let starter = thread::spawn(move || {
+            let watch =
+                start_sqlite_change_watch(&db, "test-held-start", SQLITE_WATCH_SWEEP, |_| {
+                    SqliteWatchControl::Handled
+                });
+            let _ = started_tx.send(());
+            watch
+        });
+        assert!(
+            held.wait_entered(1, HANG_GUARD),
+            "the registration reached its platform call"
+        );
+        let started = started_rx.recv_timeout(HELD_BOUND);
+        held.release();
+        let watch = starter.join().unwrap().expect("watch starts");
+        assert_eq!(
+            started,
+            Ok(()),
+            "the start waited for the held notification registration"
+        );
+        drop(watch);
+    }
+
+    #[test]
+    fn the_sweep_ticks_while_the_registration_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = test_support::hold_registrations_in(dir.path()).unwrap();
+        let db = dir.path().join("store.sqlite3");
+        let (tick_tx, tick_rx) = mpsc::channel();
+        let starter = thread::spawn(move || {
+            start_sqlite_change_watch(
+                &db,
+                "test-held-sweep",
+                Duration::from_millis(20),
+                move |tick| {
+                    let _ = tick_tx.send(tick);
+                    SqliteWatchControl::Handled
+                },
+            )
+        });
+        assert!(
+            held.wait_entered(1, HANG_GUARD),
+            "the registration reached its platform call"
+        );
+        let tick = tick_rx.recv_timeout(HELD_BOUND);
+        held.release();
+        let watch = starter.join().unwrap().expect("watch starts");
+        assert_eq!(
+            tick,
+            Ok(SqliteWatchTick::Sweep),
+            "no sweep ran while the notification registration was held"
+        );
+        drop(watch);
+    }
+
+    /// A source whose registration fails, as inotify's does past the user's
+    /// watch limit.
+    struct FailingBackend;
+
+    struct FailingSource;
+
+    impl WatchBackend for FailingBackend {
+        fn create(
+            &self,
+            _targets: &WatchTargets,
+            _wake: mpsc::Sender<()>,
+        ) -> Result<Box<dyn WatchSource>, String> {
+            Ok(Box::new(FailingSource))
+        }
+    }
+
+    impl WatchSource for FailingSource {
+        fn watch(&mut self, directory: &Path) -> Result<(), String> {
+            Err(format!(
+                "cannot watch {}: the watch limit is reached",
+                directory.display()
+            ))
+        }
+    }
+
+    #[test]
+    fn a_failed_registration_keeps_the_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.sqlite3");
+        let (tick_tx, tick_rx) = mpsc::channel();
+        let watch = start_with_backend(
+            &db,
+            "test-failed-registration",
+            Duration::from_millis(20),
+            move |tick| {
+                let _ = tick_tx.send(tick);
+                SqliteWatchControl::Handled
+            },
+            |_| Box::new(FailingBackend),
+        )
+        .expect("a failed notification registration leaves the watch on its sweep");
+        assert_eq!(tick_rx.recv_timeout(HANG_GUARD), Ok(SqliteWatchTick::Sweep));
+        drop(watch);
+    }
+
+    #[test]
+    fn stopping_cancels_a_held_registration_and_keeps_its_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = test_support::hold_registrations_in(dir.path()).unwrap();
+        let directory = dir.path().canonicalize().unwrap();
+        let db = dir.path().join("store.sqlite3");
+        let mut watch =
+            start_sqlite_change_watch(&db, "test-held-stop", Duration::from_millis(20), |_| {
+                SqliteWatchControl::Handled
+            })
+            .expect("watch starts");
+        assert!(
+            held.wait_entered(1, HANG_GUARD),
+            "the registration reached its platform call"
+        );
+
+        // The stop joins the worker and never waits for the registration.
+        assert_eq!(watch.stop_and_join(), SqliteWatchJoin::Joined);
+        assert_eq!(watch.registration(), SqliteWatchRegistration::Pending);
+        assert_eq!(held.live_sources(), 1);
+
+        // Once the platform call returns, the registration discards its source
+        // on its own thread instead of handing it to the stopped watch.
+        held.release();
+        assert_eq!(
+            settled_registration(&watch),
+            SqliteWatchRegistration::Cancelled
+        );
+        assert_eq!((held.live_sources(), held.dropped_sources()), (0, 1));
+        // Its thread stayed with this watch, which joins it now.
+        assert!(retained_in(&directory).is_empty());
+        assert_eq!(watch.stop_and_join(), SqliteWatchJoin::Joined);
+    }
+
+    #[test]
+    fn dropping_a_watch_retains_its_held_registration_until_it_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = test_support::hold_registrations_in(dir.path()).unwrap();
+        let directory = dir.path().canonicalize().unwrap();
+        let db = dir.path().join("store.sqlite3");
+        let watch =
+            start_sqlite_change_watch(&db, "test-held-drop", Duration::from_millis(20), |_| {
+                SqliteWatchControl::Handled
+            })
+            .expect("watch starts");
+        assert!(
+            held.wait_entered(1, HANG_GUARD),
+            "the registration reached its platform call"
+        );
+
+        // Dropping never waits for the registration and never detaches it:
+        // the process keeps its thread, and reports it.
+        drop(watch);
+        let retained = retained_in(&directory);
+        assert_eq!(retained.len(), 1, "{retained:?}");
+        assert_eq!(retained[0].thread_name, "test-held-drop-register");
+        assert_eq!(held.live_sources(), 1);
+
+        // Once the platform call returns, the registration discards its
+        // source, and the process joins its thread.
+        held.release();
+        let deadline = Instant::now() + HANG_GUARD;
+        while !retained_in(&directory).is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            retained_in(&directory).is_empty(),
+            "the process joins a retained registration once it returns"
+        );
+        assert_eq!((held.live_sources(), held.dropped_sources()), (0, 1));
+    }
+
+    #[test]
+    fn a_failed_registration_reports_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.sqlite3");
+        let watch = start_with_backend(
+            &db,
+            "test-failed-reason",
+            SQLITE_WATCH_SWEEP,
+            |_| SqliteWatchControl::Handled,
+            |_| Box::new(FailingBackend),
+        )
+        .expect("watch starts");
+        let registration = settled_registration(&watch);
+        assert!(
+            matches!(
+                &registration,
+                SqliteWatchRegistration::Failed(reason)
+                    if reason.contains("the watch limit is reached")
+            ),
+            "{registration:?}"
         );
     }
 }

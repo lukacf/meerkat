@@ -36,7 +36,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,6 +50,14 @@ pub const SQLITE_WATCH_SWEEP: Duration = Duration::from_millis(5_000);
 const SQLITE_WATCH_COALESCE: Duration = Duration::from_millis(10);
 const SQLITE_WATCH_RECOVERY_BACKOFF_MIN: Duration = Duration::from_millis(100);
 const SQLITE_WATCH_RECOVERY_BACKOFF_MAX: Duration = Duration::from_millis(30_000);
+/// Notification registrations a process runs at once. A stalled platform
+/// (macOS FSEvents) holds each one for as long as it stalls, with two threads
+/// apiece; past this many, a new watch runs on its sweep alone instead of
+/// adding two more threads.
+const MAX_REGISTRATIONS_IN_FLIGHT: usize = 8;
+/// Registration threads running now in this process, for watches alive or
+/// dropped.
+static REGISTRATIONS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Why the consumer is being asked to look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +163,27 @@ enum RegistrationSlot {
     Cancelled,
 }
 
+/// One running registration's place among [`MAX_REGISTRATIONS_IN_FLIGHT`],
+/// given back when its thread ends, or when the thread never starts.
+struct InFlightPlace;
+
+impl InFlightPlace {
+    /// Take a place, or say how many registrations hold them all.
+    fn take() -> Result<Self, usize> {
+        REGISTRATIONS_IN_FLIGHT
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |running| {
+                (running < MAX_REGISTRATIONS_IN_FLIGHT).then_some(running + 1)
+            })
+            .map(|_| Self)
+    }
+}
+
+impl Drop for InFlightPlace {
+    fn drop(&mut self) {
+        REGISTRATIONS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// A registration thread and what it registers.
 struct RegistrationThread {
     handle: thread::JoinHandle<()>,
@@ -173,8 +202,9 @@ struct RegistrationCustody {
 
 impl RegistrationCustody {
     /// Register `targets` on a thread of its own, named after the watch. A
-    /// thread that cannot start leaves the registration failed: the sweep
-    /// alone wakes the consumer.
+    /// thread that cannot start, or a process already running
+    /// [`MAX_REGISTRATIONS_IN_FLIGHT`] registrations, leaves the registration
+    /// failed: the sweep alone wakes the consumer.
     fn spawn(
         watch_name: &str,
         backend: Box<dyn WatchBackend>,
@@ -183,11 +213,26 @@ impl RegistrationCustody {
         stop_requested: Arc<AtomicBool>,
     ) -> Self {
         let slot = Arc::new(Mutex::new(RegistrationSlot::Pending));
+        let place = match InFlightPlace::take() {
+            Ok(place) => place,
+            Err(running) => {
+                settle_failed(
+                    &slot,
+                    format!(
+                        "{running} sqlite change watch notification registrations are already \
+                         pending (at most {MAX_REGISTRATIONS_IN_FLIGHT})"
+                    ),
+                );
+                return Self { slot, thread: None };
+            }
+        };
         let thread_slot = Arc::clone(&slot);
         let directory = targets.parent.clone();
         let name = format!("{watch_name}-register");
         let started = Instant::now();
         let spawned = thread::Builder::new().name(name.clone()).spawn(move || {
+            // Given back as the thread ends, however it ends.
+            let _place = place;
             register(
                 backend.as_ref(),
                 &targets,
@@ -561,11 +606,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// on a thread of its own, `<thread_name>-register`, which ends once the
 /// platform has registered (at once with inotify);
 /// [`SqliteChangeWatch::registration`] reports it. While the platform holds
-/// registrations, every watch started holds that thread, and on macOS
-/// notify's run-loop thread too, until the platform call returns: a process
-/// that starts watches repeatedly during such a stall holds two threads per
-/// start for its length. Errors only when the database's directory cannot be
-/// resolved or the worker cannot start.
+/// registrations, each one holds that thread, and on macOS notify's run-loop
+/// thread too, until the platform call returns. At most 8 run at once in a
+/// process: a watch started while 8 are pending runs on its sweep alone
+/// (`Failed`) and logs a warning. Errors only when the database's directory
+/// cannot be resolved or the worker cannot start.
 pub fn start_sqlite_change_watch(
     db_path: &Path,
     thread_name: &str,
@@ -1491,5 +1536,93 @@ mod tests {
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn registrations_past_the_cap_leave_new_watches_on_their_sweep() {
+        // The cap counts registrations across the process: let any that an
+        // earlier test in this process left running finish first.
+        let deadline = Instant::now() + HANG_GUARD;
+        while REGISTRATIONS_IN_FLIGHT.load(Ordering::Acquire) > 0 {
+            assert!(
+                Instant::now() < deadline,
+                "earlier registrations end within the hang guard"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let held = test_support::hold_registrations_in(dir.path()).unwrap();
+        let watches: Vec<_> = (0..MAX_REGISTRATIONS_IN_FLIGHT)
+            .map(|index| {
+                start_sqlite_change_watch(
+                    &dir.path().join(format!("store-{index}.sqlite3")),
+                    "test-cap-held",
+                    SQLITE_WATCH_SWEEP,
+                    |_| SqliteWatchControl::Handled,
+                )
+                .expect("watch starts")
+            })
+            .collect();
+        assert!(
+            held.wait_entered(MAX_REGISTRATIONS_IN_FLIGHT, HANG_GUARD),
+            "every registration under the cap reached its platform call"
+        );
+
+        // One more watch starts with no registration thread, on its sweep
+        // alone.
+        let (tick_tx, tick_rx) = mpsc::channel();
+        let over = start_sqlite_change_watch(
+            &dir.path().join("store-over.sqlite3"),
+            "test-cap-over",
+            Duration::from_millis(20),
+            move |tick| {
+                let _ = tick_tx.send(tick);
+                SqliteWatchControl::Handled
+            },
+        )
+        .expect("a watch past the cap still starts");
+        let registration = over.registration();
+        assert!(
+            matches!(
+                &registration,
+                SqliteWatchRegistration::Failed(reason) if reason.contains("already pending")
+            ),
+            "{registration:?}"
+        );
+        assert!(
+            over.registration.thread.is_none(),
+            "no registration thread started past the cap"
+        );
+        assert_eq!(held.live_sources(), MAX_REGISTRATIONS_IN_FLIGHT);
+        assert_eq!(tick_rx.recv_timeout(HANG_GUARD), Ok(SqliteWatchTick::Sweep));
+
+        // Released, every held registration settles and gives its place back,
+        // and a fresh watch registers again.
+        held.release();
+        for watch in &watches {
+            assert_eq!(
+                settled_registration(watch),
+                SqliteWatchRegistration::Registered
+            );
+        }
+        let deadline = Instant::now() + HANG_GUARD;
+        while REGISTRATIONS_IN_FLIGHT.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh = start_sqlite_change_watch(
+            &fresh_dir.path().join("store.sqlite3"),
+            "test-cap-fresh",
+            SQLITE_WATCH_SWEEP,
+            |_| SqliteWatchControl::Handled,
+        )
+        .expect("watch starts");
+        assert_eq!(
+            settled_registration(&fresh),
+            SqliteWatchRegistration::Registered,
+            "a fresh watch registers once every place is given back"
+        );
+        drop(watches);
+        drop(over);
     }
 }

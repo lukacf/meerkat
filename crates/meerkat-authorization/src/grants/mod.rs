@@ -79,6 +79,10 @@ pub enum GrantRefusal {
 /// and may rebuild once, never as unavailability. A standalone resolution
 /// ([`LocalGrantAuthority::resolve_lineage`] and its siblings) reports such
 /// a change as [`GrantRefusal::Unavailable`].
+///
+/// Closed by design: a resolution either met a change or the owner refused
+/// it, so a new reason to refuse is a [`GrantRefusal`] variant, never a new
+/// variant here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LineageResolutionRefusal {
     /// An owner change published during this resolution's observation.

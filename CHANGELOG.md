@@ -427,18 +427,26 @@ them.
   and `LocalGrantAuthority::reconstruct` returns
   `ReplacementPublicationUnavailable`, installing nothing, when its
   replacement publication is poisoned during the reconstruction.
-- A grant-backed operation preparation whose grant resolution meets an
-  owner change published during the preparation now refuses it as a stale
-  read (`OperationRefusalKind::ReprepareRequired`) and rebuilds once, as for
-  any other concurrent owner change, instead of reporting the grant
-  authority as unavailable. Controller admission does the same, and so do
-  the contributor ceilings of work that names other originals (a helper's
-  source) and the stock governed realm's review mandate, which reports
-  such a change as a stale review read instead of an unavailable review
-  context. A poisoned publication, failed durable grant custody and a clock
-  failure still answer `Unavailable` and are never retried, and a
-  standalone `LocalGrantAuthority::resolve_lineage` still reports a
-  concurrent change as `GrantRefusal::Unavailable`.
+- A grant resolution read inside an enclosing observation of the grant
+  publication that meets an owner change published during the resolution
+  is now that observation's stale read, as for any other concurrent owner
+  change, instead of an unavailable grant authority. A grant-backed
+  operation preparation refuses it as
+  `OperationRefusalKind::ReprepareRequired` and rebuilds once, for the
+  work's own grant and for the contributor ceilings of work that names
+  other originals (a helper's source); controller admission refuses it as
+  `ReprepareRequired`. A review read, which reads its material once by
+  design, is not rebuilt: when the stock governed realm's review mandate or
+  a contributor ceiling meets such a change, the review now refuses as
+  stale (`ToolError::AuthorizationRefused` with `ReprepareRequired`)
+  instead of reporting an unavailable review context, and a fresh attempt
+  reads it again. A poisoned publication still answers `Unavailable` and is
+  never retried. Failed durable grant custody and a clock failure still
+  answer `Unavailable`, except that one the resolution meets while an owner
+  change publishes is discarded with that stale read; a preparation's one
+  rebuild then answers `Unavailable` if the failure persists. A standalone
+  `LocalGrantAuthority::resolve_lineage` still reports a concurrent change
+  as `GrantRefusal::Unavailable`.
 
 ## [0.9.2] - 2026-10-16
 

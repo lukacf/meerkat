@@ -155,6 +155,22 @@ fn model_operation_refusal_notice() -> Message {
     )
 }
 
+/// Diagnostic target for an authorization refusal that reaches a turn's model
+/// request arms. Its events carry closed tags and identities, never error text.
+const TURN_REFUSAL_TRACE_TARGET: &str = "meerkat::authz::turn_refusal";
+
+/// Closed variant name of the refusal behind `error`. `None` when the operation
+/// authority was unavailable, which carries no refusal verdict.
+fn turn_refusal_kind(error: &AgentError) -> Option<&'static str> {
+    error
+        .operation_refusal()
+        .map(|refusal| match refusal.kind() {
+            crate::OperationRefusalKind::ReprepareRequired => "ReprepareRequired",
+            crate::OperationRefusalKind::Denied => "Denied",
+            crate::OperationRefusalKind::MalformedFacts => "MalformedFacts",
+        })
+}
+
 /// A concrete empty tag overrides the adapter's configured hosted defaults.
 /// Passing no tag would re-enable those defaults during provider lowering.
 fn controller_feedback_params(
@@ -2813,6 +2829,19 @@ where
                     if error.operation_refusal().is_some()
                         || error.operation_authorization_unavailable() =>
                 {
+                    tracing::info!(
+                        target: TURN_REFUSAL_TRACE_TARGET,
+                        kind = turn_refusal_kind(&error),
+                        unavailable = error.operation_authorization_unavailable(),
+                        arm = "call_llm_with_retry",
+                        session_id = %self.session.id(),
+                        run_id = %run_id,
+                        operation_id = authorization
+                            .as_ref()
+                            .map(|auth| tracing::field::display(auth.operation_id())),
+                        authorization_reprepared,
+                        controller_feedback = *controller_feedback
+                    );
                     if error.operation_refusal().is_some_and(|refusal| {
                         refusal.kind() == crate::OperationRefusalKind::ReprepareRequired
                     }) && !authorization_reprepared
@@ -6737,6 +6766,17 @@ where
             return Err(error);
         }
         if error.operation_refusal().is_some() || error.operation_authorization_unavailable() {
+            tracing::info!(
+                target: TURN_REFUSAL_TRACE_TARGET,
+                kind = turn_refusal_kind(&error),
+                unavailable = error.operation_authorization_unavailable(),
+                arm = "complete_calling_llm_request_failure",
+                session_id = %self.session.id(),
+                run_id = %ctx.run_id,
+                candidate_operation_id =
+                    ctx.model_operation_id.as_ref().map(tracing::field::display),
+                controller_feedback = *ctx.controller_feedback
+            );
             // Reachable alternate/hosted refusals have already been returned
             // to the retained controller. A refusal here means its admitted
             // route is unusable (or no pin was admitted). Preserve that typed
@@ -32134,6 +32174,150 @@ mod tests {
                     assert!(!transcript.contains("operation_refused"));
                     assert!(!transcript.contains("private unavailable canary"));
                 }
+            }
+        }
+
+        type TurnRefusalEvent = (
+            tracing::Level,
+            std::collections::BTreeMap<&'static str, String>,
+        );
+
+        /// Records only the turn-refusal diagnostic target: each event's level
+        /// and its fields as name to recorded value.
+        #[derive(Clone, Default)]
+        struct TurnRefusalCapture(Arc<Mutex<Vec<TurnRefusalEvent>>>);
+
+        struct TurnRefusalFields<'a>(&'a mut std::collections::BTreeMap<&'static str, String>);
+
+        impl tracing::field::Visit for TurnRefusalFields<'_> {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name(), value.to_string());
+            }
+
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name(), format!("{value:?}"));
+            }
+        }
+
+        impl tracing::Subscriber for TurnRefusalCapture {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.target() == "meerkat::authz::turn_refusal"
+            }
+
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut fields = std::collections::BTreeMap::new();
+                event.record(&mut TurnRefusalFields(&mut fields));
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((*event.metadata().level(), fields));
+            }
+
+            fn enter(&self, _: &tracing::span::Id) {}
+
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        /// A refusal with no local recovery leaves through both model request
+        /// arms. Each arm records the closed kind and identities only: the
+        /// whole field set is pinned, so no error text or payload can ride on it.
+        #[tokio::test]
+        async fn turn_refusal_diagnostic_records_closed_fields_at_both_arms() {
+            // A second registered dispatcher keeps callsite interest from being
+            // decided by a concurrent test thread that has no subscriber.
+            let _anchor = tracing::Dispatch::new(TurnRefusalCapture::default());
+            for unavailable in [false, true] {
+                let capture = TurnRefusalCapture::default();
+                let _guard = tracing::subscriber::set_default(capture.clone());
+                let alternate = Arc::new(RefusedAlternate {
+                    boundary: RefusalBoundary::Stream,
+                    kind: OperationRefusalKind::Denied,
+                    unavailable,
+                    preparations: AtomicUsize::new(0),
+                    attempts: AtomicUsize::new(0),
+                    ids: Mutex::new(Vec::new()),
+                });
+                let policy = Arc::new(FixturePolicy {
+                    hosted_denials: AtomicUsize::new(0),
+                    compaction_denials: AtomicUsize::new(0),
+                });
+                let mut agent =
+                    with_test_turn_state_handle(AgentBuilder::new().model("alternate-model"))
+                        .build_standalone(alternate.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+                        .await;
+                let (tx, _rx) = mpsc::channel(128);
+                // No retained controller client, so no local recovery route.
+                let error = agent
+                    .run_with_events_and_work_authorization(
+                        "attempt the requested action".to_string().into(),
+                        vec![],
+                        vec![],
+                        None,
+                        tx,
+                        Some(WorkAuthorizationContext::new(
+                            policy,
+                            crate::exact_operation::OperationExecutionScope::Domain,
+                        )),
+                    )
+                    .await
+                    .expect_err("a refusal without a recovery route fails the run");
+                assert_eq!(error.operation_authorization_unavailable(), unavailable);
+                assert_eq!(error.operation_refusal().is_some(), !unavailable);
+                let ids = alternate.ids.lock().unwrap().clone();
+                let [operation_id] = ids.as_slice() else {
+                    panic!("unavailable={unavailable}: one prepared request, got {ids:?}");
+                };
+                let events = capture.0.lock().unwrap().clone();
+                let [(call_level, call), (failure_level, failure)] = events.as_slice() else {
+                    panic!("unavailable={unavailable}: one event per arm, got {events:?}");
+                };
+                assert_eq!(*call_level, tracing::Level::INFO);
+                assert_eq!(*failure_level, tracing::Level::INFO);
+                let run_id = call.get("run_id").cloned().unwrap_or_default();
+                assert!(!run_id.is_empty(), "unavailable={unavailable}: {call:?}");
+                let expected = |arm: &str, operation: (&'static str, String), reprepared: bool| {
+                    let mut fields = std::collections::BTreeMap::from([
+                        ("unavailable", unavailable.to_string()),
+                        ("arm", arm.to_string()),
+                        ("session_id", agent.session().id().to_string()),
+                        ("run_id", run_id.clone()),
+                        ("controller_feedback", "false".to_string()),
+                        operation,
+                    ]);
+                    if reprepared {
+                        fields.insert("authorization_reprepared", "false".to_string());
+                    }
+                    if !unavailable {
+                        fields.insert("kind", "Denied".to_string());
+                    }
+                    fields
+                };
+                assert_eq!(
+                    call,
+                    &expected(
+                        "call_llm_with_retry",
+                        ("operation_id", operation_id.to_string()),
+                        true,
+                    ),
+                    "unavailable={unavailable}"
+                );
+                assert_eq!(
+                    failure,
+                    &expected(
+                        "complete_calling_llm_request_failure",
+                        ("candidate_operation_id", operation_id.to_string()),
+                        false,
+                    ),
+                    "unavailable={unavailable}"
+                );
             }
         }
 

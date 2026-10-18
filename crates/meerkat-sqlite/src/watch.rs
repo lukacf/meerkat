@@ -721,7 +721,7 @@ fn register(
     let mut source = match backend.create(targets, wake) {
         Ok(source) => source,
         Err(reason) => {
-            settle_failed(slot, reason);
+            settle_error(slot, stop_requested, reason);
             return;
         }
     };
@@ -734,7 +734,7 @@ fn register(
         Ok(Ok(())) => {}
         Ok(Err(reason)) => {
             drop(source);
-            settle_failed(slot, reason);
+            settle_error(slot, stop_requested, reason);
             return;
         }
         Err(_) => {
@@ -760,6 +760,17 @@ fn register(
     // here, so its notifications never start, then settle.
     drop(source);
     *lock(slot) = RegistrationSlot::Cancelled;
+}
+
+/// Settle a registration that returned an error: failed, with a warning, while
+/// its watch runs on its sweep alone; cancelled, quietly, once the watch has
+/// stopped, since nothing is left to run on the sweep.
+fn settle_error(slot: &Mutex<RegistrationSlot>, stop_requested: &AtomicBool, reason: String) {
+    if stop_requested.load(Ordering::Acquire) {
+        *lock(slot) = RegistrationSlot::Cancelled;
+    } else {
+        settle_failed(slot, reason);
+    }
 }
 
 fn settle_failed(slot: &Mutex<RegistrationSlot>, reason: String) {
@@ -1624,5 +1635,166 @@ mod tests {
         );
         drop(watches);
         drop(over);
+    }
+
+    /// Every WARN event this test process emitted, with the name of the
+    /// thread that emitted it.
+    static WARNINGS: Mutex<Vec<(Option<String>, String)>> = Mutex::new(Vec::new());
+
+    /// A process-wide subscriber that records WARN events into [`WARNINGS`]: a
+    /// registration settles on its own thread, which a thread-local
+    /// subscriber would never see.
+    struct WarningCapture;
+
+    struct MessageField(String);
+
+    impl tracing::field::Visit for MessageField {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl tracing::Subscriber for WarningCapture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut message = MessageField(String::new());
+            event.record(&mut message);
+            lock(&WARNINGS).push((thread::current().name().map(str::to_string), message.0));
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// Install [`WarningCapture`] as this process's global subscriber, once.
+    fn capture_warnings() {
+        static INSTALLED: OnceLock<bool> = OnceLock::new();
+        let installed = *INSTALLED
+            .get_or_init(|| tracing::subscriber::set_global_default(WarningCapture).is_ok());
+        assert!(
+            installed,
+            "the warning capture is this process's global subscriber"
+        );
+    }
+
+    fn warnings_from(thread_name: &str) -> Vec<String> {
+        lock(&WARNINGS)
+            .iter()
+            .filter(|(name, _)| name.as_deref() == Some(thread_name))
+            .map(|(_, message)| message.clone())
+            .collect()
+    }
+
+    /// A source whose registration waits for its release, then fails, as an
+    /// inotify watch past the user's limit does.
+    struct GatedFailingBackend {
+        entered: mpsc::Sender<()>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    struct GatedFailingSource {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl WatchBackend for GatedFailingBackend {
+        fn create(
+            &self,
+            _targets: &WatchTargets,
+            _wake: mpsc::Sender<()>,
+        ) -> Result<Box<dyn WatchSource>, String> {
+            let release = lock(&self.release)
+                .take()
+                .ok_or_else(|| "created twice".to_string())?;
+            Ok(Box::new(GatedFailingSource {
+                entered: self.entered.clone(),
+                release,
+            }))
+        }
+    }
+
+    impl WatchSource for GatedFailingSource {
+        fn watch(&mut self, directory: &Path) -> Result<(), String> {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+            Err(format!(
+                "cannot watch {}: the watch limit is reached",
+                directory.display()
+            ))
+        }
+    }
+
+    /// Start a watch whose registration fails once released. Returns the
+    /// watch, the signal that its registration entered, and its release.
+    fn start_failing_after_release(
+        dir: &Path,
+        name: &str,
+    ) -> (SqliteChangeWatch, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let backend = GatedFailingBackend {
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+        };
+        let watch = start_with_backend(
+            &dir.join("store.sqlite3"),
+            name,
+            SQLITE_WATCH_SWEEP,
+            |_| SqliteWatchControl::Handled,
+            move |_| Box::new(backend),
+        )
+        .expect("watch starts");
+        (watch, entered_rx, release_tx)
+    }
+
+    #[test]
+    fn a_registration_failing_after_its_watch_stopped_is_cancelled_quietly() {
+        capture_warnings();
+        // A live watch whose registration fails reports it and warns once:
+        // the capture sees registration threads.
+        let live_dir = tempfile::tempdir().unwrap();
+        let (live, live_entered, live_release) =
+            start_failing_after_release(live_dir.path(), "test-fail-live");
+        live_entered
+            .recv_timeout(HANG_GUARD)
+            .expect("the live registration reached its platform call");
+        live_release.send(()).unwrap();
+        assert!(matches!(
+            settled_registration(&live),
+            SqliteWatchRegistration::Failed(_)
+        ));
+        assert_eq!(warnings_from("test-fail-live-register").len(), 1);
+
+        // A watch that stopped first is gone: its failed registration is
+        // cancelled, with no warning about a sweep nobody runs any more.
+        let stopped_dir = tempfile::tempdir().unwrap();
+        let (mut stopped, stopped_entered, stopped_release) =
+            start_failing_after_release(stopped_dir.path(), "test-fail-stopped");
+        stopped_entered
+            .recv_timeout(HANG_GUARD)
+            .expect("the registration reached its platform call");
+        assert_eq!(stopped.stop_and_join(), SqliteWatchJoin::Joined);
+        stopped_release.send(()).unwrap();
+        assert_eq!(
+            (
+                settled_registration(&stopped),
+                warnings_from("test-fail-stopped-register")
+            ),
+            (SqliteWatchRegistration::Cancelled, Vec::<String>::new())
+        );
     }
 }

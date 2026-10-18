@@ -52,9 +52,16 @@ const SQLITE_WATCH_RECOVERY_BACKOFF_MIN: Duration = Duration::from_millis(100);
 const SQLITE_WATCH_RECOVERY_BACKOFF_MAX: Duration = Duration::from_millis(30_000);
 /// Notification registrations a process runs at once. A stalled platform
 /// (macOS FSEvents) holds each one for as long as it stalls, with two threads
-/// apiece; past this many, a new watch runs on its sweep alone instead of
-/// adding two more threads.
-const MAX_REGISTRATIONS_IN_FLIGHT: usize = 8;
+/// apiece, so a stall holds at most 128 threads; past this many, a new watch
+/// runs on its sweep alone instead of adding two more. A watch refused at the
+/// cap never registers later: it stays on its sweep for the rest of its life,
+/// which for a store held open is the life of the process. That is still
+/// correct, since correctness rests on the sweep and a notification only
+/// wakes the consumer sooner. The cap fits the bursts of a normal startup,
+/// such as parallel store opens. A queue that registers a refused watch once
+/// a place frees was considered and closed: the cliff needs more than 64
+/// registrations in flight at once.
+const MAX_REGISTRATIONS_IN_FLIGHT: usize = 64;
 /// Registration threads running now in this process, for watches alive or
 /// dropped.
 static REGISTRATIONS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -204,7 +211,8 @@ impl RegistrationCustody {
     /// Register `targets` on a thread of its own, named after the watch. A
     /// thread that cannot start, or a process already running
     /// [`MAX_REGISTRATIONS_IN_FLIGHT`] registrations, leaves the registration
-    /// failed: the sweep alone wakes the consumer.
+    /// failed: the sweep alone wakes the consumer, for the rest of the
+    /// watch's life.
     fn spawn(
         watch_name: &str,
         backend: Box<dyn WatchBackend>,
@@ -607,10 +615,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// platform has registered (at once with inotify);
 /// [`SqliteChangeWatch::registration`] reports it. While the platform holds
 /// registrations, each one holds that thread, and on macOS notify's run-loop
-/// thread too, until the platform call returns. At most 8 run at once in a
-/// process: a watch started while 8 are pending runs on its sweep alone
-/// (`Failed`) and logs a warning. Errors only when the database's directory
-/// cannot be resolved or the worker cannot start.
+/// thread too, until the platform call returns. At most 64 run at once in a
+/// process: a watch started while 64 are pending runs on its sweep alone
+/// (`Failed`) for the rest of its life and logs a warning. Errors only when
+/// the database's directory cannot be resolved or the worker cannot start.
 pub fn start_sqlite_change_watch(
     db_path: &Path,
     thread_name: &str,
@@ -1669,6 +1677,53 @@ mod tests {
                 );
                 drop(watches);
                 drop(over);
+            },
+        );
+    }
+
+    /// A burst of 64 registrations held at once, as a parallel startup holds
+    /// them while FSEvents stalls, all reach their platform call: none is
+    /// refused at the cap and left on its sweep for life. The burst is
+    /// written out, not taken from the cap, so a lower cap fails here.
+    #[test]
+    fn a_held_burst_of_64_registrations_all_reach_their_platform_call() {
+        alone_in_child_process(
+            "a_held_burst_of_64_registrations_all_reach_their_platform_call",
+            || {
+                const BURST: usize = 64;
+                // Alone in its process: no other registration holds a place.
+                assert_eq!(REGISTRATIONS_IN_FLIGHT.load(Ordering::Acquire), 0);
+                let dir = tempfile::tempdir().unwrap();
+                let held = test_support::hold_registrations_in(dir.path()).unwrap();
+                let watches: Vec<_> = (0..BURST)
+                    .map(|index| {
+                        start_sqlite_change_watch(
+                            &dir.path().join(format!("store-{index}.sqlite3")),
+                            "test-burst-held",
+                            SQLITE_WATCH_SWEEP,
+                            |_| SqliteWatchControl::Handled,
+                        )
+                        .expect("watch starts")
+                    })
+                    .collect();
+                let refused = watches
+                    .iter()
+                    .filter(|watch| {
+                        matches!(watch.registration(), SqliteWatchRegistration::Failed(_))
+                    })
+                    .count();
+                assert_eq!(refused, 0, "registrations of the burst refused at the cap");
+                assert!(
+                    held.wait_entered(BURST, HANG_GUARD),
+                    "every registration of the burst reached its platform call"
+                );
+                held.release();
+                for watch in &watches {
+                    assert_eq!(
+                        settled_registration(watch),
+                        SqliteWatchRegistration::Registered
+                    );
+                }
             },
         );
     }

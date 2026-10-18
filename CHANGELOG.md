@@ -69,10 +69,10 @@ them.
   observer drain counts such registrations
   (`SqliteMobObserverDrainReport::retained_registrations`). This covers
   `MobStorage::persistent`, `SqliteMobStores::open`, arming a runtime
-  delivery owner and the multi-process hosting check. At most 8
+  delivery owner and the multi-process hosting check. At most 64
   registrations run at once in a process, so a long FSEvents stall cannot
-  use up its threads: a watch started while 8 are pending runs on its sweep
-  alone and logs one warning.
+  use up its threads: a watch started while 64 are pending runs on its
+  sweep alone for the rest of its life and logs one warning.
 - `meerkat-sqlite`: a change watch whose notification registration fails
   (at an inotify instance or watch limit, for example) keeps its sweep.
   Before, the watch did not start at all, and a mob event observer then ran

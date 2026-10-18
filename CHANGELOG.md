@@ -440,11 +440,15 @@ them.
   a contributor ceiling meets such a change, the review now refuses as
   stale (`ToolError::AuthorizationRefused` with `ReprepareRequired`)
   instead of reporting an unavailable review context, and a fresh attempt
-  reads it again. A poisoned publication still answers `Unavailable` and is
-  never retried. Failed durable grant custody and a clock failure still
-  answer `Unavailable`, except that one the resolution meets while an owner
-  change publishes is discarded with that stale read; a preparation's one
-  rebuild then answers `Unavailable` if the failure persists. A standalone
+  reads it again. The per-agent grant check of a configured MCP attachment
+  (`AgentInstallationGrant`) reports such a change while it reads the
+  agent's lineage as `McpAttachmentRefusal::NotCurrent`, as it already did
+  for one published after the read, instead of `Unavailable`. A poisoned
+  publication still answers `Unavailable` and is never retried. Failed
+  durable grant custody and a clock failure still answer `Unavailable`,
+  except that one the resolution meets while an owner change publishes is
+  discarded with that stale read; a preparation's one rebuild then answers
+  `Unavailable` if the failure persists. A standalone
   `LocalGrantAuthority::resolve_lineage` still reports a concurrent change
   as `GrantRefusal::Unavailable`.
 

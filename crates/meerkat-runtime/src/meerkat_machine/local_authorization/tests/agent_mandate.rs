@@ -1022,3 +1022,174 @@ async fn a_grant_change_during_the_policy_decision_refuses_the_composite() {
         Err(McpAttachmentRefusal::Denied)
     );
 }
+
+/// The host's installation decision, which here interferes with the grant
+/// owner before the per-agent grant is resolved (an owner change begun and
+/// held on another thread, or a poisoned grant publication) and then
+/// permits.
+struct InterferingInstallation {
+    pending: std::sync::Mutex<Option<GrantInterference>>,
+}
+
+enum GrantInterference {
+    HoldOwnerChange {
+        begin: std::sync::mpsc::SyncSender<()>,
+        held: std::sync::mpsc::Receiver<()>,
+    },
+    Poison(LocalAuthorizationPublication),
+}
+
+impl ConfiguredMcpAttachmentAuthority for InterferingInstallation {
+    fn authorize_configured(&self, _: &McpServerConfig) -> Result<(), McpAttachmentRefusal> {
+        match self.pending.lock().expect("slot").take() {
+            Some(GrantInterference::HoldOwnerChange { begin, held }) => {
+                begin.send(()).expect("ask for an owner change");
+                held.recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the owner change is held");
+            }
+            Some(GrantInterference::Poison(publication)) => publication.poison(),
+            None => {}
+        }
+        Ok(())
+    }
+}
+
+struct InterferingInstallationHost {
+    grant: AgentInstallationGrant,
+    installation: Arc<InterferingInstallation>,
+}
+impl NativeWorkAuthorizationHost for InterferingInstallationHost {
+    fn configured_mcp_attachment_for_agent(
+        &self,
+        _session_id: &SessionId,
+        agent: crate::meerkat_machine::SessionAgentBinding,
+    ) -> Arc<dyn ConfiguredMcpAttachmentAuthority> {
+        self.grant.for_agent(
+            ConfiguredMcpConjuncts {
+                installation: Arc::clone(&self.installation)
+                    as Arc<dyn ConfiguredMcpAttachmentAuthority>,
+                policy: Some(Arc::new(PolicyRefuses("unpermitted"))),
+            },
+            agent,
+        )
+    }
+
+    fn authenticate_association(
+        &self,
+        _: &LogicalRuntimeId,
+        _: &Input,
+        _: &NativeIngressContext,
+        _: &InputAuthorityAssociation,
+    ) -> Result<(), crate::input_authority::NativeAdmissionError> {
+        Err(denied().into())
+    }
+
+    fn work_context(
+        &self,
+        _: &crate::input_authority::NativeWorkBatch,
+    ) -> Result<WorkAuthorizationContext, crate::input_authority::NativeWorkContextError> {
+        Err(crate::input_authority::NativeWorkContextError::MalformedAcceptedWork)
+    }
+}
+
+/// The grant owner's clock, failing on demand.
+struct SwitchClock(std::sync::atomic::AtomicBool);
+impl LocalAuthorizationClock for SwitchClock {
+    fn now(&self) -> Result<LocalAuthorizationTime, meerkat_authorization::clock::LocalClockError> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(meerkat_authorization::clock::LocalClockError::Unavailable);
+        }
+        Clock.now()
+    }
+}
+
+/// An owner change that publishes while the per-agent grant's lineage is
+/// read is a change during the decision: not current, as for one published
+/// after the grant was observed, never an unavailable grant owner. A fresh
+/// decision once the change completes permits. A failing grant owner clock
+/// or a poison at the same point stays unavailable.
+#[tokio::test]
+async fn a_grant_change_while_the_agent_grant_is_read_is_not_current() {
+    let publication = LocalAuthorizationPublication::new();
+    let clock = Arc::new(SwitchClock(std::sync::atomic::AtomicBool::new(false)));
+    let grants = Arc::new(
+        LocalGrantAuthority::new(
+            LocalGrantConfiguration {
+                root: who("operator"),
+                namespace: EvidenceId::new("installations").expect("id"),
+                generation: 1,
+            },
+            publication.clone(),
+            Arc::clone(&clock) as Arc<dyn LocalAuthorizationClock>,
+        )
+        .expect("grant owner"),
+    );
+    let installation = Arc::new(InterferingInstallation {
+        pending: std::sync::Mutex::new(None),
+    });
+    let grant =
+        AgentInstallationGrant::new(Arc::clone(&grants), Arc::new(Clock), operator_of("alpha"));
+    let host_installation = Arc::clone(&installation);
+    let machine = MeerkatMachine::ephemeral()
+        .install_native_work_authorization(|_| {
+            Arc::new(InterferingInstallationHost {
+                grant,
+                installation: host_installation,
+            })
+        })
+        .expect("exclusive setup");
+    let fx = Fixture { machine, grants };
+    let lineage = fx.issue("a-sentinel", "agent-a", &["sentinel"], "alpha");
+    let (_, witness, authority) = fx.session().await;
+    fx.select(&witness, "agent-a", lineage).await.expect("bind");
+
+    let (begin_tx, begin_rx) = std::sync::mpsc::sync_channel(1);
+    let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let changer_publication = publication.clone();
+    let changer = std::thread::spawn(move || {
+        begin_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("asked to change an owner");
+        let change = changer_publication
+            .begin_owner_change()
+            .expect("an owner change in progress");
+        held_tx.send(()).expect("the change is held");
+        release_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("released by the test");
+        drop(change);
+    });
+    *installation.pending.lock().expect("slot") = Some(GrantInterference::HoldOwnerChange {
+        begin: begin_tx,
+        held: held_rx,
+    });
+    let during = authority.authorize_configured(&server("sentinel"));
+    release_tx.send(()).expect("release the owner change");
+    changer.join().expect("changer thread");
+    assert_eq!(
+        during,
+        Err(McpAttachmentRefusal::NotCurrent),
+        "a change published while the grant is read is not current, never unavailable"
+    );
+    assert_eq!(
+        authority.authorize_configured(&server("sentinel")),
+        Ok(()),
+        "a fresh decision once the change completes"
+    );
+
+    clock.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        authority.authorize_configured(&server("sentinel")),
+        Err(McpAttachmentRefusal::Unavailable),
+        "a failing grant owner clock stays unavailable"
+    );
+    clock.0.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    *installation.pending.lock().expect("slot") = Some(GrantInterference::Poison(publication));
+    assert_eq!(
+        authority.authorize_configured(&server("sentinel")),
+        Err(McpAttachmentRefusal::Unavailable),
+        "a poison stays unavailable"
+    );
+}

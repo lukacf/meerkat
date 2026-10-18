@@ -6,6 +6,7 @@
 mod audit;
 mod connector_approval;
 mod delegated_search;
+mod nested_change;
 mod owner_poison;
 mod targeted;
 mod tool_application;

@@ -420,6 +420,15 @@ them.
   and `LocalGrantAuthority::reconstruct` returns
   `ReplacementPublicationUnavailable`, installing nothing, when its
   replacement publication is poisoned during the reconstruction.
+- A grant-backed operation preparation whose grant resolution meets an
+  owner change published during the preparation now refuses it as a stale
+  read (`OperationRefusalKind::ReprepareRequired`) and rebuilds once, as for
+  any other concurrent owner change, instead of reporting the grant
+  authority as unavailable. Controller admission does the same. A poisoned
+  publication, failed durable grant custody and a clock failure still
+  answer `Unavailable` and are never retried, and a standalone
+  `LocalGrantAuthority::resolve_lineage` still reports a concurrent change
+  as `GrantRefusal::Unavailable`.
 
 ## [0.9.2] - 2026-10-16
 

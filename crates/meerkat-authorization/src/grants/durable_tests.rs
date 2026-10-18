@@ -386,6 +386,31 @@ fn acknowledged_change_survives_and_a_pre_write_refusal_is_absent() {
     );
 }
 
+/// A resolution inside an enclosing observation reports failed durable
+/// custody as unavailability, never as a concurrent change.
+#[test]
+fn an_observed_resolution_reports_failed_custody_as_unavailable() {
+    let store = Scripted::new();
+    let owner = durable(store.clone());
+    let kept = issue(&owner, "kept");
+    store.set(Append::UncertainLost);
+    assert_eq!(
+        try_issue(&owner, "uncertain"),
+        Err(GrantRefusal::Unavailable)
+    );
+    assert_eq!(
+        owner
+            .resolve_executor_lineage_observed(
+                std::slice::from_ref(&kept),
+                &who("holder"),
+                None,
+                false
+            )
+            .err(),
+        Some(ObservedGrantRefusal::Refused(GrantRefusal::Unavailable))
+    );
+}
+
 #[test]
 fn uncertain_write_makes_the_owner_unavailable_and_invalidates_observations() {
     for outcome in [Append::UncertainLanded, Append::UncertainLost] {

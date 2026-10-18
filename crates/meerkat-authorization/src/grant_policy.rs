@@ -19,7 +19,7 @@ use meerkat_core::authorization::{
 use meerkat_core::exact_operation::OperationExecutionScope;
 use meerkat_core::tool_execution::{ResolvedToolExecutionPlan, ToolOperationTarget};
 
-use crate::grants::{GrantRefusal, LocalGrantAuthority, ResolvedGrant};
+use crate::grants::{GrantRefusal, LocalGrantAuthority, ObservedGrantRefusal, ResolvedGrant};
 use crate::policy::{
     LocalOperationValues, LocalPolicyAllowance, LocalPolicyPurpose, LocalWorkPolicy,
 };
@@ -545,12 +545,13 @@ impl GrantBackedWorkPolicy {
             }
             let grant = self
                 .grants
-                .resolve_controller_lineage(
+                .resolve_executor_lineage_observed(
                     &candidate.controller_grant_lineage,
                     &candidate.logical_executor,
                     candidate.represented_subject.as_ref(),
+                    true,
                 )
-                .map_err(grant_refusal)?;
+                .map_err(observed_grant_refusal)?;
             let allowance =
                 self.operation_owner
                     .authorize_controller_admission(association, facts, now_ms)?;
@@ -617,20 +618,15 @@ impl GrantBackedWorkPolicy {
                 }
             }
         };
-        let resolved = if controller {
-            self.grants.resolve_controller_lineage(
+        self.grants
+            .resolve_executor_lineage_observed(
                 lineage,
                 &candidate.logical_executor,
                 candidate.represented_subject.as_ref(),
+                controller,
             )
-        } else {
-            self.grants.resolve_lineage(
-                lineage,
-                &candidate.logical_executor,
-                candidate.represented_subject.as_ref(),
-            )
-        };
-        resolved.map(Some).map_err(grant_refusal)
+            .map(Some)
+            .map_err(observed_grant_refusal)
     }
 }
 
@@ -827,6 +823,21 @@ impl LocalWorkPolicy for GrantBackedWorkPolicy {
 
 fn denied() -> OperationRefused {
     OperationRefused::new(OperationRefusalKind::Denied)
+}
+
+/// A grant resolution read inside the caller's own observation of the grant
+/// publication. An owner change published there makes that observation
+/// stale too: a stale refusal it classifies and may rebuild once, never a
+/// known infrastructure failure that would hide the change.
+fn observed_grant_refusal(
+    refusal: ObservedGrantRefusal,
+) -> meerkat_core::OperationAuthorizationError {
+    match refusal {
+        ObservedGrantRefusal::Changed => {
+            OperationRefused::new(OperationRefusalKind::ReprepareRequired).into()
+        }
+        ObservedGrantRefusal::Refused(refusal) => grant_refusal(refusal),
+    }
 }
 
 fn grant_refusal(refusal: GrantRefusal) -> meerkat_core::OperationAuthorizationError {

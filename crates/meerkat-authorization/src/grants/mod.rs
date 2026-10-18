@@ -71,6 +71,19 @@ pub enum GrantRefusal {
     Unavailable,
 }
 
+/// Why a lineage resolution read inside an enclosing observation of this
+/// owner's publication has no grant. An owner change published during the
+/// resolution stays apart from the owner's refusals: the enclosing
+/// observation is stale too, and it classifies and may rebuild that once.
+/// A standalone resolution reports such a change as
+/// [`GrantRefusal::Unavailable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservedGrantRefusal {
+    /// An owner change published during this resolution's observation.
+    Changed,
+    Refused(GrantRefusal),
+}
+
 /// One intended child grant, retained by its caller with a stable id before
 /// any attempt: the exact root-to-parent lineage of the independent parent
 /// grant, the caller issuing from it (that parent's grantee), the child's
@@ -1059,17 +1072,60 @@ impl LocalGrantAuthority {
             })
     }
 
+    /// [`resolve_lineage`](Self::resolve_lineage), or with `controller`
+    /// [`resolve_controller_lineage`](Self::resolve_controller_lineage), for
+    /// a caller inside an enclosing observation of this owner's publication:
+    /// an owner change published during the resolution is
+    /// [`ObservedGrantRefusal::Changed`], not unavailability.
+    pub(crate) fn resolve_executor_lineage_observed(
+        &self,
+        references: &[GrantLineageRef],
+        executor: &PrincipalRef,
+        represented_subject: Option<&PrincipalRef>,
+        controller: bool,
+    ) -> Result<ResolvedGrant, ObservedGrantRefusal> {
+        self.resolve_lineage_observed(
+            references,
+            LineageUse::Executor {
+                executor,
+                represented_subject,
+            },
+            controller,
+        )
+    }
+
     fn resolve_lineage_for_use(
         &self,
         references: &[GrantLineageRef],
         lineage_use: LineageUse<'_>,
         controller: bool,
     ) -> Result<ResolvedGrant, GrantRefusal> {
+        // A standalone caller has no enclosing observation to rebuild: a
+        // concurrent change is "this owner cannot say now".
+        self.resolve_lineage_observed(references, lineage_use, controller)
+            .map_err(|refusal| match refusal {
+                ObservedGrantRefusal::Changed => GrantRefusal::Unavailable,
+                ObservedGrantRefusal::Refused(refusal) => refusal,
+            })
+    }
+
+    fn resolve_lineage_observed(
+        &self,
+        references: &[GrantLineageRef],
+        lineage_use: LineageUse<'_>,
+        controller: bool,
+    ) -> Result<ResolvedGrant, ObservedGrantRefusal> {
         let (resolved, publication) = self
             .publication
             .observe(|| self.resolve_lineage_data(references, lineage_use, controller))
-            .map_err(|_| GrantRefusal::Unavailable)?;
-        let (restrictions, lineage, expires_at_ms) = resolved?;
+            .map_err(|error| match error {
+                PublicationError::Changed => ObservedGrantRefusal::Changed,
+                PublicationError::Unavailable => {
+                    ObservedGrantRefusal::Refused(GrantRefusal::Unavailable)
+                }
+            })?;
+        let (restrictions, lineage, expires_at_ms) =
+            resolved.map_err(ObservedGrantRefusal::Refused)?;
         Ok(ResolvedGrant {
             restrictions,
             lineage,

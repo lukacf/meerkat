@@ -108,3 +108,64 @@ fn the_recorded_prompt_witness_must_equal_the_expected_prompt() {
         "other content under the same association and key"
     );
 }
+
+/// The durable read on a real SQLite runtime store: a session the store
+/// never held is unknown, a held runtime without the original's key is
+/// absence, and once the runtime holds a row its key index cannot read, the
+/// index proves neither presence nor absence and the read is unavailable.
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn an_unprovable_sqlite_key_index_reads_unavailable() {
+    use crate::store::{RuntimeStore, SqliteRuntimeStore};
+    use DurableAdmittedOriginalRefusal::{NotAdmitted, Unavailable, UnknownRuntime};
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("sessions.sqlite3");
+    let store = Arc::new(SqliteRuntimeStore::new(path.clone()).expect("sqlite store"));
+    let machine =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store) as Arc<dyn RuntimeStore>)
+            .expect("persistent machine");
+    let session = SessionId::new();
+    let runtime = crate::identifiers::LogicalRuntimeId::for_session(&session);
+    let expected = input("caller");
+
+    let mut held = StoredInputState::new_accepted(InputId::new());
+    held.state.idempotency_key = Some(crate::identifiers::IdempotencyKey::new("another-event"));
+    store
+        .persist_input_state(
+            &runtime,
+            &crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(held)
+                .expect("an authorized row"),
+        )
+        .await
+        .expect("persist a decodable row of the session's runtime");
+    assert_eq!(
+        machine
+            .durable_admitted_original(&SessionId::new(), &expected)
+            .await,
+        Err(UnknownRuntime),
+        "a session the store never held"
+    );
+    assert_eq!(
+        machine.durable_admitted_original(&session, &expected).await,
+        Err(NotAdmitted),
+        "a held runtime without the original's key"
+    );
+
+    let conn = rusqlite::Connection::open(&path).expect("open the store file");
+    conn.execute(
+        "INSERT INTO runtime_input_states (runtime_id, input_id, state_json) \
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            runtime.0.as_str(),
+            "unreadable-input-row",
+            b"{not-json".as_slice()
+        ],
+    )
+    .expect("insert a row the key index cannot read");
+    drop(conn);
+    assert_eq!(
+        machine.durable_admitted_original(&session, &expected).await,
+        Err(Unavailable),
+        "an index that cannot prove its rows is not absence"
+    );
+}

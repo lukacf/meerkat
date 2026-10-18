@@ -12,6 +12,11 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# `watch::test_support`: hold the notification registration of change
+# watches in one directory, for tests of code that starts them.
+test-support = []
+
 [dependencies]
 rusqlite = { workspace = true }
 thiserror = { workspace = true }

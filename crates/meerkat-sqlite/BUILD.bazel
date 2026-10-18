@@ -49,7 +49,12 @@ rust_library(
     aliases = aliases(package_name = "crates/meerkat-sqlite"),
     crate_name = "meerkat_sqlite",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = select({
+        "//tools/bazel:release_build": [],
+        "//conditions:default": [
+            "test-support",
+        ],
+    }),
     edition = "2024",
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
@@ -76,7 +81,12 @@ rust_library(
     aliases = aliases(package_name = "crates/meerkat-sqlite"),
     crate_name = "meerkat_sqlite",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = select({
+        "//tools/bazel:release_build": [],
+        "//conditions:default": [
+            "test-support",
+        ],
+    }),
     edition = "2024",
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
@@ -111,7 +121,9 @@ rust_test(
     ),
     crate_name = "meerkat_sqlite",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "test-support",
+    ],
     edition = "2024",
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [

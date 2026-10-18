@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -122,7 +122,8 @@ enum WorkerCustody {
 /// [`Self::stop_and_join`] to wait for the worker.
 pub struct SqliteChangeWatch {
     control: Arc<WatchControl>,
-    watcher: Option<notify::RecommendedWatcher>,
+    /// The notification source, until the watch stops.
+    source: Mutex<Option<Box<dyn WatchSource>>>,
     worker: WorkerCustody,
 }
 
@@ -179,7 +180,8 @@ impl SqliteChangeWatch {
     /// Calling it again after a join returns the recorded outcome.
     pub fn stop_and_join(&mut self) -> SqliteWatchJoin {
         self.control.request_stop();
-        drop(self.watcher.take());
+        let source = lock(&self.source).take();
+        drop(source);
         if self.on_worker_thread() {
             return SqliteWatchJoin::UnjoinedOnWorkerThread;
         }
@@ -264,6 +266,86 @@ pub fn sqlite_watch_event_relevant(
     })
 }
 
+/// The directory a watch registers, and the database files whose changes in
+/// it wake the worker.
+struct WatchTargets {
+    parent: PathBuf,
+    watched_paths: Vec<PathBuf>,
+}
+
+/// Creates a watch's notification source: notify's recommended watcher, or a
+/// held fake under the `test-support` feature.
+trait WatchBackend: Send {
+    /// A source that sends on `wake` for each relevant change once it is
+    /// registered.
+    fn create(
+        &self,
+        targets: &WatchTargets,
+        wake: mpsc::Sender<()>,
+    ) -> Result<Box<dyn WatchSource>, String>;
+}
+
+/// A created notification source. Dropping it stops its notifications.
+trait WatchSource: Send {
+    /// Register `directory`. Returns once the platform has registered it,
+    /// which has no bound: macOS FSEvents registration can take tens of
+    /// seconds.
+    fn watch(&mut self, directory: &Path) -> Result<(), String>;
+}
+
+/// notify's recommended watcher: FSEvents on macOS, inotify on Linux.
+struct NotifyBackend;
+
+impl WatchBackend for NotifyBackend {
+    fn create(
+        &self,
+        targets: &WatchTargets,
+        wake: mpsc::Sender<()>,
+    ) -> Result<Box<dyn WatchSource>, String> {
+        let parent = targets.parent.clone();
+        let watched_paths = targets.watched_paths.clone();
+        let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+            match result {
+                Ok(event) if sqlite_watch_event_relevant(&event, &parent, &watched_paths) => {
+                    let _ = wake.send(());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // The sweep bounds anything a watcher error lost.
+                    tracing::warn!(error = %error, "sqlite change watch reported an error");
+                }
+            }
+        })
+        .map_err(|error| format!("cannot create the sqlite change watcher: {error}"))?;
+        Ok(Box::new(NotifySource(watcher)))
+    }
+}
+
+struct NotifySource(notify::RecommendedWatcher);
+
+impl WatchSource for NotifySource {
+    fn watch(&mut self, directory: &Path) -> Result<(), String> {
+        self.0
+            .watch(directory, RecursiveMode::NonRecursive)
+            .map_err(|error| format!("cannot watch {}: {error}", directory.display()))
+    }
+}
+
+/// The backend that registers a watch of `parent`: notify's, unless test
+/// support holds the registrations in that directory.
+#[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
+fn watch_backend(parent: &Path) -> Box<dyn WatchBackend> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(held) = test_support::held_backend(parent) {
+        return held;
+    }
+    Box::new(NotifyBackend)
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Start watching `db_path`. `on_tick` runs on a dedicated thread named
 /// `thread_name`, once per coalesced notification and once per `sweep`
 /// without one, until the watch is stopped or `on_tick` returns
@@ -272,31 +354,30 @@ pub fn start_sqlite_change_watch(
     db_path: &Path,
     thread_name: &str,
     sweep: Duration,
+    on_tick: impl FnMut(SqliteWatchTick) -> SqliteWatchControl + Send + 'static,
+) -> Result<SqliteChangeWatch, String> {
+    start_with_backend(db_path, thread_name, sweep, on_tick, watch_backend)
+}
+
+fn start_with_backend(
+    db_path: &Path,
+    thread_name: &str,
+    sweep: Duration,
     mut on_tick: impl FnMut(SqliteWatchTick) -> SqliteWatchControl + Send + 'static,
+    backend: impl FnOnce(&Path) -> Box<dyn WatchBackend>,
 ) -> Result<SqliteChangeWatch, String> {
     let (parent, watched_paths) = sqlite_watch_targets(db_path)?;
+    let backend = backend(&parent);
+    let targets = WatchTargets {
+        parent,
+        watched_paths,
+    };
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
     let stop_requested = Arc::new(AtomicBool::new(false));
     let worker_stop_requested = Arc::clone(&stop_requested);
 
-    let callback_parent = parent.clone();
-    let notification_wake = wake_tx.clone();
-    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        match result {
-            Ok(event) if sqlite_watch_event_relevant(&event, &callback_parent, &watched_paths) => {
-                let _ = notification_wake.send(());
-            }
-            Ok(_) => {}
-            Err(error) => {
-                // The sweep bounds anything a watcher error lost.
-                tracing::warn!(error = %error, "sqlite change watch reported an error");
-            }
-        }
-    })
-    .map_err(|error| format!("cannot create the sqlite change watcher: {error}"))?;
-    watcher
-        .watch(&parent, RecursiveMode::NonRecursive)
-        .map_err(|error| format!("cannot watch {}: {error}", parent.display()))?;
+    let mut source = backend.create(&targets, wake_tx.clone())?;
+    source.watch(&targets.parent)?;
 
     let worker = thread::Builder::new()
         .name(thread_name.to_string())
@@ -352,9 +433,167 @@ pub fn start_sqlite_change_watch(
             stop_requested,
             wake: wake_tx,
         }),
-        watcher: Some(watcher),
+        source: Mutex::new(Some(source)),
         worker: WorkerCustody::Running(worker),
     })
+}
+
+/// Held watch registrations, for tests of code that starts SQLite change
+/// watches. Every watch started on a database in a held directory blocks in
+/// its notification registration, as a stalled platform registration (macOS
+/// FSEvents) does, until the hold is released.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, mpsc};
+    use std::time::{Duration, Instant};
+
+    use super::{WatchBackend, WatchSource, WatchTargets, lock};
+
+    /// Held directories, by canonical path.
+    static HOLDS: OnceLock<Mutex<HashMap<PathBuf, Arc<Hold>>>> = OnceLock::new();
+
+    fn holds() -> &'static Mutex<HashMap<PathBuf, Arc<Hold>>> {
+        HOLDS.get_or_init(Mutex::default)
+    }
+
+    #[derive(Default)]
+    struct Hold {
+        gate: Mutex<Gate>,
+        changed: Condvar,
+        live_sources: AtomicUsize,
+        dropped_sources: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct Gate {
+        released: bool,
+        entered: usize,
+    }
+
+    /// Holds the notification registrations of the watches on databases in
+    /// one directory. Dropping it releases them and ends the hold.
+    pub struct HeldRegistrations {
+        directory: PathBuf,
+        hold: Arc<Hold>,
+    }
+
+    /// Hold the registration of every watch started from now on for a
+    /// database in `directory` (an existing directory, matched by its
+    /// canonical path), until the returned hold is released or dropped. A
+    /// held registration has created its source and blocks in registering
+    /// it; once released it registers, without ever notifying.
+    pub fn hold_registrations_in(directory: &Path) -> std::io::Result<HeldRegistrations> {
+        let directory = directory.canonicalize()?;
+        let hold = Arc::new(Hold::default());
+        let mut holds = lock(holds());
+        if holds.contains_key(&directory) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} is already held", directory.display()),
+            ));
+        }
+        holds.insert(directory.clone(), Arc::clone(&hold));
+        Ok(HeldRegistrations { directory, hold })
+    }
+
+    impl HeldRegistrations {
+        /// Wait, at most `bound`, until `count` registrations have entered
+        /// the hold. Whether they had.
+        pub fn wait_entered(&self, count: usize, bound: Duration) -> bool {
+            let deadline = Instant::now() + bound;
+            let mut gate = lock(&self.hold.gate);
+            while gate.entered < count {
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    return false;
+                };
+                gate = self
+                    .hold
+                    .changed
+                    .wait_timeout(gate, left)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            true
+        }
+
+        /// Let every held registration register, and every later one in the
+        /// directory register at once.
+        pub fn release(&self) {
+            lock(&self.hold.gate).released = true;
+            self.hold.changed.notify_all();
+        }
+
+        /// Sources created through this hold and not dropped yet.
+        pub fn live_sources(&self) -> usize {
+            self.hold.live_sources.load(Ordering::SeqCst)
+        }
+
+        /// Sources created through this hold and dropped since.
+        pub fn dropped_sources(&self) -> usize {
+            self.hold.dropped_sources.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for HeldRegistrations {
+        fn drop(&mut self) {
+            lock(holds()).remove(&self.directory);
+            self.release();
+        }
+    }
+
+    /// The held backend for a watch of `parent`, while a hold covers it.
+    pub(super) fn held_backend(parent: &Path) -> Option<Box<dyn WatchBackend>> {
+        let hold = lock(holds()).get(parent).cloned()?;
+        Some(Box::new(HeldBackend(hold)))
+    }
+
+    struct HeldBackend(Arc<Hold>);
+
+    impl WatchBackend for HeldBackend {
+        fn create(
+            &self,
+            _targets: &WatchTargets,
+            wake: mpsc::Sender<()>,
+        ) -> Result<Box<dyn WatchSource>, String> {
+            self.0.live_sources.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(HeldSource {
+                hold: Arc::clone(&self.0),
+                _wake: wake,
+            }))
+        }
+    }
+
+    struct HeldSource {
+        hold: Arc<Hold>,
+        /// Kept for the source's life, as a real source keeps its wake.
+        _wake: mpsc::Sender<()>,
+    }
+
+    impl WatchSource for HeldSource {
+        fn watch(&mut self, _directory: &Path) -> Result<(), String> {
+            let mut gate = lock(&self.hold.gate);
+            gate.entered += 1;
+            self.hold.changed.notify_all();
+            while !gate.released {
+                gate = self
+                    .hold
+                    .changed
+                    .wait(gate)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for HeldSource {
+        fn drop(&mut self) {
+            self.hold.live_sources.fetch_sub(1, Ordering::SeqCst);
+            self.hold.dropped_sources.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 #[cfg(test)]

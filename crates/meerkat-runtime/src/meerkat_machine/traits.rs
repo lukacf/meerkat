@@ -253,6 +253,14 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         .await
     }
 
+    async fn durable_admitted_original(
+        &self,
+        session_id: &SessionId,
+        expected: &Input,
+    ) -> Result<DurableAdmittedOriginal, DurableAdmittedOriginalRefusal> {
+        MeerkatMachine::durable_admitted_original(self, session_id, expected).await
+    }
+
     async fn interaction_terminal_status(
         &self,
         session_id: &SessionId,

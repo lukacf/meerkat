@@ -13,6 +13,11 @@
 //! registration and attachment, with the controller pinned by exactly the
 //! live actor that attachment serves, and nothing is admitted or executed
 //! again.
+//!
+//! Once the session retires, `MeerkatMachine::durable_admitted_original`
+//! reads that admission from the store alone, with no registration,
+//! attachment or actor, and accepts only the exact admission of the expected
+//! original.
 
 use super::direct_ingest::install_credential;
 use super::*;
@@ -2101,4 +2106,259 @@ async fn a_live_admission_waits_for_its_open_run_to_release_the_boundary() {
         "ran once"
     );
     assert_eq!(effects.load(Ordering::SeqCst), 1);
+}
+
+impl Reopened {
+    /// Retire the session's runtime on the reopened machine and unregister
+    /// it: no registration, attachment or actor of the session remains.
+    async fn retire(&self) {
+        SessionServiceRuntimeExt::retire_runtime(&*self.machine, &self.session)
+            .await
+            .expect("retire the session's runtime");
+        self.machine
+            .unregister_session(&self.session)
+            .await
+            .expect("unregister the retired session");
+        assert!(
+            self.machine
+                .current_session_registration_witness(&self.session)
+                .await
+                .is_none(),
+            "the retired session has no registration"
+        );
+    }
+
+    /// The durable read of the admission of `expected` on the session.
+    async fn durable(
+        &self,
+        expected: &Input,
+    ) -> Result<
+        crate::meerkat_machine::DurableAdmittedOriginal,
+        crate::meerkat_machine::DurableAdmittedOriginalRefusal,
+    > {
+        self.machine
+            .durable_admitted_original(&self.session, expected)
+            .await
+    }
+}
+
+/// Same-process reopen only, as above; then the session retires.
+///
+/// The source owner still holds the exact keyed governed original it
+/// submitted, but the session has no registration, attachment or actor left.
+/// The live custody path is unavailable, and a durable read by the raw key
+/// misses, because a governed original is indexed under its runtime-qualified
+/// key. The durable read derives that key itself and reports the runtime's
+/// own admission of exactly that original from the store: its actual input
+/// id, its retained association and its durable lifecycle. It reads the same
+/// facts while the session is registered and after it retired, through the
+/// machine and through the session service extension, and nothing is
+/// admitted, replayed or executed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retired_sessions_admission_is_read_from_the_store_alone() {
+    let reopened = Reopened::new().await;
+    let (registration, attachment) = reopened.current().await;
+    let observed = reopened.actor.identity();
+    let expected = &reopened.original;
+    let before = reopened.inputs().await;
+    let while_registered = reopened
+        .durable(expected)
+        .await
+        .expect("the durable admission while the session is registered");
+
+    reopened.retire().await;
+
+    let custody = SourceCustody::default();
+    assert_eq!(
+        reopened
+            .promote(&registration, &attachment, &observed, expected, &custody)
+            .await,
+        Err(crate::meerkat_machine::AdmittedOriginalRefusal::Unavailable),
+        "the live custody path needs a current registration, attachment and actor"
+    );
+    assert_eq!(custody.publications.load(Ordering::SeqCst), 0);
+    let raw = expected
+        .header()
+        .idempotency_key
+        .clone()
+        .expect("a keyed original");
+    assert!(
+        SessionServiceRuntimeExt::durable_input_state_by_idempotency_key(
+            &*reopened.machine,
+            &reopened.session,
+            &raw.0,
+        )
+        .await
+        .expect("the durable read by the raw key")
+        .is_none(),
+        "a governed original is not indexed under its raw key"
+    );
+
+    let admitted = reopened
+        .durable(expected)
+        .await
+        .expect("the retired session's admission");
+    assert_eq!(admitted.session_id(), &reopened.session);
+    assert_eq!(admitted.input_id(), &reopened.original_id);
+    assert!(
+        Some(admitted.association()) == expected.header().authority_association.as_ref(),
+        "the association the runtime retained for its own admission"
+    );
+    assert_eq!(
+        admitted.phase(),
+        InputLifecycleState::Consumed,
+        "the original ran before the reopen; its admission is history"
+    );
+    assert_eq!(
+        admitted.terminal_outcome(),
+        Some(&crate::input_state::InputTerminalOutcome::Consumed)
+    );
+    assert!(
+        admitted.last_run_id().is_some(),
+        "the run the original contributed to"
+    );
+    assert!(
+        admitted == while_registered,
+        "registered or retired, the same durable facts"
+    );
+    assert_eq!(
+        SessionServiceRuntimeExt::durable_admitted_original(
+            &*reopened.machine,
+            &reopened.session,
+            expected,
+        )
+        .await,
+        Ok(admitted.clone()),
+        "the session service extension forwards the same read"
+    );
+    assert_eq!(
+        reopened.inputs().await,
+        before,
+        "nothing was admitted or replayed"
+    );
+    assert_eq!(
+        reopened.effects.load(Ordering::SeqCst),
+        0,
+        "nothing ran after the reopen"
+    );
+}
+
+/// Same-process reopen only, as above; then the session retires.
+///
+/// The durable read selects the row by the qualified key and accepts only
+/// the exact admission. Another association under the same qualified key,
+/// other content under the same key, or an ungoverned prompt conflicts. The
+/// same content under another key was never admitted, whatever the store
+/// holds under the original's key: the key selects, never the content. A
+/// session the store never held is unknown. A machine without a persistent
+/// store, and an index entry its store cannot prove, are unavailable, never
+/// absence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_durable_read_refuses_inexact_evidence_and_unreadable_stores() {
+    use crate::meerkat_machine::DurableAdmittedOriginalRefusal::{
+        Conflict, NotAdmitted, Unavailable, UnknownRuntime,
+    };
+    let reopened = Reopened::new().await;
+    reopened.retire().await;
+    let expected = &reopened.original;
+    assert!(
+        reopened.durable(expected).await.is_ok(),
+        "the exact admission is read"
+    );
+
+    // The qualified key binds the ingress namespace, requester, target and
+    // event key; another controller selection is another association under
+    // the same key.
+    let other_selection =
+        crate::input_authority::tests::input_for_account("caller", "another-account")
+            .header()
+            .authority_association
+            .as_ref()
+            .expect("claims")
+            .candidate()
+            .controller_model
+            .clone()
+            .expect("another controller selection");
+    let mut candidate = expected
+        .header()
+        .authority_association
+        .as_ref()
+        .expect("claims")
+        .candidate()
+        .clone();
+    assert!(candidate.controller_model.as_ref() != Some(&other_selection));
+    candidate.controller_model = Some(other_selection);
+    let mut reassociated = expected.clone();
+    reassociated.header_mut().authority_association =
+        Some(InputAuthorityAssociation::new(candidate).expect("claims"));
+    assert_eq!(
+        crate::input_authority::qualified_idempotency_key(&reassociated).expect("key"),
+        crate::input_authority::qualified_idempotency_key(expected).expect("key"),
+        "another association under the same qualified key"
+    );
+    assert_eq!(
+        reopened.durable(&reassociated).await,
+        Err(Conflict),
+        "another association under the same qualified key"
+    );
+
+    let Input::Prompt(mut changed) = expected.clone() else {
+        panic!("prompt")
+    };
+    changed.content = meerkat_core::types::ContentInput::Text("other content".into());
+    assert_eq!(
+        reopened.durable(&Input::Prompt(changed)).await,
+        Err(Conflict),
+        "other content under the same association and key"
+    );
+
+    let Input::Prompt(mut rekeyed) = expected.clone() else {
+        panic!("prompt")
+    };
+    rekeyed.header.idempotency_key = Some(crate::identifiers::IdempotencyKey::new("another-event"));
+    assert_eq!(
+        reopened.durable(&Input::Prompt(rekeyed)).await,
+        Err(NotAdmitted),
+        "the same content under another key was never admitted"
+    );
+
+    let Input::Prompt(mut ungoverned) = expected.clone() else {
+        panic!("prompt")
+    };
+    ungoverned.header.authority_association = None;
+    assert_eq!(
+        reopened.durable(&Input::Prompt(ungoverned)).await,
+        Err(Conflict),
+        "an ungoverned prompt is no governed original"
+    );
+
+    assert_eq!(
+        reopened
+            .machine
+            .durable_admitted_original(&SessionId::new(), expected)
+            .await,
+        Err(UnknownRuntime),
+        "a session the store never held"
+    );
+    assert_eq!(
+        MeerkatMachine::ephemeral()
+            .durable_admitted_original(&reopened.session, expected)
+            .await,
+        Err(Unavailable),
+        "a machine without a persistent store"
+    );
+
+    // Last: the index entry of the original's key now names no row.
+    let key = crate::input_authority::qualified_idempotency_key(expected)
+        .expect("key")
+        .expect("a keyed governed original");
+    reopened
+        .store
+        .point_input_idempotency_key_for_test(&reopened.runtime, &key, &InputId::new())
+        .await;
+    assert_eq!(
+        reopened.durable(expected).await,
+        Err(Unavailable),
+        "an index entry the store cannot prove is not absence"
+    );
 }

@@ -1163,7 +1163,10 @@ mod mcp_attachment;
 mod mcp_observation;
 pub use mcp_observation::McpObservationRefusal;
 mod admitted_original;
-pub use admitted_original::{AdmittedOriginal, AdmittedOriginalRefusal};
+pub use admitted_original::{
+    AdmittedOriginal, AdmittedOriginalRefusal, DurableAdmittedOriginal,
+    DurableAdmittedOriginalRefusal,
+};
 mod retained_resume;
 mod runtime_control;
 pub use agent_mandate::{

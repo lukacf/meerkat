@@ -144,6 +144,27 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         Ok(None)
     }
 
+    /// The historical admission of the keyed governed original `expected` on
+    /// `session_id`, from the runtime's durable store alone: see
+    /// [`crate::meerkat_machine::MeerkatMachine::durable_admitted_original`].
+    /// It never consults live state and works for a session that is no
+    /// longer registered.
+    ///
+    /// The default under-claims: an adapter that cannot read that durable
+    /// evidence answers
+    /// [`DurableAdmittedOriginalRefusal::Unavailable`](crate::meerkat_machine::DurableAdmittedOriginalRefusal::Unavailable),
+    /// never absence.
+    async fn durable_admitted_original(
+        &self,
+        _session_id: &SessionId,
+        _expected: &Input,
+    ) -> Result<
+        crate::meerkat_machine::DurableAdmittedOriginal,
+        crate::meerkat_machine::DurableAdmittedOriginalRefusal,
+    > {
+        Err(crate::meerkat_machine::DurableAdmittedOriginalRefusal::Unavailable)
+    }
+
     /// Durable terminal-status query for one interaction.
     ///
     /// Registered sessions answer from live DSL truth; unregistered sessions

@@ -38,20 +38,30 @@
 //! same-session mutation; B and M span the durable read. The caller must hold
 //! no turn boundary of the session. The publication step runs inside B, M
 //! and D and must not call back into this machine or its session.
+//!
+//! Durable read. [`MeerkatMachine::durable_admitted_original`] reads the same
+//! historical admission from the session's durable runtime store alone, for a
+//! source owner whose session has no current registration, attachment or
+//! live actor on this machine (for example after the session was retired).
+//! It derives the same qualified key and accepts only the same exact
+//! admission, takes no boundary or gate, never consults or revives live
+//! state, and returns owned facts that authorize nothing.
 
 use std::sync::Arc;
 
 use meerkat_authorization_contracts::work_association::InputAuthorityAssociation;
-use meerkat_core::lifecycle::{CoreExecutorActorIdentity, CoreExecutorPublicationHandle};
+use meerkat_core::lifecycle::{CoreExecutorActorIdentity, CoreExecutorPublicationHandle, RunId};
 use meerkat_core::{ControllerModelClient, InputId, SessionId};
 
 use super::{
     MeerkatMachine, RuntimeExecutorAttachmentWitness, RuntimeLoopAttachmentSlot,
     RuntimeSessionEntry, RuntimeSessionRegistrationWitness,
 };
+use crate::identifiers::IdempotencyKey;
 use crate::input::Input;
 use crate::input_authority::RetainedInputAuthority;
-use crate::input_state::{InputLifecycleState, InputState};
+use crate::input_state::{InputLifecycleState, InputState, InputTerminalOutcome};
+use crate::traits::RuntimeDriverError;
 
 /// Why no admitted original was observed. No refusal publishes anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +139,112 @@ impl AdmittedOriginal<'_> {
     }
 }
 
+/// Why [`MeerkatMachine::durable_admitted_original`] read no admission. No
+/// refusal reads anything live, revives or changes anything, and none is
+/// evidence that the original was not admitted elsewhere or may be submitted
+/// again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DurableAdmittedOriginalRefusal {
+    /// The expected input is not a keyed governed prompt, or the durable row
+    /// under its qualified key is not its exact admission: the row's own
+    /// contributor is missing, duplicated or names another association, or
+    /// its prompt witness is absent or differs from the expected input.
+    Conflict,
+    /// The session's durable runtime exists and its store-owned key index
+    /// holds no row under the expected original's qualified key: absence in
+    /// this runtime, as its store proves it at the time of the read.
+    NotAdmitted,
+    /// This machine's store holds no durable runtime for the session.
+    UnknownRuntime,
+    /// The durable evidence cannot be read now: the machine has no persistent
+    /// store, the store keeps no exact key index or cannot prove its index
+    /// for the runtime, or a read failed. Never a statement of absence.
+    Unavailable,
+}
+
+/// One governed original's admission as the durable runtime store of its
+/// session records it, read by [`MeerkatMachine::durable_admitted_original`].
+///
+/// Owned and inert: it reports the committed row's facts and authorizes
+/// nothing. It carries no payload, result, controller or custody, and none
+/// of its facts is a completion, a resume permission or permission to submit
+/// the original again.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DurableAdmittedOriginal {
+    session_id: SessionId,
+    input_id: InputId,
+    association: InputAuthorityAssociation,
+    phase: InputLifecycleState,
+    terminal_outcome: Option<InputTerminalOutcome>,
+    last_run_id: Option<RunId>,
+    attempt_count: u32,
+}
+
+impl std::fmt::Debug for DurableAdmittedOriginal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableAdmittedOriginal")
+            .field("session_id", &self.session_id)
+            .field("input_id", &self.input_id)
+            .field("phase", &self.phase)
+            .field("terminal_outcome", &self.terminal_outcome)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DurableAdmittedOriginal {
+    /// The session whose durable runtime recorded the admission.
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// The admitted input: the runtime's actual id for the original.
+    pub fn input_id(&self) -> &InputId {
+        &self.input_id
+    }
+
+    /// The exact association the runtime retained for its own admission.
+    pub fn association(&self) -> &InputAuthorityAssociation {
+        &self.association
+    }
+
+    /// The input's lifecycle phase as the store last committed it. On a
+    /// session that is still registered it can lag the live phase.
+    pub fn phase(&self) -> InputLifecycleState {
+        self.phase
+    }
+
+    /// The input's committed terminal outcome, once it reached one.
+    pub fn terminal_outcome(&self) -> Option<&InputTerminalOutcome> {
+        self.terminal_outcome.as_ref()
+    }
+
+    /// The run the input last contributed to, as the store recorded it.
+    pub fn last_run_id(&self) -> Option<&RunId> {
+        self.last_run_id.as_ref()
+    }
+
+    /// How many run attempts the store recorded for the input.
+    pub fn attempt_count(&self) -> u32 {
+        self.attempt_count
+    }
+}
+
+/// The association and runtime-qualified idempotency key of `expected` when
+/// it is a keyed governed prompt: the exact original its source owner
+/// retains. `None` for any other input.
+fn expected_original(expected: &Input) -> Option<(&InputAuthorityAssociation, IdempotencyKey)> {
+    let Input::Prompt(_) = expected else {
+        return None;
+    };
+    let association = expected.header().authority_association.as_ref()?;
+    let key = crate::input_authority::qualified_idempotency_key(expected)
+        .ok()
+        .flatten()?;
+    Some((association, key))
+}
+
 impl MeerkatMachine {
     /// Run `publish` once, synchronously, on the runtime's historical
     /// admission of the governed original `expected` names, while the exact
@@ -172,17 +288,7 @@ impl MeerkatMachine {
         publish: impl FnOnce(&AdmittedOriginal<'_>) -> Result<T, E>,
     ) -> Result<Result<T, E>, AdmittedOriginalRefusal> {
         use AdmittedOriginalRefusal::{Conflict, NotAdmitted, Unavailable};
-        let Input::Prompt(_) = expected else {
-            return Err(Conflict);
-        };
-        let association = expected
-            .header()
-            .authority_association
-            .as_ref()
-            .ok_or(Conflict)?;
-        let key = crate::input_authority::qualified_idempotency_key(expected)
-            .map_err(|_| Conflict)?
-            .ok_or(Conflict)?;
+        let (association, key) = expected_original(expected).ok_or(Conflict)?;
         if !registration.belongs_to(self)
             || !attachment.belongs_to(self)
             || attachment.session_id() != registration.session_id()
@@ -273,6 +379,66 @@ impl MeerkatMachine {
             phase,
             controller: &controller,
         }))
+    }
+
+    /// Read the historical admission of the governed original `expected`
+    /// names on `session_id` from this machine's durable runtime store alone.
+    ///
+    /// The durable sibling of [`Self::with_admitted_original`], for a source
+    /// owner whose session has no current registration, live attachment or
+    /// actor on this machine, for example after the session was retired.
+    /// `expected` is the owner's retained evidence of the original: the keyed
+    /// governed prompt it submitted. Its association and raw key derive the
+    /// qualified idempotency key here, exactly as for the live call. The
+    /// store-owned key index names the row, and that row must be the
+    /// original's exact admission: exactly one own contributor, with exactly
+    /// that association, and the exact replay of `expected` by the canonical
+    /// replay identity (content and semantic slots, and the retained
+    /// authority).
+    ///
+    /// Durable only: no registration, attachment, actor, turn boundary or
+    /// gate is required or taken, live state is never consulted, and nothing
+    /// is revived, submitted, replayed, executed or published. On a session
+    /// that is still registered the durable facts can lag the live ones; an
+    /// owner publishing its custody of a live session uses
+    /// [`Self::with_admitted_original`]. The result reports what the store
+    /// committed and confers no authority: it is not a completion, a result
+    /// release, a resume permission or permission to submit the original
+    /// again.
+    ///
+    /// # Errors
+    /// [`DurableAdmittedOriginalRefusal`]: `Conflict` for evidence that is not
+    /// the exact admission, `NotAdmitted` when the runtime's index holds no row
+    /// under the key, `UnknownRuntime` when the store holds no runtime for the
+    /// session, and `Unavailable` when the durable evidence cannot be read.
+    pub async fn durable_admitted_original(
+        &self,
+        session_id: &SessionId,
+        expected: &Input,
+    ) -> Result<DurableAdmittedOriginal, DurableAdmittedOriginalRefusal> {
+        use DurableAdmittedOriginalRefusal::{Conflict, NotAdmitted, Unavailable, UnknownRuntime};
+        let (association, key) = expected_original(expected).ok_or(Conflict)?;
+        // The store's indexed read, with the lifecycle check that separates a
+        // runtime without the key from a runtime the store never held.
+        let row = match self
+            .durable_session_input_witness_by_idempotency_key(session_id, &key.0)
+            .await
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => return Err(NotAdmitted),
+            Err(RuntimeDriverError::NotFound { .. }) => return Err(UnknownRuntime),
+            Err(_) => return Err(Unavailable),
+        };
+        let own = own_admission(&row.state, association, expected).map_err(|_| Conflict)?;
+        Ok(DurableAdmittedOriginal {
+            session_id: session_id.clone(),
+            input_id: row.state.input_id.clone(),
+            association: own.association().clone(),
+            phase: row.seed.phase,
+            terminal_outcome: row.seed.terminal_outcome.clone(),
+            last_run_id: row.seed.last_run_id.clone(),
+            attempt_count: row.seed.attempt_count,
+        })
     }
 }
 

@@ -660,6 +660,25 @@ impl InMemoryRuntimeStore {
         self.inner.lock().await
     }
 
+    /// Point `key` of `runtime_id`'s input idempotency index at `input_id`,
+    /// touching no input row: an index entry its store cannot prove. Test
+    /// support for readers that must refuse an uncertain index.
+    #[cfg(test)]
+    pub(crate) async fn point_input_idempotency_key_for_test(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        key: &IdempotencyKey,
+        input_id: &InputId,
+    ) {
+        self.inner
+            .lock()
+            .await
+            .input_idempotency_index
+            .entry(runtime_id.0.clone())
+            .or_default()
+            .insert(key.0.clone(), input_id.clone());
+    }
+
     /// Install committed WholeBlob body bytes verbatim, bypassing every
     /// writer-side guard, so recovery tests can start from a document the
     /// current decoder refuses. The authority advances exactly as a real

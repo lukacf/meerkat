@@ -4,7 +4,7 @@ description: "HTTP endpoints for console access, experience metadata, module ins
 icon: "globe"
 ---
 
-*Mirrored from MobKit main at [b07e95c6bb1e](https://github.com/lukacf/meerkat-meta/commit/b07e95c6bb1e80f5b266a09471b0d4fe3badc23c) on 2026-10-19; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [af5893d932c2](https://github.com/lukacf/meerkat-meta/commit/af5893d932c2849b961df79d12c584d5fbf64974) on 2026-10-20; MobKit workspace version 0.9.4 at that commit.*
 
 Meta serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
 
@@ -88,6 +88,14 @@ Returns experience metadata describing the current runtime state. This is the pr
 ```
 
 When a Meerkat mob runtime is configured, the response includes live agent data from the mob. Without a mob runtime, only module-level information is returned. When console UI config is loaded, the response includes `console_config`, the view-level contract consumed by the bundled console.
+
+`health_overview.live_snapshot.running` is the mob owner's answer when the
+experience is read. A console served from the console aggregator answers for
+its registered runtimes: `true` only while every registered runtime's mob is
+creating or running, and `false` when at least one is not. Without a runtime
+that can answer (no live mob runtime, or an aggregator with no registered
+runtime), it is `null`, and the snapshot names it in an `unobserved` marker:
+`{"reason": "not_observed", "fields": ["running"]}`.
 
 ### `GET /console/modules`
 

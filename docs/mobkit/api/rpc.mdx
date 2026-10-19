@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from MobKit main at [b07e95c6bb1e](https://github.com/lukacf/meerkat-meta/commit/b07e95c6bb1e80f5b266a09471b0d4fe3badc23c) on 2026-10-19; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [af5893d932c2](https://github.com/lukacf/meerkat-meta/commit/af5893d932c2849b961df79d12c584d5fbf64974) on 2026-10-20; MobKit workspace version 0.9.4 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -940,8 +940,8 @@ target set and are neither reset nor retired.
 |-------|-------------|
 | `reset` | Identities reset or respawned, in order |
 | `retired_delegates` | `{identity, mob_id?}` per retired delegate |
-| `reset_details` / `retired_delegate_details` | Per-row detail, including any `topology_restore_warning` or `cleanup_warning` |
-| `warnings` | Non-fatal per-identity notes (for example a stale live member left for identity control to reject) |
+| `reset_details` / `retired_delegate_details` | Per-row detail, including any `topology_restore_warning` |
+| `warnings` | Always empty; kept for shape stability. A registered identity resets through its successor transition, which retires the previous live member, so no stale live member is left to warn about |
 | `failed` | `{identity, error, kind?}` rows. When non-empty the response is `-32000` `reset_all failed for one or more identities` with this whole body as `error.data` |
 | `startup_history` | `{timeout, ready, pending}` from the 10 s wait; `null` when preflight failed or no console aggregator is attached |
 </Accordion>
@@ -1298,6 +1298,23 @@ change alone never refuses a send.
 ---
 
 ## Identity delivery and turn tickets
+
+Identity-addressed methods (these, the identity status, inspect and
+lifecycle methods, and the operator member methods
+`meta/member_activate_instruction`, `meta/member_instruction_activations`,
+`meta/compact_member` and `meta/bound_member_transcript`) take the durable
+identity or its current generated runtime id,
+`rt:<identity>:<generation>`. A runtime id that is no longer the
+identity's binding, such as the predecessor's after a reset, is refused with
+`-32000` and `error.data.kind` `stale_identity_runtime_binding`, naming the
+current binding in `registered_runtime_member_id` and
+`registered_session_id`; the member methods and the console's identity
+routes, `meta/console/inspect_identity` included, answer the same. A
+runtime id of an identity the runtime does not know answers `-32602`
+`invalid identity: runtime identity not found: <id>`, and a stale runtime
+id of an identity this surface hides (an implicit delegate member) answers
+`-32602` `invalid identity: identity hidden by policy: <id>` and names no
+binding.
 
 `meta/send`, `meta/interact` and `meta/dispatch` deliver to an identity
 and return `completion_baseline`, the identity's completion cursor read before

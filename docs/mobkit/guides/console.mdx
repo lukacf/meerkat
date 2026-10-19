@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from MobKit main at [b07e95c6bb1e](https://github.com/lukacf/meerkat-meta/commit/b07e95c6bb1e80f5b266a09471b0d4fe3badc23c) on 2026-10-19; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [af5893d932c2](https://github.com/lukacf/meerkat-meta/commit/af5893d932c2849b961df79d12c584d5fbf64974) on 2026-10-20; MobKit workspace version 0.9.4 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -915,6 +915,16 @@ Primary RPC methods on `/console/rpc`:
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit
+
+The identity routes take the durable identity or its current generated
+runtime id, `rt:<identity>:<generation>`. After a reset, the predecessor's
+runtime id is refused with `-32000` and `error.data.kind`
+`stale_identity_runtime_binding`, naming the current binding
+(`registered_runtime_member_id`, `registered_session_id`). A hidden identity's
+runtime id answers `identity_hidden_by_policy`, and a runtime id of an
+identity the runtime does not know answers `identity not found`.
+`meta/console/inspect_identity` refuses a stale runtime id the same way
+before it looks the identity up in the console aggregator.
 
 Topology management is opt-in at the runtime. With the default disabled
 policy, the stock console remains a passive topology viewer and does not show

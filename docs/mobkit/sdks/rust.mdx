@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from MobKit main at [b07e95c6bb1e](https://github.com/lukacf/meerkat-meta/commit/b07e95c6bb1e80f5b266a09471b0d4fe3badc23c) on 2026-10-19; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [af5893d932c2](https://github.com/lukacf/meerkat-meta/commit/af5893d932c2849b961df79d12c584d5fbf64974) on 2026-10-20; MobKit workspace version 0.9.4 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -12,7 +12,7 @@ The Rust crate `meerkat-meta` is the primary interface for Meta. All other inter
 
 ```toml Cargo.toml
 [dependencies]
-meerkat-meta = "0.9.3"
+meerkat-meta = "0.9.4"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -200,6 +200,63 @@ if let Some(record) = records.first() {
         .await?;
 }
 ```
+
+### Bootstrap completion
+
+A host that starts its own work once the runtime is up (a first recovery
+pass, a readiness signal) takes the runtime's bootstrap completion and starts
+that work inside its publication, which never runs on a runtime that has
+begun to close:
+
+```rust
+use meerkat_meta::{BootstrapCompletionRefused, UnifiedRuntime};
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(".meta/state")
+    .build()
+    .await?;
+
+let completion = runtime.take_bootstrap_completion()?;
+match completion.publish(|| spawn_first_recovery_pass()) {
+    Ok(_pass) => { /* the pass runs under the mob's ordinary admission */ }
+    Err(BootstrapCompletionRefused::RuntimeClosing) => { /* the close began first */ }
+    Err(_) => { /* AdmissionClosed: the mob's admission closed */ }
+}
+```
+
+The runtime mints one completion, on its bootstrap success path: the identity
+bootstrap on `Ok` (a held one on `Activated`), or
+`activate_without_identity_context` on `Ok`. `UnifiedRuntimeBuilder::build`
+passes through one of these, and a failed bootstrap mints nothing.
+`take_bootstrap_completion` hands it out once; otherwise it answers
+`BootstrapCompletionUnavailable::NotCompleted` or `AlreadyTaken`. A runtime
+from a legacy constructor (`UnifiedRuntime::bootstrap` and the
+`bootstrap_with_*` family) has no completion until
+`activate_without_identity_context` returns `Ok`. Installing an identity
+context withdraws a completion not yet taken, because the identity bootstrap
+that follows mints again; attaching one leaves it as it is.
+
+`publish(f)` runs `f` once, only while the runtime has not begun to close and
+its mob still admits work. The runtime's close (`shutdown`, a failed
+bootstrap's cleanup, or the retained teardown of a dropped composition) begins
+under the same gate: a publication that has begun finishes first, and a later
+one is refused with `RuntimeClosing` without running `f`. A mob whose
+admission already closed refuses with `AdmissionClosed`. While `f` runs the
+mob cannot close for being idle, but an explicit `MobHandle::close_admission`
+can still land, so work that `f` spawns handles `MobError::AdmissionClosed`
+like any other caller of the mob.
+
+Keep `f` short and synchronous, because a shutdown that begins meanwhile waits
+for it. It must not block on async work, take the host's own close boundary
+again, or shut the runtime down: the gate is not reentrant. If `f` panics,
+the panic propagates and the runtime can still close.
+
+On the stdio gateway (`rpc_gateway`), the driver takes the completion once the
+stdout capacity for its Ready line is reserved, so the runtime then answers
+`AlreadyTaken`. A host composing the gateway gets it from
+`GatewayBootstrapReady::take_runtime_completion` and publishes it inside the
+same boundary as the Ready. A Ready published without taking it drops it.
 
 ## Module routing
 

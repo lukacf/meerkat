@@ -4,7 +4,7 @@ description: "Release candidate tracking, traceability matrix, validation, and g
 icon: "clipboard-check"
 ---
 
-*Mirrored from MobKit main at [b07e95c6bb1e](https://github.com/lukacf/meerkat-meta/commit/b07e95c6bb1e80f5b266a09471b0d4fe3badc23c) on 2026-10-19; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [af5893d932c2](https://github.com/lukacf/meerkat-meta/commit/af5893d932c2849b961df79d12c584d5fbf64974) on 2026-10-20; MobKit workspace version 0.9.4 at that commit.*
 
 Meta includes governance validators for implementation-tracking documents.
 They check governance declarations, traceability row format, recognized
@@ -65,6 +65,13 @@ The function accepts YAML document text as above or a Markdown table with
 referenced artifact exists or proves the status. Invalid input returns
 `GovernanceValidationError`.
 
+YAML input parses under YAML 1.2 rules: `yes`, `on` and `off` stay text,
+and `<<` is an ordinary key rather than a merge. The document is refused as
+`InvalidTraceabilityRow` when it has a custom tag, a key given twice in the
+same mapping, a null where text is expected (an empty list entry is a null), a
+`...` document end marker, nesting deeper than 64 levels, or 100 or more
+aliases that outnumber their anchors more than ten to one.
+
 ## Baseline verification
 
 The optional source-baseline check scans a local Meerkat checkout for a
@@ -114,7 +121,7 @@ desired; it is not a release-compatibility gate.
 | `NoTraceabilityRows` | No traceability data rows were found |
 | `InvalidTraceabilityStatus { line, status }` | Row status is outside the strict set |
 | `MissingTraceabilityEvidence { line }` | A status requiring evidence has only missing/placeholder evidence |
-| `InvalidTraceabilityRow { line }` | Malformed YAML input or a malformed Markdown row/header |
+| `InvalidTraceabilityRow { line }` | Malformed or refused YAML input (see [Validation](#validation)) or a malformed Markdown row/header |
 
 For Markdown, `line` is a source line number. For parsed YAML rows it is the
 one-based row index; YAML parse failures report `line: 1`.

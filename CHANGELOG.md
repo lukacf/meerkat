@@ -97,8 +97,10 @@ them.
   it as an enum variant added to an exhaustive enum; a match outside the
   crate needs the arm. An MCP login completion now ends such a commit as
   `McpOAuthError::CommitUnsettled` (reason `commit_unsettled`), where it
-  ended as `AuthLifecycle` (reason `infrastructure`). Connector and provider
-  logins keep their earlier error and reason for it.
+  ended as `AuthLifecycle` (reason `infrastructure`). A connector login
+  still reports it as `ConnectorLoginError::AuthLifecycle`. A provider
+  login's `HostAuthError::CredentialMutation` now carries `RollbackFailed`
+  where it carried `AuthLifecycle`; its reason stays `infrastructure`.
 - Behaviour-only (not measured by the gate): `meerkat-auth-core`:
   `auth_oauth::credential_http_client` and a required egress profile's
   credential client now bound every request: 30 s in total

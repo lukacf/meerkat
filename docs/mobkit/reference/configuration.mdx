@@ -4,7 +4,7 @@ description: "Configuration reference for Meta: module definitions, runtime opti
 icon: "gear"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 Meta is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -115,16 +115,21 @@ The stock SDK gateway (`rpc_gateway`) consumes the `runtime_options` object of `
 | `http_listen` | `HOST:PORT` string | Bind address of the gateway HTTP listener (console, JSON-RPC, blobs, SSE, live). Default `127.0.0.1:0`: loopback, ephemeral port, the only bind every earlier release had. IP literals only, no hostnames. A non-loopback address is refused at init (`-32602`, before any bootstrap) unless `auth_config` enforces console app auth or `allow_remote` is `true`; every non-loopback bind that passes logs one WARN line. The listener is bound right behind that gate, still before any bootstrap, so a port another process holds is a `-32603` init error naming the address with no runtime built and no schedule executor lease taken behind it. The init result's `http_base_url` preserves the bound port and maps wildcard binds to same-family loopback: `0.0.0.0:PORT` becomes `http://127.0.0.1:PORT`, and `[::]:PORT` becomes `http://[::1]:PORT`; concrete bound addresses are unchanged. Python `.http_listen("0.0.0.0:8080")`, TypeScript `.httpListen("0.0.0.0:8080")`. A top-level `http_listen` (the `meta_gateway` init-param shape) is refused with `-32602` naming `runtime_options.http_listen`. See [Deployment](/mobkit/guides/deployment). |
 | `http_public_base_url` | Absolute `http(s)://` URL | The base URL clients reach the gateway at through a proxy. Reported back in the init result as `http_public_base_url` (trailing `/` removed; `null` when undeclared); never used to bind. Python `.http_public_base_url(url)`, read back as `runtime.rust_http_public_base_url`; TypeScript `.httpPublicBaseUrl(url)`, read back as `runtime.rustHttpPublicBaseUrl`. |
 | `allow_remote` | Boolean | Explicit acknowledgement that `http_listen` exposes the listener beyond this host; the same word and rule as `--allow-remote` on `rkat-rpc --tcp` and `rkat mob host --listen-tcp`. An exposure opt-in, not an auth mechanism: pass it only with an authenticating proxy in front of the listener. Python `.allow_remote()`, TypeScript `.allowRemote()`. |
+| `mob_announcements` | Object `{enabled, batch?, retention_ms?, member_limits?, member_tools_in_child_mobs?, child_member_limits?}` | Mob announcements. `enabled: true` needs a persistent, identity-first launch. `batch` sets `max_count` (default 100), `max_bytes` (65536), `max_delay_ms` (60000) and `min_wake_interval_ms` (60000); `retention_ms` defaults to seven days and is at least 3600000 (one hour). `member_limits` bounds the member tools per member: `announcements_per_minute` (30), `announcement_bytes_per_minute` (65536), `subscriptions` (8) and `topics_per_subscription` (16). `member_tools_in_child_mobs` (default false) is the ceiling of the member tools in mobs members create: with it the `mob_announcements` bundle is offered to child mobs, and a child mob profile gets the member tools only by naming `mob_announcements` in its own `tools.bundles` (Meerkat's narrowing and quotas still apply). Without it a child mob create whose profile names the bundle is refused, and a member that opted in under a ceiling since lowered is built without the tools. The host can subscribe members of child mobs either way. `child_member_limits` bounds live subscriptions for members of mobs hosted here: `subscriptions` (1024) on the gateway and `per_mob` (256) naming any one mob. Enables the mob announcement methods and the `mob_announcements` tool bundle a profile opts into with `tools.rust_bundles`; see [Mob announcements](/mobkit/api/rpc#mob-announcements-optional). `meta_gateway` takes the same object as its top-level `mob_announcements` init param, and a Rust host as `UnifiedRuntimeBuilder::mob_announcements`; see [Mob announcements](#mob-announcements). |
 | `member_comms_address` | Socket-address string | Binds each local member to a signed TCP endpoint that remote peers can dial. Wildcard addresses are refused because they cannot be advertised as a concrete route. |
 | `contacts_toml` | TOML string | Loads the contact directory used to resolve remote mob ids to TCP/UDS control endpoints and pinned gateway public keys. |
 | `control_grants_toml` | TOML string | Loads the closed `[control_grants]` table for `--control-listen`. Each caller public key is scoped to named control verbs and members, and the gateway binds every request signature to the local mob id as its audience. Omitting the field installs an empty deny-all table; an explicit value without `[control_grants]`, or with an unknown/invalid field, fails initialization. |
+| `control_request_window_ms` | Integer, 1000 to 3600000 | How far a signed `inject_keyed` or `inject_status` request's issue time may be from this gateway's clock, in either direction, before the control listener refuses it as `stale_request`. Default 300000 (five minutes). See [Keyed inject](/mobkit/concepts/access-control#keyed-inject). |
+| `serve_keyed_inject` | Boolean | Whether the control listener serves peers' `inject_keyed` and `inject_status` requests. Default true. With false, both verbs answer `not_served` with the cause `runtime_disabled`, and peers keep their batches for this gateway's members waiting until it serves again. See [Keyed inject](/mobkit/concepts/access-control#keyed-inject). |
 | `max_sessions` | Positive integer | Session-capacity limit, default `16` in the stock gateway. TypeScript `.maxSessions(n)`; Python requires raw init input. |
 | `implicit_delegate_idle_retire_secs` | Nonnegative integer or `null` | Default idle timeout in seconds for eligible delegates, default `300`. `null` disables the runtime default, not explicit per-member numeric overrides. Python `.implicit_delegate_idle_retirement(seconds)` / TypeScript `.implicitDelegateIdleRetirement(seconds)` (use `None` / `null` to disable the default). See [scope and overrides](#implicit-delegate-idle-retirement). |
 | `implicit_delegate_idle_sweep_interval_ms` | Positive integer | Delegate retirement sweep interval, default `10000` ms; the runtime clamps it to an effective minimum of `1000` ms. Raw init input only; neither SDK has a setter. |
 | `event_log` | Object | Declares the operational event log. `storage = "memory"` (preferred; `"in_memory"` is an accepted compatibility alias, with optional `batch_size`, `flush_interval_ms`) keeps a bounded queryable in-process store so `meta/query_events` returns events instead of `no_event_log_configured`; `storage = "null"` declares that events are dropped. These are declared-ephemeral choices; omitting the key means no ingestion at all, and any other storage kind fails initialization. Durable event-log backends are embedder-only (`UnifiedRuntimeBuilder` accepts any `EventLogStore`). |
-| `runtime_store` | Object | Declares the runtime store's durability (session resume, archive, retire). With top-level `persistent_state` configured, the default is persistent SQLite at `runtime.sqlite`; a failed SQLite open is a startup error (`-32014`), never a silent in-memory fallback. `{ "storage": "memory" }` explicitly selects ephemeral runtime storage (`"in_memory"` is an accepted compatibility alias); `null` is not a supported storage kind here. Without `persistent_state`, the gateway uses `InMemoryRuntimeStore` even when this option is omitted. In either ephemeral case, runtime-store state does not survive gateway restart. |
+| `runtime_store` | Object | Declares the runtime store's durability (session resume, archive, retire). With top-level `persistent_state` configured, the runtime store is persistent SQLite at `runtime.sqlite`, where sessions live: a declared in-memory store is refused (`-32014`), and a failed SQLite open is a startup error (`-32014`), never a silent in-memory fallback. Without `persistent_state`, the gateway uses `InMemoryRuntimeStore`, which `{ "storage": "memory" }` declares explicitly (`"in_memory"` is an accepted compatibility alias); `null` is not a supported storage kind here. In-memory runtime-store state does not survive a gateway restart. |
 | `declare_spec_update` | Object | One-shot canonical mob-definition compare-and-swap. `{ "expected_revision": N }` applies the `mob_config` supplied in the same `meta/init` request only when the durable definition is still at `N`. The launch must be authoritative and use persistent mob storage. Exact replay converges; stale revision or successor-content disagreement refuses initialization with typed storage error `-32014`. |
-| `compaction` | Object | Declares the host-level session-compaction policy for every agent the gateway builds: `auto_compact_threshold` (tokens, non-zero), `recent_turn_budget`, `max_summary_tokens`, `min_turns_between_compactions`. A compactor is always installed; this declares *when it fires*. **Omitting `auto_compact_threshold` inherits Meerkat's model-aware default — `context_window * 4 / 5`, i.e. ~840,000 tokens on a million-token model such as `gpt-5.6-sol`, which in practice never fires and resends the full transcript every turn.** Declaring the key pins it. A mob profile's own `auto_compact_threshold` still wins per member. Unknown keys and a zero threshold fail initialization. |
+| `mob_composition` | Object `{authority, candidate_definition?}` | Who speaks for the persistent mob storage's recorded composition (the composition pin). `authority` is `"authoritative"` by default: the launch records the definition it supplies when none is recorded, and a supplied definition that differs from the recorded one is refused with `-32019` (`divergent`); declare such a change with `declare_spec_update`, which needs an authoritative launch. `"candidate"` is for the candidate or certification boot of a candidate-then-promote pipeline on one state directory: the launch neither creates the pin nor is refused by one, but a candidate whose supplied definition differs from the stored one is refused (`-32019`, `candidate_divergent`) unless `candidate_definition` is `"stored"`, which boots the stored definition instead, logs the diverged fields at WARN and reports them in a degraded `mob_composition` storage-health slot. `candidate_definition` is candidate-only: an authoritative launch that sets it is refused when the options are parsed, and so is any other value. |
+| `fork_instruction_policy` | String | What a fork of a member with activated host instructions does with them. `"require_explicit_activation"` (the default when absent, Meerkat's default) leaves the activation to the host: a host-driven fork (the console fork, `UnifiedRuntime::fork_member`) is committed and the host activates each inherited key before the child's first turn, while a fork that starts its own first turn (`fork_off`, a delegation fork, a council participant) is refused with a typed `fork_instruction_refused` before anything is committed. `"reactivate_inherited"` re-activates, in the child and before it is committed, every key that was effective in the source at the fork. `"refuse"` refuses any fork whose child would inherit an activation. Applied to the gateway's mob on create and resume. Any other value refuses initialization. Python `.fork_instruction_policy(policy)`, TypeScript `.forkInstructionPolicy(policy)`; Rust embedders set it with `UnifiedRuntimeBuilder::fork_instruction_policy` (see [the Rust SDK](/mobkit/sdks/rust#fork-instruction-policy)). `meta_gateway` takes no `runtime_options` and runs Meerkat's default. See [Fork instruction policy](#fork-instruction-policy) for what a fork copies, what each value does and what `reactivate_inherited` trusts. |
+| `compaction` | Object | Declares the host-level session-compaction policy for every agent the gateway builds: `auto_compact_threshold` (tokens, non-zero), `recent_turn_budget`, `max_summary_tokens`, `min_turns_between_compactions`, `history_retained_rewrites` (non-zero; how many transcript rewrites keep their bodies, default 64 in Meta, where Meerkat's own default is 4). A declared 4, Meerkat's default, is treated as undeclared and becomes 64; a host that wants a smaller window sets any value other than 4. A compactor is always installed; this declares *when it fires*. **Omitting `auto_compact_threshold` inherits Meerkat's model-aware default - `context_window * 4 / 5`, i.e. ~840,000 tokens on a million-token model such as `gpt-5.6-sol`, which in practice never fires and resends the full transcript every turn.** Declaring the key pins it. A mob profile's own `auto_compact_threshold` still wins per member. Unknown keys and a zero threshold fail initialization. |
 | `meerkat_config_path` | String path | The Meerkat host `config.toml` every agent the gateway builds starts from (the live/realtime door included), loaded once at init, merged over `Config::default()` with Meerkat's own file semantics and validated with Meerkat's own `Config::validate` against the canonical catalog. This is the only door for the `[self_hosted]` and `[realm]` tables, which Meerkat keeps in the host config rather than in `mob.toml`; a host-config `[models]` table reaches the factory too, but does not satisfy the [init model check](#the-init-model-check), which reads the definition's own `[models.<id>]`. The gateway's own overlays (`member_comms_address`, `compaction`) are layered on top. A missing, malformed or non-validating file (a `[self_hosted.models.<id>]` alias naming an undeclared server, for one) refuses init with `-32602` naming the option and the path, never a silent `Config::default()`. Omitted, agents build from Meerkat's default config as before. Python `.meerkat_config(path)`, TypeScript `.meerkatConfig(path)`. `meta_gateway` takes the same file as its top-level `meerkat_config_path` init param and adopts `<workspace>/.rkat/config.toml` when it exists, logging one INFO line naming the adopted file either way; a top-level `meerkat_config_path` sent to `rpc_gateway` is refused with `-32602` naming `runtime_options.meerkat_config_path`. See [Self-hosted models and the Meerkat host config](#self-hosted-models-and-the-meerkat-host-config). |
 | `workgraph` | Boolean or directory string | WorkGraph construction switch, default `true`. `false` disables the store, the member `workgraph_*` tools, the attention overlays and the `meta/workgraph/*` RPCs; a non-empty string is an explicit directory for the durable store (`workgraph.sqlite3` is created inside it); any other value fails initialization. Python `.workgraph(enabled)` and TypeScript `.workgraph(enabled)` take `true`, `false` or the directory string; an unused setter sends nothing and the gateway default applies. Store placement per launch mode, the auto-issued namespace grant and the memory-backed fallback are in [WorkGraph](#workgraph). |
 
@@ -471,7 +476,7 @@ exposes no equivalent setter.
 
 | Property | Behavior |
 |----------|----------|
-| Lifetime | Boot-scoped. The list is installed on the session bridge, which lives for exactly one boot, and is never written to the continuity store. Dropping it from the next boot payload is how the authority goes away. |
+| Lifetime | Boot-scoped. The list is installed on the session bridge, which lives for exactly one boot, and is never written to any store. Dropping it from the next boot payload is how the authority goes away. |
 | Matching | Exact `AgentIdentity` match. No prefix, suffix, or case variant of a declared identity inherits authority. |
 | Authority | Meta only carries the declared predecessor role into the resume request. Meerkat re-verifies it against durable state and refuses with `MobError::MemberRoleMigrationRejected` on mismatch; Meta never infers a declaration and never retries a resume Meerkat refused. |
 | Leftovers | Once the durable and requested roles agree, Meerkat returns before reading the declaration, so a declaration left in place after the migration landed is inert. An identical repeated declaration is therefore accepted on purpose. |
@@ -489,6 +494,246 @@ Declarations that reach neither identity plane arm nothing, because there is no
 identity plane to migrate on. See
 [roster and member lifecycle](/mobkit/concepts/roster#role-migration) for the operator
 view of the refusal.
+
+## Fork instruction policy
+
+`runtime_options.fork_instruction_policy` decides what happens to a member's
+activated instructions when that member is forked. This section explains what
+a fork copies, what each policy does, what `reactivate_inherited` writes and
+trusts, and how to set the policy.
+
+### Activated instructions
+
+A host changes a member's standing instructions with
+[`meta/member_activate_instruction`](/mobkit/api/rpc): each new activation appends one
+keyed, immutable activation row to the member's session, for example the body
+of a skill your application keeps under namespace `app.skills` and key
+`calendar`. For each namespace and key, the newest row that the member's own
+session wrote is the instruction in effect. Meerkat treats every namespace
+alike, so a skill, a persona, a standing rule and any other key are all
+activation rows, and the policy applies to every one of them.
+
+Instructions a member gets from its build (its profile, the skills its profile
+preloads included, and its system prompt) are not activation rows. The policy
+does not concern them.
+
+### What a fork copies
+
+A durable fork copies the source member's committed transcript, up to the fork
+boundary, into a new session and seats that session as a new member. The
+durable forks are the agent `fork_off` tool, `UnifiedRuntime::fork_member`, a
+live delegation's fork of the member, and the participants of a temporary
+council. (`meta/fork_helper` is not a durable fork, and this policy does not
+apply to it. It renders the source's transcript as text for a fresh member. A
+helper that runs as an autonomous host gets that text as its first prompt, and
+with the default full-history context it includes the source's system rows, so
+the bodies of the source's activated instructions reach that helper as plain
+context under every policy, `refuse` included.)
+
+| Copied into the child | Not copied |
+|---|---|
+| The conversation up to the fork boundary: messages, tool calls and results, and system rows. | The source's member identity, comms name, runtime binding and roster entry. The child is a new member. |
+| Every activation row in that prefix, as history only (see below). | The source's activations as instructions in effect. |
+| The session configuration: output schema, hook overrides, budget limits, timeouts, application context, additional instructions and callback tool definitions. | Mob operator authority, which belongs to the source's identity, not to a branch of its transcript; the shell environment; MCP attachments. |
+| For `fork_off`, `UnifiedRuntime::fork_member`, the bounded and detached member forks of `MobHandle` and local council participants: the source's application labels, except the standard member labels that name the source, and its per-spawn tool overlay. | For a live delegation's fork and a council participant on a member host: those build inputs. They are built from their own spec. |
+
+`fork_off` also gives the child the source's role profile, its profile and
+model overrides, and the forking member's own tool access policy. The forking
+member needs spawn admission for that role: manage scope over the mob, or
+spawn scope for the profile.
+
+Inherited activation rows stay in the child's transcript with their full text,
+rendered for the child as `[meerkat-inherited-instruction-v1]` with
+`status=historical_only_not_active_in_child`. The child can read what its
+source was told, but none of it is in effect. A child runs no model turn while
+an inherited key has no activation of its own: its first model request fails
+with `forked session must explicitly activate inherited instruction keys`,
+followed by the keys. The policy decides who writes that activation, or
+refuses the fork instead.
+
+### The three policies
+
+| Policy | Host-driven fork (`UnifiedRuntime::fork_member`) | Fork that starts its own first turn (`fork_off`, a live delegation's fork, council participants, the bounded and detached member forks of `MobHandle`) |
+|---|---|---|
+| `require_explicit_activation` (default) | Committed. The host activates each inherited key on the child before its first turn. | Refused before anything is committed (`fork_instruction_refused`, cause `policy_refuses`), because nobody could activate the child before the turn the fork starts. |
+| `reactivate_inherited` | Committed with one re-activation row per inherited key; the child needs no activation from the host. | Committed with the re-activation rows, and the child's first turn runs. |
+| `refuse` | Refused before anything is committed. | Refused before anything is committed. |
+
+A source with no activation rows in the copied prefix forks the same way
+under every policy. The default is the least-privilege choice: no durable
+fork's child runs an instruction that nobody activated for that child.
+
+Under `require_explicit_activation`, a Rust host activates an inherited key on
+the child with `MobHandle::activate_member_instruction(child, request)`
+(`runtime.mob_handle()`). Read the key first with
+`MobHandle::read_member_instruction_activations` and a query that names its
+`namespace` and `key`: for an inherited key, `key_state` reports
+`requires_explicit_child_activation: true`, `next_expectation`
+`{"kind": "absent"}` and `next_supersedes` set to the inherited row's
+`activation_id`. The host may activate the same revision and body, or a
+different one.
+
+### What `reactivate_inherited` writes
+
+Before the child is committed, the fork appends one activation row per
+inherited key, in namespace and key order:
+
+- **Keys:** every key with an activation row in the copied prefix, in every
+  namespace. There is no namespace filter.
+- **Revision and body:** the key's head at the fork boundary, which is its
+  last copied row. The new row carries that row's `revision` (`namespace`,
+  `key`, `revision_id`, `content_sha256`) and its whole body, unchanged. An
+  activation the source wrote after the fork boundary is not in the prefix
+  and is not copied.
+- **Origin:** the child's own session. The key is then in effect for the child
+  exactly as if the host had activated it there. The row `supersedes` the
+  copied head's `activation_id`.
+- **Identity:** `activation_id` is `fork-reactivation:` followed by the first
+  32 hex digits of SHA-256 over the child session id, a zero byte and the
+  head's activation id. It depends only on the child and the head, so the same
+  fork writes the same rows. The prefix is for operators; Meerkat recognizes
+  these rows by reproducing them, not by their ids.
+- **Timestamp:** the last copied message's timestamp.
+- **Rules:** the rows pass the ordinary activation rules: the body digest, 256
+  KiB per body, and the 1 MiB budget of retained activation bodies across the
+  session lineage. Each re-activation adds its body to the lineage again, so
+  forks of forks of a member with large bodies reach that budget after a few
+  generations and are refused with `lineage_body_budget_exceeded`.
+- **Only what the source activated itself:** each head must be an activation the
+  source session wrote itself. A head the source only inherited from an
+  earlier fork, and never activated, refuses the fork with
+  `not_effective_in_source`.
+
+### What `reactivate_inherited` trusts
+
+With `reactivate_inherited`, the child claims its source's activations as its
+own:
+
+- The copied body is the one in effect in the source at the fork boundary.
+  Meerkat does not ask your application whether that revision is still
+  current, still allowed, or meant for this child. A skill revision you have
+  since withdrawn, replaced or narrowed keeps running in a child forked from a
+  transcript that still carried it.
+- Once written, the row is the child's instruction for that key, like one your
+  host activated on the child. An activation is never removed: to change what
+  the child runs, activate a new revision of the key on the child, which
+  supersedes the re-activation row.
+- A fork of the child copies those rows again, so one setting carries an
+  instruction down a chain of forks.
+- The policy is one decision for every member, every key and every fork of the
+  gateway's mob. Choose `reactivate_inherited` only when every instruction your
+  members may carry is safe to run, unchanged, in any fork of them.
+  `require_explicit_activation` keeps that decision with the host for each
+  child (and refuses forks that leave it no chance), and `refuse` rules out
+  durable forks of activated members (an autonomous-host `meta/fork_helper`
+  still sees their text).
+
+### Refusals
+
+A refused fork commits nothing: no child session, no member and no
+transcript. Meerkat classifies the refusal as `FORK_INSTRUCTION_REFUSED`
+(`-32037` on Meerkat's own JSON-RPC, HTTP 422, CLI exit 57). No method of this
+gateway forks a member, so the gateway itself never answers `-32037`: you meet
+the refusal as the agent's `fork_off` tool error, a council exit reason, or
+`MobError::ForkInstructionRefused { source_member_id, refusal }` from the Rust
+API. Its structured data:
+
+```json
+{
+  "kind": "fork_instruction_refused",
+  "source_member_id": "assistant",
+  "fork_instruction_refusal": {
+    "cause": { "kind": "policy_refuses" },
+    "keys": [["app.skills", "calendar"]]
+  }
+}
+```
+
+| `cause.kind` | Meaning |
+|---|---|
+| `policy_refuses` | The policy refuses a child that inherits activation rows: `refuse`, or `require_explicit_activation` for a fork that starts its own first turn. |
+| `not_effective_in_source` | `reactivate_inherited`, but a copied key's head was never activated by the source itself. |
+| `lineage_body_budget_exceeded` (with `max_bytes`) | Re-activating would exceed the lineage's retained activation-body budget. |
+| `activation` (with `code`) | The activation rules refused a re-activation row. |
+| `member_host_unsupported` | `reactivate_inherited`, but the member host that holds a placed source is older than 0.9.4 and cannot apply the policy. Upgrade member hosts before their controller. |
+
+The message names the keys, for example:
+
+```text
+fork of member 'assistant' refused: fork refused: the child would inherit activated instruction keys [app.skills/calendar] and the fork instruction policy refuses them; reactivate_inherited carries them into the child
+```
+
+An agent that called `fork_off` gets a tool error with that message after
+`tool 'fork_off' failed:` and the structured data above. A temporary council
+ends with the exit reason `participant_fork_instruction_refused`, naming the
+participant's order and the refusal; nothing was created for that
+participant, so its cleanup has nothing to revoke.
+
+### Setting the policy
+
+The policy belongs to the host. It is never a tool argument or part of a mob
+definition, and it cannot be chosen per fork: every fork of the gateway's mob
+uses it. The gateway applies it to its mob on every create and resume. It is
+not stored with the mob, so set it on every boot. A fork applies the policy
+the gateway runs at the moment of the fork; changing the policy later does not
+touch children that already exist.
+
+| Surface | Setting |
+|---|---|
+| `meta/init` | `runtime_options.fork_instruction_policy`: `"require_explicit_activation"` (the default when absent), `"reactivate_inherited"` or `"refuse"`. Any other value refuses initialization. |
+| Python | `Meta.builder().fork_instruction_policy("reactivate_inherited")`. Another value raises `ValueError`. |
+| TypeScript | `.forkInstructionPolicy("reactivate_inherited")` (type `ForkInstructionPolicy`). Another value throws `RangeError`. |
+| Rust | `UnifiedRuntimeBuilder::fork_instruction_policy(ForkInstructionPolicy::ReactivateInherited)`, or `MobBootstrapSpec::with_fork_instruction_policy` on a spec you build. |
+| `meta_gateway` | Takes no `runtime_options` and always runs the default. |
+
+Meerkat's own JSON-RPC server forks sessions with `session/fork_at` and
+`session/fork_replace`; those calls take the policy per call as
+`inherited_instructions`. They are not this gateway's member forks.
+
+### Example: a member with an activated skill
+
+The host activates a skill on member `assistant`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "meta/member_activate_instruction",
+  "params": {
+    "identity": "assistant",
+    "activation": {
+      "revision": {
+        "namespace": "app.skills",
+        "key": "calendar",
+        "revision_id": "calendar-v3",
+        "content_sha256": "sha256:<hex of the body>"
+      },
+      "activation_id": "calendar-v3-assistant",
+      "expectation": { "kind": "absent" },
+      "body": "Use the calendar tools to answer scheduling questions."
+    }
+  }
+}
+```
+
+With the default policy, `assistant` calling `fork_off` now gets the
+`fork_instruction_refused` tool error above, and nothing is forked. A host
+that wants forks to keep the skill opts in at boot:
+
+```python
+from meerkat_meta import Meta
+
+runtime = await (
+    Meta.builder()
+    .mob("config/mob.toml")
+    .fork_instruction_policy("reactivate_inherited")
+    .build()
+)
+```
+
+The `fork_off` child then starts with its own activation of
+`app.skills/calendar`, with the body `assistant` had at the fork boundary, and
+its first turn runs.
 
 ## Child mob tool policy and bundles
 
@@ -636,7 +881,7 @@ launch that never mentions the key has one). The service backs the member
 | Launch | `workgraph: true` (default) | `workgraph: "<dir>"` |
 |--------|-----------------------------|----------------------|
 | With `persistent_state` | Durable `SqliteWorkGraphStore` at `<persistent_state>/workgraph.sqlite3`, the `workgraph` storage slot. If the store fails to open, the slot reports `degraded` and WorkGraph is disabled for that launch; nothing falls back to memory. | Durable store at `<dir>/workgraph.sqlite3`, created if needed, same open-failure posture. |
-| Without `persistent_state` | Memory-backed `MemoryWorkGraphStore`, reported as a declared-ephemeral slot: goals, work items and attention bindings do not survive a gateway restart. On an identity-first launch that persists through an SDK-hosted continuity store the gateway logs one WARN line naming this, because everything else about that launch is durable. | Durable store at `<dir>/workgraph.sqlite3`; the directory form exists for exactly this case. |
+| Without `persistent_state` | Memory-backed `MemoryWorkGraphStore`, reported as a declared-ephemeral slot: goals, work items and attention bindings do not survive a gateway restart. | Durable store at `<dir>/workgraph.sqlite3`; the directory form exists for exactly this case. |
 
 `meta_gateway` has no switch: its persistent mode attaches the durable store
 from the workspace state dir (same degraded posture on open failure) and its
@@ -658,6 +903,39 @@ per-profile: a member sees them only when its profile sets
 `tools.workgraph = true`, while the `meta/workgraph/*` RPCs are available
 whenever the service exists.
 
+## Mob announcements
+
+Mob announcements are composed the same way on every surface that offers
+them. The options are checked once, before anything is built; the
+`mob_announcements` member tool bundle is registered for the host's own
+profiles, before the runtime is built, and offered to child mob profiles
+only under `member_tools_in_child_mobs`; and the owner attaches once the
+identity runtime is installed, before the control listener's keyed inject
+plane is sealed. Each surface refuses what it cannot compose.
+
+| Surface | How it is enabled | Refused when |
+|---------|-------------------|--------------|
+| `rpc_gateway` | `runtime_options.mob_announcements` (see [SDK and Gateway runtime options](#sdk-and-gateway-runtime-options)) | The launch is not persistent and identity-first, or an option is malformed or out of range: init answers `-32602` |
+| `meta_gateway` | Top-level `mob_announcements` init param: the same object, through the same parser | `identity_first: false`, `persistent_sessions` not `true`, or an option is malformed or out of range: the init is refused |
+| Rust library | `UnifiedRuntimeBuilder::mob_announcements(AnnouncementConfig)` | No `persistent_state()` (it holds the announcement database), a runtime that is not identity-first, a configuration `AnnouncementConfig::validate` refuses, or a Rust tool bundle already registered under the name `mob_announcements`: `build()` answers `ConflictingConfiguration` |
+
+`member_tools_in_child_mobs: true` sets the same ceiling on every surface: a
+child mob profile gets the member tools only by opting in itself, with
+`tools.bundles = ["mob_announcements"]`.
+
+A peer gateway refuses this gateway's keyed injects issued further from its
+clock than the window the owner assumes, which bounds when a batch for a
+member on that peer may expire. `rpc_gateway` takes it from
+`runtime_options.control_request_window_ms`. `meta_gateway`'s control
+listener serves keyed injects with the default window,
+`DEFAULT_KEYED_INJECT_WINDOW_MS` (five minutes), and its owner assumes the
+same. A runtime the builder composes takes the window its keyed inject plane
+serves with (`UnifiedRuntimeBuilder::keyed_inject_plane`, by default
+`DEFAULT_KEYED_INJECT_WINDOW_MS`) in place of the configuration's
+`peer_request_window_ms`, which applies only when the plane does not serve.
+The runtime's shutdown stops the delivery dispatcher, whichever surface
+composed it.
+
 ## Storage layout and durability
 
 `MetaStorageLayout` is the single path authority for storage roots and the
@@ -670,9 +948,9 @@ directory's internal sharding, per-realm agent-memory files).
 **Canonical spellings** (decided once; stores shared with Meerkat keep
 Meerkat's names, Meta-owned files converge on `*.sqlite3`):
 
-| Slot | Canonical name | Legacy spellings (still readable) |
+| Slot | Canonical name | Legacy spellings |
 |------|----------------|------------------------------------|
-| sessions | `sessions.sqlite3` | `sessions.db`, `sessions.sqlite` |
+| sessions (0.9.3 state: read only by the migration verbs and the storage doctor; 0.9.4 creates none) | `sessions.sqlite3` | `sessions.db`, `sessions.sqlite` |
 | runtime | `runtime.sqlite` | — |
 | schedule | `schedule.sqlite` | — |
 | workgraph | `workgraph.sqlite3` | — |
@@ -683,15 +961,33 @@ Meerkat's names, Meta-owned files converge on `*.sqlite3`):
 | canonical Meerkat mob storage | `event_log.sqlite3` | — |
 | blob root | `blobs/` | — |
 
+0.9.4 keeps every session in Meerkat Core's store in `runtime.sqlite`. It
+creates and opens no session database, and keeps no session rows in the
+continuity database. An unretired sessions database under any of its
+spellings, or a continuity database under any of its spellings that still
+holds session rows, is 0.9.3 state: startup refuses it
+(`NativeStorageMigrationRequired`, `-32014`) until
+`meta_gateway storage-migrate-native` migrates it in place (see
+[Upgrading to 0.9.4](/mobkit/guides/upgrading-to-0-9-4)).
+
 On normal persistent gateway launches, `event_log.sqlite3` holds Meerkat's
 canonical mob definition, events, and adopted-member state. It is live storage,
 not a reserved file, and is distinct from the optional operational query
 projection configured by `runtime_options.event_log`. The SDK gateway's
 explicit `runtime_options.mob_storage: { "storage": "memory" }` declaration
-opts out of persistent mob storage; ordinary persistent launches do not.
+keeps mob storage in memory, except under `persistent_state` while a roster
+provider is registered: the roster's identity bindings live in the mob
+storage, so that launch is refused (`-32014`). The Rust builder refuses the
+same composition (`mob_storage()` without a persistent path, together with
+`persistent_state()` and `roster_provider()`) with
+`ConflictingConfiguration`; without `mob_storage()`, `persistent_state()`
+keeps mob storage in `event_log.sqlite3`.
 
 **Canonical-name-first probing.** Opening a slot resolves the canonical name
-first, then probes the known legacy spellings in the same directory. Exactly
+first, then probes the known legacy spellings in the same directory (for the
+slots 0.9.4 opens, the continuity database included, which keeps the identity
+records; the sessions spellings are read only by the migration verbs and the
+storage doctor). Exactly
 one spelling → it is used *where it lies* (no rename at open). Two spellings
 of the same store → the gateway refuses to start (error `-32014`, "file-name
 twins") and points at `meta/storage/doctor`; physical renames happen only
@@ -701,10 +997,12 @@ through the storage migrate verb, under the maintenance fence.
 resolves to a durability class (`durable` / `scratch`) and a resolution
 (`persistent` / `declared_ephemeral` / `non_persistent`). A durable-class
 slot may run non-persistent only as an *explicit declaration*
-(`runtime_options.runtime_store`, `runtime_options.event_log`, the Rust
-builder's `ephemeral_runtime_store(true)` / `ephemeral_blobs(true)`) — never
-as a silent fallback; undeclared gaps are startup errors that SDKs surface
-as the typed `StorageResolutionError` (`-32014`). The sanctioned boot-without
+(`runtime_options.event_log`, the Rust builder's `ephemeral_blobs(true)`, and,
+without `persistent_state`, `runtime_options.runtime_store` and the builder's
+`ephemeral_runtime_store(true)`), never as a silent fallback. Under
+`persistent_state` an in-memory runtime store is refused (`-32014`, or
+`ConflictingConfiguration` from the builder). Undeclared gaps are startup
+errors that SDKs surface as the typed `StorageResolutionError` (`-32014`). The sanctioned boot-without
 degradations (schedule or workgraph store open failure) disable the feature
 and appear as `degraded` slots.
 
@@ -716,15 +1014,10 @@ on `meta/status`, `meta/capabilities`, and `meta/storage/doctor`:
 
 **Incremental session persistence.** `session_store_incremental: false` means
 the session store writes the whole session document at every turn boundary.
-For an identity-first launch, that happens when the continuity store does not
-serve `ContinuityStore::as_incremental_sessions`. The method has no default,
-so every continuity store states its choice, and a wrapper must forward its
-inner store's channel. Rust embedders can opt in to strict mode with
+Rust embedders can opt in to strict mode with
 `UnifiedRuntime::builder().require_incremental_session_persistence(true)`.
 `build()` then refuses with `SessionStoreNotIncremental` instead of starting
-on that fallback. To check a wrapper, run
-`meta_store_conformance::chapters::continuity_wrapper_preserves_incremental_channel`
-with your wrapping function.
+on that fallback.
 
 <Note>
 **Changelog policy.** Any storage file rename or table move gets the
@@ -741,9 +1034,7 @@ and new spellings — operators read these files directly.
 
     let runtime = UnifiedRuntime::builder()
         .definition(definition)
-        .continuity_store(continuity_store)
-        .lease_provider(lease_provider)
-        .scratch_dir("state/identity-scratch")
+        .persistent_state("state")
         .roster_provider(roster_provider)
         .identity_bootstrap_mode(
             IdentityBootstrapMode::LazyWithBackgroundWarm { concurrency: 2 },
@@ -796,26 +1087,23 @@ failures that apply to the whole pass are reported in the snapshot's optional
 `error` field.
 
 During an eager restore pass each identity's entry also carries typed
-`restore` progress: `{"stage": "registered"}`, `"resuming"`, `"minted"` (a
-fresh identity's durable record and session were created), `"resumed"`, or
-`{"stage": "broken", "kind": "<continuity failure kind>"}`. A minted or resumed
-member is `active` (and a broken one `broken`) as soon as its own restore
-settles, before the whole pass ends. In process,
+`restore` progress: `{"stage": "registered"}`, `"resuming"`, `"minted"` (Core
+spawned the identity on a fresh session), `"resumed"`, or
+`{"stage": "refused", "code": <code>, "kind": "<kind>"}` with the refusal's
+error code (`kind` is absent when the refusal has none). A minted or resumed
+member is `active` (and a refused one `broken` or `dormant`, as its refusal
+says) as soon as its own restore settles, before the whole pass ends. In process,
 `IdentityRuntime::watch_identity_bootstrap_status` streams the snapshot. On
 the stdio gateway `meta/init` still returns after the eager pass; a host
 that must not wait on the whole fleet uses `lazy_with_background_warm` and
 follows the same typed progress with `meta/wait_identity_bootstrap`.
 
-Broken identities are retried by the continuity repair supervisor, which is
-event-driven. It runs one pass when it starts and then waits for a typed
-trigger: another identity's embodiment settled (a resume or a fresh durable
-mint committed, releasing the store writer it held), a host restore or
-reconcile pass settled (boot, a roster refresh, `meta/reconcile_identity`),
-a delivery or materialization was refused because the identity is Broken (a
-caller's demand), or an explicit request (`meta/request_continuity_repair`,
-`request_continuity_repair()` / `requestContinuityRepair()` in the SDKs). It
-defers a pass while other embodiments are in flight, so a warm-up burst runs
-one pass rather than one per member. Its own passes never re-trigger it.
+No background pass retries a refused identity. Every wake answers its
+refusal typed, and the identity's `wake_refusal` names the way out:
+`delete_identity` after a final refusal (`-32051`, the identity reads
+`broken`), the repair for a held one (`-32603`), and nothing for a refusal a
+retry can clear (`-32052`): the identity stays `dormant`, and its next wake
+tries again.
 Only a transient cause with no typed signal (a heal authority that could not
 be reached, a pass that failed on a roster provider or store error, a member
 still Broken on an unavailable store) arms a last-resort fallback wake: 1 s,
@@ -828,8 +1116,8 @@ its bounded `stdio_shutdown_horizon_ms` in the `meta/init` result. SDK hosts
 keep stdin and provider callbacks open until that handshake completes, then
 close the process. Honor the advertised `stdio_shutdown_horizon_ms` rather than
 hard-coding it. The current stock 392-second horizon covers an already-admitted
-provider callback, runtime event and mob drains, the final lease-release
-callback, the mob's terminal shutdown report, the member MCP settlement (in
+provider callback, runtime event and mob drains, the mob's terminal shutdown
+report, the member MCP settlement (in
 the runtime shutdown and again at the gateway's executor-exit boundary), and
 bounded response-delivery/reaping margin. At the executor-exit boundary the
 gateway answers only after every member MCP server's close returned its
@@ -888,13 +1176,13 @@ desired identity roster for `identity_first: true` (the default):
 | `backend`, `binding`, `placement` | no | Backend kind, runtime binding and exact Meerkat host placement; a placement never degrades to local. |
 
 At boot the seed becomes the `MutableRosterProvider` and `restore_flow` runs
-over it: the roster is validated, continuity is resolved for every listed
-identity, and each non-Broken identity is created or resumed. Omitting the
+over it: the roster is validated, Core's member history is read for every
+listed identity, and each identity is created or resumed. Omitting the
 param is an empty seed, so the gateway starts with no identities and
 `meta/ensure_member` adds them at runtime (it upserts the same provider). The
 seed is boot-scoped like `role_migrations`: it is never persisted, and an
-identity missing from the next boot's seed is not restored on that boot (its
-continuity record is untouched). Under `identity_first: false` the param is
+identity missing from the next boot's seed is not restored on that boot (Core
+keeps its session). Under `identity_first: false` the param is
 parsed and ignored, not refused.
 
 ## ConsoleUiConfig

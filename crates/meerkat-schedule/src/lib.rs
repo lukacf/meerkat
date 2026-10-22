@@ -23,15 +23,16 @@ mod trigger;
 mod types;
 
 pub use driver::{
-    DeliveryCompletion, DeliveryDispatch, DeliveryTerminal, IdentityTargetDeliverability,
-    ScheduleDeliveryIdentity, ScheduleDriver, ScheduleDriverConfig, ScheduleIdentityTargetProbe,
-    ScheduleRefillFault, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleTickReport,
-    TargetProbeOutcome,
+    DeliveryCompletion, DeliveryDispatch, DeliveryTerminal, ExistingDelivery,
+    ExistingDeliveryAnswer, IdentityTargetDeliverability, ScheduleDeliveryIdentity, ScheduleDriver,
+    ScheduleDriverConfig, ScheduleIdentityTargetProbe, ScheduleRefillFault, ScheduleTargetDelivery,
+    ScheduleTargetProbe, ScheduleTickReport, TargetProbeOutcome,
 };
 pub use error::{ScheduleDomainError, ScheduleStoreError};
 pub use lifecycle::{
-    AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, ClaimedDispatchDisposition,
-    ClaimedDispatchVerdict, CompletionSupersessionDisposition, CompletionSupersessionVerdict,
+    ADMITTED_RECLAIM_ATTEMPT_CAP, AdmissionEvidence, AuthorizedOccurrenceWrite,
+    AuthorizedScheduleWrite, ClaimedDispatchDisposition, ClaimedDispatchVerdict,
+    CompletionSupersessionDisposition, CompletionSupersessionVerdict,
     LateCompletionResolutionClass, OccurrenceDueAction, OccurrenceLifecycleEffect,
     OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
     OccurrenceSupersessionAck, OccurrenceTransitionCommit, OccurrenceWritePrecondition,

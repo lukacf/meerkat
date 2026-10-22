@@ -314,6 +314,7 @@ async fn sqlite_store_rejects_stale_generated_writes() {
             at_utc: Utc::now(),
             lease_expires_at_utc: Utc::now() + Duration::minutes(5),
             claim_token: uuid::Uuid::now_v7(),
+            admission_evidence: meerkat_schedule::AdmissionEvidence::None,
         })
         .expect("first claim should pass generated authority");
     let stale_claim = occurrence
@@ -322,6 +323,7 @@ async fn sqlite_store_rejects_stale_generated_writes() {
             at_utc: Utc::now(),
             lease_expires_at_utc: Utc::now() + Duration::minutes(5),
             claim_token: uuid::Uuid::now_v7(),
+            admission_evidence: meerkat_schedule::AdmissionEvidence::None,
         })
         .expect("stale claim should pass before durability CAS");
     let claim_commit = store

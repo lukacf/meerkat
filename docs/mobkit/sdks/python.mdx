@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -297,7 +297,7 @@ member's output is read once, at completion. `timeout` is only the deadline;
 waits. `completion_cursor()` is a one-shot cursor read that never touches the
 member session. `inspect()` does read the member session, so do not poll it.
 
-A wait that ends before a completion (a failed or cancelled run, a Broken,
+A wait that ends before a completion (a failed or cancelled run, a broken,
 retiring or deleted identity, or gateway shutdown) raises the typed
 `WaitEndedError`, whose `outcome` names why; only the deadline raises
 `TimeoutError`.
@@ -543,7 +543,7 @@ if health.last_delivery_error and health.last_delivery_error["class"] == "reload
 | `list_members()` | `list[MemberSnapshot]` | List all members in the roster |
 | `get_member(member_id)` | `MemberSnapshot` | Get a single member by ID |
 | `retire_member(member_id)` | `None` | Retire a member (graceful shutdown) |
-| `respawn_member(member_id)` | `None` | Respawn a previously retired member (identity-first: a destructive continuity reset) |
+| `respawn_member(member_id)` | `None` | Respawn a previously retired member (identity-first: resets the identity onto a fresh session) |
 | `reload_member(member_id)` | `MemberReloadResult` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
 | `member_health(member_id)` | `MemberHealth` | Lifecycle and delivery health from in-process reads; carries `actor_loop`, `open_stall_id`, and `last_delivery_error` |
 | `reconcile_edges()` | `ReconcileEdgesReport` | Converge mob.toml `[wiring]` (`auto_wire_orchestrator`, `role_wiring`) on the live roster. Needed after `runtime.reconcile()` or an identity-first boot only when the definition declares such wiring; `ensure_member` already runs it, and with no declared wiring the report is empty |
@@ -560,7 +560,8 @@ strings.
 Per-user agents are **durable** members, so stand them up on the identity
 plane — declare them through your roster provider and reconcile — rather
 than `ensure_member`-ing them into the mob roster. Identity-plane members
-get continuity records and resume across restarts; mob-plane members do not.
+resume their session across restarts (Core keeps it); mob-plane members do
+not.
 
 ```python
 # Slack DM from a new user — add the identity to your roster source,
@@ -585,7 +586,7 @@ from meerkat_meta import Meta
 rt = await (
     Meta.builder()
     .mob("config/mob.toml")
-    .session_service(my_builder, my_store)
+    .session_service(my_builder)
     .roster(my_roster)
     .gateway("./rpc_gateway")
     .build()
@@ -600,16 +601,13 @@ rt = await (
 | `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
 | `.meerkat_config(path)` | Meerkat host `config.toml` forwarded as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. TypeScript twin `meerkatConfig(path)`. See [Self-hosted models and the Meerkat host config](/mobkit/reference/configuration#self-hosted-models-and-the-meerkat-host-config) |
 | `.persistent_state(path)` | Enable persistent state at path |
-| `.continuity_store(provider)` | External identity continuity store |
-| `.lease_provider(provider)` | External identity lease provider |
-| `.scratch_dir(path)` | Required scratch path for external identity providers |
 | `.roster(provider)` | Identity-first roster provider |
 | `.topology_provider(provider)` | Identity-first topology provider |
 | `.agent_customizer(customizer)` | Identity-first agent customizer (`customize_build(context, spec, draft)`; see [Per-profile tools](#session-agent-builder-and-per-profile-tools)) |
 | `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `meta/on_error` notification; sync or async, fire-and-forget. Without it the events reach only the gateway's normal log sink: ERROR for failures, INFO for `actor_loop_recovered`, subject to configured tracing filters and stderr handling (see [Error hook and logging](/mobkit/guides/unified-runtime#error-hook-and-logging)) |
 | `.identity_bootstrap_mode(mode)` | Eager, lazy, or bounded background-warm identity materialization; requires `.roster(...)` |
 | `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
-| `.session_service(builder, store)` | Session agent builder and optional store |
+| `.session_service(builder)` | Session agent builder |
 | `.gating(path)` | Gating config path (`config/gating.toml` is discovered when present). An empty path raises `ValueError`: it no longer switches gating off. To keep gating off, do not call it and keep nothing at `config/gating.toml` under the working directory |
 | `.routing(path)` | Routing config path |
 | `.event_log(config)` | Operational event log declaration (`event_log.memory()` / `event_log.null()`) |
@@ -621,9 +619,30 @@ rt = await (
 | `.console_read_only(read_only=True)` | View-only console: mutating console RPCs are denied and omitted from capabilities |
 | `.console_fetch_timeout_ms(ms)` | Bundled-console JSON fetch timeout override (positive integer) |
 | `.console_config(path)` | Console UI TOML (`ConsoleUiConfig`) forwarded as `runtime_options.console_config_path` |
+| `.fork_instruction_policy(policy)` | What a fork of a member with activated instructions does with them, forwarded as `runtime_options.fork_instruction_policy`: `"require_explicit_activation"` (the default when unset), `"reactivate_inherited"` or `"refuse"`. Another value raises `ValueError`. See [Fork instruction policy](/mobkit/reference/configuration#fork-instruction-policy) |
 | `.gateway(bin_path)` | Path to rpc_gateway binary |
 | `.modules(specs)` | Module specifications |
 | `.build()` | Build and connect the runtime |
+
+A member forked with `fork_off`, a delegation fork or a council does not run
+the instructions its source activated (`meta/member_activate_instruction`,
+skill bodies activated that way included) unless the gateway's fork instruction
+policy says so. Under the default, such a fork is refused with
+`fork_instruction_refused` before anything is committed. To let forks carry
+their source's activations, opt in at boot:
+
+```python
+runtime = await (
+    Meta.builder()
+    .mob("config/mob.toml")
+    .fork_instruction_policy("reactivate_inherited")
+    .build()
+)
+```
+
+The setting applies to every fork of the gateway's mob and cannot be chosen
+per fork. Read [what `reactivate_inherited` trusts](/mobkit/reference/configuration#what-reactivate_inherited-trusts)
+before you enable it.
 
 Boot-time membership is declared, never derived: a member exists only once a
 `.roster(provider)` names it (identity plane) or `ensure_member` creates it
@@ -632,18 +651,12 @@ nothing on their own. The former `.discovery(callback)` and
 `.pre_spawn(callback)` builder methods were removed: they stored the callback
 and never transmitted it, so no boot spawn ever came from them.
 
-External identity providers follow the Rust gateway's authoritative path: set
-`.continuity_store(provider)`, `.lease_provider(provider)`, and
-`.scratch_dir(path)` together. The Python callback dispatcher speaks the Rust
-wire contract for leases (`result` tags and `ttl`) and continuity deletes.
-`LeaseProviderProtocol.renew_leases(...)` is atomic from the caller's
-perspective: raising means no input grant was changed, while every returned
-`renewed` or `lost` result is already committed for that identity. Providers
-must not commit a replacement grant and then raise.
-For continuity stores, `checkpoint_version` is monotonic per identity and
-continuity generation. A live session rebind changes `session_id` without
-resetting the version; only destructive reset advances `generation` and starts
-the version stream over.
+Identities and their sessions live in Core's stores under
+`.persistent_state(path)`: Core's mob machine holds each identity's session
+and generation, and a host supplies no continuity storage and holds no
+leases. The external identity providers of Meta 0.9.3 are removed; see
+[Upgrading to Meta 0.9.4](/mobkit/guides/upgrading-to-0-9-4) to move a deployment
+that used them.
 
 A durable member whose role changed refuses to resume with
 `MobError::MemberRoleMigrationRequired` until the host declares the migration.
@@ -795,7 +808,7 @@ finally:
 gateway accepts the init at once, reports each startup phase, and then
 settles it `ready` or `failed`. The SDK has **no built-in total deadline** for
 that wait. Startup legitimately includes provider callbacks (each bounded at
-130 s by the gateway) and native persisted-authority prewarm, which is
+130 s by the gateway) and the native identity restore, which is
 deliberately unbounded and can run for minutes on a large roster. Any fixed
 SDK timer would sooner or later abort a healthy restore. A 60 s timeout still
 bounds the wait for the `accepted` answer, and for an older gateway's single
@@ -819,14 +832,14 @@ The wait ends only when one of these happens:
 - your task is cancelled.
 
 `InitOutcomeUnknownError` carries `init_id`, `last_phase` (the last
-`meta/init_progress` phase seen, such as `"prewarm"` or `"restore"`) and
+`meta/init_progress` phase seen, such as `"roster"` or `"restore"`) and
 `reason`. That makes a stuck or interrupted init diagnosable. The gateway may
 already have changed native state, so the SDK never retries it automatically
 and asks the gateway to shut down.
 
-Provider callbacks that run during startup (roster, topology, continuity,
-lease, session builder, customizer) must not call ordinary runtime RPCs on the
-same runtime. Ordinary dispatch starts only after init settles, and the
+Provider callbacks that run during startup (roster, topology, session
+builder, customizer) must not call ordinary runtime RPCs on the same
+runtime. Ordinary dispatch starts only after init settles, and the
 gateway refuses an earlier request at once with `InitInProgressError`
 (`-32018`, exported as `INIT_IN_PROGRESS_CODE`).
 
@@ -1015,6 +1028,11 @@ from meerkat_meta.errors import (
     CompositionProvenanceError,  # Mob composition provenance refusal at init (-32019): .kind, .fields
     InitOutcomeUnknownError,     # Init written, settlement never arrived (native state may have changed)
     TransportReaderFailedError,  # The transport reader stopped; no response can arrive
+    GatewayChildEndedError,      # The gateway child ended and takes no more requests (.reason, .exit_code); a TransportReaderFailedError
+    IdentityUnresumableError,          # Core cannot resume the identity (-32051, final): .reason, .remedy
+    IdentityHistoryUnavailableError,   # Core's history of the identity cannot be read now (-32052, retryable)
+    IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
+    IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
 )
 ```
 
@@ -1119,7 +1137,7 @@ from meerkat_meta import (
     MobStructuralEvent, MobRun, MobRunStatus,
     StepRecord, FailureRecord, FrameRecord, LoopRecord, LoopIterationRecord,
     # Config modules
-    auth, event_log, memory, runtime_store, session_store,
+    auth, event_log, memory, runtime_store,
 )
 ```
 

@@ -13414,18 +13414,36 @@ mod tests {
     #[test]
     fn bridge_delivery_handler_does_not_wait_for_completion_inline() {
         let source = include_str!("comms_drain.rs");
-        let deliver_start = source
-            .find("BridgeCommand::DeliverMemberInput")
-            .expect("deliver command branch exists");
-        let deliver_end = source[deliver_start..]
-            .find("fn bridge_runtime_state")
-            .map(|offset| deliver_start + offset)
-            .expect("bridge runtime state helper follows command match");
-        let deliver_source = &source[deliver_start..deliver_end];
-        assert!(
-            !deliver_source.contains(".wait().await"),
-            "bridge delivery admission must not block the comms drain waiting for completion"
-        );
+        // Resolve every anchor in the production code above the test module, so
+        // this guard's own string literals can never stand in for a missing item.
+        let production = &source[..source
+            .find("\nmod tests {")
+            .expect("the test module follows the production code")];
+        // Delivery admission runs inline in the drain on two paths: the delivery
+        // arm itself (untracked work), and the tracked-turn admission it hands
+        // off to, which gives the completion handle to the watcher.
+        for (item_start, item_end) in [
+            (
+                "BridgeCommand::DeliverMemberInput(payload) => {",
+                "BridgeCommand::InterruptMember(payload) => {",
+            ),
+            (
+                "async fn serve_tracked_member_delivery(",
+                "fn runtime_state_to_bridge(",
+            ),
+        ] {
+            let start = production
+                .find(item_start)
+                .unwrap_or_else(|| panic!("`{item_start}` exists"));
+            let end = production[start..]
+                .find(item_end)
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("`{item_end}` follows `{item_start}`"));
+            assert!(
+                !production[start..end].contains(".wait().await"),
+                "bridge delivery admission must not block the comms drain waiting for completion: `{item_start}`"
+            );
+        }
     }
 
     #[tokio::test]

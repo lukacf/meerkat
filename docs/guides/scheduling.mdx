@@ -338,6 +338,21 @@ the stable submission key. The built-in `ScheduledDurableJobRunnable` follows
 this pattern: Schedule owns when to submit, while the jobs subsystem owns the
 attempt, lease, progress, cancellation, and terminal result.
 
+A host runnable that calls a connector-bound MCP server (for example a
+collector that reads a provider on a schedule) needs governed work
+authorization for every call, and a fire carries none: the fire is a
+trigger, not an authority. On a governed runtime (Rust hosts only), the
+host enrolls a service original for the work at operator-reviewed setup,
+whose basis selects the operator's grant for exactly that installation's
+MCP server. Each occurrence then builds a `ServiceCallRequest` from that
+original and the occurrence's identities, admits it with
+`MeerkatMachine::prepare_service_call`, and makes its calls through the
+returned `ServiceCall`. The operator's grant, the connector approval it
+records and the host's operation policy decide each call, which is
+audited. The schedule and occurrence identities the request carries are
+audit data the host asserts, not authority. An ungoverned runtime, or a
+host whose composition does not enroll service originals, refuses.
+
 ## Policies
 
 ### Misfire policy
@@ -404,16 +419,45 @@ occurrence claim lease is 60 seconds; a long delivery renews it around the
 half-lease point.
 
 Each dispatch also carries a stable occurrence-level delivery identity. If
-target admission succeeds but recording the receipt fails, recovery retries
-the same identity. Target hosts must reconcile or deduplicate that identity;
-the scheduler does not claim exactly-once behavior for arbitrary external
-effects. A retry that the target deduplicates waits for the original input's
-outcome and records it. While that outcome cannot be read yet, the occurrence
-keeps its lease and re-reads it for up to five lease periods; then it ends
-delivery_failed with runtime_completion_authority_unavailable.
-A reclaim after a lapsed lease is still subject to the misfire
-policy: with `skip`, a lapse past the grace window ends `misfired`; keeping
-crash recovery needs `catch_up_within` with a window longer than the lease.
+target admission succeeds but recording the receipt fails, a later reclaim
+retries the same identity. Target hosts must reconcile or deduplicate that
+identity; the scheduler does not claim exactly-once behavior for arbitrary
+external effects. A retry that the target deduplicates waits for the original
+input's outcome and records it. While that outcome cannot be read yet, the
+occurrence keeps its lease and re-reads it for up to five lease periods; then
+it ends `delivery_failed` with failure class `internal_error` (runtime
+completion authority unavailable).
+
+A reclaim after a lapsed lease follows the misfire policy unless an earlier
+attempt recorded its dispatch. With `skip`, a lapse after the grace window
+ends `misfired`. When an earlier attempt did record its dispatch:
+
+- With a recorded admission (the target accepted an earlier attempt), the
+  occurrence is reclaimed, also past its misfire deadline, for up to five
+  attempts. The redelivery only finds that admission and never admits the
+  delivery again, and the occurrence records the admitted input's outcome.
+  A target still busy with that input does not end the redelivery under
+  `skip_if_running`: a redelivery starts no new run. After five lost
+  executors it ends `delivery_failed` with `lease_lost`. A target that no
+  longer knows the admitted input (a row that recovery discarded) ends it
+  `delivery_failed`, with nothing admitted. A host runnable keeps no
+  admission record and runs again: for host runnables the guarantee is
+  at-least-once, and the runnable must deduplicate on its
+  `delivery_idempotency_key`. A custom target delivery that keeps the default
+  redelivery relies on its own durable deduplication of the delivery
+  identity.
+- With only a recorded dispatch start, a reclaim past the deadline asks the
+  target, a busy one too, whether it admitted the delivery. If it did, the
+  occurrence records that input's outcome; if not, it ends `misfired`, and
+  nothing is delivered late.
+- A crash before the dispatch start was recorded leaves no evidence, and the
+  policy applies as before: keeping crash recovery then needs
+  `catch_up_within` with a window longer than the lease.
+
+With a runtime that keeps no store, an input that completed and was archived
+looks the same as one that was never admitted: a late redelivery with only a
+recorded dispatch start then ends `misfired`, and one with a recorded
+admission ends `delivery_failed`.
 
 Poisoned schedule and occurrence rows are isolated as typed per-row faults so
 healthy rows can continue. Hosts should surface the driver fault report rather

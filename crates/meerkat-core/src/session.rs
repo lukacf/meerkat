@@ -880,6 +880,12 @@ pub(crate) struct SessionHistoryCaches {
     /// materialization and explicit 0.8.10 activation install a fully verified
     /// snapshot before ordinary delta writes are admitted.
     head_canonical_metadata: head_metadata::SessionHeadMetadataTracker,
+    /// The rewrite occurrences the session's durable HeadCanonical head
+    /// covers, when one does: set where the session is materialized from that
+    /// head and where a HeadCanonical commit is acknowledged on it.
+    /// Retirement never passes it, because the next checkpoint proves the
+    /// pending rewrite suffix from that head.
+    durable_rewrite_count: Option<usize>,
 }
 
 fn head_canonical_metadata_cell_carries_key(key: &str) -> bool {
@@ -6673,6 +6679,23 @@ impl Session {
     fn adopt_head_canonical_metadata_baseline_from(&mut self, source: &Session) {
         self.history_caches.head_canonical_metadata =
             source.history_caches.head_canonical_metadata.clone();
+        self.history_caches.durable_rewrite_count = source.history_caches.durable_rewrite_count;
+    }
+
+    /// Record that a durable HeadCanonical head of this session covers
+    /// `rewrite_count` rewrite occurrences.
+    ///
+    /// A HeadCanonical checkpoint persists the rewrite occurrences after that
+    /// head by proving the graph suffix from it, which needs their bodies, so
+    /// [`Self::retire_transcript_history`] never retires past this count.
+    pub(crate) fn note_durable_transcript_rewrites(&mut self, rewrite_count: u64) {
+        self.history_caches.durable_rewrite_count =
+            Some(usize::try_from(rewrite_count).unwrap_or(usize::MAX));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn durable_transcript_rewrite_count_for_test(&self) -> Option<usize> {
+        self.history_caches.durable_rewrite_count
     }
 
     fn set_metadata_unchecked(&mut self, key: &str, value: serde_json::Value) {
@@ -6740,6 +6763,11 @@ impl Session {
     /// rewrite authority that binds the graph still verifies; only the bodies
     /// of retired occurrences go. Returns how many occurrences this call
     /// retired.
+    ///
+    /// A session a durable HeadCanonical head describes keeps every
+    /// occurrence that head does not cover yet, even past `retention`: the
+    /// next checkpoint persists them by proving the graph suffix from that
+    /// head. Its next retirement after that checkpoint catches up.
     pub fn retire_transcript_history(
         &mut self,
         retention: TranscriptHistoryRetention,
@@ -6753,7 +6781,15 @@ impl Session {
             return Ok(0);
         }
         let mut state = history.state().clone();
-        let retired = state.retire_occurrences_beyond(retention)?;
+        let retired = match self.history_caches.durable_rewrite_count {
+            Some(durable) => state.retire_occurrences_through(
+                state
+                    .commit_count()
+                    .saturating_sub(retention.retained_rewrites())
+                    .min(durable),
+            )?,
+            None => state.retire_occurrences_beyond(retention)?,
+        };
         if retired != 0 {
             self.install_validated_transcript_history_state(state)
                 .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;

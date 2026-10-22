@@ -196,6 +196,164 @@ impl From<NativeAdmissionError> for RuntimeDriverError {
     }
 }
 
+/// The schedule occurrence one governed service call request is made for, as
+/// the trusted host asserts it: the identities copied from the occurrence's
+/// `HostRunnableInvocation` (`meerkat-schedule`).
+///
+/// Host-asserted audit data, NOT authority. The seam does not prove that a
+/// call belongs to a real schedule fire; the operator's grant bounds what any
+/// call may do, whoever asserts the occurrence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ServiceOccurrence {
+    /// The schedule the occurrence belongs to.
+    pub schedule: EvidenceId,
+    /// The occurrence.
+    pub occurrence: EvidenceId,
+    /// The occurrence's stable delivery idempotency key.
+    pub delivery_key: EvidenceId,
+}
+
+impl ServiceOccurrence {
+    #[must_use]
+    pub fn new(schedule: EvidenceId, occurrence: EvidenceId, delivery_key: EvidenceId) -> Self {
+        Self {
+            schedule,
+            occurrence,
+            delivery_key,
+        }
+    }
+}
+
+/// One schedule occurrence's request for governed service calls: provider
+/// calls that no runtime input carries (a scheduled host runnable's), made
+/// under a SERVICE ORIGINAL the trusted host enrolled at operator-reviewed
+/// setup.
+///
+/// Process-only: no serde, and no authority by construction. The installed
+/// native host admits it once
+/// ([`crate::MeerkatMachine::prepare_service_call`]) when its whole
+/// association is the record the host's original source holds enrolled, and
+/// the operator's grant, selected for exactly the operation's MCP server,
+/// decides every call it then makes. The occurrence is audit data
+/// ([`ServiceOccurrence`]); the audit sink receives every decision and
+/// refusal of the request's calls and must be durable: a failing sink
+/// refuses the call.
+#[non_exhaustive]
+pub struct ServiceCallRequest {
+    association: InputAuthorityAssociation,
+    occurrence: ServiceOccurrence,
+    audit: Arc<dyn meerkat_authorization_contracts::audit::AuthorizationAuditSink>,
+    claimed: std::sync::atomic::AtomicBool,
+}
+
+impl ServiceCallRequest {
+    /// The request of a trusted host for `association`, the service
+    /// original it enrolled, in `occurrence`, with `audit` for its calls.
+    ///
+    /// # Errors
+    /// Refuses as `MalformedFacts` an association that cannot be a service
+    /// original.
+    pub fn from_trusted_host(
+        association: InputAuthorityAssociation,
+        occurrence: ServiceOccurrence,
+        audit: Arc<dyn meerkat_authorization_contracts::audit::AuthorizationAuditSink>,
+    ) -> Result<Arc<Self>, meerkat_core::OperationRefused> {
+        if !service_original_shape(&association) {
+            return Err(meerkat_core::OperationRefused::new(
+                meerkat_core::OperationRefusalKind::MalformedFacts,
+            ));
+        }
+        Ok(Arc::new(Self {
+            association,
+            occurrence,
+            audit,
+            claimed: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
+    /// The service original's association the request presents.
+    #[must_use]
+    pub fn association(&self) -> &InputAuthorityAssociation {
+        &self.association
+    }
+
+    /// The occurrence the trusted host asserts (audit data only).
+    #[must_use]
+    pub fn occurrence(&self) -> &ServiceOccurrence {
+        &self.occurrence
+    }
+
+    /// The sink every decision and refusal of the request's calls goes to.
+    #[must_use]
+    pub fn audit_sink(
+        &self,
+    ) -> &Arc<dyn meerkat_authorization_contracts::audit::AuthorizationAuditSink> {
+        &self.audit
+    }
+
+    /// Claim the request's one admission. The installed host claims it
+    /// before it composes the request's work authorization, so one request
+    /// is admitted at most once.
+    ///
+    /// # Errors
+    /// A request that was already claimed is unavailable.
+    pub fn claim(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+}
+
+/// The prefix of the ingress namespaces Core reserves for its own host
+/// work. A service original never names one.
+const RESERVED_SERVICE_NAMESPACE_PREFIX: &str = "meerkat.";
+
+/// Whether `association` can be a service original: no controller (no model
+/// runs for it), no represented subject and no contributing work, a basis
+/// that selects a lineage per operation target with at least one MCP server
+/// or checked MCP route target (a single lineage would cover every target),
+/// and an ingress namespace outside Core's reserved prefix.
+fn service_original_shape(association: &InputAuthorityAssociation) -> bool {
+    use meerkat_authorization_contracts::work_association::{GrantTarget, WorkAuthorityBasis};
+    let claims = association.candidate();
+    let selects_an_mcp_target = match &claims.authority_basis {
+        WorkAuthorityBasis::TargetedGrantLineages { targets, .. } => {
+            targets.iter().any(|selected| {
+                matches!(
+                    selected.target,
+                    GrantTarget::McpServer { .. } | GrantTarget::CheckedMcpRoute { .. }
+                )
+            })
+        }
+        WorkAuthorityBasis::GrantLineage { .. }
+        | WorkAuthorityBasis::HostPolicy { .. }
+        | WorkAuthorityBasis::ServiceMandate { .. } => false,
+    };
+    claims.controller_model.is_none()
+        && claims.controller_grant_lineage.is_empty()
+        && claims.represented_subject.is_none()
+        && claims.contributing_work.is_empty()
+        && selects_an_mcp_target
+        && !claims
+            .ingress_namespace
+            .ingress
+            .namespace
+            .starts_with(RESERVED_SERVICE_NAMESPACE_PREFIX)
+}
+
+impl std::fmt::Debug for ServiceCallRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ServiceCallRequest([REDACTED])")
+    }
+}
+
 /// Host-installed authentication and current-policy composition. This is a
 /// trusted native component, never selected by a serialized input. An
 /// implementation must validate the actual transport/ingress actor and the
@@ -274,6 +432,24 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
     fn mcp_attachment_authorization(
         &self,
         _control: Arc<meerkat_core::mcp_attachment_control::McpAttachmentControlRequest>,
+    ) -> Result<WorkAuthorizationContext, meerkat_core::OperationAuthorizationError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+
+    /// Compose fresh, Domain-scoped work authorization for one governed
+    /// service call request: the provider calls of one schedule occurrence
+    /// under a service original the host enrolled (see
+    /// [`ServiceCallRequest`] and
+    /// [`crate::MeerkatMachine::prepare_service_call`]). The installed host
+    /// admits the request only when the request's whole association is the
+    /// record its original source holds enrolled, and every operation is
+    /// then decided again by the work owner, the operator's grant selected
+    /// for the operation's MCP server and the operation owner. The default
+    /// refuses: a host that cannot read enrolled service originals serves no
+    /// service call, and no run's authority is ever borrowed for one.
+    fn service_call_authorization(
+        &self,
+        _request: Arc<ServiceCallRequest>,
     ) -> Result<WorkAuthorizationContext, meerkat_core::OperationAuthorizationError> {
         Err(meerkat_core::OperationAuthorizationError::Unavailable)
     }

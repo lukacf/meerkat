@@ -4866,6 +4866,23 @@ impl EphemeralRuntimeDriver {
         Self::resolved_idempotency_from_machine_effects(input_id, effects)
     }
 
+    /// Refuse an existing-only admission of `input` unless an input was
+    /// admitted earlier under its idempotency key. The lookup is the
+    /// read-only preview of the machine's idempotency resolution, so a
+    /// refusal changes nothing.
+    pub(crate) fn require_existing_admission(
+        &self,
+        input: &Input,
+    ) -> Result<(), RuntimeDriverError> {
+        let Some(key) = crate::input_authority::qualified_idempotency_key(input)? else {
+            return Err(crate::accept::no_existing_admission(input));
+        };
+        match self.preview_idempotency(input.id(), Some(key.to_string()))? {
+            Some(_) => Ok(()),
+            None => Err(crate::accept::no_existing_admission(input)),
+        }
+    }
+
     fn preview_idempotency(
         &self,
         input_id: &InputId,
@@ -5248,6 +5265,14 @@ impl EphemeralRuntimeDriver {
                 "resolved admission authority id '{}' did not match accepted input '{input_id}'",
                 resolved.authority().input_id()
             )));
+        }
+
+        // An existing-only admission only deduplicates. Decided here, where
+        // deduplication is decided, under the driver lock and before any
+        // state changes: an input admitted earlier under the same key whose
+        // binding an archive released is gone here, never half-seen.
+        if resolved.admission_requirement() == crate::accept::AdmissionRequirement::ExistingOnly {
+            self.require_existing_admission(&input)?;
         }
 
         if let Some(existing_id) = self.resolve_idempotency(
@@ -6803,6 +6828,142 @@ mod tests {
                 "duplicate resolution must not rewrite the generated key owner"
             );
         });
+    }
+
+    /// The prompt of one scheduled delivery attempt under `key`.
+    fn keyed_prompt(text: &str, key: &IdempotencyKey) -> Input {
+        let mut input = prompt_input(text);
+        if let Input::Prompt(prompt) = &mut input {
+            prompt.header.idempotency_key = Some(key.clone());
+        }
+        input
+    }
+
+    /// Admit `input` as a deduplicate-only admission.
+    async fn accept_existing_only(
+        driver: &mut EphemeralRuntimeDriver,
+        input: Input,
+    ) -> Result<crate::accept::AcceptOutcome, RuntimeDriverError> {
+        let resolved = driver
+            .resolve_admission(&input)?
+            .with_admission_requirement(crate::accept::AdmissionRequirement::ExistingOnly);
+        driver.accept_resolved_input(input, resolved).await
+    }
+
+    /// A deduplicate-only admission never admits fresh: with no input
+    /// admitted earlier under its key it refuses NoExistingAdmission and
+    /// leaves no input and no key binding behind; after an ordinary admission
+    /// under the key it deduplicates against that input.
+    #[tokio::test]
+    async fn existing_only_admission_deduplicates_or_refuses_without_admitting() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("existing-only"));
+        let key = IdempotencyKey::new("scheduled-delivery");
+
+        let early = keyed_prompt("redelivery before any admission", &key);
+        let early_id = early.id().clone();
+        match accept_existing_only(&mut driver, early).await {
+            Err(RuntimeDriverError::NoExistingAdmission { key: refused }) => {
+                assert_eq!(refused, key.to_string());
+            }
+            other => panic!("expected NoExistingAdmission, got {other:?}"),
+        }
+        assert!(
+            driver.input_state(&early_id).is_none(),
+            "a refused existing-only admission admits nothing"
+        );
+        driver.with_dsl_state(|state| {
+            assert!(
+                !state
+                    .admission_idempotency_inputs
+                    .contains_key(&key.to_string()),
+                "a refused existing-only admission binds no key"
+            );
+        });
+
+        let first = keyed_prompt("first delivery", &key);
+        let first_id = first.id().clone();
+        assert!(
+            driver
+                .accept_input(first)
+                .await
+                .expect("ordinary admission")
+                .is_accepted()
+        );
+        let redelivery = keyed_prompt("redelivery", &key);
+        let redelivery_id = redelivery.id().clone();
+        match accept_existing_only(&mut driver, redelivery)
+            .await
+            .expect("existing-only admission deduplicates")
+        {
+            crate::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                assert_eq!(existing_id, first_id);
+            }
+            other => panic!("expected Deduplicated, got {other:?}"),
+        }
+        assert!(driver.input_state(&redelivery_id).is_none());
+    }
+
+    /// A store-less runtime releases a terminal input's key binding when it
+    /// archives the input. A deduplicate-only redelivery after the archive
+    /// refuses and admits nothing: the archive and the lookup both run under
+    /// the driver, so the lookup sees the binding or its absence, never both,
+    /// and the archived input never runs a second time.
+    #[tokio::test]
+    async fn existing_only_admission_refuses_once_the_archive_released_the_binding() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("existing-only-archived"));
+        let key = IdempotencyKey::new("archived-delivery");
+        let first = keyed_prompt("first delivery", &key);
+        let first_id = first.id().clone();
+        assert!(
+            driver
+                .accept_input(first)
+                .await
+                .expect("ordinary admission")
+                .is_accepted()
+        );
+        assert!(
+            driver
+                .abandon_queued_input(&first_id, InputAbandonReason::Stopped)
+                .expect("terminal transition")
+        );
+        driver
+            .archive_terminal_input_after_durable_commit(&first_id)
+            .expect("terminal archival");
+        driver.with_dsl_state(|state| {
+            assert!(
+                !state
+                    .admission_idempotency_inputs
+                    .contains_key(&key.to_string()),
+                "the archive released the key binding"
+            );
+        });
+
+        let redelivery = keyed_prompt("redelivery after the archive", &key);
+        let redelivery_id = redelivery.id().clone();
+        assert!(matches!(
+            accept_existing_only(&mut driver, redelivery).await,
+            Err(RuntimeDriverError::NoExistingAdmission { .. })
+        ));
+        assert!(
+            driver.input_state(&redelivery_id).is_none(),
+            "the archived input is not admitted a second time"
+        );
+    }
+
+    /// An input without an idempotency key has no earlier admission to
+    /// deduplicate against, so a deduplicate-only admission refuses it.
+    #[tokio::test]
+    async fn existing_only_admission_refuses_an_input_without_a_key() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("existing-only-keyless"));
+        let input = prompt_input("keyless redelivery");
+        let input_id = input.id().clone();
+        match accept_existing_only(&mut driver, input).await {
+            Err(RuntimeDriverError::NoExistingAdmission { key }) => assert!(key.is_empty()),
+            other => panic!("expected NoExistingAdmission, got {other:?}"),
+        }
+        assert!(driver.input_state(&input_id).is_none());
     }
 
     #[tokio::test]

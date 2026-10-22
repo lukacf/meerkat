@@ -935,6 +935,7 @@ impl InteractionTerminalPublicationError {
             | crate::RuntimeDriverError::InputRefused { .. }
             | crate::RuntimeDriverError::RetainedResumeRefused { .. }
             | crate::RuntimeDriverError::InputIdempotencyConflict { .. }
+            | crate::RuntimeDriverError::NoExistingAdmission { .. }
             | crate::RuntimeDriverError::RecoveryCorruption { .. }
             | crate::RuntimeDriverError::InputTerminalWithoutReceipt { .. }
             | crate::RuntimeDriverError::ScopedResultWithheld { .. }

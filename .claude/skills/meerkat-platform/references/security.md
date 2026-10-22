@@ -574,6 +574,12 @@ secret_env = ["SEARCH_API_KEY"]
   `HttpEgressProfile::trusted_host()` is the default.
 - Checked MCP routes (Rust): `McpRouterAdapter::checked_route` exposes exact
   operations of a server under a separate grant (`GrantTarget::CheckedMcpRoute`).
+- Governed service calls (Rust): a host runnable's connector-bound MCP calls
+  go through `MeerkatMachine::prepare_service_call` under a service original
+  the host enrolled. The operator's grant for exactly that MCP server, the
+  connector approval it records and the operation owner decide each call,
+  Domain-scoped, runless and audited. The occurrence identities are audit
+  data, not authority; an ungoverned runtime refuses.
 
 ## Audit and security events
 

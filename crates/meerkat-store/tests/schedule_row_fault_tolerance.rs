@@ -19,9 +19,12 @@
 use chrono::{Duration, TimeZone, Utc};
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
-    AcquireScheduleExecutorLeaseOutcome, AcquireScheduleExecutorLeaseRequest, ClaimDueRequest,
-    ClaimDueResult, CreateScheduleRequest, IntervalTriggerSpec, MisfirePolicy, MissingTargetPolicy,
-    Occurrence, OccurrenceOrdinal, OverlapPolicy, Schedule, ScheduleFilter, ScheduleLifecycleInput,
+    ADMITTED_RECLAIM_ATTEMPT_CAP, AcquireScheduleExecutorLeaseOutcome,
+    AcquireScheduleExecutorLeaseRequest, AdmissionEvidence, ClaimDueRequest, ClaimDueResult,
+    CreateScheduleRequest, DeliveryAdmissionOutcome, IntervalTriggerSpec, MemoryScheduleStore,
+    MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceFailureClass, OccurrenceId,
+    OccurrenceLifecycleEffect, OccurrenceLifecycleInput, OccurrenceOrdinal, OccurrencePhase,
+    OverlapPolicy, RuntimeDeliveryOutcome, Schedule, ScheduleFilter, ScheduleLifecycleInput,
     SchedulePhase, ScheduleService, ScheduleStore, ScheduleStoreRowFaultKind,
     ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
 };
@@ -702,4 +705,363 @@ async fn legacy_deleted_tombstone_with_planning_cursor_heals_on_read() {
         .expect("get over a legacy tombstone must succeed")
         .expect("tombstone present");
     assert!(fetched.planning_cursor_utc.is_none());
+}
+
+// --- Admission evidence from the receipt history ---
+//
+// A reclaim past the misfire deadline depends on what the occurrence's
+// receipt history proves about its earlier attempts' target admission. The
+// SQLite store decodes that history from receipt_json (no stage column); the
+// in-memory store reads its typed receipts. The rows below drive both stores
+// through the same history and expect the same claim scan.
+
+/// How far an occurrence's first attempt got before its executor died.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstAttempt {
+    /// Claimed only: no dispatch receipt.
+    Claimed,
+    /// A DispatchStarted receipt and no DispatchAccepted one.
+    DispatchStarted,
+    /// A DispatchAccepted receipt.
+    DispatchAccepted,
+}
+
+/// A one-second catch-up window, short enough to pass while a test waits.
+fn evidence_schedule_request(name: &str) -> CreateScheduleRequest {
+    CreateScheduleRequest {
+        misfire_policy: MisfirePolicy::CatchUpWithin { window_seconds: 1 },
+        ..sample_schedule_request(name)
+    }
+}
+
+async fn claim_due_in(store: &dyn ScheduleStore, lease_duration: Duration) -> ClaimDueResult {
+    let lease = match store
+        .acquire_executor_lease(AcquireScheduleExecutorLeaseRequest {
+            owner_id: "admission-evidence-executor".into(),
+            lease_duration: Duration::minutes(5),
+        })
+        .await
+        .expect("acquire executor lease")
+    {
+        AcquireScheduleExecutorLeaseOutcome::Acquired(lease) => lease,
+        AcquireScheduleExecutorLeaseOutcome::Busy { .. } => unreachable!("single test executor"),
+    };
+    let result = store
+        .claim_due_occurrences(
+            &lease,
+            ClaimDueRequest {
+                owner_id: "admission-evidence".to_string(),
+                limit: 16,
+                lease_duration,
+            },
+        )
+        .await
+        .expect("claim scan");
+    store
+        .release_executor_lease(lease)
+        .await
+        .expect("release executor lease");
+    result
+}
+
+async fn current_occurrence(store: &dyn ScheduleStore, occurrence_id: &OccurrenceId) -> Occurrence {
+    store
+        .get_occurrence(occurrence_id)
+        .await
+        .expect("read occurrence")
+        .expect("occurrence exists")
+}
+
+/// Plan one occurrence due now under a one-second catch-up window, claim it
+/// with a 50 ms lease, record the receipts of `first`, then wait until both
+/// the lease and the misfire window have passed.
+async fn lapse_past_the_deadline_after(
+    store: &dyn ScheduleStore,
+    first: FirstAttempt,
+    name: &str,
+) -> OccurrenceId {
+    let mutator = Schedule::apply(
+        None,
+        ScheduleLifecycleInput::Create(evidence_schedule_request(name)),
+    )
+    .expect("schedule creation should pass generated authority");
+    let schedule = mutator.schedule().clone();
+    let _schedule_commit = store
+        .commit_schedule_write(mutator.into_authorized_write())
+        .await
+        .expect("commit schedule");
+    let write = Occurrence::planned_write_from_schedule(
+        &schedule,
+        OccurrenceOrdinal(0),
+        Utc::now() - Duration::milliseconds(100),
+    )
+    .expect("occurrence planning should pass generated authority");
+    let occurrence_id = write.occurrence().occurrence_id.clone();
+    let _occurrence_commit = store
+        .commit_occurrence_write(write)
+        .await
+        .expect("commit occurrence");
+
+    let claimed = claim_due_in(store, Duration::milliseconds(50)).await;
+    assert_eq!(claimed.transitions.len(), 1, "{first:?}: the first claim");
+    let claimed = claimed.transitions[0].successor().clone();
+    assert_eq!(claimed.attempt_count, 1);
+    if first != FirstAttempt::Claimed {
+        let started = store
+            .transition_occurrence_with_receipt_if_current(
+                &occurrence_id,
+                1,
+                claimed.claim_token(),
+                OccurrenceLifecycleInput::DispatchStarted {
+                    correlation_id: Some("admission-evidence-correlation".to_string()),
+                    at_utc: Utc::now(),
+                },
+                None,
+            )
+            .await
+            .expect("record the dispatch start")
+            .expect("the claim is current");
+        if first == FirstAttempt::DispatchAccepted {
+            let _accepted = store
+                .transition_occurrence_with_receipt_if_current(
+                    &occurrence_id,
+                    1,
+                    started.successor().claim_token(),
+                    OccurrenceLifecycleInput::DispatchAccepted {
+                        admission_outcome: DeliveryAdmissionOutcome::Accepted,
+                        at_utc: Utc::now(),
+                    },
+                    Some(RuntimeDeliveryOutcome::AdmissionAccepted),
+                )
+                .await
+                .expect("record the admission")
+                .expect("the claim is current");
+        }
+    }
+    // The executor dies: the 50 ms lease and the misfire window (one second
+    // after due) both pass.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    occurrence_id
+}
+
+/// What one claim scan after the lapse did to the occurrence.
+#[derive(Debug, PartialEq, Eq)]
+struct ReclaimView {
+    phase: OccurrencePhase,
+    attempt_count: u32,
+    reclaimed_after_admission: bool,
+    reclaimed_after_unproven_dispatch: bool,
+    row_faults: usize,
+}
+
+async fn reclaim_scan(store: &dyn ScheduleStore, occurrence_id: &OccurrenceId) -> ReclaimView {
+    let result = claim_due_in(store, Duration::seconds(60)).await;
+    let effects: Vec<OccurrenceLifecycleEffect> = result
+        .transitions
+        .iter()
+        .filter(|commit| commit.successor().occurrence_id == *occurrence_id)
+        .flat_map(|commit| commit.effects().iter().cloned())
+        .collect();
+    let occurrence = current_occurrence(store, occurrence_id).await;
+    ReclaimView {
+        phase: occurrence.phase,
+        attempt_count: occurrence.attempt_count,
+        reclaimed_after_admission: effects
+            .contains(&OccurrenceLifecycleEffect::ReclaimedAfterAdmission),
+        reclaimed_after_unproven_dispatch: effects
+            .contains(&OccurrenceLifecycleEffect::ReclaimedAfterUnprovenDispatch),
+        row_faults: result.row_faults.len(),
+    }
+}
+
+/// The SQLite store and the in-memory store derive the same evidence from the
+/// same receipt history, one of whose SQLite rows is stored as TEXT:
+/// - no dispatch receipt: the lapse past the deadline is not reclaimed (the
+///   refused reclaim is the row's typed fault, as before) and the next scan
+///   misfires it;
+/// - a DispatchStarted receipt only: reclaimed as an unproven dispatch;
+/// - a DispatchAccepted receipt: reclaimed as an admitted delivery, with no
+///   row fault.
+#[tokio::test]
+async fn both_stores_derive_the_same_admission_evidence_from_the_receipt_history() {
+    for first in [
+        FirstAttempt::Claimed,
+        FirstAttempt::DispatchStarted,
+        FirstAttempt::DispatchAccepted,
+    ] {
+        let name = format!("admission-evidence-{first:?}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("schedules.sqlite3");
+        let sqlite = SqliteScheduleStore::open(&path).expect("open store");
+        let memory = MemoryScheduleStore::new();
+
+        let sqlite_id = lapse_past_the_deadline_after(&sqlite, first, &name).await;
+        let memory_id = lapse_past_the_deadline_after(&memory, first, &name).await;
+        if first == FirstAttempt::DispatchAccepted {
+            // A receipt row written as TEXT reads like a BLOB one.
+            let conn = Connection::open(&path).expect("open sqlite");
+            conn.execute(
+                "UPDATE schedule_receipts SET receipt_json = CAST(receipt_json AS TEXT) WHERE occurrence_id = ?1",
+                params![sqlite_id.to_string()],
+            )
+            .expect("rewrite receipts as text");
+            let text_rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schedule_receipts WHERE occurrence_id = ?1 AND typeof(receipt_json) = 'text'",
+                    params![sqlite_id.to_string()],
+                    |row| row.get(0),
+                )
+                .expect("count text receipts");
+            assert!(text_rows >= 2, "the history is stored as TEXT: {text_rows}");
+        }
+
+        let sqlite_view = reclaim_scan(&sqlite, &sqlite_id).await;
+        let memory_view = reclaim_scan(&memory, &memory_id).await;
+        let expected = match first {
+            FirstAttempt::Claimed => ReclaimView {
+                phase: OccurrencePhase::Pending,
+                attempt_count: 1,
+                reclaimed_after_admission: false,
+                reclaimed_after_unproven_dispatch: false,
+                row_faults: 1,
+            },
+            FirstAttempt::DispatchStarted => ReclaimView {
+                phase: OccurrencePhase::Claimed,
+                attempt_count: 2,
+                reclaimed_after_admission: false,
+                reclaimed_after_unproven_dispatch: true,
+                row_faults: 0,
+            },
+            FirstAttempt::DispatchAccepted => ReclaimView {
+                phase: OccurrencePhase::Claimed,
+                attempt_count: 2,
+                reclaimed_after_admission: true,
+                reclaimed_after_unproven_dispatch: false,
+                row_faults: 0,
+            },
+        };
+        assert_eq!(sqlite_view, expected, "{first:?}: the SQLite store");
+        assert_eq!(memory_view, expected, "{first:?}: the in-memory store");
+
+        if first == FirstAttempt::Claimed {
+            // No recorded dispatch: the misfire policy decides, as before.
+            for (store, occurrence_id) in [
+                (&sqlite as &dyn ScheduleStore, &sqlite_id),
+                (&memory as &dyn ScheduleStore, &memory_id),
+            ] {
+                let view = reclaim_scan(store, occurrence_id).await;
+                assert_eq!(view.phase, OccurrencePhase::Misfired, "{:?}", store.kind());
+                assert_eq!(view.row_faults, 0, "{:?}", store.kind());
+            }
+        }
+    }
+}
+
+/// An admitted occurrence is reclaimed past its misfire deadline once per
+/// lapsed lease until its attempts reach the cap; then it ends
+/// delivery_failed with lease_lost and the exhausted detail, never misfired.
+#[tokio::test]
+async fn an_admitted_occurrence_that_used_up_its_reclaims_ends_lease_lost() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedules.sqlite3");
+    let sqlite = SqliteScheduleStore::open(&path).expect("open store");
+    let memory = MemoryScheduleStore::new();
+    for store in [&sqlite as &dyn ScheduleStore, &memory as &dyn ScheduleStore] {
+        let occurrence_id =
+            lapse_past_the_deadline_after(store, FirstAttempt::DispatchAccepted, "exhausted").await;
+        // Each scan after a lapsed lease reclaims the next attempt.
+        for attempt in 2..=ADMITTED_RECLAIM_ATTEMPT_CAP {
+            let result = claim_due_in(store, Duration::milliseconds(50)).await;
+            assert!(result.row_faults.is_empty(), "{:?}", result.row_faults);
+            let occurrence = current_occurrence(store, &occurrence_id).await;
+            assert_eq!(occurrence.phase, OccurrencePhase::Claimed);
+            assert_eq!(occurrence.attempt_count, attempt);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // At the cap the lapsed lease is not reclaimed again, and the
+        // exhaustion resolves within the next scans.
+        let mut occurrence = current_occurrence(store, &occurrence_id).await;
+        for _ in 0..3 {
+            let _ = claim_due_in(store, Duration::seconds(60)).await;
+            occurrence = current_occurrence(store, &occurrence_id).await;
+            assert!(
+                occurrence.attempt_count <= ADMITTED_RECLAIM_ATTEMPT_CAP,
+                "never a reclaim past the cap"
+            );
+            assert_ne!(occurrence.phase, OccurrencePhase::Misfired);
+            if occurrence.phase == OccurrencePhase::DeliveryFailed {
+                break;
+            }
+        }
+        assert_eq!(
+            occurrence.phase,
+            OccurrencePhase::DeliveryFailed,
+            "{:?}",
+            store.kind()
+        );
+        assert_eq!(
+            occurrence.failure_class,
+            Some(OccurrenceFailureClass::LeaseLost)
+        );
+        assert_eq!(
+            occurrence.failure_detail.as_deref(),
+            Some(
+                occurrence
+                    .reclaim_exhausted_detail(AdmissionEvidence::Accepted)
+                    .as_str()
+            )
+        );
+    }
+}
+
+/// A receipt row of the history that does not decode is the occurrence's
+/// typed fault in the claim scan, never read as missing evidence: the row is
+/// neither reclaimed nor misfired, and its neighbors still claim.
+#[tokio::test]
+async fn an_undecodable_receipt_in_the_history_is_the_rows_typed_fault() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedules.sqlite3");
+    let store = SqliteScheduleStore::open(&path).expect("open store");
+    let occurrence_id =
+        lapse_past_the_deadline_after(&store, FirstAttempt::DispatchAccepted, "poisoned-history")
+            .await;
+    let conn = Connection::open(&path).expect("open sqlite");
+    let changed = conn
+        .execute(
+            "UPDATE schedule_receipts SET receipt_json = ?2 WHERE occurrence_id = ?1",
+            params![occurrence_id.to_string(), b"{not json".as_slice()],
+        )
+        .expect("poison the receipt history");
+    assert!(changed >= 1);
+    let neighbor_schedule = commit_schedule(&store, "healthy-neighbor").await;
+    let neighbor = commit_due_occurrence(&store, &neighbor_schedule).await;
+
+    let result = claim_due_in(&store, Duration::seconds(60)).await;
+    assert_eq!(result.row_faults.len(), 1);
+    assert_eq!(
+        result.row_faults[0].kind,
+        ScheduleStoreRowFaultKind::Deserialization
+    );
+    assert_eq!(
+        result.row_faults[0].occurrence_id.as_deref(),
+        Some(occurrence_id.to_string().as_str())
+    );
+    assert!(
+        result.row_faults[0].detail.contains("receipt history"),
+        "{}",
+        result.row_faults[0].detail
+    );
+    assert!(
+        result
+            .transitions
+            .iter()
+            .any(|commit| commit.successor().occurrence_id == neighbor.occurrence_id),
+        "the healthy neighbor still claims"
+    );
+    // The faulted row keeps its first attempt untouched: still Dispatching
+    // after its recorded admission, its lapsed lease neither expired nor
+    // reclaimed.
+    let untouched = current_occurrence(&store, &occurrence_id).await;
+    assert_eq!(untouched.phase, OccurrencePhase::Dispatching);
+    assert_eq!(untouched.attempt_count, 1);
 }

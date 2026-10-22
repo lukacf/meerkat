@@ -4,7 +4,7 @@ description: "Meta ownership boundaries, gateway profiles, composition, storage 
 icon: "layer-group"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 Meta is a Rust composition crate plus gateway binaries, SDKs, examples, a
 Flow Editor, and a React console. It is a companion to Meerkat, not a second
@@ -56,7 +56,7 @@ graph TD
     SESSION["Meerkat session runtime<br/>agent loop, prompts, tools, durability"]
     MODULES["Meta module runtime<br/>supervision, routing, delivery, events"]
     POLICY["Meta policy<br/>auth, ABAC, topology controls"]
-    STORES["Meta storage provider<br/>continuity, leases, timeline, metadata,<br/>blobs, schedule, agent memory"]
+    STORES["Meta storage provider<br/>timeline, metadata, blobs,<br/>schedule, agent memory"]
     CONSOLE["Console and Flow Editor<br/>REST / JSON-RPC / SSE projections"]
     SCHEDULING["Meta scheduling runtime"]
     GATING["Meta gating runtime"]
@@ -124,7 +124,7 @@ crates/meerkat-meta/src/
 ├── http_console.rs           # Console REST, JSON-RPC, timeline SSE, blobs
 ├── http_flow_editor.rs       # Flow Editor static assets and JSON-RPC
 ├── http_sse.rs               # Agent, mob, and structural mob SSE
-├── identity_first/           # Host roster, continuity, lease, and mob bridge
+├── identity_first/           # Host roster, identity views, and mob bridge
 ├── memory/                   # Memory records, guards, engines, SQLite store
 ├── mob_handle_runtime.rs     # Adapter over the Meerkat mob runtime
 ├── schedule_wiring.rs        # Schedule service and host-target composition
@@ -144,10 +144,10 @@ crates/meerkat-meta/src/
 └── mocks.rs                  # Test utilities
 ```
 
-The `identity_first/` directory is a host continuity layer, not the owner of
-mob identity. It keys desired roster records, leases, and persistence bridges
-by Meerkat `AgentIdentity`, then materializes or resumes members through
-`meerkat-mob`.
+The `identity_first/` directory is a host roster layer, not the owner of mob
+identity. It keys desired roster records by Meerkat `AgentIdentity`, reads
+each identity's session and generation from Core's member history, and
+materializes or resumes members through `meerkat-mob`, which holds them.
 
 ## Module boundary
 
@@ -268,8 +268,8 @@ sinks fail-closed unless explicitly granted.
 
 `MetaStorageLayout` is the single Meta path authority. A
 `MetaStorageProvider` wraps or accompanies Meerkat's realm storage provider
-and opens the realm-wide Meta stores for continuity, lease fencing, event
-log, console timeline, metadata, blobs, agent memory, and schedule state.
+and opens the realm-wide Meta stores for the event log, console timeline,
+metadata, blobs, agent memory, and schedule state.
 Those stores are Meta-owned projections and operational records; canonical
 Meerkat session and mob state stay upstream.
 

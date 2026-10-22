@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use meerkat_authorization_contracts::constraints::{ExecutionRestrictions, LifetimeBound};
 use meerkat_authorization_contracts::work_association::{
-    GrantTarget, InputAuthorityAssociation, WorkAuthorityBasis,
+    GrantTarget, InputAuthorityAssociation, OriginalWorkRef, QualifiedIngressNamespace,
+    WorkAuthorityBasis,
 };
 use meerkat_core::authorization::{
     AuthorizationOperation, OperationRefusalKind, OperationRefused, PreparedAuthorizationBinding,
@@ -273,6 +274,29 @@ pub trait AdmittedWorkPolicyOwner: Send + Sync {
         _binding: &PreparedAuthorizationBinding,
         _now_ms: u64,
     ) -> Result<Option<String>, meerkat_core::OperationAuthorizationError> {
+        Err(meerkat_core::OperationAuthorizationError::Unavailable)
+    }
+
+    /// The record of the service original `original` that the composition's
+    /// original source holds enrolled under `namespace`: the exact
+    /// association it enrolled for a governed service call (work no runtime
+    /// input carries, such as a scheduled host runnable's provider calls).
+    /// This only fetches the record for the native host, which compares it
+    /// with the claims a call presents; it decides nothing. Every operation
+    /// is still decided by this owner's `authorize_admitted_work`, the grant
+    /// owner and the operation owner.
+    ///
+    /// `Ok(None)` is no current enrollment (never enrolled, or revoked). A
+    /// cancelled original is refused `Denied`; an owner that cannot say now
+    /// is `Unavailable`. Synchronous and without I/O, under the same
+    /// publication as `authorize_admitted_work`. The default is
+    /// `Unavailable`: an owner that cannot read enrolled service originals
+    /// serves no service call.
+    fn enrolled_service_original(
+        &self,
+        _namespace: &QualifiedIngressNamespace,
+        _original: &OriginalWorkRef,
+    ) -> Result<Option<InputAuthorityAssociation>, meerkat_core::OperationAuthorizationError> {
         Err(meerkat_core::OperationAuthorizationError::Unavailable)
     }
 }

@@ -1128,6 +1128,26 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ]),
                 ),
                 scenario(
+                    "occurrence_recorded_dispatch_reclaim",
+                    "classify a pending occurrence whose earlier attempt recorded its dispatch as claim eligible past its misfire deadline up to five attempts and as reclaim exhausted after them, reclaim it after a recorded admission or an unproven dispatch start, keep such a redelivery claimed when its target is busy under skip if running, end an exhausted admitted occurrence delivery failed lease lost and an exhausted or never-admitted unproven one misfired",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "ClassifyDuePendingReclaimExhausted",
+                            "ClaimPendingAfterAdmission",
+                            "ClaimPendingAfterUnprovenDispatch",
+                            "TargetProbeBusyExistingRedelivery",
+                            "ReclaimExhaustedAfterAdmission",
+                            "ReclaimExhaustedAfterUnprovenDispatch",
+                            "UnprovenLateNotAdmittedFromClaimed",
+                            "UnprovenLateNotAdmittedFromDispatching",
+                        ])
+                        .effects(&[
+                            "DueReclaimExhausted",
+                            "ReclaimedAfterAdmission",
+                            "ReclaimedAfterUnprovenDispatch",
+                        ]),
+                ),
+                scenario(
                     "occurrence_lease_recovery",
                     "classify due no action, due claim eligible, due misfire required, due lease expired, lease renewal by the live claim-token holder from dispatching or awaiting completion, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery",
                     CoverageClaims::none()

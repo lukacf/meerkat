@@ -16544,13 +16544,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// classifies candidate bytes, mints a successor, or writes a projection;
     /// the store-owned recovery seam proves and atomically consumes the exact
     /// runtime authority plus physical-head evidence.
+    ///
+    /// It runs under this runtime owner's hosting claim for the session
+    /// (#1813), joining the claim when this owner's lineage already holds it.
+    /// A session another runtime owner hosts is refused with
+    /// [`SessionError::ServedElsewhere`], and one whose claim cannot be taken
+    /// with [`SessionError::HostingUnavailable`], before any recovery: the
+    /// other owner may still commit the session's durable tail itself.
     pub async fn recover_committed_boundary(
         &self,
         id: &SessionId,
     ) -> Result<CommittedBoundaryRecovery, SessionError> {
-        self.recover_committed_boundary_retaining_aligned_body(id)
-            .await
-            .map(|(recovery, _aligned_body)| recovery)
+        // #1813: recovery may settle the session's durable tail, a store-only
+        // write: it holds the session's hosting claim (shared with its
+        // runtime owner's lineage) for its duration, inside its blocking
+        // store writes too, and refuses at once when another runtime owner
+        // hosts the session.
+        let hosting = self.grant_session_hosting(id)?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.recover_committed_boundary_retaining_aligned_body(id),
+        )
+        .await
+        .map(|(recovery, _aligned_body)| recovery)
     }
 
     /// [`Self::recover_committed_boundary`], additionally returning the
@@ -16639,7 +16655,33 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// observations. A successful materialization returns a non-cloneable
     /// capability that the same service/store owner must later consume during
     /// actor creation; callers never reduce that proof to a boolean.
+    ///
+    /// It runs under this runtime owner's hosting claim for the session
+    /// (#1813), joining the claim when this owner's lineage already holds it.
+    /// A session another runtime owner hosts is refused with
+    /// [`SessionError::ServedElsewhere`], and one whose claim cannot be taken
+    /// with [`SessionError::HostingUnavailable`], before any recovery: the
+    /// other owner may still commit the session's durable tail itself.
     pub async fn prepare_committed_boundary_resume(
+        &self,
+        id: &SessionId,
+    ) -> Result<PreparedCommittedBoundaryResume, SessionError> {
+        // #1813: the preparation's recovery may settle the session's durable
+        // tail, a store-only write: the preparation holds the session's
+        // hosting claim (shared with its runtime owner's lineage) for its
+        // duration, inside its blocking store writes too, and refuses at once
+        // when another runtime owner hosts the session. Actor creation takes
+        // the claim again and re-observes the prepared authority before it
+        // consumes the receipt, so a write between the two is refused there.
+        let hosting = self.grant_session_hosting(id)?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.prepare_committed_boundary_resume_hosted(id),
+        )
+        .await
+    }
+
+    async fn prepare_committed_boundary_resume_hosted(
         &self,
         id: &SessionId,
     ) -> Result<PreparedCommittedBoundaryResume, SessionError> {
@@ -29680,6 +29722,372 @@ mod tests {
                 PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result)
             );
         }
+    }
+
+    /// A HeadCanonical pair with a committed turn-start head for a session
+    /// whose transcript the compaction cycles below can rewrite, and the
+    /// actor checkpointer over it.
+    async fn retention_checkpoint_fixture() -> (
+        tempfile::TempDir,
+        PersistentSessionService<DummyBuilder>,
+        StoreCheckpointer,
+        Session,
+    ) {
+        let directory = tempfile::Builder::new()
+            .prefix(".retention-checkpoint-")
+            .tempdir_in(".")
+            .unwrap();
+        let database_path = directory.path().join("runtime.sqlite3");
+        let runtime_store = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path).unwrap(),
+        );
+        let store = Arc::new(meerkat_store::SqliteSessionStore::open(&database_path).unwrap());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let committed = service
+            .persist_detached_head_canonical_session(
+                live_context_summary_source(),
+                "turn-start head",
+            )
+            .await
+            .unwrap();
+        let checkpointer = StoreCheckpointer {
+            runtime_store,
+            incremental: service.incremental.clone(),
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(None),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+        };
+        (directory, service, checkpointer, committed)
+    }
+
+    /// One compaction of a long turn: a few rows, then, as the agent does on
+    /// a clone of its session it installs afterwards, a rewrite of everything
+    /// after the first row down to a summary and the retirement it applies
+    /// after every compaction rewrite.
+    fn compact_and_retire(
+        session: &mut Session,
+        compaction: usize,
+        retention: meerkat_core::TranscriptHistoryRetention,
+    ) {
+        for row in 0..3 {
+            session.push(user_message(&format!("compaction {compaction} row {row}")));
+        }
+        let mut compacted = session.clone();
+        let end = compacted.messages().len();
+        let parent_revision = compacted.transcript_revision().unwrap();
+        compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end },
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage::new(
+                        vec![meerkat_core::AssistantBlock::Text {
+                            text: format!("summary of compaction {compaction}"),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                    ),
+                )],
+                TranscriptRewriteReason::new("compaction"),
+                Some("test".to_string()),
+                Some(parent_revision),
+            )
+            .unwrap();
+        compacted.retire_transcript_history(retention).unwrap();
+        *session = compacted;
+    }
+
+    fn retired_rewrites(session: &Session) -> usize {
+        session
+            .transcript_history_state()
+            .unwrap()
+            .expect("rewrite graph")
+            .retired_count()
+    }
+
+    async fn physical_rewrite_count(
+        service: &PersistentSessionService<DummyBuilder>,
+        id: &SessionId,
+    ) -> u64 {
+        service
+            .incremental
+            .as_ref()
+            .unwrap()
+            .load_head(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .rewrite_count
+    }
+
+    /// One long turn compacts more often than the history retention keeps
+    /// (six compactions at four retained rewrites) before its intra-turn
+    /// checkpoint: the agent checkpoints at the end of a run, not between its
+    /// compactions. The checkpoint persists the pending rewrite suffix from
+    /// the physical head the turn started on, so retirement keeps the
+    /// occurrences that head does not cover yet, and catches up once a
+    /// checkpoint has covered them.
+    #[tokio::test]
+    async fn intra_turn_checkpoint_after_more_compactions_than_retained_rewrites() {
+        let (_directory, service, checkpointer, committed) = retention_checkpoint_fixture().await;
+        let id = committed.id().clone();
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap();
+        let mut session = committed;
+        for compaction in 0..6 {
+            compact_and_retire(&mut session, compaction, retention);
+        }
+
+        let run_id = RunId::new();
+        let receipt = meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &run_id,
+            None,
+        )
+        .await
+        .expect("the intra-turn checkpoint persists every compaction of the turn")
+        .expect("the checkpoint writes a provisional successor");
+        assert_eq!(physical_rewrite_count(&service, &id).await, 6);
+        assert_eq!(
+            retired_rewrites(&session),
+            0,
+            "nothing the turn-start head lacked was retired"
+        );
+
+        // The head now covers all six: the next compaction retires down to
+        // the retention again, and the next checkpoint still proves its
+        // suffix.
+        compact_and_retire(&mut session, 6, retention);
+        assert_eq!(retired_rewrites(&session), 3);
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &run_id,
+            Some(&receipt),
+        )
+        .await
+        .expect("the next checkpoint proves its suffix after the catch-up")
+        .expect("the checkpoint writes the next provisional successor");
+        assert_eq!(physical_rewrite_count(&service, &id).await, 7);
+    }
+
+    /// When a checkpoint follows every compaction, the durable head keeps up
+    /// and retirement keeps the graph at the retention bound.
+    #[tokio::test]
+    async fn checkpoints_after_every_compaction_keep_the_retention_bound() {
+        let (_directory, service, checkpointer, committed) = retention_checkpoint_fixture().await;
+        let id = committed.id().clone();
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap();
+        let mut session = committed;
+        let run_id = RunId::new();
+        let mut previous = None;
+        for compaction in 0..6 {
+            compact_and_retire(&mut session, compaction, retention);
+            assert_eq!(
+                retired_rewrites(&session),
+                (compaction + 1).saturating_sub(4)
+            );
+            previous = Some(
+                meerkat_core::SessionCheckpointer::checkpoint_run(
+                    &checkpointer,
+                    &mut session,
+                    &run_id,
+                    previous.as_ref(),
+                )
+                .await
+                .expect("every checkpoint proves its suffix")
+                .expect("every checkpoint writes a provisional successor"),
+            );
+        }
+        assert_eq!(physical_rewrite_count(&service, &id).await, 6);
+        assert_eq!(retired_rewrites(&session), 2);
+    }
+
+    /// Retirement goes exactly as far as the durable head and no further:
+    /// with the head at four rewrites, the eighth compaction retires the
+    /// first four, and the ninth, which the retention alone would let retire
+    /// a fifth, keeps it until a checkpoint covers it.
+    #[tokio::test]
+    async fn retirement_reaches_the_durable_head_and_stops_there() {
+        let (_directory, service, checkpointer, committed) = retention_checkpoint_fixture().await;
+        let id = committed.id().clone();
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap();
+        let mut session = committed;
+        for compaction in 0..4 {
+            compact_and_retire(&mut session, compaction, retention);
+        }
+        let run_id = RunId::new();
+        let receipt = meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &run_id,
+            None,
+        )
+        .await
+        .expect("the checkpoint after four compactions")
+        .expect("a provisional successor");
+        assert_eq!(physical_rewrite_count(&service, &id).await, 4);
+
+        for compaction in 4..8 {
+            compact_and_retire(&mut session, compaction, retention);
+        }
+        assert_eq!(
+            retired_rewrites(&session),
+            4,
+            "the eighth compaction retires up to the durable head"
+        );
+        compact_and_retire(&mut session, 8, retention);
+        assert_eq!(
+            retired_rewrites(&session),
+            4,
+            "the ninth compaction keeps what the durable head does not cover"
+        );
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &run_id,
+            Some(&receipt),
+        )
+        .await
+        .expect("the checkpoint proves its suffix from the durable head")
+        .expect("the next provisional successor");
+        assert_eq!(physical_rewrite_count(&service, &id).await, 9);
+    }
+
+    /// A committed run boundary advances the cap on the session the next run
+    /// continues with: a second long run retires back toward the retention
+    /// within that boundary, and its checkpoint still proves the suffix.
+    #[tokio::test]
+    async fn a_second_run_retires_within_the_committed_boundary_and_checkpoints() {
+        let (_directory, service, checkpointer, committed) = retention_checkpoint_fixture().await;
+        let id = committed.id().clone();
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap();
+        let mut session = committed;
+        for compaction in 0..6 {
+            compact_and_retire(&mut session, compaction, retention);
+        }
+        let mut session = service
+            .persist_detached_head_canonical_session(session, "first run boundary")
+            .await
+            .expect("the first run's boundary commits every compaction of the run");
+        assert_eq!(physical_rewrite_count(&service, &id).await, 6);
+        assert_eq!(retired_rewrites(&session), 0);
+
+        for compaction in 6..12 {
+            compact_and_retire(&mut session, compaction, retention);
+        }
+        assert_eq!(
+            retired_rewrites(&session),
+            6,
+            "the second run retires up to the committed boundary"
+        );
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &RunId::new(),
+            None,
+        )
+        .await
+        .expect("the second run's checkpoint proves its suffix from the boundary")
+        .expect("a provisional successor");
+        assert_eq!(physical_rewrite_count(&service, &id).await, 12);
+        compact_and_retire(&mut session, 12, retention);
+        assert_eq!(
+            retired_rewrites(&session),
+            9,
+            "after the checkpoint the graph is back at the retention bound"
+        );
+    }
+
+    /// The shape after a restart: the session is materialized from the
+    /// store's committed head. A long run on it compacts more often than the
+    /// retention keeps and its run-end commit still proves every compaction;
+    /// after a second restart the next long run's intra-turn checkpoint
+    /// proves its suffix from the reloaded head.
+    #[tokio::test]
+    async fn a_session_reloaded_from_the_store_keeps_what_its_head_lacks() {
+        let (_directory, service, checkpointer, committed) = retention_checkpoint_fixture().await;
+        let id = committed.id().clone();
+        drop(committed);
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap();
+
+        let mut session = service
+            .load_committed_runtime_session_for_body(&id, "reload after restart")
+            .await
+            .unwrap()
+            .expect("the committed head");
+        for compaction in 0..6 {
+            compact_and_retire(&mut session, compaction, retention);
+        }
+        let session = service
+            .persist_detached_head_canonical_session(session, "run boundary")
+            .await
+            .expect("the run-end commit proves every compaction of the run");
+        assert_eq!(physical_rewrite_count(&service, &id).await, 6);
+        assert_eq!(
+            retired_rewrites(&session),
+            0,
+            "nothing the reloaded head lacked was retired"
+        );
+        drop(session);
+
+        let mut session = service
+            .load_committed_runtime_session_for_body(&id, "reload after the second restart")
+            .await
+            .unwrap()
+            .expect("the committed head");
+        for compaction in 6..12 {
+            compact_and_retire(&mut session, compaction, retention);
+        }
+        assert_eq!(
+            retired_rewrites(&session),
+            6,
+            "the reloaded session retires up to its head and no further"
+        );
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &RunId::new(),
+            None,
+        )
+        .await
+        .expect("the intra-turn checkpoint proves its suffix from the reloaded head")
+        .expect("a provisional successor");
+        assert_eq!(physical_rewrite_count(&service, &id).await, 12);
+    }
+
+    /// The cap belongs to the session a durable head describes. A fork and a
+    /// copy decoded from the persisted document have no durable head of
+    /// their own and retire to the retention bound as before.
+    #[tokio::test]
+    async fn forks_and_decoded_copies_retire_without_the_durable_cap() {
+        let (_directory, _service, _checkpointer, committed) = retention_checkpoint_fixture().await;
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap();
+        let mut session = committed;
+        for compaction in 0..6 {
+            compact_and_retire(&mut session, compaction, retention);
+        }
+        assert_eq!(retired_rewrites(&session), 0);
+
+        // A fork starts its own rewrite graph.
+        let mut fork = session.fork();
+        for compaction in 6..12 {
+            compact_and_retire(&mut fork, compaction, retention);
+        }
+        assert_eq!(retired_rewrites(&fork), 2);
+
+        let mut decoded: Session =
+            serde_json::from_slice(&session.to_persisted_bytes().unwrap()).unwrap();
+        compact_and_retire(&mut decoded, 6, retention);
+        assert_eq!(retired_rewrites(&decoded), 3);
     }
 
     #[tokio::test]
@@ -43154,6 +43562,293 @@ mod tests {
             token,
             "NotFound classification must not mutate the physical row"
         );
+    }
+
+    /// A HeadCanonical session hosted with OS-locked claims whose last turn
+    /// left a durable tail: the runtime authority committed one turn, and a
+    /// store-issued provisional tail plus the physical head carry the next
+    /// (a process that died between its rows and its runtime boundary).
+    struct HostedDurableTail {
+        _dir: tempfile::TempDir,
+        runtime_store: Arc<meerkat_runtime::SqliteRuntimeStore>,
+        session_store: Arc<meerkat_store::SqliteSessionStore>,
+        session_id: SessionId,
+    }
+
+    impl HostedDurableTail {
+        async fn new() -> Self {
+            use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+            use meerkat_core::session_store::PreparedHeadCanonicalMutation;
+            use meerkat_core::types::{
+                AssistantBlock, BlockAssistantMessage, TranscriptMessageIdentity,
+            };
+            use meerkat_runtime::store::{
+                PreparedHeadCanonicalProvisionalTail, PreparedRuntimeSessionCommit,
+            };
+
+            let dir = tempfile::tempdir().expect("hosted durable tail directory");
+            let database = dir.path().join("runtime.sqlite3");
+            let runtime_store = Arc::new(
+                meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database)
+                    .expect("head-canonical runtime store")
+                    .with_hosting_paths(meerkat_runtime::HostingPaths {
+                        hosting_lock_dir: dir.path().join("hosting"),
+                        cold_delivery_lock: dir.path().join("cold-delivery.lock"),
+                        database: None,
+                    }),
+            );
+            assert!(
+                runtime_store.hosting_capability().is_cross_process(),
+                "the store must host sessions with OS-locked claims"
+            );
+            let session_store = Arc::new(
+                meerkat_store::SqliteSessionStore::open(&database)
+                    .expect("co-located head-canonical session store"),
+            );
+
+            let mut committed = Session::new();
+            committed.push(Message::User(UserMessage::text("committed turn")));
+            let session_id = committed.id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let root = PreparedHeadCanonicalMutation::prepare(&committed, None)
+                .expect("prepare the committed head");
+            let document = BoundSessionCommit::sealed(Arc::new(committed))
+                .expect("seal the committed document")
+                .with_head_canonical_mutation(root)
+                .expect("bind the committed head");
+            let committed_authority = runtime_store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::snapshot_only(document),
+                )
+                .await
+                .expect("commit the first boundary")
+                .authority()
+                .and_then(|authority| authority.head_canonical())
+                .cloned()
+                .expect("the boundary returns HeadCanonical authority");
+
+            let run_id = RunId::new();
+            let mut candidate = session_store
+                .load(&session_id)
+                .await
+                .expect("load the committed session")
+                .expect("the committed session exists");
+            candidate.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "durable tail reply".to_string(),
+                    meta: None,
+                }],
+                stop_reason: Some(StopReason::EndTurn),
+                identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+                created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
+            }));
+            let observed = session_store
+                .load_head(&session_id)
+                .await
+                .expect("load the committed head")
+                .expect("the committed head exists");
+            let tail = PreparedHeadCanonicalMutation::prepare(&candidate, Some(observed))
+                .expect("prepare the tail");
+            runtime_store
+                .write_prepared_head_canonical_provisional_tail(
+                    &runtime_id,
+                    PreparedHeadCanonicalProvisionalTail::prepare(
+                        committed_authority,
+                        run_id,
+                        tail.successor_head(),
+                        tail.successor_head_token(),
+                        &candidate,
+                    )
+                    .expect("prepare the provisional tail"),
+                )
+                .await
+                .expect("write the provisional tail");
+            session_store
+                .apply_prepared_head_canonical_mutation(&tail)
+                .await
+                .expect("advance the physical head past the boundary");
+            Self {
+                _dir: dir,
+                runtime_store,
+                session_store,
+                session_id,
+            }
+        }
+
+        fn service(&self) -> PersistentSessionService<DummyBuilder> {
+            PersistentSessionService::new(
+                DummyBuilder,
+                4,
+                Arc::clone(&self.session_store) as Arc<dyn SessionStore>,
+                Arc::clone(&self.runtime_store) as Arc<dyn RuntimeStore>,
+                memory_blob_store(),
+            )
+        }
+
+        /// The committed head token, the physical head token, and whether the
+        /// provisional tail is still recorded.
+        async fn durable_state(&self) -> (String, String, bool) {
+            let runtime_id = LogicalRuntimeId::for_session(&self.session_id);
+            let committed = self
+                .runtime_store
+                .load_session_boundary_authority(&runtime_id)
+                .await
+                .expect("load the runtime authority")
+                .expect("the runtime authority exists")
+                .head_canonical()
+                .expect("HeadCanonical authority")
+                .committed_head_token()
+                .to_string();
+            let head = self
+                .session_store
+                .load_head(&self.session_id)
+                .await
+                .expect("load the physical head")
+                .expect("the physical head exists");
+            let physical = session_head_cas_token(&head).expect("the physical head has a token");
+            let provisional = self
+                .runtime_store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .expect("load the provisional tail")
+                .is_some();
+            (committed, physical, provisional)
+        }
+
+        /// Another runtime owner on the realm (another process, or another
+        /// runtime of this one) takes the session's hosting claim.
+        fn another_owner_hosts_the_session(&self) -> meerkat_runtime::HostingClaim {
+            meerkat_runtime::SessionHostingAuthority::new(
+                self.runtime_store.hosting_capability(),
+                meerkat_runtime::HostingOwner::mint(),
+            )
+            .grant(&self.session_id)
+            .expect("another runtime owner takes the session's claim")
+        }
+    }
+
+    /// #1813: recovery may settle a session's durable tail, so it never runs
+    /// for a session another runtime owner on the realm hosts: that owner may
+    /// still commit the tail itself. The heal seam refuses, typed, before any
+    /// recovery, and the runtime authority, the provisional tail and the
+    /// physical head stay as they were.
+    #[tokio::test]
+    async fn recover_committed_boundary_refuses_a_session_another_owner_hosts() {
+        let tail = HostedDurableTail::new().await;
+        let service = tail.service();
+        let _other_owner_claim = tail.another_owner_hosts_the_session();
+        let before = tail.durable_state().await;
+        assert_ne!(
+            before.0, before.1,
+            "instrument: the physical head is ahead of the committed boundary"
+        );
+        assert!(before.2, "instrument: the provisional tail is recorded");
+
+        let refused = service.recover_committed_boundary(&tail.session_id).await;
+        assert!(
+            matches!(&refused, Err(SessionError::ServedElsewhere { id }) if *id == tail.session_id),
+            "recovery must refuse a session another runtime owner hosts: {refused:?}"
+        );
+        assert_eq!(
+            tail.durable_state().await,
+            before,
+            "the refused recovery must leave the durable tail as it was"
+        );
+    }
+
+    /// #1813: the resume preparation refuses a session another runtime owner
+    /// hosts the same way, before its recovery and before any body read.
+    #[tokio::test]
+    async fn prepare_committed_boundary_resume_refuses_a_session_another_owner_hosts() {
+        let tail = HostedDurableTail::new().await;
+        let service = tail.service();
+        let _other_owner_claim = tail.another_owner_hosts_the_session();
+        let before = tail.durable_state().await;
+
+        match service
+            .prepare_committed_boundary_resume(&tail.session_id)
+            .await
+        {
+            Err(SessionError::ServedElsewhere { id }) => {
+                assert_eq!(id, tail.session_id, "the refusal names the session");
+            }
+            other => panic!(
+                "the resume preparation must refuse a session another runtime owner hosts: \
+                 {other:?}"
+            ),
+        }
+        assert_eq!(
+            tail.durable_state().await,
+            before,
+            "the refused preparation must leave the durable tail as it was"
+        );
+    }
+
+    /// #1813: a caller whose own runtime owner already holds the session's
+    /// claim (a registration, or a create that granted it before its
+    /// recovery) joins that claim: the recovery proceeds and settles the
+    /// durable tail.
+    #[tokio::test]
+    async fn recover_committed_boundary_joins_its_own_runtime_owners_claim() {
+        let tail = HostedDurableTail::new().await;
+        let service = tail.service();
+        let held = service
+            .grant_session_hosting(&tail.session_id)
+            .expect("this runtime owner takes the session's claim");
+        assert!(
+            held.is_cross_process(),
+            "instrument: the held claim is an OS lock"
+        );
+
+        let recovery = service
+            .recover_committed_boundary(&tail.session_id)
+            .await
+            .expect("recovery joins its own runtime owner's claim");
+        assert!(
+            matches!(recovery, CommittedBoundaryRecovery::Recovered { .. }),
+            "recovery must settle the durable tail: {recovery:?}"
+        );
+        let (committed, physical, provisional) = tail.durable_state().await;
+        assert_eq!(
+            committed, physical,
+            "the settled boundary is the physical head"
+        );
+        assert!(!provisional, "settling consumes the provisional tail");
+        drop(held);
+    }
+
+    /// #1813: the resume preparation joins its own runtime owner's claim as
+    /// well: it settles the durable tail and materializes the settled body.
+    #[tokio::test]
+    async fn prepare_committed_boundary_resume_joins_its_own_runtime_owners_claim() {
+        let tail = HostedDurableTail::new().await;
+        let service = tail.service();
+        let held = service
+            .grant_session_hosting(&tail.session_id)
+            .expect("this runtime owner takes the session's claim");
+
+        let prepared = service
+            .prepare_committed_boundary_resume(&tail.session_id)
+            .await
+            .expect("the preparation joins its own runtime owner's claim");
+        let session = match prepared {
+            PreparedCommittedBoundaryResume::Materializable { session, .. } => session,
+            other => panic!("a settled session is materializable: {other:?}"),
+        };
+        assert_eq!(
+            session.messages().len(),
+            2,
+            "the materialized body carries the settled tail turn"
+        );
+        let (committed, physical, provisional) = tail.durable_state().await;
+        assert_eq!(
+            committed, physical,
+            "the settled boundary is the physical head"
+        );
+        assert!(!provisional, "settling consumes the provisional tail");
+        drop(held);
     }
 
     /// A committed WholeBlob document the current decoder refuses (its live

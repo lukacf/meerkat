@@ -69,6 +69,12 @@ async fn session_driver(
 
 /// Accept one keyed prompt (it stays queued: no executor serves the session)
 /// and step it to applied with no run: the state a cancellation must wait out.
+///
+/// The admission hands the session mutation gate to its accepted boundary
+/// work, which releases it on the process-owned runtime, out of the paused
+/// clock's sight. The gate is taken once before the step, so that work is
+/// done before any cancellation starts: a cancellation started while it still
+/// held the gate would wait for the gate, not for the input.
 async fn input_between_steps(
     machine: &MeerkatMachine,
     session_id: &SessionId,
@@ -79,6 +85,7 @@ async fn input_between_steps(
     <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(machine, session_id, input)
         .await
         .expect("accept the prompt");
+    take_the_gate_once(machine, session_id).await;
     session_driver(machine, session_id)
         .await
         .lock()
@@ -88,9 +95,24 @@ async fn input_between_steps(
     input_id
 }
 
+/// Take the session mutation gate and give it back at once. The gate is first
+/// come, first served, so its holder and every waiter queued on it before
+/// this call have had their turn.
+async fn take_the_gate_once(machine: &MeerkatMachine, session_id: &SessionId) {
+    drop(
+        machine
+            .session_mutation_gate(session_id)
+            .await
+            .expect("registered session gate")
+            .lock_settled(SettledGateWait::TestFixture)
+            .await,
+    );
+}
+
 /// Let every other task run until it is idle. The paused clock advances only
 /// then, so a cancellation started before this call has read the input and
-/// parked by the time it returns.
+/// parked by the time it returns, as long as it waits for nothing off this
+/// runtime: `input_between_steps` leaves no admission work holding the gate.
 async fn until_parked() {
     crate::tokio::time::sleep(Duration::from_millis(1)).await;
 }
@@ -113,6 +135,52 @@ async fn consume(
 
 /// The cancellations' settle bound.
 const SETTLE: Duration = Duration::from_secs(5);
+
+/// What the admission's accepted boundary work still holds when a bound row
+/// starts its cancellation. The admission hands the session mutation gate to
+/// that work, which releases it on the process-owned runtime, out of the
+/// paused clock's sight.
+#[derive(Clone, Copy)]
+enum BoundaryWork {
+    /// Nothing the row arranges: the work runs as it does.
+    Unheld,
+    /// The work keeps the gate until the row's unsignalled commit, or until
+    /// `SETTLE * 10` of paused time has passed since it started.
+    HeldUntilTheCommit,
+}
+
+/// Hold the next admission's accepted boundary work, and with it the session
+/// mutation gate, until the returned sender fires or `SETTLE * 10` of paused
+/// time has passed since the work started.
+fn hold_next_boundary_work(machine: &MeerkatMachine) -> crate::tokio::sync::oneshot::Sender<()> {
+    let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+    *machine
+        .test_accepted_boundary_work_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+    let (commit_tx, commit_rx) = crate::tokio::sync::oneshot::channel::<()>();
+    crate::tokio::spawn(async move {
+        let _ = entered_rx.await;
+        crate::tokio::select! {
+            _ = commit_rx => {}
+            () = crate::tokio::time::sleep(SETTLE * 10) => {}
+        }
+        let _ = release_tx.send(());
+    });
+    commit_tx
+}
+
+/// Release the held boundary work after the row's commit, then take the gate
+/// once, so a cancellation queued on it has had its turn.
+async fn release_after_the_commit(
+    machine: &MeerkatMachine,
+    session_id: &SessionId,
+    commit: crate::tokio::sync::oneshot::Sender<()>,
+) {
+    let _ = commit.send(());
+    take_the_gate_once(machine, session_id).await;
+}
 
 /// Commit the input's terminal without the step signal: apply the generated
 /// consume straight on the shared machine authority, as a lifecycle apply
@@ -265,12 +333,19 @@ async fn persistent_tracked_cancellation_waits_for_the_committed_step() {
     tracked_cancellation_waits_for_the_committed_step(persistent_machine()).await;
 }
 
-async fn exact_cancellation_reads_again_at_the_bound(machine: Arc<MeerkatMachine>) {
+async fn exact_cancellation_reads_again_at_the_bound(
+    machine: Arc<MeerkatMachine>,
+    boundary_work: BoundaryWork,
+) {
     let session_id = SessionId::new();
     machine
         .register_session(session_id.clone())
         .await
         .expect("register session");
+    let commit = match boundary_work {
+        BoundaryWork::Unheld => None,
+        BoundaryWork::HeldUntilTheCommit => Some(hold_next_boundary_work(&machine)),
+    };
     let input_id = input_between_steps(&machine, &session_id, "exact-unsignalled").await;
 
     let cancel = crate::tokio::spawn({
@@ -289,6 +364,9 @@ async fn exact_cancellation_reads_again_at_the_bound(machine: Arc<MeerkatMachine
     });
     until_parked().await;
     consume_without_signal(&machine, &session_id, &input_id).await;
+    if let Some(commit) = commit {
+        release_after_the_commit(&machine, &session_id, commit).await;
+    }
     crate::tokio::time::sleep(SETTLE / 2).await;
     assert!(
         !cancel.is_finished(),
@@ -306,15 +384,46 @@ async fn exact_cancellation_reads_again_at_the_bound(machine: Arc<MeerkatMachine
 /// cancellation its settle bound, then the read after it answers.
 #[tokio::test(start_paused = true)]
 async fn ephemeral_exact_cancellation_reads_again_at_the_bound() {
-    exact_cancellation_reads_again_at_the_bound(Arc::new(MeerkatMachine::ephemeral())).await;
+    exact_cancellation_reads_again_at_the_bound(
+        Arc::new(MeerkatMachine::ephemeral()),
+        BoundaryWork::Unheld,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn persistent_exact_cancellation_reads_again_at_the_bound() {
-    exact_cancellation_reads_again_at_the_bound(persistent_machine()).await;
+    exact_cancellation_reads_again_at_the_bound(persistent_machine(), BoundaryWork::Unheld).await;
 }
 
-async fn tracked_cancellation_reads_again_at_the_bound(machine: Arc<MeerkatMachine>) {
+/// R1 behind the admission's boundary work: while that work holds the
+/// session mutation gate, a cancellation waits for the gate, not for the
+/// input. Held until the unsignalled commit, the cancellation would read the
+/// input only after that commit and answer at once, as the unheld rows did
+/// now and then. `input_between_steps` waits the work out, so here the hold
+/// ends on its paused-time bound before the cancellation starts.
+#[tokio::test(start_paused = true)]
+async fn ephemeral_exact_cancellation_reads_again_at_the_bound_behind_boundary_work() {
+    exact_cancellation_reads_again_at_the_bound(
+        Arc::new(MeerkatMachine::ephemeral()),
+        BoundaryWork::HeldUntilTheCommit,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistent_exact_cancellation_reads_again_at_the_bound_behind_boundary_work() {
+    exact_cancellation_reads_again_at_the_bound(
+        persistent_machine(),
+        BoundaryWork::HeldUntilTheCommit,
+    )
+    .await;
+}
+
+async fn tracked_cancellation_reads_again_at_the_bound(
+    machine: Arc<MeerkatMachine>,
+    boundary_work: BoundaryWork,
+) {
     const KEY: &str = "tracked-unsignalled";
     let session_id = SessionId::new();
     machine
@@ -322,6 +431,10 @@ async fn tracked_cancellation_reads_again_at_the_bound(machine: Arc<MeerkatMachi
         .await
         .expect("register session");
     let member = resident_member(&machine, &session_id).await;
+    let commit = match boundary_work {
+        BoundaryWork::Unheld => None,
+        BoundaryWork::HeldUntilTheCommit => Some(hold_next_boundary_work(&machine)),
+    };
     let input_id = input_between_steps(&machine, &session_id, KEY).await;
 
     let cancel = crate::tokio::spawn({
@@ -335,6 +448,9 @@ async fn tracked_cancellation_reads_again_at_the_bound(machine: Arc<MeerkatMachi
     });
     until_parked().await;
     consume_without_signal(&machine, &session_id, &input_id).await;
+    if let Some(commit) = commit {
+        release_after_the_commit(&machine, &session_id, commit).await;
+    }
     crate::tokio::time::sleep(SETTLE / 2).await;
     assert!(
         !cancel.is_finished(),
@@ -351,12 +467,36 @@ async fn tracked_cancellation_reads_again_at_the_bound(machine: Arc<MeerkatMachi
 /// cancellation its settle bound, then the read after it answers.
 #[tokio::test(start_paused = true)]
 async fn ephemeral_tracked_cancellation_reads_again_at_the_bound() {
-    tracked_cancellation_reads_again_at_the_bound(Arc::new(MeerkatMachine::ephemeral())).await;
+    tracked_cancellation_reads_again_at_the_bound(
+        Arc::new(MeerkatMachine::ephemeral()),
+        BoundaryWork::Unheld,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn persistent_tracked_cancellation_reads_again_at_the_bound() {
-    tracked_cancellation_reads_again_at_the_bound(persistent_machine()).await;
+    tracked_cancellation_reads_again_at_the_bound(persistent_machine(), BoundaryWork::Unheld).await;
+}
+
+/// R1 for the tracked cancellation behind the admission's boundary work; see
+/// `ephemeral_exact_cancellation_reads_again_at_the_bound_behind_boundary_work`.
+#[tokio::test(start_paused = true)]
+async fn ephemeral_tracked_cancellation_reads_again_at_the_bound_behind_boundary_work() {
+    tracked_cancellation_reads_again_at_the_bound(
+        Arc::new(MeerkatMachine::ephemeral()),
+        BoundaryWork::HeldUntilTheCommit,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistent_tracked_cancellation_reads_again_at_the_bound_behind_boundary_work() {
+    tracked_cancellation_reads_again_at_the_bound(
+        persistent_machine(),
+        BoundaryWork::HeldUntilTheCommit,
+    )
+    .await;
 }
 
 async fn exact_cancellation_after_the_bound_answers_a_settled_terminal(

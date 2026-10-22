@@ -4,7 +4,7 @@ description: "How Meta's session-store adapters relate to Meerkat's canonical ru
 icon: "database"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 Meerkat owns the canonical session and runtime lifecycle: input acceptance, turn execution, deduplication, retire/reset semantics, and durable recovery. Meta adds session-store adapters that support Meta's operational workflows, console views, and integration surfaces.
 
@@ -143,25 +143,31 @@ These power Meta's operational session inspection features and adapter-specific 
 
 ## On-disk layout and durability
 
-On persistent gateway launches (`persistent_state`), session state lives in
-the state directory under names owned by `MetaStorageLayout`, Meta's
-single path authority: the canonical session database is `sessions.sqlite3`
-(Meerkat's realm spelling), and the runtime store — session resume, archive,
-retire — is `runtime.sqlite`. Legacy spellings (`sessions.db`,
-`sessions.sqlite`) remain readable through canonical-name-first probing: a
-single existing spelling is used where it lies, but two spellings of the
-same store refuse startup (error `-32014`, "file-name twins") and point at
-`meta/storage/doctor` — renames happen only through the storage migrate
-verb.
+On persistent gateway launches (`persistent_state`), every session lives in
+Meerkat Core's runtime store, `runtime.sqlite` in the state directory: its
+transcript and its resume, archive and retire state. Meta keeps no session
+database of its own beside it. A session projection that Meta 0.9.3 kept,
+either a session database (`sessions.sqlite3`, or its older spellings
+`sessions.db` and `sessions.sqlite`) or session rows in the continuity
+database (`continuity.sqlite3`, `continuity.db` or
+`identity_continuity.sqlite`) of a runtime with a roster provider, makes a
+0.9.4 launch refuse the directory (`-32014`,
+`NativeStorageMigrationRequired`) until `meta_gateway storage-migrate-native`
+has moved its sessions into Core's stores and retired the projection. A
+`store_path` that names a separate session database file is refused too. See
+[Upgrading to Meta 0.9.4](/mobkit/guides/upgrading-to-0-9-4).
 
 Durability is fail-closed: a runtime store that cannot open is a startup
-error, never a silent in-memory fallback. Running sessions in-memory on a
-persistent launch requires the explicit declaration
-`runtime_options.runtime_store = {"storage": "memory"}`
-(`runtime_store.memory()` / `runtimeStore.memory()` in the SDKs), and the
-choice is visible in the storage census on `meta/status` →
-`storage.slots`. See
-[Configuration → Storage layout and durability](/mobkit/reference/configuration#storage-layout-and-durability).
+error, never a silent in-memory fallback. A persistent launch keeps its
+sessions under the state directory, so it refuses a declared in-memory
+runtime store: `runtime_options.runtime_store = {"storage": "memory"}` on
+`rpc_gateway` (`runtime_store.memory()` / `runtimeStore.memory()` in the
+SDKs) answers `-32014`, and `ephemeral_runtime_store(true)` on the Rust
+builder is refused with `ConflictingConfiguration`. For sessions that live
+only as long as the process, launch without `persistent_state`. The storage
+census on `meta/status` (`storage.slots`) reports each store's durability
+resolution and backend. See
+[Configuration: Storage layout and durability](/mobkit/reference/configuration#storage-layout-and-durability).
 
 ## Runtime correlation
 
@@ -178,5 +184,5 @@ unknown: it is not a usable session ID and does not mean delivery failed.
 ## See also
 
 - [Configuration](/mobkit/reference/configuration) -- session store settings, storage layout, durability classes
-- [RPC API](/mobkit/api/rpc) -- `session_store.*` methods, `meta/storage/doctor`
+- [RPC API](/mobkit/api/rpc) -- `meta/session_store/bigquery`, `meta/storage/doctor`
 - [BigQuery naming](/mobkit/reference/decisions) -- naming validation rules

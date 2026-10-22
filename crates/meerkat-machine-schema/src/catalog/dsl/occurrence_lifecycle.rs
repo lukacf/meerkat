@@ -150,7 +150,12 @@ machine! {
                 materialized_session_id: Option<SessionId>,
                 runtime_outcome_key: Option<RuntimeOutcomeKey>
             },
-            ClassifyDue { now_utc_ms: u64 },
+            // `admission_evidence` is what the occurrence's receipt history
+            // proves about its earlier attempts' target admission: a
+            // DispatchAccepted receipt (Accepted), only a DispatchStarted one
+            // (Started), or neither (Unrecorded). The store derives it from
+            // the history, which no state field carries.
+            ClassifyDue { now_utc_ms: u64, admission_evidence: Enum<AdmissionEvidence> },
             // Terminality classification. This machine owns the lifecycle_phase
             // and the terminal-phase SET (`terminal [Completed, Skipped,
             // Misfired, Superseded, DeliveryFailed]` above). The shell extracts
@@ -188,7 +193,13 @@ machine! {
                 schedule_phase: Enum<ClaimedDispatchSchedulePhase>,
                 current_schedule_revision: u64
             },
-            Claim { owner_id: ClaimOwner, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
+            Claim {
+                owner_id: ClaimOwner,
+                at_utc_ms: u64,
+                lease_expires_at_utc_ms: u64,
+                claim_token: ClaimToken,
+                admission_evidence: Enum<AdmissionEvidence>
+            },
             DispatchStarted { correlation_id: Option<CorrelationId>, at_utc_ms: u64 },
             // Target admission returned after the durable DispatchStarted
             // intent was committed. The correlation id is deliberately not an
@@ -215,12 +226,35 @@ machine! {
                 detail: Option<String>,
                 at_utc_ms: u64
             },
+            // `redelivery` is the redelivery the claim named in its effects:
+            // AfterAdmission (ReclaimedAfterAdmission), AfterUnprovenDispatch
+            // (ReclaimedAfterUnprovenDispatch), or Ordinary. A redelivery
+            // starts no new run.
             ResolveTargetProbe {
                 outcome: Enum<OccurrenceTargetProbeOutcome>,
+                redelivery: Enum<ClaimRedelivery>,
                 detail: Option<String>,
                 at_utc_ms: u64
             },
             ResolveDueMisfire { detail: Option<String>, at_utc_ms: u64 },
+            // A Pending occurrence past its misfire deadline whose earlier
+            // attempts recorded their dispatch, and which used up its
+            // reclaims. It carries the evidence so a row without any fails
+            // closed.
+            ResolveReclaimExhausted {
+                admission_evidence: Enum<AdmissionEvidence>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
+            // A reclaim past the misfire deadline of an occurrence whose
+            // earlier attempt recorded only its dispatch start found that the
+            // target never admitted the delivery. It carries the evidence so
+            // an admitted occurrence fails closed.
+            ResolveUnprovenLateNotAdmitted {
+                admission_evidence: Enum<AdmissionEvidence>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
             Supersede { superseded_by_revision: u64, at_utc_ms: u64 },
             // Lease renewal (2026-07 P0: the firing host granted a fixed 60s
             // lease and NOTHING renewed it, while a session-target delivery
@@ -275,6 +309,19 @@ machine! {
             DueClaimEligible,
             DueMisfireRequired,
             DueLeaseExpired,
+            // A Pending occurrence past its misfire deadline whose recorded
+            // dispatch used up its reclaims: the store resolves it with
+            // ResolveReclaimExhausted.
+            DueReclaimExhausted,
+            // The claim reclaims an occurrence whose earlier attempt recorded
+            // its admission: the driver redelivers it without a fresh
+            // admission, and the occurrence waits for that input's outcome.
+            ReclaimedAfterAdmission,
+            // The claim reclaims, past its misfire deadline, an occurrence
+            // whose earlier attempt recorded only its dispatch start: the
+            // driver asks the target whether it admitted the delivery, and
+            // never delivers it fresh.
+            ReclaimedAfterUnprovenDispatch,
             // Terminality verdict over the machine-owned lifecycle_phase. The
             // shell mirrors `terminal`; it decides nothing.
             OccurrenceTerminalityClassified { terminal: bool },
@@ -381,6 +428,11 @@ machine! {
         disposition DueClaimEligible => local seam NoOwnerRealization,
         disposition DueMisfireRequired => local seam NoOwnerRealization,
         disposition DueLeaseExpired => local seam NoOwnerRealization,
+        disposition DueReclaimExhausted => local seam NoOwnerRealization,
+        // The driver mirrors these to choose the redelivery: one that may
+        // only find the earlier admission, never admit fresh.
+        disposition ReclaimedAfterAdmission => local seam SurfaceResultAlignment,
+        disposition ReclaimedAfterUnprovenDispatch => local seam SurfaceResultAlignment,
         disposition OccurrenceTerminalityClassified => local seam NoOwnerRealization,
         disposition ClaimedDispatchDispositionClassified => local seam NoOwnerRealization,
         disposition CompletionSupersessionClassified => local seam NoOwnerRealization,
@@ -640,6 +692,8 @@ machine! {
                     || trigger == OccurrenceLifecycleInputVariant::ResolveDeliveryFailure
                     || trigger == OccurrenceLifecycleInputVariant::ResolveTargetProbe
                     || trigger == OccurrenceLifecycleInputVariant::ResolveDueMisfire
+                    || trigger == OccurrenceLifecycleInputVariant::ResolveReclaimExhausted
+                    || trigger == OccurrenceLifecycleInputVariant::ResolveUnprovenLateNotAdmitted
                     || trigger == OccurrenceLifecycleInputVariant::Supersede
                 )
                 && (
@@ -801,36 +855,64 @@ machine! {
         // lease reclaimability.
 
         transition ClassifyDuePendingFuture {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard { self.lifecycle_phase == Phase::Pending && now_utc_ms < self.due_at_utc_ms }
             to Pending
             emit DueNoAction
         }
 
+        // Past the misfire deadline the misfire policy decides only for an
+        // occurrence with no recorded dispatch. One whose earlier attempt
+        // recorded its dispatch (Started) or its admission (Accepted) is
+        // reclaimed past the deadline, up to five attempts, and then
+        // resolved as exhausted. Inside the window every row claims as
+        // before, whatever its evidence or attempt count. The three pending
+        // arms are exclusive: misfire and exhausted both need the deadline
+        // passed and split on the evidence.
         transition ClassifyDuePendingMisfire {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::Pending
                 && self.due_at_utc_ms <= now_utc_ms
                 && self.misfire_deadline_utc_ms < now_utc_ms
+                && admission_evidence == AdmissionEvidence::Unrecorded
             }
             to Pending
             emit DueMisfireRequired
         }
 
         transition ClassifyDuePendingClaimEligible {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::Pending
                 && self.due_at_utc_ms <= now_utc_ms
-                && now_utc_ms <= self.misfire_deadline_utc_ms
+                && (
+                    now_utc_ms <= self.misfire_deadline_utc_ms
+                    || (
+                        admission_evidence != AdmissionEvidence::Unrecorded
+                        && self.attempt_count < 5
+                    )
+                )
             }
             to Pending
             emit DueClaimEligible
         }
 
+        transition ClassifyDuePendingReclaimExhausted {
+            on input ClassifyDue { now_utc_ms, admission_evidence }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= now_utc_ms
+                && self.misfire_deadline_utc_ms < now_utc_ms
+                && admission_evidence != AdmissionEvidence::Unrecorded
+                && self.attempt_count >= 5
+            }
+            to Pending
+            emit DueReclaimExhausted
+        }
+
         transition ClassifyDueClaimedLeaseExpired {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::Claimed
                 && self.lease_expires_at_utc_ms != None
@@ -841,7 +923,7 @@ machine! {
         }
 
         transition ClassifyDueDispatchingLeaseExpired {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::Dispatching
                 && self.lease_expires_at_utc_ms != None
@@ -852,7 +934,7 @@ machine! {
         }
 
         transition ClassifyDueAwaitingCompletionLeaseExpired {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::AwaitingCompletion
                 && self.lease_expires_at_utc_ms != None
@@ -863,7 +945,7 @@ machine! {
         }
 
         transition ClassifyDueClaimedLeaseCurrent {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::Claimed
                 && (
@@ -876,7 +958,7 @@ machine! {
         }
 
         transition ClassifyDueDispatchingLeaseCurrent {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::Dispatching
                 && (
@@ -889,7 +971,7 @@ machine! {
         }
 
         transition ClassifyDueAwaitingCompletionLeaseCurrent {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::AwaitingCompletion
                 && (
@@ -902,35 +984,35 @@ machine! {
         }
 
         transition ClassifyDueCompletedNoAction {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard { self.lifecycle_phase == Phase::Completed }
             to Completed
             emit DueNoAction
         }
 
         transition ClassifyDueSkippedNoAction {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard { self.lifecycle_phase == Phase::Skipped }
             to Skipped
             emit DueNoAction
         }
 
         transition ClassifyDueMisfiredNoAction {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard { self.lifecycle_phase == Phase::Misfired }
             to Misfired
             emit DueNoAction
         }
 
         transition ClassifyDueSupersededNoAction {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard { self.lifecycle_phase == Phase::Superseded }
             to Superseded
             emit DueNoAction
         }
 
         transition ClassifyDueDeliveryFailedNoAction {
-            on input ClassifyDue { now_utc_ms }
+            on input ClassifyDue { now_utc_ms, admission_evidence }
             guard { self.lifecycle_phase == Phase::DeliveryFailed }
             to DeliveryFailed
             emit DueNoAction
@@ -1372,12 +1454,17 @@ machine! {
 
         // --- Claim ---
 
+        // An occurrence with no recorded admission claims inside its misfire
+        // window, as before. One whose earlier attempt recorded only its
+        // dispatch start also claims so inside the window: the ordinary
+        // redelivery deduplicates against an input the target admitted.
         transition ClaimPending {
-            on input Claim { owner_id, at_utc_ms, lease_expires_at_utc_ms, claim_token }
+            on input Claim { owner_id, at_utc_ms, lease_expires_at_utc_ms, claim_token, admission_evidence }
             guard {
                 self.lifecycle_phase == Phase::Pending
                 && self.due_at_utc_ms <= at_utc_ms
                 && at_utc_ms <= self.misfire_deadline_utc_ms
+                && admission_evidence != AdmissionEvidence::Accepted
             }
             update {
                 self.claimed_by = Some(owner_id);
@@ -1405,6 +1492,90 @@ machine! {
             }
             to Claimed
             emit Claimed
+        }
+
+        // An earlier attempt's admission is recorded: the claim reclaims the
+        // occurrence inside its window and past its misfire deadline, up to
+        // five attempts. The driver redelivers it without a fresh admission,
+        // and the occurrence ends with that input's own outcome.
+        transition ClaimPendingAfterAdmission {
+            on input Claim { owner_id, at_utc_ms, lease_expires_at_utc_ms, claim_token, admission_evidence }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= at_utc_ms
+                && admission_evidence == AdmissionEvidence::Accepted
+                && (at_utc_ms <= self.misfire_deadline_utc_ms || self.attempt_count < 5)
+            }
+            update {
+                self.claimed_by = Some(owner_id);
+                self.lease_expires_at_utc_ms = Some(lease_expires_at_utc_ms);
+                self.claimed_at_utc_ms = Some(at_utc_ms);
+                self.claim_token = Some(claim_token);
+                self.delivery_correlation_id = None;
+                self.receipt_recorded_at_utc_ms = None;
+                self.last_receipt_recorded_at_utc_ms = None;
+                self.last_receipt_attempt = None;
+                self.last_receipt_stage = None;
+                self.last_receipt_failure_class = None;
+                self.last_receipt_detail = None;
+                self.last_receipt_correlation_id = None;
+                self.last_receipt_materialized_session_id = None;
+                self.runtime_outcome_key = None;
+                self.receipt_stage = None;
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
+                self.failure_class = None;
+                self.failure_detail = None;
+                self.dispatched_at_utc_ms = None;
+                self.completed_at_utc_ms = None;
+                self.attempt_count += 1;
+            }
+            to Claimed
+            emit Claimed
+            emit ReclaimedAfterAdmission
+        }
+
+        // Only an earlier attempt's dispatch start is recorded, and the
+        // misfire deadline passed: the claim reclaims the occurrence, up to
+        // five attempts, so the driver can ask the target whether it admitted
+        // the delivery. A target that never did ends it Misfired
+        // (ResolveUnprovenLateNotAdmitted); nothing is delivered fresh.
+        transition ClaimPendingAfterUnprovenDispatch {
+            on input Claim { owner_id, at_utc_ms, lease_expires_at_utc_ms, claim_token, admission_evidence }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= at_utc_ms
+                && admission_evidence == AdmissionEvidence::Started
+                && self.misfire_deadline_utc_ms < at_utc_ms
+                && self.attempt_count < 5
+            }
+            update {
+                self.claimed_by = Some(owner_id);
+                self.lease_expires_at_utc_ms = Some(lease_expires_at_utc_ms);
+                self.claimed_at_utc_ms = Some(at_utc_ms);
+                self.claim_token = Some(claim_token);
+                self.delivery_correlation_id = None;
+                self.receipt_recorded_at_utc_ms = None;
+                self.last_receipt_recorded_at_utc_ms = None;
+                self.last_receipt_attempt = None;
+                self.last_receipt_stage = None;
+                self.last_receipt_failure_class = None;
+                self.last_receipt_detail = None;
+                self.last_receipt_correlation_id = None;
+                self.last_receipt_materialized_session_id = None;
+                self.runtime_outcome_key = None;
+                self.receipt_stage = None;
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
+                self.failure_class = None;
+                self.failure_detail = None;
+                self.dispatched_at_utc_ms = None;
+                self.completed_at_utc_ms = None;
+                self.attempt_count += 1;
+            }
+            to Claimed
+            emit Claimed
+            emit ReclaimedAfterUnprovenDispatch
         }
 
         // --- Dispatch ---
@@ -1766,25 +1937,39 @@ machine! {
         // skipped terminality, or misfired terminality.
 
         transition TargetProbeReadyClaimed {
-            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            on input ResolveTargetProbe { outcome, redelivery, detail, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Claimed }
             guard "ready" { outcome == OccurrenceTargetProbeOutcome::Ready }
             to Claimed
         }
 
         transition TargetProbeBusyAllowedByPolicy {
-            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            on input ResolveTargetProbe { outcome, redelivery, detail, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Claimed }
             guard "busy" { outcome == OccurrenceTargetProbeOutcome::Busy }
             guard "allow_concurrent" { self.overlap_policy == OverlapPolicy::AllowConcurrent }
             to Claimed
         }
 
-        transition TargetProbeBusySkipByPolicy {
-            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+        // A redelivery the claim named (a recorded admission, or a recorded
+        // dispatch start past the misfire deadline) starts no new run: it may
+        // only find the earlier admission, whose input can be what keeps the
+        // target busy. The overlap policy does not end it.
+        transition TargetProbeBusyExistingRedelivery {
+            on input ResolveTargetProbe { outcome, redelivery, detail, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Claimed }
             guard "busy" { outcome == OccurrenceTargetProbeOutcome::Busy }
             guard "skip_if_running" { self.overlap_policy == OverlapPolicy::SkipIfRunning }
+            guard "existing_redelivery" { redelivery != ClaimRedelivery::Ordinary }
+            to Claimed
+        }
+
+        transition TargetProbeBusySkipByPolicy {
+            on input ResolveTargetProbe { outcome, redelivery, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            guard "busy" { outcome == OccurrenceTargetProbeOutcome::Busy }
+            guard "skip_if_running" { self.overlap_policy == OverlapPolicy::SkipIfRunning }
+            guard "ordinary_claim" { redelivery == ClaimRedelivery::Ordinary }
             update {
                 self.failure_detail = detail;
                 self.failure_class = Some(OccurrenceFailureClass::TargetBusy);
@@ -1803,7 +1988,7 @@ machine! {
         }
 
         transition TargetProbeMissingSkipByPolicy {
-            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            on input ResolveTargetProbe { outcome, redelivery, detail, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Claimed }
             guard "missing" { outcome == OccurrenceTargetProbeOutcome::Missing }
             guard "skip_missing_target" { self.missing_target_policy == MissingTargetPolicy::Skip }
@@ -1825,7 +2010,7 @@ machine! {
         }
 
         transition TargetProbeMissingMisfireByPolicy {
-            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            on input ResolveTargetProbe { outcome, redelivery, detail, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Claimed }
             guard "missing" { outcome == OccurrenceTargetProbeOutcome::Missing }
             guard "mark_misfired_missing_target" { self.missing_target_policy == MissingTargetPolicy::MarkMisfired }
@@ -1853,6 +2038,124 @@ machine! {
             guard {
                 self.lifecycle_phase == Phase::Pending
                 && self.due_at_utc_ms <= at_utc_ms
+                && self.misfire_deadline_utc_ms < at_utc_ms
+            }
+            update {
+                self.failure_detail = detail;
+                self.failure_class = None;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Misfired);
+                self.receipt_failure_class = None;
+                self.receipt_detail = detail;
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+            }
+            to Misfired
+            emit Misfired
+        }
+
+        // --- Reclaims exhausted ---
+        //
+        // A Pending occurrence past its misfire deadline whose earlier
+        // attempts recorded their dispatch and lost their executor five times.
+        // Each arm requires that evidence, so a row with none fails closed.
+
+        // The admission was recorded, and the input's outcome was never
+        // observed: delivery_failed with lease_lost.
+        transition ReclaimExhaustedAfterAdmission {
+            on input ResolveReclaimExhausted { admission_evidence, detail, at_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= at_utc_ms
+                && self.misfire_deadline_utc_ms < at_utc_ms
+                && self.attempt_count >= 5
+                && admission_evidence == AdmissionEvidence::Accepted
+            }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = detail;
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        // Only the dispatch start was recorded, so the admission was never
+        // proven: the occurrence ends as the misfire policy ends a late one.
+        transition ReclaimExhaustedAfterUnprovenDispatch {
+            on input ResolveReclaimExhausted { admission_evidence, detail, at_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= at_utc_ms
+                && self.misfire_deadline_utc_ms < at_utc_ms
+                && self.attempt_count >= 5
+                && admission_evidence == AdmissionEvidence::Started
+            }
+            update {
+                self.failure_detail = detail;
+                self.failure_class = None;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Misfired);
+                self.receipt_failure_class = None;
+                self.receipt_detail = detail;
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+            }
+            to Misfired
+            emit Misfired
+        }
+
+        // --- Unproven late redelivery not admitted ---
+        //
+        // A reclaim past the misfire deadline whose only evidence is an
+        // earlier dispatch start asked the target, and the target never
+        // admitted the delivery: the occurrence ends Misfired, as the policy
+        // ends a late one, and nothing was delivered. It requires that
+        // evidence and the passed deadline, so it fails closed for an
+        // admitted occurrence and inside the window.
+        transition UnprovenLateNotAdmittedFromClaimed {
+            on input ResolveUnprovenLateNotAdmitted { admission_evidence, detail, at_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && admission_evidence == AdmissionEvidence::Started
+                && self.misfire_deadline_utc_ms < at_utc_ms
+            }
+            update {
+                self.failure_detail = detail;
+                self.failure_class = None;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Misfired);
+                self.receipt_failure_class = None;
+                self.receipt_detail = detail;
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+            }
+            to Misfired
+            emit Misfired
+        }
+
+        transition UnprovenLateNotAdmittedFromDispatching {
+            on input ResolveUnprovenLateNotAdmitted { admission_evidence, detail, at_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && admission_evidence == AdmissionEvidence::Started
                 && self.misfire_deadline_utc_ms < at_utc_ms
             }
             update {
@@ -2328,6 +2631,25 @@ pub enum DeliveryAdmissionOutcome {
     Deduplicated,
 }
 
+/// What an occurrence's receipt history proves about its earlier attempts'
+/// target admission. The store derives it per row; no state field carries
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionEvidence {
+    /// Neither a DispatchStarted nor a DispatchAccepted receipt.
+    Unrecorded,
+    /// A DispatchStarted receipt and no DispatchAccepted one: the dispatch
+    /// started, and its admission was never proven.
+    Started,
+    /// A DispatchAccepted receipt: the target admitted the delivery.
+    Accepted,
+}
+
+/// The attempts an occurrence with recorded dispatch evidence may use past
+/// its misfire deadline. The guards above spell it as the literal 5; a test
+/// pins the two equal.
+pub const ADMITTED_RECLAIM_ATTEMPT_CAP: u64 = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryCompletionFailureReason {
     CompletionFutureFailed,
@@ -2353,6 +2675,18 @@ pub enum OccurrenceTargetProbeOutcome {
     Ready,
     Busy,
     Missing,
+}
+
+/// The redelivery a claim named in its effects, reported with that claim's
+/// target probe. No state field carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimRedelivery {
+    /// No redelivery: a first claim, or a reclaim that delivers as before.
+    Ordinary,
+    /// The claim emitted ReclaimedAfterAdmission.
+    AfterAdmission,
+    /// The claim emitted ReclaimedAfterUnprovenDispatch.
+    AfterUnprovenDispatch,
 }
 
 /// Pure observation of the owning schedule's lifecycle phase, extracted by the

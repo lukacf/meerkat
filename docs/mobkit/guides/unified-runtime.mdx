@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with Meta modules into a single managed runt
 icon: "layer-group"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 The unified runtime is the production entry point for Meta. It bootstraps a Meerkat mob and Meta's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -110,13 +110,13 @@ Meta composition, `delegate` uses an ephemeral child mob and retires the
 helper and its fork descendants when delegation completes. Such members
 cannot be resumed after restart. Persistent root-mob members retain their
 native identity and lineage through the configured durable mob storage.
-The convenience `persistent_state(...)` path persists sessions and other
-stores but leaves the native mob journal in memory. To retain member identity
-and lineage across process restarts, supply `mob_spec(...)` using
+The convenience `persistent_state(...)` path persists sessions, the native
+mob journal (`<persistent_state>/event_log.sqlite3`) and the other stores, so
+members keep their identity and lineage across process restarts. A host that
+keeps the journal elsewhere supplies `mob_spec(...)` using
 `MobBootstrapSpec::persistent(...)` with `persistent_mob_storage(...)` and its
-storage provenance. Durable document rows or continuity records alone cannot
-reconstruct missing native creation facts; the extension refuses unavailable
-authority.
+storage provenance. Durable document rows alone cannot reconstruct missing
+native creation facts; the extension refuses unavailable authority.
 
 Documents name a mob by its id alone, as their owner (`Owner::Mob`) or in an
 audience grant or deny (`Audience::Mob`), and they outlive the mob. A new mob
@@ -202,22 +202,11 @@ quarantined. `meta_store_conformance::chapters::mob_references` and
 holders in a plain `extension_mob_holders` table beside its ledgered
 tables, which Meta 0.9.2 ignores.
 
-The SDK callback-backed `GatewayContinuityStore` currently lacks the required
-retained identity-history capability. Registering this extension on such a
-host fails before activation with typed `ExtensionAuthorityUnavailable`.
-Use the local continuity store or an implementation of the complete history
-contract; an unavailable history is never interpreted as an unrelated Worker.
-
-Local identity history is a one-way opt-in to continuity schema version 3.
-Enabling it atomically installs retention triggers and backfills existing
-bindings. Older binaries refuse the database after this opt-in, because they
-cannot preserve the ancestry proof. Ordinary opens and head-only migrations
-do not enable history or incur this additional downgrade barrier.
-
-Current binaries continue retaining bindings even with extension tools
-disabled or the extension feature compiled out, so a later re-enable can
-safely resolve ancestors. Disabling the factory does not remove stored
-documents, identity history or those triggers.
+The extension resolves the identity behind a session through Core's member
+history, which keeps every binding Core committed for an identity, including
+bindings from before the extension was enabled. A history Core cannot read
+answers typed `ExtensionAuthorityUnavailable`; it is never interpreted as an
+unrelated Worker. Disabling the factory does not remove stored documents.
 
 The extension integration requires the Meerkat crate family at the exact
 versions declared in the repository manifests. Applications using the Meta Git
@@ -228,7 +217,7 @@ lockfile against those packages.
 
 <Steps>
   <Step title="Mob preparation">
-    The runtime first prepares the Meerkat mob. This does not unconditionally provision members or finish wiring. A persistent identity-first resume can remain staged in `Stopped` until continuity owners are registered and activation can proceed. A mob preparation failure returns `UnifiedRuntimeBootstrapError::Mob`.
+    The runtime first prepares the Meerkat mob. This does not unconditionally provision members or finish wiring. A persistent identity-first resume can remain staged in `Stopped` until activation can proceed. A mob preparation failure returns `UnifiedRuntimeBootstrapError::Mob`.
   </Step>
   <Step title="Module startup">
     After mob preparation, the supervisor attempts each discovered module and records its startup transitions. A module that exhausts its restart policy remains unloaded and emits a supervisor warning. A module-runtime initialization error or startup-thread panic rolls back the prepared mob before the builder returns an error.
@@ -303,6 +292,153 @@ let result = runtime.refresh_desired_topology().await?;
 `refresh_desired_topology` returns `Some(RestoreFlowResult)` when identity-first
 authority is attached and `None` otherwise. Calling whole-mob `reconcile` on an
 identity-first runtime fails rather than bypassing that authority.
+
+### Retiring an identity at a captured scope
+
+`retire_member_alias_tracked` refuses a generated alias of an older
+generation, but Core can move a member's session binding without a new
+generation: an alias captured before such a move still retires the member on
+its new session. A host that must retire exactly the member it captured
+retires at its saved `DeliveryScope` instead (see
+[scope-bound dispatch](/mobkit/api/rpc#scope-bound-dispatch)):
+
+```rust
+let scope = identity_runtime.capture_delivery_scope(&identity).await?;
+// ... persist the scope, deliver against it ...
+match identity_runtime.retire_at_scope_tracked(&identity, &scope).await {
+    Ok(_fencing_token) => { /* retired */ }
+    Err(ScopedRetireError::StaleScope { mismatch, .. }) => { /* the scope's member is not retired */ }
+    Err(other) => return Err(other.into()),
+}
+```
+
+Core decides. Under the identity's lifecycle lock, Meta reads Core's live
+member scope: when it is the member the scope names, the ordinary retire's
+memory hooks run first (the pre-retire distillation of the outgoing session,
+then the exit-interview note); when it is not, no hooks run. Then meerkat's
+`MobHandle::retire_at_scope` retires exactly the member incarnation the scope
+names, with retire's process-tree semantics: the member's `spawned_by`
+descendants, then the member, then the descendants again. Each step
+re-checks the scope inside the actor command that retires it, so a successor
+minted after the capture (a respawn, a reset, a wake after a retire) is never
+retired through the old scope. Meta holds no lease for the call and writes
+no continuity record; scoped dispatch compares the same Core facts.
+
+It returns the Core fence of the incarnation the scope names. `Ok` is
+meerkat's terminal barrier: that incarnation is retired, or no incarnation of
+the identity is current and none is still retiring, so a retry after a lost
+reply converges to `Ok`, as does a first call for an identity that is already
+retired. Core keeps the retired member's history and session,
+and a later wake resumes it at the next generation.
+
+A refusal does not retire the scope's member:
+
+- `Unsupported`: the bridge has no scoped seam, or the identity is externally
+  bound.
+- `Rejected`: a scope of another identity, or one wrapped around another
+  identity's member; a runtime that no longer admits identity operations (it
+  is shutting down, or its mob is closed); a mob that is not running; Core's
+  live member scope could not be read; the mob's actor stopped while the
+  call ran; or a denied control scope.
+- `Refused(IdentityHostAdopted)`: Core holds an identity intent row for the
+  identity, so the host owns it. `Refused(IdentityHistoryUnavailable)`: Core
+  cannot read that row.
+- `StaleScope { mismatch }`: the scope is stale for good; capture it again.
+  `RuntimeId`: another incarnation is current under another runtime id
+  (after a reset, a respawn, or a retire then a wake at Core's next
+  generation). `LeaseFencingToken`: Core's fence moved; the slot keeps its
+  0.9.3 name and carries Core's fence. `MemberBinding`: the scope's
+  incarnation is current but bound to another session, or the scope was
+  captured at another incarnation of the mob (destroyed and created again
+  under its id). A successor minted while the call runs can show as either
+  of the first two.
+
+Because Core re-checks the scope at each step, a `StaleScope` or `Rejected`
+answer can come after the first pass over the descendants: the descendants
+retired before it stay retired, and the scope's member is not retired.
+
+`Retire` is a failure: meerkat's retirement failed or is stuck, or the
+tracked operation ended without a result. Read the identity's status to see
+whether it was retired.
+
+### Adding one held member to a running roster
+
+`bootstrap_roster_held` holds a whole fresh roster at startup. To add one
+fresh member while the others keep running, hold it the same way with
+`add_member_held` on the identity-first context:
+
+```rust
+// `roster` is the host's MutableRosterProvider. The next roster pass
+// retires a member its result does not list.
+let listing = Arc::clone(&roster);
+let listed = spec.clone();
+let start = context
+    .add_member_held(spec, deadline, move |members, completion| async move {
+        // Complete the application from members[0].finished_surface, then
+        // list the member: the add still holds the bootstrap controller.
+        listing.upsert(listed);
+        Ok(())
+    })
+    .await?;
+match start {
+    HeldBootstrapStart::Activated(result) => { /* the member's own outcome */ }
+    HeldBootstrapStart::Unsettled(settlement) => {
+        roster.remove(&identity); // owed until a held pass publishes it
+        let error = settlement.settled().await; // the abort and its cleanup settled
+    }
+}
+```
+
+The add runs under the same bootstrap controller as every roster pass, so a
+pass waits for it, and it has the same one terminal decision: the deadline
+first, then the caller's loss, then the host's completion. It registers and
+embodies that identity only; it never reconciles the roster and never
+changes the managed peer edges, so refresh the topology afterwards when your
+topology provider wires the member. Freshness is Core's member history,
+read as for a held roster bootstrap: an identity Core spawned since the
+latest mob reset, live or retired, or one a first-boot row names, is refused
+(`ExistingContinuity`), and a failed read of that history is never taken as
+fresh. An identity a host adopted (Core holds an identity intent row for it)
+is refused (`IdentityHostAdopted`). A member embodied outside the add after
+its freshness read refuses the add (`NotHeld`). In each case the host is
+never asked. In lazy mode, too, the add embodies its member at once.
+
+Before the member exists, the add marks its identity as owing the host a
+held completion (in `<state>/held-completion-owed/`, as a held roster pass
+does), and it clears the mark when it publishes the member. A member whose
+add aborted never got a Core binding, so it can be added again. Until a held
+pass (that re-add, or a held roster pass) publishes it, every other wake or
+reset refuses it (`HeldCompletionOwed`), across a restart too; a delete finds
+nothing to delete, since Core never spawned it, and the mark stays.
+
+List the member from inside the completion, as above, never before the add.
+Until the add ends it holds the bootstrap controller, so no pass of the
+attached identity-first context reads the listing before the member is held
+and completed. A spec listed before the add starts can be read by a pass
+the host did not start, such as a `meta/reconcile_identity`, before the add
+has written its mark: in eager mode that pass embodies the member unheld, and
+in lazy mode it registers the member and an on-demand dispatch materializes
+it unheld. The add then refuses with `ExistingContinuity`, after the member
+has run without the host's completion. Once the add has ended without
+publishing the member, every other wake refuses it (`HeldCompletionOwed`).
+
+Two paths run outside the controller, and so outside that guarantee:
+`meta/reconcile_identity` on an RPC context that is not attached to the
+unified runtime, which reads the roster and restores it with no controller,
+and the host's own `bootstrap_roster(roster)`, which applies the roster it
+is given: a roster resolved before the add and applied after it retires the
+member.
+
+When the add ends `Unsettled`, unlist the member, or add it again. Until a
+held pass publishes it, a pass that reads the listing refuses it
+(`HeldCompletionOwed`). A caller that goes away while the completion runs
+after listing never sees `Unsettled`: the add aborts and the member stays
+listed and owed, so the host unlists it, or adds it again, on its recovery
+path.
+
+The add publishes no bootstrap generation. Until the next roster pass,
+`identity_bootstrap_status` does not list the added member, and its counts
+and `ready` do not cover it; the add's own result is its outcome.
 
 ### Shutdown
 
@@ -432,7 +568,7 @@ let app = runtime.build_reference_app_router_with_live(decisions).await?;
 
 What happens at build and at router time:
 
-- `session_store` (or `continuity_from_state_dir`) is required. Registering a
+- Persistent sessions (`persistent_state(...)`) are required. Registering a
   live door on an ephemeral runtime fails `build()` closed with
   `UnifiedRuntimeBuilderError::LiveCompose(LiveRequiresPersistentSessions)`;
   `live(...)` with an empty `public_base_url` fails with

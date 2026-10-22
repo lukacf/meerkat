@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -12,7 +12,7 @@ The Rust crate `meerkat-meta` is the primary interface for Meta. All other inter
 
 ```toml Cargo.toml
 [dependencies]
-meerkat-meta = "0.9.3"
+meerkat-meta = "0.9.4"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -257,6 +257,81 @@ stdout capacity for its Ready line is reserved, so the runtime then answers
 `AlreadyTaken`. A host composing the gateway gets it from
 `GatewayBootstrapReady::take_runtime_completion` and publishes it inside the
 same boundary as the Ready. A Ready published without taking it drops it.
+
+### Operation refusal observer
+
+A governed operation that Meerkat refuses reaches the model only as uniform
+feedback. A host sees which typed refusal Meerkat met, and what it did with
+it, through Meerkat's `OperationRefusalObserver` (see
+[Observe refusal dispositions](https://docs.rkat.ai/rust/native-authorization#observe-refusal-dispositions)).
+Install it with the builder:
+
+```rust
+use meerkat_meta::UnifiedRuntime;
+use std::sync::Arc;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .operation_refusal_observer(Arc::new(refusal_log)) // impl OperationRefusalObserver
+    .build()
+    .await?;
+```
+
+The builder installs it on every agent factory it owns, for persistent,
+scratch and temp-dir launches. Nothing of it reaches the event stream, a wire
+type or the model. A builder given an already-built `mob_spec(...)` refuses
+the observer with `UnifiedRuntimeBuilderError::ConflictingConfiguration`, and
+the public `MobBootstrapSpec` constructors take none: a host that builds its
+own spec installs the observer on its own agent factory and passes a session
+service built on that factory to `MobBootstrapSpec::new`.
+
+A host composing the stdio gateway answers
+`GatewayHostComposition::operation_refusal_observer`. The gateway asks once
+per member factory, with the construction it offers `compose_member_factory`,
+before either answer is installed. `Ok(None)` (the default) installs nothing,
+and `Err` refuses init. The observer sees every agent that factory builds:
+roster members, spawned helpers and forks, and the child mobs and councils
+agents create.
+
+`observe` is synchronous and must not block, and a panic in it propagates on
+the deciding task (the member's turn).
+
+### Fork instruction policy
+
+A fork of a member with activated host instructions does with them what the
+host's fork instruction policy says (the values are in the `runtime_options`
+row `fork_instruction_policy` of the
+[configuration reference](/mobkit/reference/configuration)). Set it with the builder:
+
+```rust
+use meerkat_core::ForkInstructionPolicy;
+use meerkat_meta::UnifiedRuntime;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .fork_instruction_policy(ForkInstructionPolicy::ReactivateInherited)
+    .build()
+    .await?;
+```
+
+The builder applies it to its mob for persistent, scratch and temp-dir
+launches, on create and on resume. Unset, Meerkat's default
+(`RequireExplicitActivation`) applies. A builder given an already-built
+`mob_spec(...)` refuses it with
+`UnifiedRuntimeBuilderError::ConflictingConfiguration`: set it on that spec
+with `MobBootstrapSpec::with_fork_instruction_policy`.
+
+The mob does not store the policy, so the builder applies it on every create
+and resume, and it cannot be chosen per fork. Under the default, a fork you
+drive yourself with `UnifiedRuntime::fork_member` is committed, and its child
+runs no turn until you activate each inherited key on it with
+`runtime.mob_handle().activate_member_instruction(child, request)`; read the
+key's `key_state` with `read_member_instruction_activations` first for the
+`expectation` and `supersedes` to use. A fork that starts its own first turn
+(`fork_off`, a delegation fork, a council participant, the bounded and
+detached member forks) is refused with `MobError::ForkInstructionRefused`
+instead. See [Fork instruction policy](/mobkit/reference/configuration#fork-instruction-policy)
+for what a fork copies and what `ReactivateInherited` trusts.
 
 ## Module routing
 

@@ -345,11 +345,14 @@ are in `docs/guides/upgrading.mdx` ("Upgrading to 0.9.4").
   input after the reload instead of resubmitting it (resubmit only with an
   idempotency key); a scheduled delivery waits for the input's own outcome
   for up to 5 lease periods. A custom `ScheduleTargetDelivery` resolves a
-  deduplicated replay's completion from the original input's outcome. A
-  delivery whose executor crashed is reclaimed only inside its misfire window
-  (known limitation: under the default `skip` grace and the 60 s lease it
-  ends `misfired`; keep crash recovery with a `catch_up_within`
-  `window_seconds` comfortably longer than the lease). An
+  deduplicated replay's completion from the original input's outcome. In
+  0.9.4 a delivery whose executor crashed is reclaimed only inside its
+  misfire window (known limitation: under the default `skip` grace and the
+  60 s lease it ends `misfired`; keep crash recovery with a `catch_up_within`
+  `window_seconds` comfortably longer than the lease). 0.9.5 lifts it: an
+  occurrence whose earlier attempt recorded its dispatch is reclaimed past
+  the deadline too and ends with the admitted input's outcome (see
+  `docs/guides/upgrading.mdx`, "Upgrading to 0.9.5"). An
   input admission whose write never answers is bounded by the same deadline
   (then `RecoveryRepairBlocked`, `runtime_admission_deadline`; resubmit with
   the same idempotency key); registration, unregister, control writes and

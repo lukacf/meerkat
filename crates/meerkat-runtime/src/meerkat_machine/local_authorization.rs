@@ -348,6 +348,50 @@ impl NativeWorkAuthorizationHost for NativeGrantWorkAuthorizationHost {
         ))
     }
 
+    /// Admit one governed service call request: under governed execution
+    /// custody, claimed once, and only when its whole association is the
+    /// record the installed owner's original source holds enrolled. The
+    /// returned context is Domain-scoped and runless: every operation is
+    /// prepared through the grant-backed policy (this request's owner, then
+    /// the operator's grant selected for the operation's target, then the
+    /// operation owner) and audited to the request's own sink.
+    fn service_call_authorization(
+        &self,
+        request: Arc<crate::input_authority::ServiceCallRequest>,
+    ) -> Result<WorkAuthorizationContext, meerkat_core::OperationAuthorizationError> {
+        let owner = self
+            .machine
+            .upgrade()
+            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
+        owner
+            .require_governed_execution_custody()
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        request.claim()?;
+        require_current_enrollment(self.invocation_owner.as_ref(), request.association())?;
+        let work_owner = Arc::new(ServiceCallOwner {
+            request: Arc::clone(&request),
+            invocation_owner: Arc::clone(&self.invocation_owner),
+            machine: self.machine.clone(),
+        });
+        let policy = Arc::new(GrantBackedWorkPolicy::new(
+            Arc::clone(&self.grants),
+            work_owner,
+            Arc::clone(&self.operation_owner),
+        ));
+        let context = policy.audited_work_context(
+            Arc::from([request.association().clone()]),
+            OperationExecutionScope::Domain,
+            Arc::clone(request.audit_sink()),
+        )?;
+        Ok(WorkAuthorizationContext::new(
+            Arc::new(NativeControlAuthorization {
+                inner: Arc::clone(context.authorization()),
+                machine: self.machine.clone(),
+            }),
+            OperationExecutionScope::Domain,
+        ))
+    }
+
     fn authenticate_association(
         &self,
         runtime: &LogicalRuntimeId,
@@ -2993,6 +3037,119 @@ mod tests {
     mod memory_persistence;
 
     mod agent_mandate;
+}
+
+/// Require that `association` is, as a whole, the record of the service
+/// original that `owner`'s original source holds enrolled: equal canonical
+/// bytes, so every claim is compared (requester, ingress actor and realm,
+/// executor, subject, target, original and its authentication, basis,
+/// contributors, ceilings and the empty controller fields). No current
+/// enrollment (never enrolled, or revoked) is `Denied`; a record that
+/// differs is `MalformedFacts`, the scoped ingress's own kind for a claim
+/// that disagrees with custody.
+fn require_current_enrollment(
+    owner: &dyn AdmittedWorkPolicyOwner,
+    association: &InputAuthorityAssociation,
+) -> Result<(), meerkat_core::OperationAuthorizationError> {
+    let claims = association.candidate();
+    let record = owner
+        .enrolled_service_original(&claims.ingress_namespace, &claims.original_work)?
+        .ok_or_else(|| OperationRefused::new(OperationRefusalKind::Denied))?;
+    let presented = association.canonical_bytes().map_err(|_| malformed())?;
+    let enrolled = record.canonical_bytes().map_err(|_| malformed())?;
+    if presented != enrolled {
+        return Err(malformed().into());
+    }
+    Ok(())
+}
+
+/// Whether `binding` is a tool operation whose plan's single owner-produced
+/// target is an MCP server operation, reached directly or through a checked
+/// route: the only operations a service call admits.
+fn service_operation(
+    binding: &PreparedAuthorizationBinding,
+) -> Result<bool, meerkat_core::OperationAuthorizationError> {
+    let AuthorizationOperation::Tool(tool) = &binding.facts().operation else {
+        return Ok(false);
+    };
+    let meerkat_core::authorization::ToolAuthorizationTarget::Dispatcher(plan) = &tool.target
+    else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        meerkat_authorization::grant_policy::single_tool_operation_target(plan)?,
+        Some(
+            meerkat_core::ToolOperationTarget::McpServerOperation { .. }
+                | meerkat_core::ToolOperationTarget::CheckedMcpServerOperation { .. }
+        )
+    ))
+}
+
+/// The admitted-work owner of one governed service call request. Before
+/// the installed owner answers for an operation, the bound operation must
+/// be one of this request's (a Domain-scoped, runless MCP server operation
+/// of its own association), the machine must still hold governed execution
+/// custody, and the request's whole association must still be the enrolled
+/// record (a revoked or cancelled original refuses the next operation).
+struct ServiceCallOwner {
+    request: Arc<crate::input_authority::ServiceCallRequest>,
+    invocation_owner: Arc<dyn AdmittedWorkPolicyOwner>,
+    machine: Weak<MeerkatMachineShared>,
+}
+
+impl ServiceCallOwner {
+    fn check_current(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        let facts = binding.facts();
+        if association != self.request.association()
+            || facts.execution_scope != OperationExecutionScope::Domain
+            || facts.run_id.is_some()
+            || facts.context_revision.is_some()
+            || !service_operation(binding)?
+        {
+            return Err(malformed().into());
+        }
+        let machine = self
+            .machine
+            .upgrade()
+            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
+        machine
+            .require_governed_execution_custody()
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        require_current_enrollment(self.invocation_owner.as_ref(), association)
+    }
+}
+
+impl AdmittedWorkPolicyOwner for ServiceCallOwner {
+    fn authorize_admitted_work(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        purpose: LocalPolicyPurpose,
+        now_ms: u64,
+    ) -> Result<WorkOwnerAllowance, meerkat_core::OperationAuthorizationError> {
+        // No model runs for a service call: it has no controller purpose.
+        if purpose != LocalPolicyPurpose::Operation {
+            return Err(malformed().into());
+        }
+        self.check_current(association, binding)?;
+        self.invocation_owner
+            .authorize_admitted_work(association, binding, purpose, now_ms)
+    }
+
+    fn review_mandate(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        now_ms: u64,
+    ) -> Result<Option<String>, meerkat_core::OperationAuthorizationError> {
+        self.check_current(association, binding)?;
+        self.invocation_owner
+            .review_mandate(association, binding, now_ms)
+    }
 }
 
 /// Recheck physical native custody at the final control entry, after service

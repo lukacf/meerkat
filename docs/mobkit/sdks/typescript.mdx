@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -51,6 +51,33 @@ const results = await handle.memoryQuery({
 
 ```
 
+## Fork instruction policy
+
+A member forked with `fork_off`, a delegation fork or a council does not run
+the instructions its source activated (`meta/member_activate_instruction`,
+skill bodies activated that way included) unless the gateway's fork instruction
+policy says so. Under the default, `"require_explicit_activation"`, such a fork
+is refused with `fork_instruction_refused` before anything is committed. Set
+the policy on the builder; it is sent as
+`runtime_options.fork_instruction_policy`:
+
+```typescript
+import { Meta } from "@rkat/meta-sdk";
+
+const rt = await Meta.builder()
+  .mob("config/mob.toml")
+  .forkInstructionPolicy("reactivate_inherited")
+  .build();
+```
+
+`forkInstructionPolicy` takes a `ForkInstructionPolicy`:
+`"require_explicit_activation"`, `"reactivate_inherited"` or `"refuse"`;
+another value throws `RangeError`. Unset, nothing is sent and the gateway
+default applies. The setting applies to every fork of the gateway's mob and
+cannot be chosen per fork. See
+[Fork instruction policy](/mobkit/reference/configuration#fork-instruction-policy)
+for what each value does and what `reactivate_inherited` trusts.
+
 ## Waiting for a turn
 
 The recommended completion barrier is a tracked delivery plus its ticket:
@@ -96,7 +123,7 @@ waits. `completionCursor(identity)` is a one-shot cursor read that never
 touches the member session. `inspectIdentity` does read the member session, so
 do not poll it.
 
-A wait that ends before a completion (a failed or cancelled run, a Broken,
+A wait that ends before a completion (a failed or cancelled run, a broken,
 retiring or deleted identity, or gateway shutdown) rejects with the typed
 `WaitEndedError`, whose `outcome` names why.
 
@@ -343,8 +370,7 @@ const archive = Buffer.from(pack.contentBase64, "base64"); // pack.filename, pac
 
 The TypeScript SDK targets the JSON-RPC gateway. Rust also exposes lower-level native builder options for in-process embedding; those remain Rust-native and are not mirrored one-for-one in the gateway SDKs.
 
-External identity providers are all-or-nothing: configure `continuityStore()`, `leaseProvider()`, and `scratchDir()` together. The SDK sends the corresponding init flags to Rust, and provider callbacks use Rust's wire shape (`result` tags and `ttl`). `LeaseProvider.renewLeases(...)` is atomic from the caller's perspective: a rejected promise means no input grant was changed, while every returned `renewed` or `lost` result is already committed for that identity. Providers must not commit a replacement grant and then reject.
-Continuity stores should treat `checkpoint_version` as monotonic per identity and continuity generation. A live session rebind changes `session_id` without resetting the version; only destructive reset advances `generation` and starts the version stream over.
+Identities and their sessions live in Core's stores under `persistentState(path)`: Core's mob machine holds each identity's session and generation, and a host supplies no continuity storage and holds no leases. The external identity providers of Meta 0.9.3 are removed; see [Upgrading to Meta 0.9.4](/mobkit/guides/upgrading-to-0-9-4) to move a deployment that used them.
 
 Raw gateway memory config accepts `{ backend: "local_json", health_check_endpoint: url }`, with `health_check_endpoint` optional; `local_json` is the only backend. The TypeScript helper is `memory.localJson({ healthCheckEndpoint: url })`; it translates that option to the snake_case wire key. The predecessor's backend helper was removed in 0.9 with no alias, and the gateway refuses its backend value at init. Gateway auth config supports JWT validation; Google/OIDC helpers are model objects, not accepted by `meta/init` today.
 
@@ -466,8 +492,8 @@ twin is `.on_error(callback)`.
 the init at once, reports each startup phase, and then settles it `ready` or
 `failed`. The SDK has **no built-in total deadline** for that wait. Startup
 legitimately includes provider callbacks (each bounded at 130 s by the
-gateway) and native persisted-authority prewarm, which is deliberately
-unbounded and can run for minutes on a large roster. Any fixed SDK timer
+gateway) and the native identity restore, which is deliberately unbounded
+and can run for minutes on a large roster. Any fixed SDK timer
 would sooner or later abort a healthy restore. `gatewayTimeoutMs` still
 bounds the wait for the `accepted` answer, and for an older gateway's single
 init response.
@@ -485,7 +511,7 @@ The wait ends only when one of these happens:
   `InitOutcomeUnknownError`.
 
 `InitOutcomeUnknownError` carries `initId`, `lastPhase` (the last
-`meta/init_progress` phase seen, such as `"prewarm"` or `"restore"`) and
+`meta/init_progress` phase seen, such as `"roster"` or `"restore"`) and
 `reason`. That makes a stuck or interrupted init diagnosable. The gateway may
 already have changed native state, so the SDK never retries it automatically
 and asks the gateway to shut down.

@@ -1462,6 +1462,17 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn settle_durable_tail_before_cold_start(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat::LiveSessionActorWitness,
@@ -16900,6 +16911,68 @@ mod tests {
             ),
             runtime_store,
         )
+    }
+
+    /// #1813: the RPC surface's mob session wrapper forwards the
+    /// claim-scoped durable-tail settle, which refuses a session another
+    /// runtime owner on the realm hosts. The trait default refuses it as
+    /// well, through the persistent resume verdict, so this row pins the
+    /// refusal; the forward keeps the cheaper cold-attach settle.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn rpc_mob_session_service_forwards_the_claimed_durable_tail_settle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hosting_lock_dir = temp.path().join("hosting");
+        let cold_delivery_lock = temp.path().join("delivery").join("cold-delivery.lock");
+        std::fs::create_dir_all(&hosting_lock_dir).expect("create the hosting lock dir");
+        std::fs::create_dir_all(
+            cold_delivery_lock
+                .parent()
+                .expect("the cold delivery lock has a parent"),
+        )
+        .expect("create the cold delivery dir");
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new(temp.path().join("runtime.sqlite3"))
+                .expect("open the runtime store")
+                .with_hosting_paths(meerkat_runtime::HostingPaths {
+                    hosting_lock_dir,
+                    cold_delivery_lock,
+                    database: None,
+                }),
+        );
+        let capability = runtime_store.hosting_capability();
+        assert!(
+            capability.is_cross_process(),
+            "the runtime store must offer cross-process hosting claims: {capability:?}"
+        );
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            1,
+            meerkat::PersistenceBundle::new(session_store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
+            crate::router::NotificationSink::noop(),
+        )
+        .expect("compose the RPC session runtime");
+        let session_id = SessionId::new();
+        let _other_owner_claim = meerkat_runtime::SessionHostingAuthority::new(
+            capability,
+            meerkat_runtime::HostingOwner::mint(),
+        )
+        .grant(&session_id)
+        .expect("another runtime owner hosts the session");
+        let error = runtime
+            .session_service()
+            .settle_durable_tail_before_cold_start(&session_id)
+            .await
+            .expect_err("the wrapper refuses a session another runtime owner hosts");
+        assert!(
+            matches!(error, SessionError::ServedElsewhere { .. }),
+            "the RPC wrapper must forward the claim-scoped settle: {error:?}"
+        );
     }
 
     #[tokio::test]

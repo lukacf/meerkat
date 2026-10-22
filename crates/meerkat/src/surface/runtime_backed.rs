@@ -4069,6 +4069,124 @@ mod tests {
         expect_unregister_completion(&adapter, &session_id).await;
     }
 
+    /// #1813: on a store that hosts sessions with OS-locked claims, the
+    /// existing attachment's registration holds the session's claim, so the
+    /// actor-only reconstruction's durable resume preparation joins that
+    /// claim rather than refusing its own runtime owner. The attachment keeps
+    /// the claim: another runtime owner is still refused afterwards.
+    #[tokio::test]
+    async fn materialize_session_reconstructs_actor_joining_its_attachments_hosting_claim() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let jsonl_store = Arc::new(JsonlStore::new(temp.path().join("sessions")));
+        jsonl_store
+            .init()
+            .await
+            .expect("initialize the session projection");
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new(temp.path().join("runtime.sqlite3"))
+                .expect("open the runtime store")
+                .with_hosting_paths(meerkat_core::session_hosting::HostingPaths {
+                    hosting_lock_dir: temp.path().join("hosting"),
+                    cold_delivery_lock: temp.path().join("cold-delivery.lock"),
+                    database: None,
+                }),
+        );
+        let capability = runtime_store.hosting_capability();
+        assert!(
+            capability.is_cross_process(),
+            "the store must host sessions with OS-locked claims: {capability:?}"
+        );
+        let persistence = PersistenceBundle::new(
+            jsonl_store as Arc<dyn SessionStore>,
+            runtime_store,
+            Arc::new(MemoryBlobStore::new()),
+        )
+        .expect("construct runtime authority");
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::for_provider(
+            meerkat_core::Provider::OpenAI,
+        )));
+        let (service, adapter) = build_runtime_backed_service(builder, 4, persistence)
+            .expect("compose the runtime-backed service");
+        let service = Arc::new(service);
+
+        let initial = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize the initial runtime-backed session");
+        let session_id = initial.session_id;
+        let original_witness = adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .expect("initial materialization should commit an exact attachment");
+        let persisted = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load authoritative session")
+            .expect("authoritative session should exist");
+        let recovered = build_recovered_session(
+            persisted.clone(),
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("build recovered actor request");
+
+        let turn_boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        service
+            .discard_live_session_under_runtime_turn_boundary(&session_id)
+            .await
+            .expect("discard only the live actor");
+        drop(turn_boundary);
+
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            persisted,
+            recovered.into_deferred_create_request(),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("the reconstruction joins its attachment's hosting claim");
+        assert_eq!(result.session_id, session_id);
+        assert_eq!(
+            adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .as_ref(),
+            Some(&original_witness),
+            "actor reconstruction must preserve exact attachment identity"
+        );
+        assert!(
+            matches!(
+                meerkat_core::session_hosting::SessionHostingAuthority::new(
+                    capability,
+                    meerkat_core::session_hosting::HostingOwner::mint(),
+                )
+                .grant(&session_id),
+                Err(meerkat_core::session_hosting::HostingRefused::ServedElsewhere(_))
+            ),
+            "the attachment keeps the session's hosting claim"
+        );
+        expect_prompt_completion(&adapter, &session_id, "reconstructed actor prompt").await;
+        expect_unregister_completion(&adapter, &session_id).await;
+    }
+
     #[tokio::test]
     async fn materialize_under_runtime_turn_boundary_is_actor_only() {
         let temp = tempfile::tempdir().expect("tempdir");

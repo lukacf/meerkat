@@ -5,16 +5,17 @@ use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
     AcquireScheduleExecutorLeaseOutcome, AcquireScheduleExecutorLeaseRequest,
-    ActiveScheduleExecutor, AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, ClaimDueRequest,
-    ClaimDueResult, DeliveryReceipt, Occurrence, OccurrenceDueAction, OccurrenceFilter,
-    OccurrenceId, OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
-    OccurrenceTransitionCommit, PendingSupersession, RenewOccurrenceLeaseOutcome,
-    RenewOccurrenceLeaseRequest, RenewOccurrenceLeaseResult, RenewScheduleExecutorLeaseOutcome,
-    RenewScheduleExecutorLeaseRequest, RuntimeDeliveryOutcome, Schedule, ScheduleExecutorLease,
-    ScheduleExecutorLeaseObservation, ScheduleFilter, ScheduleMutationCommit, SchedulePhase,
-    ScheduleRefillBatch, ScheduleRefillCandidate, ScheduleStore, ScheduleStoreActionTime,
-    ScheduleStoreError, ScheduleStoreKind, ScheduleStoreRowFault, ScheduleStoreRowFaultKind,
-    ScheduleStoreWakeMode, ScheduleTransitionCommit, apply_supersession_feedback,
+    ActiveScheduleExecutor, AdmissionEvidence, AuthorizedOccurrenceWrite, AuthorizedScheduleWrite,
+    ClaimDueRequest, ClaimDueResult, DeliveryReceipt, Occurrence, OccurrenceDueAction,
+    OccurrenceFilter, OccurrenceId, OccurrenceLifecycleError, OccurrenceLifecycleInput,
+    OccurrenceLifecycleMutator, OccurrenceTransitionCommit, PendingSupersession,
+    RenewOccurrenceLeaseOutcome, RenewOccurrenceLeaseRequest, RenewOccurrenceLeaseResult,
+    RenewScheduleExecutorLeaseOutcome, RenewScheduleExecutorLeaseRequest, RuntimeDeliveryOutcome,
+    Schedule, ScheduleExecutorLease, ScheduleExecutorLeaseObservation, ScheduleFilter,
+    ScheduleMutationCommit, SchedulePhase, ScheduleRefillBatch, ScheduleRefillCandidate,
+    ScheduleStore, ScheduleStoreActionTime, ScheduleStoreError, ScheduleStoreKind,
+    ScheduleStoreRowFault, ScheduleStoreRowFaultKind, ScheduleStoreWakeMode,
+    ScheduleTransitionCommit, apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
@@ -1582,23 +1583,47 @@ impl SqliteScheduleStore {
                 let mut transition_writes = Vec::new();
                 let mut claimed_count = 0usize;
                 for occurrence in occurrences {
-                    // Machine-owned due classification, tolerated per row: a
-                    // refusal skips only this occurrence (typed fault) and the
-                    // remaining rows still claim.
-                    let action = match occurrence.classify_due_action(store_now_utc) {
-                        Ok(action) => action,
-                        Err(error) => {
-                            row_faults.push(claim_row_fault(
-                                &occurrence,
-                                ScheduleStoreRowFaultKind::DueClassification,
-                                format!("due classification: {error}"),
-                            ));
+                    // What the row's receipt history proves about its earlier
+                    // attempts' admission, read before the expiry below
+                    // records its own receipt. A receipt row that does not
+                    // decode is this row's typed fault.
+                    let admission_evidence = match read_admission_evidence_in_txn(&tx, &occurrence)?
+                    {
+                        Ok(admission_evidence) => admission_evidence,
+                        Err(fault) => {
+                            row_faults.push(fault);
                             continue;
                         }
                     };
+                    // Machine-owned due classification, tolerated per row: a
+                    // refusal skips only this occurrence (typed fault) and the
+                    // remaining rows still claim.
+                    let action =
+                        match occurrence.classify_due_action(store_now_utc, admission_evidence) {
+                            Ok(action) => action,
+                            Err(error) => {
+                                row_faults.push(claim_row_fault(
+                                    &occurrence,
+                                    ScheduleStoreRowFaultKind::DueClassification,
+                                    format!("due classification: {error}"),
+                                ));
+                                continue;
+                            }
+                        };
                     match action {
                         Some(OccurrenceDueAction::MisfireRequired) => {
                             match resolve_due_misfire_in_txn(&tx, &occurrence, store_now_utc)? {
+                                Ok(write) => transition_writes.push(write),
+                                Err(fault) => row_faults.push(fault),
+                            }
+                        }
+                        Some(OccurrenceDueAction::ReclaimExhausted) => {
+                            match resolve_reclaim_exhausted_in_txn(
+                                &tx,
+                                &occurrence,
+                                admission_evidence,
+                                store_now_utc,
+                            )? {
                                 Ok(write) => transition_writes.push(write),
                                 Err(fault) => row_faults.push(fault),
                             }
@@ -1607,9 +1632,13 @@ impl SqliteScheduleStore {
                             if claimed_count >= limit {
                                 continue;
                             }
-                            let write =
-                                claim_occurrence_for_sqlite(occurrence, &request, store_now_utc)?
-                                    .into_authorized_write();
+                            let write = claim_occurrence_for_sqlite(
+                                occurrence,
+                                &request,
+                                store_now_utc,
+                                admission_evidence,
+                            )?
+                            .into_authorized_write();
                             write_occurrence_in_txn(&tx, write.occurrence())?;
                             transition_writes.push(write);
                             claimed_count += 1;
@@ -1638,22 +1667,25 @@ impl SqliteScheduleStore {
                             // row's typed fault, never a silent skip: the expiry
                             // above stays committed and the row re-enters the
                             // scan on the next tick.
-                            let claim_mutator =
-                                match claim_occurrence_for_sqlite(expired, &request, store_now_utc)
-                                {
-                                    Ok(claimed_occurrence) => claimed_occurrence,
-                                    Err(error) => {
-                                        let write = mutator.into_authorized_write();
-                                        write_occurrence_in_txn(&tx, write.occurrence())?;
-                                        transition_writes.push(write);
-                                        row_faults.push(claim_row_fault(
-                                            &occurrence,
-                                            ScheduleStoreRowFaultKind::DueClassification,
-                                            format!("lease-expiry reclaim: {error}"),
-                                        ));
-                                        continue;
-                                    }
-                                };
+                            let claim_mutator = match claim_occurrence_for_sqlite(
+                                expired,
+                                &request,
+                                store_now_utc,
+                                admission_evidence,
+                            ) {
+                                Ok(claimed_occurrence) => claimed_occurrence,
+                                Err(error) => {
+                                    let write = mutator.into_authorized_write();
+                                    write_occurrence_in_txn(&tx, write.occurrence())?;
+                                    transition_writes.push(write);
+                                    row_faults.push(claim_row_fault(
+                                        &occurrence,
+                                        ScheduleStoreRowFaultKind::DueClassification,
+                                        format!("lease-expiry reclaim: {error}"),
+                                    ));
+                                    continue;
+                                }
+                            };
                             mutator
                                 .absorb_followup(claim_mutator)
                                 .map_err(|error| StoreError::Internal(error.to_string()))?;
@@ -1662,6 +1694,13 @@ impl SqliteScheduleStore {
                             transition_writes.push(write);
                             claimed_count += 1;
                         }
+                        // A due action this store does not know yet is this
+                        // row's typed fault, never a silent skip.
+                        Some(other) => row_faults.push(claim_row_fault(
+                            &occurrence,
+                            ScheduleStoreRowFaultKind::DueClassification,
+                            format!("due classification: unsupported due action {other:?}"),
+                        )),
                         None => {}
                     }
                 }
@@ -2749,18 +2788,54 @@ fn resolve_due_misfire_in_txn(
     store_now_utc: chrono::DateTime<chrono::Utc>,
 ) -> Result<Result<AuthorizedOccurrenceWrite, ScheduleStoreRowFault>, StoreError> {
     let detail = Some(occurrence.due_misfire_detail_at(store_now_utc));
-    let mut mutator = match occurrence
-        .clone()
-        .apply(OccurrenceLifecycleInput::ResolveDueMisfire {
+    resolve_due_terminal_in_txn(
+        tx,
+        occurrence,
+        OccurrenceLifecycleInput::ResolveDueMisfire {
             detail,
             at_utc: store_now_utc,
-        }) {
+        },
+        "misfire",
+    )
+}
+
+/// Realize a machine-classified reclaim exhaustion for one row: a Pending
+/// occurrence past its misfire deadline whose recorded dispatch used up its
+/// reclaims. Same write and fault contract as [`resolve_due_misfire_in_txn`].
+fn resolve_reclaim_exhausted_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    occurrence: &Occurrence,
+    admission_evidence: AdmissionEvidence,
+    store_now_utc: chrono::DateTime<chrono::Utc>,
+) -> Result<Result<AuthorizedOccurrenceWrite, ScheduleStoreRowFault>, StoreError> {
+    let detail = Some(occurrence.reclaim_exhausted_detail(admission_evidence));
+    resolve_due_terminal_in_txn(
+        tx,
+        occurrence,
+        OccurrenceLifecycleInput::ResolveReclaimExhausted {
+            admission_evidence,
+            detail,
+            at_utc: store_now_utc,
+        },
+        "reclaim exhaustion",
+    )
+}
+
+/// Apply one due resolution (`resolution`) to a row and record its canonical
+/// receipt. `label` names the resolution in the row's typed faults.
+fn resolve_due_terminal_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    occurrence: &Occurrence,
+    resolution: OccurrenceLifecycleInput,
+    label: &str,
+) -> Result<Result<AuthorizedOccurrenceWrite, ScheduleStoreRowFault>, StoreError> {
+    let mut mutator = match occurrence.clone().apply(resolution) {
         Ok(mutator) => mutator,
         Err(error) => {
             return Ok(Err(claim_row_fault(
                 occurrence,
                 ScheduleStoreRowFaultKind::DueClassification,
-                format!("misfire resolution: {error}"),
+                format!("{label} resolution: {error}"),
             )));
         }
     };
@@ -2770,7 +2845,7 @@ fn resolve_due_misfire_in_txn(
             return Ok(Err(claim_row_fault(
                 occurrence,
                 ScheduleStoreRowFaultKind::DueClassification,
-                format!("misfire receipt: {error}"),
+                format!("{label} receipt: {error}"),
             )));
         }
     };
@@ -2787,7 +2862,7 @@ fn resolve_due_misfire_in_txn(
                 return Ok(Err(claim_row_fault(
                     occurrence,
                     ScheduleStoreRowFaultKind::DueClassification,
-                    format!("misfire receipt record: {error}"),
+                    format!("{label} receipt record: {error}"),
                 )));
             }
         };
@@ -2795,13 +2870,51 @@ fn resolve_due_misfire_in_txn(
         return Ok(Err(claim_row_fault(
             occurrence,
             ScheduleStoreRowFaultKind::DueClassification,
-            format!("misfire receipt record: {error}"),
+            format!("{label} receipt record: {error}"),
         )));
     }
     let write = mutator.into_authorized_write();
     write_receipt_in_txn(tx, &receipt)?;
     write_occurrence_in_txn(tx, write.occurrence())?;
     Ok(Ok(write))
+}
+
+/// What one row's receipt history proves about its earlier attempts' target
+/// admission ([`AdmissionEvidence::from_receipt_stages`]). The receipts have
+/// no stage column, so this decodes each receipt of the occurrence through
+/// the tolerant JSON column codec (TEXT or BLOB), read through the
+/// `(occurrence_id, recorded_at_ms)` index inside the claim transaction. A
+/// row that was never claimed (`attempt_count == 0`) has no dispatch receipt
+/// and is not read. A receipt that does not decode is the row's typed fault
+/// (`Ok(Err(fault))`), never skipped; a store read failure returns `Err`.
+fn read_admission_evidence_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    occurrence: &Occurrence,
+) -> Result<Result<AdmissionEvidence, ScheduleStoreRowFault>, StoreError> {
+    if occurrence.attempt_count == 0 {
+        return Ok(Ok(AdmissionEvidence::None));
+    }
+    let mut stmt = tx.prepare(
+        "SELECT receipt_json FROM schedule_receipts WHERE occurrence_id = ?1 ORDER BY recorded_at_ms ASC, receipt_id ASC",
+    )?;
+    let rows = stmt.query_map(params![occurrence.occurrence_id.to_string()], |row| {
+        Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes())
+    })?;
+    let mut stages = Vec::new();
+    for row in rows {
+        let bytes = row?;
+        match serde_json::from_slice::<DeliveryReceipt>(&bytes) {
+            Ok(receipt) => stages.push(receipt.stage),
+            Err(error) => {
+                return Ok(Err(claim_row_fault(
+                    occurrence,
+                    ScheduleStoreRowFaultKind::Deserialization,
+                    format!("receipt history: {error}"),
+                )));
+            }
+        }
+    }
+    Ok(Ok(AdmissionEvidence::from_receipt_stages(stages)))
 }
 
 fn write_receipt_in_txn(
@@ -2859,6 +2972,7 @@ fn claim_occurrence_for_sqlite(
     occurrence: Occurrence,
     request: &ClaimDueRequest,
     at_utc: DateTime<Utc>,
+    admission_evidence: AdmissionEvidence,
 ) -> Result<OccurrenceLifecycleMutator, StoreError> {
     occurrence
         .apply(OccurrenceLifecycleInput::Claim {
@@ -2866,6 +2980,7 @@ fn claim_occurrence_for_sqlite(
             at_utc,
             lease_expires_at_utc: at_utc + request.lease_duration,
             claim_token: Uuid::now_v7(),
+            admission_evidence,
         })
         .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))
 }

@@ -9,19 +9,21 @@ use meerkat::surface::{
     parse_mob_member_schedule_identity,
 };
 use meerkat::{
-    DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryTerminal, ForkContextSpec,
-    HelperOptionsSpec, IdentityTargetBinding, MobTargetBinding, Occurrence,
-    ScheduleDeliveryIdentity, ScheduleDomainError, ScheduleSpawnTooling, ScheduledMobAction,
-    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction, TargetProbeOutcome,
+    DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryTerminal,
+    ExistingDelivery, ExistingDeliveryAnswer, ForkContextSpec, HelperOptionsSpec,
+    IdentityTargetBinding, MobTargetBinding, Occurrence, ScheduleDeliveryIdentity,
+    ScheduleDomainError, ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind,
+    ScheduledMobRuntimeMode, ScheduledSessionAction, TargetProbeOutcome,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata};
 use meerkat_mob::{
     AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobError,
     MobExternalDeliveryBeginOutcome, MobExternalDeliveryCompleteOutcome,
-    MobExternalDeliveryIdentity, MobExternalDeliveryIntent, MobExternalDeliveryRepairOutcome,
-    MobExternalDeliveryRepairState, MobExternalDeliveryTargetKind, MobExternalDeliveryTerminal,
-    MobFailureClass, MobFlowRunPublicResultClass, MobId, MobRunStatus, RunId,
-    mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
+    MobExternalDeliveryIdentity, MobExternalDeliveryIntent, MobExternalDeliveryRecord,
+    MobExternalDeliveryRepairOutcome, MobExternalDeliveryRepairState,
+    MobExternalDeliveryTargetKind, MobExternalDeliveryTerminal, MobFailureClass,
+    MobFlowRunPublicResultClass, MobId, MobRunStatus, RunId, mob_machine_run_public_result_class,
+    mob_machine_run_status_is_terminal,
 };
 
 use crate::MobMcpState;
@@ -58,6 +60,14 @@ pub(crate) trait ScheduleMobRuntime: Send + Sync {
         &self,
         intent: &MobExternalDeliveryIntent,
     ) -> Result<MobExternalDeliveryRepairOutcome, MobError>;
+
+    /// Read the durable external-delivery record of `idempotency_key`
+    /// without beginning a delivery.
+    async fn load_external_delivery(
+        &self,
+        mob_id: &MobId,
+        idempotency_key: &str,
+    ) -> Result<Option<MobExternalDeliveryRecord>, MobError>;
 
     /// Explicit target-owned proof that re-entering one `ExistingBegun`
     /// delivery with the same stable identity cannot repeat its effect.
@@ -149,6 +159,17 @@ impl ScheduleMobRuntime for MobMcpState {
         intent: &MobExternalDeliveryIntent,
     ) -> Result<MobExternalDeliveryRepairOutcome, MobError> {
         self.mob_schedule_external_delivery_repair(intent).await
+    }
+
+    async fn load_external_delivery(
+        &self,
+        mob_id: &MobId,
+        idempotency_key: &str,
+    ) -> Result<Option<MobExternalDeliveryRecord>, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .load_external_delivery(idempotency_key)
+            .await
     }
 
     fn supports_external_delivery_redrive(
@@ -367,6 +388,38 @@ impl SurfaceScheduleMobHost for MobMcpScheduleHost {
                 }
             }
         }
+    }
+
+    /// An unproven late redelivery answers from the durable external-delivery
+    /// record of its stable identity: an existing record goes down the
+    /// ordinary paths, which answer from it without a second effect; no
+    /// record means the mob never admitted the delivery, and nothing is
+    /// delivered or recorded. An admitted one replays as before.
+    async fn deliver_existing_mob_target(
+        &self,
+        occurrence: &Occurrence,
+        schedule_identity: &ScheduleDeliveryIdentity,
+        binding: &MobTargetBinding,
+        existing: ExistingDelivery,
+    ) -> Result<ExistingDeliveryAnswer, ScheduleDomainError> {
+        if existing != ExistingDelivery::Admitted {
+            let mob_id = MobId::from(mob_binding_mob_id(binding));
+            let record = self
+                .runtime
+                .load_external_delivery(&mob_id, &schedule_identity.idempotency_key)
+                .await
+                .map_err(|error| ScheduleDomainError::DeliveryRepairDeferred {
+                    detail: format!(
+                        "durable mob external-delivery record is unavailable for a late redelivery: {error}"
+                    ),
+                })?;
+            if record.is_none() {
+                return Ok(ExistingDeliveryAnswer::NotAdmittedPastDeadline);
+            }
+        }
+        self.deliver_mob_target(occurrence, schedule_identity, binding)
+            .await
+            .map(ExistingDeliveryAnswer::Dispatch)
     }
 
     async fn deliver_mob_target(
@@ -1394,6 +1447,17 @@ mod tests {
             Ok(outcome)
         }
 
+        async fn load_external_delivery(
+            &self,
+            mob_id: &MobId,
+            idempotency_key: &str,
+        ) -> Result<Option<MobExternalDeliveryRecord>, MobError> {
+            self.external_deliveries
+                .load_external_delivery(mob_id, idempotency_key)
+                .await
+                .map_err(Into::into)
+        }
+
         fn supports_external_delivery_redrive(
             &self,
             target_kind: MobExternalDeliveryTargetKind,
@@ -1691,6 +1755,106 @@ mod tests {
             runtime.sent_members.lock().expect("sent lock").len(),
             1,
             "stable runtime input identity must suppress a duplicate member effect"
+        );
+    }
+
+    fn deploy_monitor_send() -> MobTargetBinding {
+        MobTargetBinding::Member {
+            mob_id: "ops".to_string(),
+            member_id: "deploy-monitor".to_string(),
+            action: ScheduledMobAction::Send {
+                content: ContentInput::Text("Check deploy state.".to_string()),
+                render_metadata: None,
+            },
+        }
+    }
+
+    /// An unproven late redelivery the mob holds no durable record of: the
+    /// mob never admitted it, so the host answers not admitted, sends
+    /// nothing and records nothing. A host that delivered it would send the
+    /// member a late, fresh message.
+    #[tokio::test]
+    async fn unproven_late_redelivery_without_a_record_delivers_nothing() {
+        let runtime = Arc::new(RecordingMobRuntime::default());
+        runtime.with_member("deploy-monitor");
+        let host = MobMcpScheduleHost::from_runtime(runtime.clone());
+        let binding = deploy_monitor_send();
+        let occurrence = sample_occurrence(binding.clone());
+        let identity = sample_delivery_identity(&occurrence);
+
+        let answer = host
+            .deliver_existing_mob_target(
+                &occurrence,
+                &identity,
+                &binding,
+                ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the record read answers");
+        assert!(matches!(
+            answer,
+            ExistingDeliveryAnswer::NotAdmittedPastDeadline
+        ));
+        assert!(runtime.sent_members.lock().expect("sent lock").is_empty());
+        assert!(
+            runtime
+                .load_external_delivery(&MobId::from("ops"), &identity.idempotency_key)
+                .await
+                .expect("load")
+                .is_none(),
+            "the probe begins no delivery record"
+        );
+    }
+
+    /// The same redelivery with a durable record (the mob admitted the
+    /// delivery before the executor died): it goes down the ordinary replay
+    /// path and answers from the record, with no second member effect.
+    #[tokio::test]
+    async fn unproven_late_redelivery_with_a_record_replays_it() {
+        let runtime = Arc::new(RecordingMobRuntime::default());
+        runtime.with_member("deploy-monitor");
+        let host = MobMcpScheduleHost::from_runtime(runtime.clone());
+        let binding = deploy_monitor_send();
+        let occurrence = sample_occurrence(binding.clone());
+        let identity = sample_delivery_identity(&occurrence);
+        let (delivery_identity, _intent) = begin_test_delivery(
+            runtime.as_ref(),
+            &occurrence,
+            &binding,
+            MobExternalDeliveryTargetKind::MemberSend,
+        )
+        .await;
+        runtime
+            .member_send(
+                &MobId::from("ops"),
+                AgentIdentity::from("deploy-monitor"),
+                ContentInput::Text("Check deploy state.".to_string()),
+                None,
+                delivery_identity,
+            )
+            .await
+            .expect("the first attempt's member effect");
+
+        let answer = host
+            .deliver_existing_mob_target(
+                &occurrence,
+                &identity,
+                &binding,
+                ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the replay answers");
+        let ExistingDeliveryAnswer::Dispatch(dispatch) = answer else {
+            panic!("a recorded delivery replays");
+        };
+        assert_eq!(
+            dispatch.completion.await.expect("replay completion").phase,
+            meerkat::OccurrencePhase::Completed
+        );
+        assert_eq!(
+            runtime.sent_members.lock().expect("sent lock").len(),
+            1,
+            "the replay sends nothing a second time"
         );
     }
 

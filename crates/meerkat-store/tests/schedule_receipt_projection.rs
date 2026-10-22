@@ -78,6 +78,7 @@ async fn sample_in_flight_occurrence(
                 at_utc: Utc::now(),
                 lease_expires_at_utc: Utc::now() + Duration::minutes(5),
                 claim_token,
+                admission_evidence: meerkat_schedule::AdmissionEvidence::None,
             },
         )
         .await?

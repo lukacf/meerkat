@@ -1,7 +1,7 @@
 use crate::error::{ScheduleDomainError, ScheduleStoreError};
 use crate::lifecycle::{
-    ClaimedDispatchDisposition, CompletionSupersessionDisposition, OccurrenceLifecycleEffect,
-    OccurrenceLifecycleInput, StaleCompletionArrivalTrigger,
+    AdmissionEvidence, ClaimedDispatchDisposition, CompletionSupersessionDisposition,
+    OccurrenceLifecycleEffect, OccurrenceLifecycleInput, StaleCompletionArrivalTrigger,
 };
 use crate::service::ScheduleService;
 use crate::store::{
@@ -179,6 +179,72 @@ pub trait ScheduleTargetDelivery: Send + Sync {
         occurrence: &Occurrence,
         identity: &ScheduleDeliveryIdentity,
     ) -> Result<DeliveryDispatch, ScheduleDomainError>;
+
+    /// Redeliver a reclaimed occurrence whose earlier attempt recorded its
+    /// dispatch, without a fresh admission (see [`ExistingDelivery`]). The
+    /// driver has committed the attempt's `DispatchStarted` intent, as for
+    /// [`Self::deliver_occurrence`].
+    ///
+    /// The default delivers an [`ExistingDelivery::Admitted`] occurrence
+    /// through [`Self::deliver_occurrence`], whose contract already requires
+    /// the identity's durable deduplication, and answers
+    /// [`ExistingDeliveryAnswer::NotAdmittedPastDeadline`] for
+    /// [`ExistingDelivery::UnprovenLate`]: an implementation that cannot
+    /// tell whether it admitted the identity never delivers a late
+    /// occurrence fresh, and the occurrence ends misfired as before.
+    /// Implementations that decide it inside their admission override this.
+    async fn deliver_existing_occurrence(
+        &self,
+        occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
+        existing: ExistingDelivery,
+    ) -> Result<ExistingDeliveryAnswer, ScheduleDomainError> {
+        match existing {
+            ExistingDelivery::Admitted => self
+                .deliver_occurrence(occurrence, identity)
+                .await
+                .map(ExistingDeliveryAnswer::Dispatch),
+            ExistingDelivery::UnprovenLate => Ok(ExistingDeliveryAnswer::NotAdmittedPastDeadline),
+        }
+    }
+}
+
+/// How the driver redelivers a reclaimed occurrence whose earlier attempt
+/// recorded its dispatch ([`ScheduleTargetDelivery::deliver_existing_occurrence`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExistingDelivery {
+    /// An earlier attempt's target admission is recorded (a DispatchAccepted
+    /// receipt). The redelivery must find that admission and never admit
+    /// the delivery fresh; the occurrence then waits for that input's own
+    /// outcome. A target that no longer knows the admission ends the
+    /// occurrence delivery_failed, with nothing admitted.
+    ///
+    /// A host runnable keeps no admission record and runs again, so for host
+    /// runnables the guarantee is at-least-once and relies on the runnable
+    /// deduplicating on its `delivery_idempotency_key`. The trait's default
+    /// and the surface hosts' defaults (a mob host, a session host that does
+    /// not decide existing-only admission) redeliver an admitted occurrence
+    /// through the ordinary delivery and rely on its durable deduplication:
+    /// a target that lost the admission admits the delivery again.
+    Admitted,
+    /// Only an earlier attempt's dispatch start is recorded, and the
+    /// occurrence is past its misfire deadline. The redelivery may only find
+    /// an admission of the same identity; a target that holds none answers
+    /// [`ExistingDeliveryAnswer::NotAdmittedPastDeadline`], and the
+    /// occurrence ends misfired.
+    UnprovenLate,
+}
+
+/// The answer of [`ScheduleTargetDelivery::deliver_existing_occurrence`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ExistingDeliveryAnswer {
+    /// The target found the earlier admission: the dispatch of that replay.
+    Dispatch(DeliveryDispatch),
+    /// For [`ExistingDelivery::UnprovenLate`]: the target never admitted the
+    /// delivery, and admitted nothing now.
+    NotAdmittedPastDeadline,
 }
 
 #[derive(Debug, Clone)]
@@ -547,8 +613,24 @@ impl ScheduleDriver {
                         ));
                     }
                     report.claimed_occurrences += 1;
+                    // A reclaim of an occurrence whose earlier attempt
+                    // recorded its dispatch redelivers without a fresh
+                    // admission.
+                    let existing = commit.effects().iter().find_map(|effect| match effect {
+                        OccurrenceLifecycleEffect::ReclaimedAfterAdmission => {
+                            Some(ExistingDelivery::Admitted)
+                        }
+                        OccurrenceLifecycleEffect::ReclaimedAfterUnprovenDispatch => {
+                            Some(ExistingDelivery::UnprovenLate)
+                        }
+                        _ => None,
+                    });
                     match self
-                        .handle_claimed_occurrence(successor.clone(), claimed.store_now_utc)
+                        .handle_claimed_occurrence(
+                            successor.clone(),
+                            claimed.store_now_utc,
+                            existing,
+                        )
                         .await
                     {
                         Ok(true) => report.terminalized_occurrences += 1,
@@ -608,6 +690,7 @@ impl ScheduleDriver {
         &self,
         occurrence: Occurrence,
         store_now_utc: chrono::DateTime<Utc>,
+        existing: Option<ExistingDelivery>,
     ) -> Result<bool, ScheduleDomainError> {
         let frozen_occurrence = occurrence.clone();
         let occurrence = match self
@@ -661,7 +744,10 @@ impl ScheduleDriver {
             }
         };
 
-        let occurrence = match self.resolve_target_probe(occurrence, store_now_utc).await? {
+        let occurrence = match self
+            .resolve_target_probe(occurrence, store_now_utc, existing)
+            .await?
+        {
             TargetProbeResolution::Continue(occurrence) => *occurrence,
             TargetProbeResolution::Terminalized => return Ok(true),
             TargetProbeResolution::StaleClaim => return Ok(false),
@@ -702,11 +788,31 @@ impl ScheduleDriver {
         }
         let mut dispatching = dispatch_commit.successor().clone();
 
-        let dispatch = match self
-            .delivery
-            .deliver_occurrence(&dispatching, &delivery_identity)
-            .await
-        {
+        let delivered = match existing {
+            None => {
+                self.delivery
+                    .deliver_occurrence(&dispatching, &delivery_identity)
+                    .await
+            }
+            Some(existing) => match self
+                .delivery
+                .deliver_existing_occurrence(&dispatching, &delivery_identity, existing)
+                .await
+            {
+                Ok(ExistingDeliveryAnswer::Dispatch(dispatch)) => Ok(dispatch),
+                Ok(ExistingDeliveryAnswer::NotAdmittedPastDeadline) => {
+                    return self
+                        .resolve_existing_delivery_not_admitted(
+                            dispatching,
+                            existing,
+                            store_now_utc,
+                        )
+                        .await;
+                }
+                Err(error) => Err(error),
+            },
+        };
+        let dispatch = match delivered {
             Ok(dispatch) => dispatch,
             Err(ScheduleDomainError::DeliveryRepairDeferred { detail }) => {
                 tracing::warn!(
@@ -926,10 +1032,49 @@ impl ScheduleDriver {
         Ok(())
     }
 
+    /// The target holds no admission of a redelivery that had to find one.
+    /// An unproven late one ends misfired, as the misfire policy ends a late
+    /// occurrence the target never started; nothing was delivered. An
+    /// admitted one answering so breaks the trait's contract (it must find
+    /// the admission or fail the delivery) and ends delivery_failed.
+    async fn resolve_existing_delivery_not_admitted(
+        &self,
+        dispatching: Occurrence,
+        existing: ExistingDelivery,
+        store_now_utc: DateTime<Utc>,
+    ) -> Result<bool, ScheduleDomainError> {
+        let lifecycle = match existing {
+            ExistingDelivery::UnprovenLate => {
+                OccurrenceLifecycleInput::ResolveUnprovenLateNotAdmitted {
+                    admission_evidence: AdmissionEvidence::Started,
+                    detail: Some(
+                        "dispatch started past the misfire deadline and the target never admitted it"
+                            .to_string(),
+                    ),
+                    at_utc: store_now_utc,
+                }
+            }
+            ExistingDelivery::Admitted => OccurrenceLifecycleInput::ResolveDeliveryFailure {
+                reason: DeliveryFailureReason::InternalError,
+                detail: Some(
+                    "the target answered not admitted for a delivery whose admission is recorded"
+                        .to_string(),
+                ),
+                at_utc: store_now_utc,
+            },
+        };
+        self.terminalize_occurrence(dispatching, lifecycle, None)
+            .await?;
+        Ok(true)
+    }
+
+    /// `existing` is the redelivery the claim named: the occurrence machine
+    /// never ends one on a busy target, since it starts no new run.
     async fn resolve_target_probe(
         &self,
         occurrence: Occurrence,
         store_now_utc: DateTime<Utc>,
+        existing: Option<ExistingDelivery>,
     ) -> Result<TargetProbeResolution, ScheduleDomainError> {
         let (outcome, detail) = match self.probe.probe_target(&occurrence).await? {
             TargetProbeOutcome::Ready => (OccurrenceTargetProbeOutcome::Ready, None),
@@ -945,6 +1090,7 @@ impl ScheduleDriver {
 
         let lifecycle = OccurrenceLifecycleInput::ResolveTargetProbe {
             outcome,
+            redelivery: existing,
             detail,
             at_utc: store_now_utc,
         };
@@ -4694,6 +4840,577 @@ mod tests {
         Ok(())
     }
 
+    /// A keyed target that decides a redelivery inside its admission: an
+    /// existing input under the stable key is replayed (deduplicated), and
+    /// without one an admitted redelivery fails and an unproven late one
+    /// answers that the target never admitted it. Nothing is admitted fresh
+    /// on either path.
+    #[derive(Default)]
+    struct ExistingOnlyKeyedDelivery {
+        keyed: KeyedInputDelivery,
+        existing_calls: Mutex<Vec<ExistingDelivery>>,
+    }
+
+    #[async_trait]
+    impl ScheduleTargetDelivery for ExistingOnlyKeyedDelivery {
+        async fn deliver_occurrence(
+            &self,
+            occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            self.keyed.deliver_occurrence(occurrence, identity).await
+        }
+
+        async fn deliver_existing_occurrence(
+            &self,
+            occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
+            existing: ExistingDelivery,
+        ) -> Result<ExistingDeliveryAnswer, ScheduleDomainError> {
+            self.existing_calls.lock().await.push(existing);
+            let admitted = self
+                .keyed
+                .inputs
+                .lock()
+                .await
+                .contains_key(&identity.idempotency_key);
+            if admitted {
+                return self
+                    .keyed
+                    .deliver_occurrence(occurrence, identity)
+                    .await
+                    .map(ExistingDeliveryAnswer::Dispatch);
+            }
+            match existing {
+                ExistingDelivery::Admitted => Err(ScheduleDomainError::DeliveryFailed {
+                    occurrence_id: occurrence.occurrence_id.clone(),
+                    reason: "the admitted input is no longer known".to_string(),
+                }),
+                _ => Ok(ExistingDeliveryAnswer::NotAdmittedPastDeadline),
+            }
+        }
+    }
+
+    /// How far the first attempt got before its process died.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FirstAttemptEnd {
+        /// The dispatch start was recorded and the target never saw it.
+        DispatchStarted,
+        /// The target admitted the input; its admission was not recorded.
+        AdmittedUnrecorded,
+        /// The target admitted the input and DispatchAccepted was recorded.
+        AdmissionRecorded,
+    }
+
+    /// One occurrence under a one-second catch-up window whose first attempt
+    /// ended as `end` and whose executor then died: its 25 ms lease lapses
+    /// and the misfire deadline passes before a restarted driver ticks.
+    async fn first_attempt_died_past_the_deadline(
+        store: &Arc<dyn ScheduleStore>,
+        service: &ScheduleService,
+        keyed: &KeyedInputDelivery,
+        end: FirstAttemptEnd,
+        name: &str,
+    ) -> Result<(crate::ScheduleId, ScheduleDeliveryIdentity), ScheduleDomainError> {
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some(name.into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::milliseconds(200),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::CatchUpWithin { window_seconds: 1 },
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let intent =
+            claim_and_start_dispatch_without_waiter(store, Duration::milliseconds(25)).await?;
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&intent);
+        if end != FirstAttemptEnd::DispatchStarted {
+            drop(keyed.deliver_occurrence(&intent, &identity).await?);
+        }
+        if end == FirstAttemptEnd::AdmissionRecorded {
+            let _accepted = store
+                .transition_occurrence_with_receipt_if_current(
+                    &intent.occurrence_id,
+                    intent.attempt_count,
+                    intent.claim_token(),
+                    OccurrenceLifecycleInput::DispatchAccepted {
+                        admission_outcome: DeliveryAdmissionOutcome::Accepted,
+                        at_utc: Utc::now(),
+                    },
+                    Some(RuntimeDeliveryOutcome::AdmissionAccepted),
+                )
+                .await?
+                .ok_or_else(|| {
+                    ScheduleDomainError::Internal("the first claim went stale".to_string())
+                })?;
+        }
+        // The process dies: the lease lapses and the misfire deadline (one
+        // second after due) passes.
+        sleep(std::time::Duration::from_millis(1_200)).await;
+        Ok((schedule.schedule_id, identity))
+    }
+
+    fn restarted_driver(
+        service: &ScheduleService,
+        store: &Arc<dyn ScheduleStore>,
+        delivery: Arc<dyn ScheduleTargetDelivery>,
+    ) -> ScheduleDriver {
+        ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery,
+            "restarted-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        )
+    }
+
+    /// An admitted delivery whose executor died, reclaimed past its misfire
+    /// deadline: the reclaim is not refused, the redelivery replays the
+    /// admitted input without a fresh admission, and the occurrence ends with
+    /// that input's own outcome, with no row fault. Before the recorded
+    /// admission exempted the reclaim from the misfire deadline it ended
+    /// Misfired.
+    #[tokio::test]
+    async fn admitted_delivery_reclaimed_past_its_misfire_deadline_ends_with_its_input()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let delivery = Arc::new(ExistingOnlyKeyedDelivery::default());
+        let (schedule_id, identity) = first_attempt_died_past_the_deadline(
+            &store,
+            &service,
+            &delivery.keyed,
+            FirstAttemptEnd::AdmissionRecorded,
+            "admitted-reclaim-past-deadline",
+        )
+        .await?;
+
+        let driver = restarted_driver(&service, &store, delivery.clone());
+        let report = driver.tick_once().await?;
+        assert_eq!(report.fault_count(), 0, "the reclaim is not refused");
+        let waiting =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::AwaitingCompletion)
+                .await?;
+        assert_eq!(waiting.attempt_count, 2);
+        assert_eq!(
+            delivery.existing_calls.lock().await.as_slice(),
+            &[ExistingDelivery::Admitted]
+        );
+        assert_eq!(
+            delivery.keyed.admissions.lock().await.as_slice(),
+            &[
+                RuntimeDeliveryOutcome::AdmissionAccepted,
+                RuntimeDeliveryOutcome::AdmissionDeduplicated
+            ],
+            "the redelivery replays the first admission"
+        );
+
+        delivery
+            .keyed
+            .settle(
+                &identity.idempotency_key,
+                DeliveryTerminal::runtime_completion(
+                    RuntimeCompletionOutcome::Completed,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        let completed =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::Completed).await?;
+        assert_eq!(completed.attempt_count, 2);
+        Ok(())
+    }
+
+    /// Only the dispatch start was recorded, and the target never admitted
+    /// the delivery: the reclaim past the deadline asks the target, which
+    /// answers not admitted, and the occurrence ends Misfired with nothing
+    /// admitted.
+    #[tokio::test]
+    async fn unproven_late_redelivery_the_target_never_admitted_ends_misfired()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let delivery = Arc::new(ExistingOnlyKeyedDelivery::default());
+        let (schedule_id, _identity) = first_attempt_died_past_the_deadline(
+            &store,
+            &service,
+            &delivery.keyed,
+            FirstAttemptEnd::DispatchStarted,
+            "unproven-late-not-admitted",
+        )
+        .await?;
+
+        let driver = restarted_driver(&service, &store, delivery.clone());
+        let report = driver.tick_once().await?;
+        assert_eq!(report.fault_count(), 0);
+        let misfired =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::Misfired).await?;
+        assert_eq!(misfired.attempt_count, 2);
+        assert_eq!(
+            delivery.existing_calls.lock().await.as_slice(),
+            &[ExistingDelivery::UnprovenLate]
+        );
+        assert!(
+            delivery.keyed.admissions.lock().await.is_empty(),
+            "nothing is admitted"
+        );
+        Ok(())
+    }
+
+    /// Only the dispatch start was recorded, but the target did admit the
+    /// input: the late reclaim finds that admission, and the occurrence ends
+    /// with the input's own outcome. Before the reclaim asked the target, it
+    /// ended Misfired.
+    #[tokio::test]
+    async fn unproven_late_redelivery_the_target_admitted_ends_with_its_input()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let delivery = Arc::new(ExistingOnlyKeyedDelivery::default());
+        let (schedule_id, identity) = first_attempt_died_past_the_deadline(
+            &store,
+            &service,
+            &delivery.keyed,
+            FirstAttemptEnd::AdmittedUnrecorded,
+            "unproven-late-admitted",
+        )
+        .await?;
+
+        let driver = restarted_driver(&service, &store, delivery.clone());
+        driver.tick_once().await?;
+        let waiting =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::AwaitingCompletion)
+                .await?;
+        assert_eq!(waiting.attempt_count, 2);
+        assert_eq!(
+            delivery.existing_calls.lock().await.as_slice(),
+            &[ExistingDelivery::UnprovenLate]
+        );
+        delivery
+            .keyed
+            .settle(
+                &identity.idempotency_key,
+                DeliveryTerminal::runtime_completion(
+                    RuntimeCompletionOutcome::Abandoned,
+                    Some("the admitted input failed".to_string()),
+                    None,
+                ),
+            )
+            .await;
+        let failed =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::DeliveryFailed)
+                .await?;
+        assert_eq!(
+            failed.failure_class,
+            Some(OccurrenceFailureClass::RuntimeRejected)
+        );
+        Ok(())
+    }
+
+    /// A driver restarted after the executor died whose target probe answers
+    /// Busy: the earlier attempt's input is still running on the target.
+    fn restarted_driver_onto_a_busy_target(
+        service: &ScheduleService,
+        store: &Arc<dyn ScheduleStore>,
+        delivery: Arc<dyn ScheduleTargetDelivery>,
+    ) -> ScheduleDriver {
+        ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(StaticProbe(TargetProbeOutcome::Busy {
+                detail: Some("the earlier attempt's input is still running".to_string()),
+            })),
+            delivery,
+            "restarted-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        )
+    }
+
+    /// The one occurrence of `schedule_id`, read right after a tick.
+    async fn the_occurrence(
+        service: &ScheduleService,
+        schedule_id: &crate::ScheduleId,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        let mut occurrences = service.list_occurrences(schedule_id).await?;
+        assert_eq!(occurrences.len(), 1, "one occurrence: {occurrences:?}");
+        Ok(occurrences.remove(0))
+    }
+
+    /// An admitted delivery reclaimed while its input still runs, under
+    /// skip_if_running: the probe answers Busy, but the redelivery starts no
+    /// new run, so the overlap policy does not end it. It replays the
+    /// admitted input, and the occurrence ends with that input's outcome.
+    /// Before the probe resolution knew the claim's redelivery it ended
+    /// Skipped with target_busy.
+    #[tokio::test]
+    async fn admitted_reclaim_onto_a_busy_target_ends_with_its_input()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let delivery = Arc::new(ExistingOnlyKeyedDelivery::default());
+        let (schedule_id, identity) = first_attempt_died_past_the_deadline(
+            &store,
+            &service,
+            &delivery.keyed,
+            FirstAttemptEnd::AdmissionRecorded,
+            "admitted-reclaim-busy-target",
+        )
+        .await?;
+
+        let driver = restarted_driver_onto_a_busy_target(&service, &store, delivery.clone());
+        let report = driver.tick_once().await?;
+        assert_eq!(report.fault_count(), 0);
+        let reclaimed = the_occurrence(&service, &schedule_id).await?;
+        assert!(
+            !matches!(
+                reclaimed.phase,
+                OccurrencePhase::Skipped | OccurrencePhase::Misfired
+            ),
+            "a busy target must not end an admitted redelivery: {:?} {:?}",
+            reclaimed.phase,
+            reclaimed.failure_class
+        );
+        let waiting =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::AwaitingCompletion)
+                .await?;
+        assert_eq!(waiting.attempt_count, 2);
+        assert_eq!(
+            delivery.existing_calls.lock().await.as_slice(),
+            &[ExistingDelivery::Admitted]
+        );
+        assert_eq!(
+            delivery.keyed.admissions.lock().await.as_slice(),
+            &[
+                RuntimeDeliveryOutcome::AdmissionAccepted,
+                RuntimeDeliveryOutcome::AdmissionDeduplicated
+            ],
+            "the redelivery replays the first admission"
+        );
+
+        delivery
+            .keyed
+            .settle(
+                &identity.idempotency_key,
+                DeliveryTerminal::runtime_completion(
+                    RuntimeCompletionOutcome::Completed,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        let completed =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::Completed).await?;
+        assert_eq!(completed.attempt_count, 2);
+        assert_eq!(completed.failure_class, None);
+        Ok(())
+    }
+
+    /// Only the dispatch start was recorded, the target did admit the input,
+    /// and that input still runs: the late reclaim's probe answers Busy, the
+    /// redelivery finds the admission, and the occurrence ends with the
+    /// input's outcome. Before the probe resolution knew the claim's
+    /// redelivery it ended Skipped with target_busy.
+    #[tokio::test]
+    async fn unproven_late_reclaim_onto_a_busy_target_ends_with_its_input()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let delivery = Arc::new(ExistingOnlyKeyedDelivery::default());
+        let (schedule_id, identity) = first_attempt_died_past_the_deadline(
+            &store,
+            &service,
+            &delivery.keyed,
+            FirstAttemptEnd::AdmittedUnrecorded,
+            "unproven-late-busy-target",
+        )
+        .await?;
+
+        let driver = restarted_driver_onto_a_busy_target(&service, &store, delivery.clone());
+        let report = driver.tick_once().await?;
+        assert_eq!(report.fault_count(), 0);
+        let reclaimed = the_occurrence(&service, &schedule_id).await?;
+        assert!(
+            !matches!(
+                reclaimed.phase,
+                OccurrencePhase::Skipped | OccurrencePhase::Misfired
+            ),
+            "a busy target must not end an unproven late redelivery the target admitted: {:?} {:?}",
+            reclaimed.phase,
+            reclaimed.failure_class
+        );
+        let waiting =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::AwaitingCompletion)
+                .await?;
+        assert_eq!(waiting.attempt_count, 2);
+        assert_eq!(
+            delivery.existing_calls.lock().await.as_slice(),
+            &[ExistingDelivery::UnprovenLate]
+        );
+        assert_eq!(
+            delivery.keyed.admissions.lock().await.as_slice(),
+            &[
+                RuntimeDeliveryOutcome::AdmissionAccepted,
+                RuntimeDeliveryOutcome::AdmissionDeduplicated
+            ],
+            "the redelivery replays the first admission"
+        );
+
+        delivery
+            .keyed
+            .settle(
+                &identity.idempotency_key,
+                DeliveryTerminal::runtime_completion(
+                    RuntimeCompletionOutcome::Completed,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        let completed =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::Completed).await?;
+        assert_eq!(completed.attempt_count, 2);
+        Ok(())
+    }
+
+    /// Only the dispatch start was recorded, the target never admitted the
+    /// delivery, and it is busy with other work: the late reclaim still asks
+    /// the target rather than skipping, and the occurrence ends Misfired
+    /// with nothing admitted, as with a ready target. Before the probe
+    /// resolution knew the claim's redelivery it ended Skipped with
+    /// target_busy.
+    #[tokio::test]
+    async fn unproven_late_reclaim_onto_a_busy_target_that_never_admitted_it_misfires()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let delivery = Arc::new(ExistingOnlyKeyedDelivery::default());
+        let (schedule_id, _identity) = first_attempt_died_past_the_deadline(
+            &store,
+            &service,
+            &delivery.keyed,
+            FirstAttemptEnd::DispatchStarted,
+            "unproven-late-busy-not-admitted",
+        )
+        .await?;
+
+        let driver = restarted_driver_onto_a_busy_target(&service, &store, delivery.clone());
+        let report = driver.tick_once().await?;
+        assert_eq!(report.fault_count(), 0);
+        let ended = the_occurrence(&service, &schedule_id).await?;
+        assert_eq!(
+            (ended.phase, ended.failure_class),
+            (OccurrencePhase::Misfired, None),
+            "the redelivery asks the target and misfires, never skips as busy"
+        );
+        assert_eq!(ended.attempt_count, 2);
+        assert_eq!(
+            delivery.existing_calls.lock().await.as_slice(),
+            &[ExistingDelivery::UnprovenLate]
+        );
+        assert!(
+            delivery.keyed.admissions.lock().await.is_empty(),
+            "nothing is admitted"
+        );
+        Ok(())
+    }
+
+    /// An implementation that keeps the trait's default never delivers an
+    /// unproven late occurrence fresh: the default answers not admitted, and
+    /// the occurrence ends Misfired as before, with no second delivery. A
+    /// default that called `deliver_occurrence` here would admit it.
+    #[tokio::test]
+    async fn default_existing_delivery_never_delivers_an_unproven_late_occurrence()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let delivery = Arc::new(KeyedInputDelivery::default());
+        let (schedule_id, _identity) = first_attempt_died_past_the_deadline(
+            &store,
+            &service,
+            &delivery,
+            FirstAttemptEnd::DispatchStarted,
+            "default-unproven-late",
+        )
+        .await?;
+
+        let driver = restarted_driver(&service, &store, delivery.clone());
+        driver.tick_once().await?;
+        let misfired =
+            wait_for_occurrence_phase(&service, &schedule_id, OccurrencePhase::Misfired).await?;
+        assert_eq!(misfired.attempt_count, 2);
+        assert!(
+            delivery.admissions.lock().await.is_empty(),
+            "the default delivers nothing"
+        );
+        Ok(())
+    }
+
+    /// No dispatch was recorded at all: past the deadline the misfire policy
+    /// decides as before, and nothing is reclaimed.
+    #[tokio::test]
+    async fn a_claim_without_a_recorded_dispatch_still_misfires_past_the_deadline()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("no-recorded-dispatch".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::milliseconds(200),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::CatchUpWithin { window_seconds: 1 },
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let executor_lease = test_executor_lease(&store).await;
+        let claimed = store
+            .claim_due_occurrences(
+                &executor_lease,
+                ClaimDueRequest {
+                    owner_id: "dying-process".into(),
+                    limit: 1,
+                    lease_duration: Duration::milliseconds(25),
+                },
+            )
+            .await?;
+        store.release_executor_lease(executor_lease).await?;
+        assert_eq!(claimed.transitions.len(), 1);
+        sleep(std::time::Duration::from_millis(1_200)).await;
+
+        let delivery = Arc::new(ExistingOnlyKeyedDelivery::default());
+        let driver = restarted_driver(&service, &store, delivery.clone());
+        driver.tick_once().await?;
+        driver.tick_once().await?;
+        let misfired =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Misfired)
+                .await?;
+        assert_eq!(misfired.attempt_count, 1, "no reclaim");
+        assert!(delivery.existing_calls.lock().await.is_empty());
+        assert!(delivery.keyed.admissions.lock().await.is_empty());
+        Ok(())
+    }
+
     /// Commit only the pre-effect intent-bearing occurrence state, with no
     /// adapter call or live completion waiter. This is the exact durable
     /// crash boundary between intent and target effect.
@@ -4943,7 +5660,7 @@ mod tests {
         service.pause(&schedule.schedule_id).await?;
 
         let terminalized = driver
-            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc)
+            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc, None)
             .await?;
         let current = service
             .list_occurrences(&schedule.schedule_id)
@@ -5026,7 +5743,7 @@ mod tests {
         service.delete(&schedule.schedule_id).await?;
 
         let terminalized = driver
-            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc)
+            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc, None)
             .await?;
         let current = service
             .list_occurrences(&schedule.schedule_id)
@@ -5115,7 +5832,7 @@ mod tests {
             .await?;
 
         let terminalized = driver
-            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc)
+            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc, None)
             .await?;
         let current = service
             .list_occurrences(&schedule.schedule_id)
@@ -5463,7 +6180,7 @@ mod tests {
         // must stay benign (typed idempotent no-op): no probe, no delivery,
         // no error, no duplicate superseded receipt.
         driver
-            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc)
+            .handle_claimed_occurrence(occurrence.clone(), claimed.store_now_utc, None)
             .await?;
         assert_eq!(*probe.calls.lock().await, 0, "delete should block probes");
         assert_eq!(

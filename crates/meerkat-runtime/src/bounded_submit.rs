@@ -1219,6 +1219,26 @@ mod tests {
         assert_eq!(evidence, MIN_EVIDENCE_READ_BOUND);
     }
 
+    /// The trait's default deduplicate-only admission refuses and admits
+    /// nothing: an implementation that does not decide it inside its own
+    /// admission never admits fresh.
+    #[tokio::test]
+    async fn the_default_existing_only_admission_refuses_and_admits_nothing() {
+        let runtime = ScriptedRuntime::new();
+        let mut input = prompt("redelivery");
+        input.header_mut().idempotency_key = Some(IdempotencyKey::new("scheduled-delivery"));
+        match runtime
+            .accept_existing_input_with_completion(&SessionId::new(), input)
+            .await
+        {
+            Err(RuntimeDriverError::NoExistingAdmission { key }) => {
+                assert_eq!(key, "scheduled-delivery");
+            }
+            other => panic!("expected NoExistingAdmission, got {other:?}"),
+        }
+        assert_eq!(runtime.admissions_started.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test]
     async fn expired_bound_reports_durably_queued_from_the_store_index() {
         let queued = InputId::new();

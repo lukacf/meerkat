@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for OccurrenceLifecycleMachine.
 
-CONSTANTS BooleanValues, ClaimOwnerValues, ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, CompletionSupersessionDispositionValues, CorrelationIdValues, DeliveryAdmissionOutcomeValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, LateCompletionResolutionClassValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, RuntimeOutcomeKeyValues, ScheduleIdValues, SessionIdValues, StringValues, TargetBindingIdValues, TriggerKeyValues
+CONSTANTS AdmissionEvidenceValues, BooleanValues, ClaimOwnerValues, ClaimRedeliveryValues, ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, CompletionSupersessionDispositionValues, CorrelationIdValues, DeliveryAdmissionOutcomeValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, LateCompletionResolutionClassValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, RuntimeOutcomeKeyValues, ScheduleIdValues, SessionIdValues, StringValues, TargetBindingIdValues, TriggerKeyValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -828,7 +828,7 @@ ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotLiveForTerminalPending(refusal_kind, trigger) ==
     /\ phase = "Pending"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -836,7 +836,7 @@ ClassifyTransitionFailureNotLiveForTerminalPending(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotLiveForTerminalClaimed(refusal_kind, trigger) ==
     /\ phase = "Claimed"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Claimed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -844,7 +844,7 @@ ClassifyTransitionFailureNotLiveForTerminalClaimed(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotLiveForTerminalDispatching(refusal_kind, trigger) ==
     /\ phase = "Dispatching"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Dispatching"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -852,7 +852,7 @@ ClassifyTransitionFailureNotLiveForTerminalDispatching(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion(refusal_kind, trigger) ==
     /\ phase = "AwaitingCompletion"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "AwaitingCompletion"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -860,7 +860,7 @@ ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion(refusal_kind, trig
 
 ClassifyTransitionFailureNotLiveForTerminalCompleted(refusal_kind, trigger) ==
     /\ phase = "Completed"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -868,7 +868,7 @@ ClassifyTransitionFailureNotLiveForTerminalCompleted(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotLiveForTerminalSkipped(refusal_kind, trigger) ==
     /\ phase = "Skipped"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Skipped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -876,7 +876,7 @@ ClassifyTransitionFailureNotLiveForTerminalSkipped(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotLiveForTerminalMisfired(refusal_kind, trigger) ==
     /\ phase = "Misfired"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Misfired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -884,7 +884,7 @@ ClassifyTransitionFailureNotLiveForTerminalMisfired(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotLiveForTerminalSuperseded(refusal_kind, trigger) ==
     /\ phase = "Superseded"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "Superseded"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -892,7 +892,7 @@ ClassifyTransitionFailureNotLiveForTerminalSuperseded(refusal_kind, trigger) ==
 
 ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed(refusal_kind, trigger) ==
     /\ phase = "DeliveryFailed"
-    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (trigger = "Supersede"))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
+    /\ ((IF (trigger = "Complete") THEN TRUE ELSE (IF (trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (trigger = "Supersede"))))))))) /\ (IF (refusal_kind = "GuardRejected") THEN TRUE ELSE (refusal_kind = "NoMatchingTransition")))
     /\ phase' = "DeliveryFailed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
@@ -1100,7 +1100,7 @@ PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revis
     /\ stale_completion_arrivals' = 0
 
 
-ClassifyDuePendingFuture(now_utc_ms) ==
+ClassifyDuePendingFuture(now_utc_ms, admission_evidence) ==
     /\ phase = "Pending"
     /\ (now_utc_ms < due_at_utc_ms)
     /\ phase' = "Pending"
@@ -1108,23 +1108,31 @@ ClassifyDuePendingFuture(now_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDuePendingMisfire(now_utc_ms) ==
+ClassifyDuePendingMisfire(now_utc_ms, admission_evidence) ==
     /\ phase = "Pending"
-    /\ ((due_at_utc_ms <= now_utc_ms) /\ (misfire_deadline_utc_ms < now_utc_ms))
+    /\ ((due_at_utc_ms <= now_utc_ms) /\ (misfire_deadline_utc_ms < now_utc_ms) /\ (admission_evidence = "Unrecorded"))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDuePendingClaimEligible(now_utc_ms) ==
+ClassifyDuePendingClaimEligible(now_utc_ms, admission_evidence) ==
     /\ phase = "Pending"
-    /\ ((due_at_utc_ms <= now_utc_ms) /\ (now_utc_ms <= misfire_deadline_utc_ms))
+    /\ ((due_at_utc_ms <= now_utc_ms) /\ (IF (now_utc_ms <= misfire_deadline_utc_ms) THEN TRUE ELSE ((admission_evidence # "Unrecorded") /\ (attempt_count < 5))))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueClaimedLeaseExpired(now_utc_ms) ==
+ClassifyDuePendingReclaimExhausted(now_utc_ms, admission_evidence) ==
+    /\ phase = "Pending"
+    /\ ((due_at_utc_ms <= now_utc_ms) /\ (misfire_deadline_utc_ms < now_utc_ms) /\ (admission_evidence # "Unrecorded") /\ (attempt_count >= 5))
+    /\ phase' = "Pending"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_dac7ac5b0d5b99b3
+
+
+ClassifyDueClaimedLeaseExpired(now_utc_ms, admission_evidence) ==
     /\ phase = "Claimed"
     /\ ((lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None) <= now_utc_ms))
     /\ phase' = "Claimed"
@@ -1132,7 +1140,7 @@ ClassifyDueClaimedLeaseExpired(now_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueDispatchingLeaseExpired(now_utc_ms) ==
+ClassifyDueDispatchingLeaseExpired(now_utc_ms, admission_evidence) ==
     /\ phase = "Dispatching"
     /\ ((lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None) <= now_utc_ms))
     /\ phase' = "Dispatching"
@@ -1140,7 +1148,7 @@ ClassifyDueDispatchingLeaseExpired(now_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueAwaitingCompletionLeaseExpired(now_utc_ms) ==
+ClassifyDueAwaitingCompletionLeaseExpired(now_utc_ms, admission_evidence) ==
     /\ phase = "AwaitingCompletion"
     /\ ((lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None) <= now_utc_ms))
     /\ phase' = "AwaitingCompletion"
@@ -1148,7 +1156,7 @@ ClassifyDueAwaitingCompletionLeaseExpired(now_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueClaimedLeaseCurrent(now_utc_ms) ==
+ClassifyDueClaimedLeaseCurrent(now_utc_ms, admission_evidence) ==
     /\ phase = "Claimed"
     /\ (IF (lease_expires_at_utc_ms = None) THEN TRUE ELSE (now_utc_ms < (IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None)))
     /\ phase' = "Claimed"
@@ -1156,7 +1164,7 @@ ClassifyDueClaimedLeaseCurrent(now_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueDispatchingLeaseCurrent(now_utc_ms) ==
+ClassifyDueDispatchingLeaseCurrent(now_utc_ms, admission_evidence) ==
     /\ phase = "Dispatching"
     /\ (IF (lease_expires_at_utc_ms = None) THEN TRUE ELSE (now_utc_ms < (IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None)))
     /\ phase' = "Dispatching"
@@ -1164,7 +1172,7 @@ ClassifyDueDispatchingLeaseCurrent(now_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueAwaitingCompletionLeaseCurrent(now_utc_ms) ==
+ClassifyDueAwaitingCompletionLeaseCurrent(now_utc_ms, admission_evidence) ==
     /\ phase = "AwaitingCompletion"
     /\ (IF (lease_expires_at_utc_ms = None) THEN TRUE ELSE (now_utc_ms < (IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None)))
     /\ phase' = "AwaitingCompletion"
@@ -1172,35 +1180,35 @@ ClassifyDueAwaitingCompletionLeaseCurrent(now_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueCompletedNoAction(now_utc_ms) ==
+ClassifyDueCompletedNoAction(now_utc_ms, admission_evidence) ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueSkippedNoAction(now_utc_ms) ==
+ClassifyDueSkippedNoAction(now_utc_ms, admission_evidence) ==
     /\ phase = "Skipped"
     /\ phase' = "Skipped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueMisfiredNoAction(now_utc_ms) ==
+ClassifyDueMisfiredNoAction(now_utc_ms, admission_evidence) ==
     /\ phase = "Misfired"
     /\ phase' = "Misfired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueSupersededNoAction(now_utc_ms) ==
+ClassifyDueSupersededNoAction(now_utc_ms, admission_evidence) ==
     /\ phase = "Superseded"
     /\ phase' = "Superseded"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-ClassifyDueDeliveryFailedNoAction(now_utc_ms) ==
+ClassifyDueDeliveryFailedNoAction(now_utc_ms, admission_evidence) ==
     /\ phase = "DeliveryFailed"
     /\ phase' = "DeliveryFailed"
     /\ model_step_count' = model_step_count + 1
@@ -1514,9 +1522,69 @@ RecordReceiptDeliveryFailed(correlation_id, detail, materialized_session_id, arg
     /\ UnchangedFrame_8de17078a40e0109
 
 
-ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token) ==
+ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, admission_evidence) ==
     /\ phase = "Pending"
-    /\ ((due_at_utc_ms <= at_utc_ms) /\ (at_utc_ms <= misfire_deadline_utc_ms))
+    /\ ((due_at_utc_ms <= at_utc_ms) /\ (at_utc_ms <= misfire_deadline_utc_ms) /\ (admission_evidence # "Accepted"))
+    /\ phase' = "Claimed"
+    /\ model_step_count' = model_step_count + 1
+    /\ claimed_by' = Some(owner_id)
+    /\ lease_expires_at_utc_ms' = Some(arg_lease_expires_at_utc_ms)
+    /\ claimed_at_utc_ms' = Some(at_utc_ms)
+    /\ claim_token' = Some(arg_claim_token)
+    /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = None
+    /\ last_receipt_recorded_at_utc_ms' = None
+    /\ last_receipt_attempt' = None
+    /\ last_receipt_stage' = None
+    /\ last_receipt_failure_class' = None
+    /\ last_receipt_detail' = None
+    /\ last_receipt_correlation_id' = None
+    /\ last_receipt_materialized_session_id' = None
+    /\ runtime_outcome_key' = None
+    /\ receipt_stage' = None
+    /\ receipt_failure_class' = None
+    /\ receipt_detail' = None
+    /\ failure_class' = None
+    /\ failure_detail' = None
+    /\ dispatched_at_utc_ms' = None
+    /\ completed_at_utc_ms' = None
+    /\ attempt_count' = (attempt_count) + 1
+    /\ UnchangedFrame_0b1d331647e227f9
+
+
+ClaimPendingAfterAdmission(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, admission_evidence) ==
+    /\ phase = "Pending"
+    /\ ((due_at_utc_ms <= at_utc_ms) /\ (admission_evidence = "Accepted") /\ (IF (at_utc_ms <= misfire_deadline_utc_ms) THEN TRUE ELSE (attempt_count < 5)))
+    /\ phase' = "Claimed"
+    /\ model_step_count' = model_step_count + 1
+    /\ claimed_by' = Some(owner_id)
+    /\ lease_expires_at_utc_ms' = Some(arg_lease_expires_at_utc_ms)
+    /\ claimed_at_utc_ms' = Some(at_utc_ms)
+    /\ claim_token' = Some(arg_claim_token)
+    /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = None
+    /\ last_receipt_recorded_at_utc_ms' = None
+    /\ last_receipt_attempt' = None
+    /\ last_receipt_stage' = None
+    /\ last_receipt_failure_class' = None
+    /\ last_receipt_detail' = None
+    /\ last_receipt_correlation_id' = None
+    /\ last_receipt_materialized_session_id' = None
+    /\ runtime_outcome_key' = None
+    /\ receipt_stage' = None
+    /\ receipt_failure_class' = None
+    /\ receipt_detail' = None
+    /\ failure_class' = None
+    /\ failure_detail' = None
+    /\ dispatched_at_utc_ms' = None
+    /\ completed_at_utc_ms' = None
+    /\ attempt_count' = (attempt_count) + 1
+    /\ UnchangedFrame_0b1d331647e227f9
+
+
+ClaimPendingAfterUnprovenDispatch(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, admission_evidence) ==
+    /\ phase = "Pending"
+    /\ ((due_at_utc_ms <= at_utc_ms) /\ (admission_evidence = "Started") /\ (misfire_deadline_utc_ms < at_utc_ms) /\ (attempt_count < 5))
     /\ phase' = "Claimed"
     /\ model_step_count' = model_step_count + 1
     /\ claimed_by' = Some(owner_id)
@@ -1818,7 +1886,7 @@ DeliveryFailureScheduleMandateUnavailable(reason, detail, at_utc_ms) ==
     /\ UnchangedFrame_baba76eb08ae0995
 
 
-TargetProbeReadyClaimed(outcome, detail, at_utc_ms) ==
+TargetProbeReadyClaimed(outcome, redelivery, detail, at_utc_ms) ==
     /\ phase = "Claimed"
     /\ (outcome = "Ready")
     /\ phase' = "Claimed"
@@ -1826,7 +1894,7 @@ TargetProbeReadyClaimed(outcome, detail, at_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-TargetProbeBusyAllowedByPolicy(outcome, detail, at_utc_ms) ==
+TargetProbeBusyAllowedByPolicy(outcome, redelivery, detail, at_utc_ms) ==
     /\ phase = "Claimed"
     /\ (outcome = "Busy")
     /\ (overlap_policy = "AllowConcurrent")
@@ -1835,10 +1903,21 @@ TargetProbeBusyAllowedByPolicy(outcome, detail, at_utc_ms) ==
     /\ UnchangedFrame_dac7ac5b0d5b99b3
 
 
-TargetProbeBusySkipByPolicy(outcome, detail, at_utc_ms) ==
+TargetProbeBusyExistingRedelivery(outcome, redelivery, detail, at_utc_ms) ==
     /\ phase = "Claimed"
     /\ (outcome = "Busy")
     /\ (overlap_policy = "SkipIfRunning")
+    /\ (redelivery # "Ordinary")
+    /\ phase' = "Claimed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_dac7ac5b0d5b99b3
+
+
+TargetProbeBusySkipByPolicy(outcome, redelivery, detail, at_utc_ms) ==
+    /\ phase = "Claimed"
+    /\ (outcome = "Busy")
+    /\ (overlap_policy = "SkipIfRunning")
+    /\ (redelivery = "Ordinary")
     /\ phase' = "Skipped"
     /\ model_step_count' = model_step_count + 1
     /\ claimed_by' = None
@@ -1855,7 +1934,7 @@ TargetProbeBusySkipByPolicy(outcome, detail, at_utc_ms) ==
     /\ UnchangedFrame_1f2faaf9e88439a0
 
 
-TargetProbeMissingSkipByPolicy(outcome, detail, at_utc_ms) ==
+TargetProbeMissingSkipByPolicy(outcome, redelivery, detail, at_utc_ms) ==
     /\ phase = "Claimed"
     /\ (outcome = "Missing")
     /\ (missing_target_policy = "Skip")
@@ -1875,7 +1954,7 @@ TargetProbeMissingSkipByPolicy(outcome, detail, at_utc_ms) ==
     /\ UnchangedFrame_1f2faaf9e88439a0
 
 
-TargetProbeMissingMisfireByPolicy(outcome, detail, at_utc_ms) ==
+TargetProbeMissingMisfireByPolicy(outcome, redelivery, detail, at_utc_ms) ==
     /\ phase = "Claimed"
     /\ (outcome = "Missing")
     /\ (missing_target_policy = "MarkMisfired")
@@ -1898,6 +1977,82 @@ TargetProbeMissingMisfireByPolicy(outcome, detail, at_utc_ms) ==
 DueMisfirePending(detail, at_utc_ms) ==
     /\ phase = "Pending"
     /\ ((due_at_utc_ms <= at_utc_ms) /\ (misfire_deadline_utc_ms < at_utc_ms))
+    /\ phase' = "Misfired"
+    /\ model_step_count' = model_step_count + 1
+    /\ claimed_by' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ claim_token' = None
+    /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("Misfired")
+    /\ receipt_failure_class' = None
+    /\ receipt_detail' = detail
+    /\ failure_class' = None
+    /\ failure_detail' = detail
+    /\ completed_at_utc_ms' = Some(at_utc_ms)
+    /\ UnchangedFrame_1f2faaf9e88439a0
+
+
+ReclaimExhaustedAfterAdmission(admission_evidence, detail, at_utc_ms) ==
+    /\ phase = "Pending"
+    /\ ((due_at_utc_ms <= at_utc_ms) /\ (misfire_deadline_utc_ms < at_utc_ms) /\ (attempt_count >= 5) /\ (admission_evidence = "Accepted"))
+    /\ phase' = "DeliveryFailed"
+    /\ model_step_count' = model_step_count + 1
+    /\ claimed_by' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ claim_token' = None
+    /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("DeliveryFailed")
+    /\ receipt_failure_class' = Some("LeaseLost")
+    /\ receipt_detail' = detail
+    /\ failure_class' = Some("LeaseLost")
+    /\ failure_detail' = detail
+    /\ completed_at_utc_ms' = Some(at_utc_ms)
+    /\ UnchangedFrame_1f2faaf9e88439a0
+
+
+ReclaimExhaustedAfterUnprovenDispatch(admission_evidence, detail, at_utc_ms) ==
+    /\ phase = "Pending"
+    /\ ((due_at_utc_ms <= at_utc_ms) /\ (misfire_deadline_utc_ms < at_utc_ms) /\ (attempt_count >= 5) /\ (admission_evidence = "Started"))
+    /\ phase' = "Misfired"
+    /\ model_step_count' = model_step_count + 1
+    /\ claimed_by' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ claim_token' = None
+    /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("Misfired")
+    /\ receipt_failure_class' = None
+    /\ receipt_detail' = detail
+    /\ failure_class' = None
+    /\ failure_detail' = detail
+    /\ completed_at_utc_ms' = Some(at_utc_ms)
+    /\ UnchangedFrame_1f2faaf9e88439a0
+
+
+UnprovenLateNotAdmittedFromClaimed(admission_evidence, detail, at_utc_ms) ==
+    /\ phase = "Claimed"
+    /\ ((admission_evidence = "Started") /\ (misfire_deadline_utc_ms < at_utc_ms))
+    /\ phase' = "Misfired"
+    /\ model_step_count' = model_step_count + 1
+    /\ claimed_by' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ claim_token' = None
+    /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("Misfired")
+    /\ receipt_failure_class' = None
+    /\ receipt_detail' = detail
+    /\ failure_class' = None
+    /\ failure_detail' = detail
+    /\ completed_at_utc_ms' = Some(at_utc_ms)
+    /\ UnchangedFrame_1f2faaf9e88439a0
+
+
+UnprovenLateNotAdmittedFromDispatching(admission_evidence, detail, at_utc_ms) ==
+    /\ phase = "Dispatching"
+    /\ ((admission_evidence = "Started") /\ (misfire_deadline_utc_ms < at_utc_ms))
     /\ phase' = "Misfired"
     /\ model_step_count' = model_step_count + 1
     /\ claimed_by' = None
@@ -2256,20 +2411,21 @@ Next ==
     \/ (phase = "Superseded") /\ \E trigger \in OccurrenceLifecycleInputVariantValues : ClassifyStaleCompletionArrivalObservedSuperseded(trigger)
     \/ (phase = "DeliveryFailed") /\ \E trigger \in OccurrenceLifecycleInputVariantValues : ClassifyStaleCompletionArrivalObservedDeliveryFailed(trigger)
     \/ (phase = "Pending") /\ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_trigger_key \in TriggerKeyValues : \E arg_target_binding_key \in TargetBindingIdValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_misfire_policy_key \in StringValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_overlap_policy_key \in StringValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_missing_target_policy_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : \E arg_due_at_utc_ms \in 0..2 : \E arg_misfire_deadline_utc_ms \in 0..2 : PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms)
-    \/ (phase = "Pending") /\ \E now_utc_ms \in 0..2 : ClassifyDuePendingFuture(now_utc_ms)
-    \/ (phase = "Pending") /\ \E now_utc_ms \in 0..2 : ClassifyDuePendingMisfire(now_utc_ms)
-    \/ (phase = "Pending") /\ \E now_utc_ms \in 0..2 : ClassifyDuePendingClaimEligible(now_utc_ms)
-    \/ (phase = "Claimed") /\ \E now_utc_ms \in 0..2 : ClassifyDueClaimedLeaseExpired(now_utc_ms)
-    \/ (phase = "Dispatching") /\ \E now_utc_ms \in 0..2 : ClassifyDueDispatchingLeaseExpired(now_utc_ms)
-    \/ (phase = "AwaitingCompletion") /\ \E now_utc_ms \in 0..2 : ClassifyDueAwaitingCompletionLeaseExpired(now_utc_ms)
-    \/ (phase = "Claimed") /\ \E now_utc_ms \in 0..2 : ClassifyDueClaimedLeaseCurrent(now_utc_ms)
-    \/ (phase = "Dispatching") /\ \E now_utc_ms \in 0..2 : ClassifyDueDispatchingLeaseCurrent(now_utc_ms)
-    \/ (phase = "AwaitingCompletion") /\ \E now_utc_ms \in 0..2 : ClassifyDueAwaitingCompletionLeaseCurrent(now_utc_ms)
-    \/ (phase = "Completed") /\ \E now_utc_ms \in 0..2 : ClassifyDueCompletedNoAction(now_utc_ms)
-    \/ (phase = "Skipped") /\ \E now_utc_ms \in 0..2 : ClassifyDueSkippedNoAction(now_utc_ms)
-    \/ (phase = "Misfired") /\ \E now_utc_ms \in 0..2 : ClassifyDueMisfiredNoAction(now_utc_ms)
-    \/ (phase = "Superseded") /\ \E now_utc_ms \in 0..2 : ClassifyDueSupersededNoAction(now_utc_ms)
-    \/ (phase = "DeliveryFailed") /\ \E now_utc_ms \in 0..2 : ClassifyDueDeliveryFailedNoAction(now_utc_ms)
+    \/ (phase = "Pending") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDuePendingFuture(now_utc_ms, admission_evidence)
+    \/ (phase = "Pending") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDuePendingMisfire(now_utc_ms, admission_evidence)
+    \/ (phase = "Pending") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDuePendingClaimEligible(now_utc_ms, admission_evidence)
+    \/ (phase = "Pending") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDuePendingReclaimExhausted(now_utc_ms, admission_evidence)
+    \/ (phase = "Claimed") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueClaimedLeaseExpired(now_utc_ms, admission_evidence)
+    \/ (phase = "Dispatching") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueDispatchingLeaseExpired(now_utc_ms, admission_evidence)
+    \/ (phase = "AwaitingCompletion") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueAwaitingCompletionLeaseExpired(now_utc_ms, admission_evidence)
+    \/ (phase = "Claimed") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueClaimedLeaseCurrent(now_utc_ms, admission_evidence)
+    \/ (phase = "Dispatching") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueDispatchingLeaseCurrent(now_utc_ms, admission_evidence)
+    \/ (phase = "AwaitingCompletion") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueAwaitingCompletionLeaseCurrent(now_utc_ms, admission_evidence)
+    \/ (phase = "Completed") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueCompletedNoAction(now_utc_ms, admission_evidence)
+    \/ (phase = "Skipped") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueSkippedNoAction(now_utc_ms, admission_evidence)
+    \/ (phase = "Misfired") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueMisfiredNoAction(now_utc_ms, admission_evidence)
+    \/ (phase = "Superseded") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueSupersededNoAction(now_utc_ms, admission_evidence)
+    \/ (phase = "DeliveryFailed") /\ \E now_utc_ms \in 0..2 : \E admission_evidence \in AdmissionEvidenceValues : ClassifyDueDeliveryFailedNoAction(now_utc_ms, admission_evidence)
     \/ ClassifyOccurrenceTerminalityTerminalCompleted
     \/ ClassifyOccurrenceTerminalityTerminalSkipped
     \/ ClassifyOccurrenceTerminalityTerminalMisfired
@@ -2300,7 +2456,9 @@ Next ==
     \/ (phase = "Misfired") /\ \E correlation_id \in OptionCorrelationIdValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : RecordReceiptMisfired(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
     \/ (phase = "Superseded") /\ \E correlation_id \in OptionCorrelationIdValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : RecordReceiptSuperseded(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
     \/ (phase = "DeliveryFailed") /\ \E correlation_id \in OptionCorrelationIdValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : RecordReceiptDeliveryFailed(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
-    \/ (phase = "Pending") /\ \E owner_id \in ClaimOwnerValues : \E at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)
+    \/ (phase = "Pending") /\ \E owner_id \in ClaimOwnerValues : \E at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : \E admission_evidence \in AdmissionEvidenceValues : ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, admission_evidence)
+    \/ (phase = "Pending") /\ \E owner_id \in ClaimOwnerValues : \E at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : \E admission_evidence \in AdmissionEvidenceValues : ClaimPendingAfterAdmission(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, admission_evidence)
+    \/ (phase = "Pending") /\ \E owner_id \in ClaimOwnerValues : \E at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : \E admission_evidence \in AdmissionEvidenceValues : ClaimPendingAfterUnprovenDispatch(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, admission_evidence)
     \/ (phase = "Claimed") /\ \E correlation_id \in OptionCorrelationIdValues : \E at_utc_ms \in 0..2 : DispatchStartedFromClaimed(correlation_id, at_utc_ms)
     \/ (phase = "Dispatching") /\ \E admission_outcome \in DeliveryAdmissionOutcomeValues : \E at_utc_ms \in 0..2 : DispatchAcceptedFromDispatching(admission_outcome, at_utc_ms)
     \/ (phase = "Dispatching") /\ \E admission_outcome \in DeliveryAdmissionOutcomeValues : \E at_utc_ms \in 0..2 : DispatchDeduplicatedFromDispatching(admission_outcome, at_utc_ms)
@@ -2321,12 +2479,17 @@ Next ==
     \/ (phase = "Claimed" \/ phase = "Dispatching" \/ phase = "AwaitingCompletion") /\ \E reason \in DeliveryFailureReasonValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : DeliveryFailureTransportError(reason, detail, at_utc_ms)
     \/ (phase = "Claimed" \/ phase = "Dispatching" \/ phase = "AwaitingCompletion") /\ \E reason \in DeliveryFailureReasonValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : DeliveryFailureInternalError(reason, detail, at_utc_ms)
     \/ (phase = "Claimed" \/ phase = "Dispatching" \/ phase = "AwaitingCompletion") /\ \E reason \in DeliveryFailureReasonValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : DeliveryFailureScheduleMandateUnavailable(reason, detail, at_utc_ms)
-    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeReadyClaimed(outcome, detail, at_utc_ms)
-    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeBusyAllowedByPolicy(outcome, detail, at_utc_ms)
-    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeBusySkipByPolicy(outcome, detail, at_utc_ms)
-    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeMissingSkipByPolicy(outcome, detail, at_utc_ms)
-    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeMissingMisfireByPolicy(outcome, detail, at_utc_ms)
+    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E redelivery \in ClaimRedeliveryValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeReadyClaimed(outcome, redelivery, detail, at_utc_ms)
+    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E redelivery \in ClaimRedeliveryValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeBusyAllowedByPolicy(outcome, redelivery, detail, at_utc_ms)
+    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E redelivery \in ClaimRedeliveryValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeBusyExistingRedelivery(outcome, redelivery, detail, at_utc_ms)
+    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E redelivery \in ClaimRedeliveryValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeBusySkipByPolicy(outcome, redelivery, detail, at_utc_ms)
+    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E redelivery \in ClaimRedeliveryValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeMissingSkipByPolicy(outcome, redelivery, detail, at_utc_ms)
+    \/ (phase = "Claimed") /\ \E outcome \in OccurrenceTargetProbeOutcomeValues : \E redelivery \in ClaimRedeliveryValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : TargetProbeMissingMisfireByPolicy(outcome, redelivery, detail, at_utc_ms)
     \/ (phase = "Pending") /\ \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : DueMisfirePending(detail, at_utc_ms)
+    \/ (phase = "Pending") /\ \E admission_evidence \in AdmissionEvidenceValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : ReclaimExhaustedAfterAdmission(admission_evidence, detail, at_utc_ms)
+    \/ (phase = "Pending") /\ \E admission_evidence \in AdmissionEvidenceValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : ReclaimExhaustedAfterUnprovenDispatch(admission_evidence, detail, at_utc_ms)
+    \/ (phase = "Claimed") /\ \E admission_evidence \in AdmissionEvidenceValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : UnprovenLateNotAdmittedFromClaimed(admission_evidence, detail, at_utc_ms)
+    \/ (phase = "Dispatching") /\ \E admission_evidence \in AdmissionEvidenceValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : UnprovenLateNotAdmittedFromDispatching(admission_evidence, detail, at_utc_ms)
     \/ (phase = "Pending" \/ phase = "Claimed" \/ phase = "Dispatching" \/ phase = "AwaitingCompletion") /\ \E arg_superseded_by_revision \in 0..2 : \E at_utc_ms \in 0..2 : SupersedePendingOrLive(arg_superseded_by_revision, at_utc_ms)
     \/ (phase = "Superseded") /\ \E arg_superseded_by_revision \in 0..2 : \E at_utc_ms \in 0..2 : SupersedeAlreadySuperseded(arg_superseded_by_revision, at_utc_ms)
     \/ (phase = "Superseded") /\ \E at_utc_ms \in 0..2 : LateCompleteAfterSupersession(at_utc_ms)

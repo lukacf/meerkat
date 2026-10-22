@@ -14,6 +14,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
 - `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, persist dispatch intent from claimed, record target admission without rewriting its correlation, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/accept/await/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
+- `occurrence_recorded_dispatch_reclaim` — classify a pending occurrence whose earlier attempt recorded its dispatch as claim eligible past its misfire deadline up to five attempts and as reclaim exhausted after them, reclaim it after a recorded admission or an unproven dispatch start, keep such a redelivery claimed when its target is busy under skip if running, end an exhausted admitted occurrence delivery failed lease lost and an exhausted or never-admitted unproven one misfired
 - `occurrence_lease_recovery` — classify due no action, due claim eligible, due misfire required, due lease expired, lease renewal by the live claim-token holder from dispatching or awaiting completion, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery
 
 ### Transitions
@@ -380,6 +381,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyDuePendingClaimEligible`
   - anchors: `occurrence_lifecycle`
   - scenarios: (unclaimed)
+- `ClassifyDuePendingReclaimExhausted`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
 - `ClassifyDueClaimedLeaseExpired`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
@@ -506,6 +510,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClaimPending`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
+- `ClaimPendingAfterAdmission`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
+- `ClaimPendingAfterUnprovenDispatch`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
 - `DispatchStartedFromClaimed`
   - anchors: (unclaimed)
   - scenarios: `occurrence_claim_dispatch_completion`
@@ -572,6 +582,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `TargetProbeBusyAllowedByPolicy`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `TargetProbeBusyExistingRedelivery`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
 - `TargetProbeBusySkipByPolicy`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -584,6 +597,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DueMisfirePending`
   - anchors: `occurrence_lifecycle`
   - scenarios: (unclaimed)
+- `ReclaimExhaustedAfterAdmission`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
+- `ReclaimExhaustedAfterUnprovenDispatch`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
+- `UnprovenLateNotAdmittedFromClaimed`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
+- `UnprovenLateNotAdmittedFromDispatching`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
 - `SupersedePendingOrLive`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -679,6 +704,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DueLeaseExpired`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
+- `DueReclaimExhausted`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
+- `ReclaimedAfterAdmission`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
+- `ReclaimedAfterUnprovenDispatch`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
 - `OccurrenceTerminalityClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

@@ -1,0 +1,318 @@
+---
+title: "Exporting SDK-hosted continuity from 0.9.3"
+description: "Before a 0.9.3 deployment that kept continuity behind an SDK continuity provider upgrades to 0.9.4, export that continuity into a file that meta_gateway storage-migrate-native imports."
+icon: "file-export"
+---
+
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
+
+Meta 0.9.4 keeps session and identity truth in Core's local stores. The 0.9.3
+SDK continuity provider (`continuity_store` on the Python builder,
+`continuityStore` on the TypeScript builder) has no 0.9.4 runtime. If your
+0.9.3 deployment passed one to the builder, export its continuity once, before
+you upgrade. A deployment without a continuity provider skips this page.
+
+The upgrade runs in this order:
+
+1. Stop every 0.9.3 gateway that uses the store.
+2. Run the export with 0.9.3 still installed (this page).
+3. Upgrade to 0.9.4.
+4. Import the file with `meta_gateway storage-migrate-native`.
+5. Start 0.9.4.
+
+The export is a standalone script. `continuity_export.py` needs Python 3.10 or
+later and nothing beyond the standard library; `continuity-export.mjs` needs
+Node.js 18 or later and no packages. Neither imports the Meta SDK, so either
+one runs in your 0.9.3 environment beside your provider. Use the one in your
+provider's language: both write the same file.
+
+## 1. Download and check the scripts
+
+Both scripts ship in the `v0.9.4` tag, with the JSON Lines providers that run
+beside them (see "Records and snapshots in your own tables" below). Download
+all four files and check their SHA-256 digests before you run any of them:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/lukacf/meerkat-meta/v0.9.4/tools/continuity-export/continuity_export.py
+curl -fsSLO https://raw.githubusercontent.com/lukacf/meerkat-meta/v0.9.4/tools/continuity-export/continuity-export.mjs
+curl -fsSLO https://raw.githubusercontent.com/lukacf/meerkat-meta/v0.9.4/tools/continuity-export/jsonl_provider.py
+curl -fsSLO https://raw.githubusercontent.com/lukacf/meerkat-meta/v0.9.4/tools/continuity-export/jsonl-provider.mjs
+sha256sum --check --strict <<'EOF'
+36ffe2f8da8e0e68a85b31b7045197a37cec9ba19fe9f9223872cf266457ae80  continuity_export.py
+228771596cf78882d112bb574befc5a7c79913b755317dda00a7342235c7831e  continuity-export.mjs
+e6313295da8d492cf830b69f296096c2be25801f468371b6d914e2e0a116f9e2  jsonl_provider.py
+019f097c7e5107ccfaffa36cc1a1699ccebdfa1bd404f02563689a10ca34a4f5  jsonl-provider.mjs
+EOF
+```
+
+On macOS, use `shasum -a 256 --check` in place of `sha256sum --check --strict`.
+Each file must print `OK`. Anything else means the download is not the
+released script: do not run it.
+
+## 2. List the identities
+
+The 0.9.3 provider protocol cannot list the identities a store holds, so the
+export covers exactly the identities you name. Name every identity the store
+holds a record for, including retired identities and identities your roster no
+longer lists. Put one identity on each line of a UTF-8 file. A byte order
+mark at the start of the file, whitespace around an identity and blank lines
+are ignored:
+
+```text
+agent:alpha
+agent:beta
+```
+
+An identity the store holds no record for is exported as `uninitialized`, so
+a typo shows up in the summary. Only the current session of each identity is
+exported; its earlier sessions are not migrated.
+
+## 3. Run the export
+
+Point `--provider` at the provider object you passed to the 0.9.3 builder, or
+at a function that returns it (the function may be async).
+
+With Python, `--provider` takes `module.path:attribute`, and the current
+directory is importable:
+
+```bash
+python3 continuity_export.py --provider my_app.continuity:provider \
+  --identities-file identities.txt --output continuity-export.jsonl
+```
+
+With Node.js, `--provider` takes a module path relative to the current
+directory and an optional `#export` name, `default` when omitted. An ES module
+or a CommonJS file works; run the script under `tsx` to load a TypeScript
+module:
+
+```bash
+node continuity-export.mjs --provider ./continuity-provider.mjs#provider \
+  --identities-file identities.txt --output continuity-export.jsonl
+```
+
+A Node.js provider's `resolveMany` answers in the snake_case wire shape its
+0.9.3 gateway read, as every working 0.9.3 deployment does: a camelCase
+record is refused as `Unreadable`; the 0.9.3 gateway could not read one
+either.
+
+`--identity ID` names an identity on the command line. Repeat it, or combine
+it with `--identities-file`.
+
+`--missing-snapshot fresh` is for a store written by a host built with the
+Python or TypeScript SDK; see "Hosts built with the Python or TypeScript SDK"
+below.
+
+The export calls only the provider's 0.9.3 read methods: `resolve_many`,
+`load_session_snapshot` and, when the provider has it,
+`resolve_record_by_session` (`resolveMany`, `loadSessionSnapshot` and
+`resolveRecordBySession` in Node.js). It writes nothing to the provider and
+never replaces an existing file. It sees the store as it is while it runs,
+which is why every gateway is stopped first. On success it prints a summary:
+each identity with its state, and for a ready identity its session and the
+size and SHA-256 of its session document.
+
+| Exit status | Meaning |
+|---|---|
+| 0 | The file was written. |
+| 1 | Refused: nothing was written, and each identity that blocks the export is printed. |
+| 2 | A usage error, or the output file already exists or cannot be written. |
+| 3 | The provider failed: its module, its factory, a read or the value a read returned. Nothing was written; run the export again. |
+| 4 | With `--verify`: a file failed a check (see step 4). |
+
+The file holds the session documents of every exported identity, so keep it
+with the same care as the 0.9.3 store. The script creates it readable by its
+owner only. It writes each identity's entry as soon as it has read the
+session, so its memory use follows the largest session rather than the whole
+store: allow up to about 20 times the largest session. It needs free space
+beside the output for about twice the file while it runs. An export that is
+killed before it finishes can leave hidden `.<output>.*.partial` files beside
+the output; they hold session documents, so delete them.
+
+## When the export refuses
+
+If any listed identity cannot be exported as it stands, the export writes
+nothing and prints each blocking identity with its class, its session, what
+it found and the action that clears it:
+
+```text
+continuity export refused; nothing was written:
+  class=RuntimeMissing identity=agent:alpha session=019ecb20-4899-7292-a2b4-c81bc7a44258
+    detail: the provider holds no snapshot for session 019ecb20-4899-7292-a2b4-c81bc7a44258 (0.9.3 record: agent_runtime_id rt:agent:alpha:0, generation 0, checkpoint_version 0)
+    action: if a 0.9.3 host built with the Python or TypeScript SDK wrote the store, it never saved snapshots: rerun the export with --missing-snapshot fresh, which writes the identity as uninitialized, so it starts fresh with an empty transcript, as at every 0.9.3 restart; otherwise restore the session's snapshot, or delete the identity with the 0.9.3 binary, then rerun the export
+```
+
+| Class | What the export found | Action |
+|---|---|---|
+| `Broken` | The provider reports the identity's continuity as broken. | Settle or delete the identity with the 0.9.3 binary, then rerun the export. |
+| `RuntimeMissing` | The provider holds no snapshot for the identity's current session. | If a 0.9.3 host built with the Python or TypeScript SDK wrote the store, it never saved snapshots: rerun the export with --missing-snapshot fresh, which writes the identity as uninitialized, so it starts fresh with an empty transcript, as at every 0.9.3 restart; otherwise restore the session's snapshot, or delete the identity with the 0.9.3 binary, then rerun the export. |
+| `IdentityDisagrees` | The record names another identity, the session is bound to more than one identity, or `resolve_record_by_session` does not bind the session to this identity. | Settle the identity's record with the 0.9.3 binary (or delete the identity), then rerun the export. |
+| `Unreadable` | An answer is not in the 0.9.3 wire shape, for example a malformed record or an empty snapshot. | Make the provider answer in the 0.9.3 wire shape, then rerun the export. |
+| `Unlisted` | The provider answered for an identity you did not list. | Add the identity to the identity list, then rerun the export. |
+| `TooLarge` | The session's snapshot does not fit in one entry of the file: an entry holds at most 536,870,888 bytes, a snapshot of about 400 MB. | Reset or delete the identity with the 0.9.3 binary (either drops its session), then rerun the export. |
+
+## Hosts built with the Python or TypeScript SDK
+
+A 0.9.3 gateway that the Python or TypeScript SDK started with a continuity
+provider kept its sessions in memory. It saved each identity's continuity
+record to the provider but never a session snapshot, so every restart started
+every identity fresh. This is a known issue of 0.9.3.
+
+For such a store the export refuses every ready identity as `RuntimeMissing`:
+it cannot tell a snapshot that was never saved from one that was lost. Rerun
+it with `--missing-snapshot fresh`:
+
+```bash
+python3 continuity_export.py --provider my_app.continuity:provider \
+  --identities-file identities.txt --output continuity-export.jsonl \
+  --missing-snapshot fresh
+```
+
+Each ready identity without a snapshot is then written as `uninitialized`, so
+it starts fresh after the upgrade with an empty transcript, as it did at every
+0.9.3 restart: nothing of its conversation is carried. The summary counts
+them and lists each one with its session and its 0.9.3 record. Every other
+refusal still stops the export.
+
+A host that drives the gateway itself and passes `persistent_state` with the
+continuity provider did save snapshots. For it, `RuntimeMissing` means a
+snapshot is missing from the provider: restore it rather than use the flag.
+
+## Records and snapshots in your own tables
+
+A host that kept its 0.9.3 continuity records and session snapshots in its own
+tables, with no provider object the export can import, does not need to write
+one. Write the rows to two JSON Lines files and use the JSON Lines provider:
+`jsonl_provider.py` beside `continuity_export.py`, or `jsonl-provider.mjs`
+beside `continuity-export.mjs`. Both read the same files by the same rules.
+Both files are UTF-8, one JSON object per line; a byte order mark at the start
+of a file and lines that hold only whitespace are skipped.
+
+The records file holds each identity's current continuity record, one line per
+identity, with exactly the record's five keys:
+
+```json
+{"identity":"agent:alpha","agent_runtime_id":"rt:agent:alpha:0","session_id":"019ecb20-4899-7292-a2b4-c81bc7a44258","generation":0,"checkpoint_version":3}
+```
+
+The sessions file holds session snapshots, one line per session, with exactly
+the keys `session_id` and `data`. `data` is the snapshot's exact bytes in
+standard base64, with padding and without line breaks:
+
+```json
+{"session_id":"019ecb20-4899-7292-a2b4-c81bc7a44258","data":"eyJpZCI6IjAxOWVjYjIwLTQ4OTktNzI5Mi1hMmI0LWM4MWJjN2E0NDI1OCJ9"}
+```
+
+Queries of this shape fill them from a host's tables, one row per line. The
+names in angle brackets stand for your tables, columns and functions. Each
+query must give one row per identity or per session: a table that keeps a
+history of records or snapshots needs the newest-row pick shown, and a
+repeated identity or session stops the export.
+
+```sql
+-- records.jsonl: the current record of each identity, one row per identity
+SELECT r.identity, r.agent_runtime_id, r.session_id, r.generation, r.checkpoint_version
+FROM <continuity records> AS r
+WHERE r.<written at> = (SELECT MAX(<written at>) FROM <continuity records>
+                        WHERE identity = r.identity);
+
+-- sessions.jsonl: the latest snapshot of each session a record names,
+-- one row per session
+SELECT s.session_id, <base64 of the snapshot bytes> AS data
+FROM <session snapshots> AS s
+JOIN <the records query above> AS r ON r.session_id = s.session_id
+WHERE s.<saved at> = (SELECT MAX(<saved at>) FROM <session snapshots>
+                      WHERE session_id = s.session_id);
+
+-- identities.txt: one identity per line
+SELECT DISTINCT identity FROM <continuity records>;
+```
+
+Some tools write 64-bit integers into JSON as strings: the provider reads
+`generation` and `checkpoint_version` as JSON integers or as strings of
+decimal digits. Some base64 functions break their output into lines: remove
+the line breaks. A session id may be in any spelling 0.9.3 accepted.
+
+Then run the export with the two paths in environment variables:
+
+```bash
+CONTINUITY_EXPORT_RECORDS=records.jsonl CONTINUITY_EXPORT_SESSIONS=sessions.jsonl \
+  python3 continuity_export.py --provider jsonl_provider:from_env \
+  --identities-file identities.txt --output continuity-export.jsonl
+```
+
+With Node.js, run `node continuity-export.mjs --provider
+./jsonl-provider.mjs#fromEnv` from the directory that holds both files, with
+the same variables. It holds integers exactly up to 2^53 - 1, as the Node.js
+script does; a records file with a larger one is exported with the Python
+scripts.
+
+Only the current session of each identity is exported: the one session its
+record names. Every other session in the sessions file is ignored. After the
+upgrade each identity continues its current session; its earlier sessions
+are not migrated and stay only in your tables.
+
+The provider answers for every identity in the records file, so an identity
+list that misses one is refused as `Unlisted` rather than exporting less. A
+listed identity the records file does not hold is exported as
+`uninitialized`.
+
+A file the provider cannot use stops the export with exit status 3 before it
+reads a record: a line that is not a JSON object with exactly the expected
+keys, a repeated identity or session, or a session id or `data` it cannot
+read. The error names the file and the line; fix the file and run the export
+again. The provider keeps the records and where each session's line starts,
+and reads one snapshot at a time, so memory follows the largest session as
+with any provider.
+
+## Restoring a lost 0.9.4 state directory from a continuity mirror
+
+A Rust host whose state directory sits on a volume it could lose can keep a
+live copy outside it: `UnifiedRuntimeBuilder::continuity_mirror(sink,
+interval)`. The SDKs and `rpc_gateway` have no mirror option, and none of the
+0.9.3 continuity seams is a copy: `meta/init` refuses the 0.9.3 continuity
+parameters, and the Rust builder ignores `continuity_store()` and
+`lease_provider()` with a warning. The runtime copies, for
+each durable identity, its current record, its committed session and the
+image blobs that session references, every `interval` and once more at
+shutdown. It never reads the copy at boot: the state directory stays the
+authority, and a turn never waits on the copy. `JsonlFileMirrorSink` writes
+`records.jsonl` and `sessions.jsonl`, in the shape the JSON Lines provider
+above reads, and `blobs.jsonl`; a host writes elsewhere by implementing
+`ContinuityMirrorSink`. `BigQueryMirrorSink` writes the copy into BigQuery
+tables; its module documentation has the queries that read the three files
+back out of them. To restore into a new, empty state directory:
+
+```bash
+CONTINUITY_EXPORT_RECORDS=mirror/records.jsonl CONTINUITY_EXPORT_SESSIONS=mirror/sessions.jsonl \
+  python3 continuity_export.py --provider jsonl_provider:from_env \
+  --identities-file identities.txt --output continuity-export.jsonl
+meta_gateway storage-migrate-native --state-dir <new dir> \
+  --continuity-export continuity-export.jsonl --apply
+python3 restore_blobs.py --blobs mirror/blobs.jsonl --state-dir <new dir>
+```
+
+List the identities of `records.jsonl` in `identities.txt`. Start the gateway
+with only `persistent_state` pointing at the new directory: no `scratch_dir`,
+continuity store or lease provider, and leave the mob storage at its durable
+default, so each identity resumes its own session. Register the same models
+and provider configuration as the source: a restored session keeps its model,
+and a resume whose model is not registered is refused, keeping the session. The copy lags the runtime
+by up to one interval, so a restore can miss the turns committed after the
+last copy, and like every export it carries only each identity's current
+session. A put that takes longer than its deadline (ten minutes by default)
+is offered again on the next round; the first put after a start carries
+every session, so a slow sink needs a longer deadline:
+`continuity_mirror_with_timings`.
+
+
+## 4. Check the file
+
+```bash
+python3 continuity_export.py --verify continuity-export.jsonl
+```
+
+`node continuity-export.mjs --verify continuity-export.jsonl` checks it the
+same way. Either script checks the header, the count, length and SHA-256 of
+the entries, and every entry, prints the summary again, and exits with status 4
+when the file fails a check. Keep the file unchanged until 0.9.4 has imported
+it.

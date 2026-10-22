@@ -4,7 +4,7 @@ description: "Server-Sent Events for real-time Meta interaction and event subscr
 icon: "bolt"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 Meta uses Server-Sent Events (SSE) for several live HTTP streams:
 
@@ -29,6 +29,16 @@ When `require_app_auth` is on, the request must carry one of:
 Missing or invalid credentials return HTTP **401**. Tokens are
 percent-decoded; a token containing characters that need URL-encoding
 (`=`, `&`, `+`, `%`) is handled correctly.
+
+A stream stays open only while its token is accepted. Once a request with
+the same token would get **401**, 30 seconds after the token's `exp`, the
+stream ends without a final event, and it sends nothing it decided after that
+point; reconnect with a current token. On a route that does not require a
+token, a token the caller sends anyway identifies it to access control; such a
+stream ends the same way, and its reconnect without a current token is
+anonymous. A token without `exp` never lapses. A revocation of the token's
+principal (`meta/console/revoke_sessions`) ends the stream at once, with or
+without `exp`, and its reconnect is refused with **401**.
 
 ## Agent event stream
 

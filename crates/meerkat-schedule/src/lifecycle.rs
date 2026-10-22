@@ -479,8 +479,12 @@ pub enum OccurrenceLifecycleInput {
         receipt: DeliveryReceipt,
         runtime_outcome: Option<RuntimeDeliveryOutcome>,
     },
+    /// `admission_evidence` is what the occurrence's receipt history proves
+    /// about its earlier attempts' target admission
+    /// ([`AdmissionEvidence::from_receipt_stages`]).
     ClassifyDue {
         now_utc: DateTime<Utc>,
+        admission_evidence: AdmissionEvidence,
     },
     ClassifyOccurrenceTerminality,
     ClassifyClaimedDispatchDisposition {
@@ -496,6 +500,7 @@ pub enum OccurrenceLifecycleInput {
         at_utc: DateTime<Utc>,
         lease_expires_at_utc: DateTime<Utc>,
         claim_token: Uuid,
+        admission_evidence: AdmissionEvidence,
     },
     DispatchStarted {
         correlation_id: Option<String>,
@@ -530,12 +535,38 @@ pub enum OccurrenceLifecycleInput {
         detail: Option<String>,
         at_utc: DateTime<Utc>,
     },
+    /// `redelivery` is the redelivery the claim named in its effects
+    /// ([`OccurrenceLifecycleEffect::ReclaimedAfterAdmission`]: `Admitted`,
+    /// [`OccurrenceLifecycleEffect::ReclaimedAfterUnprovenDispatch`]:
+    /// `UnprovenLate`), `None` for an ordinary claim. A busy target ends an
+    /// ordinary claim under `SkipIfRunning`, never a redelivery: it starts
+    /// no new run.
     ResolveTargetProbe {
         outcome: OccurrenceTargetProbeOutcome,
+        redelivery: Option<crate::driver::ExistingDelivery>,
         detail: Option<String>,
         at_utc: DateTime<Utc>,
     },
     ResolveDueMisfire {
+        detail: Option<String>,
+        at_utc: DateTime<Utc>,
+    },
+    /// A Pending occurrence past its misfire deadline whose earlier attempts
+    /// recorded their dispatch used up its
+    /// [`ADMITTED_RECLAIM_ATTEMPT_CAP`] attempts: a recorded admission ends
+    /// delivery_failed with lease_lost, a recorded dispatch start alone ends
+    /// misfired. A row without such evidence refuses it.
+    ResolveReclaimExhausted {
+        admission_evidence: AdmissionEvidence,
+        detail: Option<String>,
+        at_utc: DateTime<Utc>,
+    },
+    /// A reclaim past the misfire deadline of an occurrence whose earlier
+    /// attempt recorded only its dispatch start found that the target never
+    /// admitted the delivery: the occurrence ends misfired. An admitted
+    /// occurrence, or one inside its window, refuses it.
+    ResolveUnprovenLateNotAdmitted {
+        admission_evidence: AdmissionEvidence,
         detail: Option<String>,
         at_utc: DateTime<Utc>,
     },
@@ -615,6 +646,16 @@ pub enum OccurrenceLifecycleEffect {
     DueClaimEligible,
     DueMisfireRequired,
     DueLeaseExpired,
+    /// A Pending occurrence past its misfire deadline whose recorded
+    /// dispatch used up its reclaims.
+    DueReclaimExhausted,
+    /// The claim reclaimed an occurrence whose earlier attempt recorded its
+    /// admission: redeliver it without a fresh admission.
+    ReclaimedAfterAdmission,
+    /// The claim reclaimed, past its misfire deadline, an occurrence whose
+    /// earlier attempt recorded only its dispatch start: ask the target
+    /// whether it admitted the delivery, and never deliver it fresh.
+    ReclaimedAfterUnprovenDispatch,
     OccurrenceTerminalityClassified {
         terminal: bool,
     },
@@ -647,11 +688,58 @@ pub enum OccurrenceLifecycleEffect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OccurrenceDueAction {
     ClaimEligible,
     MisfireRequired,
     LeaseExpired,
+    /// Past the misfire deadline with recorded dispatch evidence and no
+    /// reclaim left: resolve it with
+    /// [`OccurrenceLifecycleInput::ResolveReclaimExhausted`].
+    ReclaimExhausted,
 }
+
+/// What an occurrence's receipt history proves about its earlier attempts'
+/// target admission. Stores derive it per row from the recorded receipts
+/// ([`AdmissionEvidence::from_receipt_stages`]); no occurrence field carries
+/// it, because every lease expiry overwrites the receipt fields and a
+/// reclaimed attempt can die again before its own admission.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AdmissionEvidence {
+    /// No DispatchStarted and no DispatchAccepted receipt: the misfire
+    /// policy decides a late reclaim, as before.
+    #[default]
+    None,
+    /// A DispatchStarted receipt and no DispatchAccepted one: an earlier
+    /// attempt started its dispatch, and its admission was never proven.
+    Started,
+    /// A DispatchAccepted receipt: an earlier attempt's target admitted the
+    /// delivery.
+    Accepted,
+}
+
+impl AdmissionEvidence {
+    /// The evidence of a receipt history, given its receipts' stages in any
+    /// order: Accepted when any receipt is DispatchAccepted, Started when
+    /// any is DispatchStarted and none DispatchAccepted, None otherwise.
+    pub fn from_receipt_stages(stages: impl IntoIterator<Item = DeliveryReceiptStage>) -> Self {
+        let mut evidence = Self::None;
+        for stage in stages {
+            match stage {
+                DeliveryReceiptStage::DispatchAccepted => return Self::Accepted,
+                DeliveryReceiptStage::DispatchStarted => evidence = Self::Started,
+                _ => {}
+            }
+        }
+        evidence
+    }
+}
+
+/// The attempts an occurrence whose earlier attempt recorded its dispatch
+/// may use past its misfire deadline. The occurrence machine's guards spell
+/// the same cap; a test pins them equal.
+pub const ADMITTED_RECLAIM_ATTEMPT_CAP: u32 = 5;
 
 /// Domain mirror of the occurrence authority's claimed-occurrence pre-dispatch
 /// disposition verdict.
@@ -1221,14 +1309,31 @@ impl Occurrence {
         })
     }
 
+    /// Classify this occurrence's due action at `now_utc`, given what its
+    /// receipt history proves about its earlier attempts' admission.
     pub fn classify_due_action(
         &self,
         now_utc: DateTime<Utc>,
+        admission_evidence: AdmissionEvidence,
     ) -> Result<Option<OccurrenceDueAction>, OccurrenceLifecycleError> {
-        let mutator = self
-            .clone()
-            .apply(OccurrenceLifecycleInput::ClassifyDue { now_utc })?;
+        let mutator = self.clone().apply(OccurrenceLifecycleInput::ClassifyDue {
+            now_utc,
+            admission_evidence,
+        })?;
         due_action_from_effects(&mutator.effects)
+    }
+
+    /// The detail of [`OccurrenceLifecycleInput::ResolveReclaimExhausted`]
+    /// for this occurrence's evidence.
+    pub fn reclaim_exhausted_detail(&self, admission_evidence: AdmissionEvidence) -> String {
+        match admission_evidence {
+            AdmissionEvidence::Accepted => format!(
+                "admitted delivery lost its executor {ADMITTED_RECLAIM_ATTEMPT_CAP} times; the input's outcome was never observed"
+            ),
+            _ => format!(
+                "dispatch started {ADMITTED_RECLAIM_ATTEMPT_CAP} times past the misfire deadline without a proven admission"
+            ),
+        }
     }
 
     /// Classify whether this occurrence is terminal.
@@ -1476,11 +1581,13 @@ fn convert_occurrence_input(
                 .map(runtime_outcome_authority_key)
                 .transpose()?,
         },
-        OccurrenceLifecycleInput::ClassifyDue { now_utc } => {
-            occ_dsl::OccurrenceLifecycleInput::ClassifyDue {
-                now_utc_ms: occurrence_datetime_to_millis(*now_utc, "now_utc")?,
-            }
-        }
+        OccurrenceLifecycleInput::ClassifyDue {
+            now_utc,
+            admission_evidence,
+        } => occ_dsl::OccurrenceLifecycleInput::ClassifyDue {
+            now_utc_ms: occurrence_datetime_to_millis(*now_utc, "now_utc")?,
+            admission_evidence: to_dsl_admission_evidence(*admission_evidence),
+        },
         OccurrenceLifecycleInput::ClassifyOccurrenceTerminality => {
             occ_dsl::OccurrenceLifecycleInput::ClassifyOccurrenceTerminality {}
         }
@@ -1503,6 +1610,7 @@ fn convert_occurrence_input(
             at_utc,
             lease_expires_at_utc,
             claim_token,
+            admission_evidence,
         } => occ_dsl::OccurrenceLifecycleInput::Claim {
             owner_id: owner_id.clone().into(),
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
@@ -1511,6 +1619,7 @@ fn convert_occurrence_input(
                 "lease_expires_at_utc",
             )?,
             claim_token: occ_dsl::ClaimToken(claim_token.to_string()),
+            admission_evidence: to_dsl_admission_evidence(*admission_evidence),
         },
         OccurrenceLifecycleInput::DispatchStarted {
             correlation_id,
@@ -1565,10 +1674,12 @@ fn convert_occurrence_input(
         },
         OccurrenceLifecycleInput::ResolveTargetProbe {
             outcome,
+            redelivery,
             detail,
             at_utc,
         } => occ_dsl::OccurrenceLifecycleInput::ResolveTargetProbe {
             outcome: to_dsl_occurrence_target_probe_outcome(*outcome),
+            redelivery: to_dsl_claim_redelivery(*redelivery),
             detail: detail.clone(),
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
         },
@@ -1578,6 +1689,24 @@ fn convert_occurrence_input(
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
             }
         }
+        OccurrenceLifecycleInput::ResolveReclaimExhausted {
+            admission_evidence,
+            detail,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::ResolveReclaimExhausted {
+            admission_evidence: to_dsl_admission_evidence(*admission_evidence),
+            detail: detail.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
+        OccurrenceLifecycleInput::ResolveUnprovenLateNotAdmitted {
+            admission_evidence,
+            detail,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::ResolveUnprovenLateNotAdmitted {
+            admission_evidence: to_dsl_admission_evidence(*admission_evidence),
+            detail: detail.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
         OccurrenceLifecycleInput::Supersede {
             superseded_by_revision,
             at_utc,
@@ -2023,6 +2152,14 @@ fn to_dsl_delivery_failure_reason(reason: DeliveryFailureReason) -> occ_dsl::Del
     }
 }
 
+fn to_dsl_admission_evidence(evidence: AdmissionEvidence) -> occ_dsl::AdmissionEvidence {
+    match evidence {
+        AdmissionEvidence::None => occ_dsl::AdmissionEvidence::Unrecorded,
+        AdmissionEvidence::Started => occ_dsl::AdmissionEvidence::Started,
+        AdmissionEvidence::Accepted => occ_dsl::AdmissionEvidence::Accepted,
+    }
+}
+
 fn to_dsl_occurrence_target_probe_outcome(
     outcome: OccurrenceTargetProbeOutcome,
 ) -> occ_dsl::OccurrenceTargetProbeOutcome {
@@ -2030,6 +2167,18 @@ fn to_dsl_occurrence_target_probe_outcome(
         OccurrenceTargetProbeOutcome::Ready => occ_dsl::OccurrenceTargetProbeOutcome::Ready,
         OccurrenceTargetProbeOutcome::Busy => occ_dsl::OccurrenceTargetProbeOutcome::Busy,
         OccurrenceTargetProbeOutcome::Missing => occ_dsl::OccurrenceTargetProbeOutcome::Missing,
+    }
+}
+
+fn to_dsl_claim_redelivery(
+    redelivery: Option<crate::driver::ExistingDelivery>,
+) -> occ_dsl::ClaimRedelivery {
+    match redelivery {
+        None => occ_dsl::ClaimRedelivery::Ordinary,
+        Some(crate::driver::ExistingDelivery::Admitted) => occ_dsl::ClaimRedelivery::AfterAdmission,
+        Some(crate::driver::ExistingDelivery::UnprovenLate) => {
+            occ_dsl::ClaimRedelivery::AfterUnprovenDispatch
+        }
     }
 }
 
@@ -2108,6 +2257,15 @@ fn map_occurrence_effect(
         occ_dsl::OccurrenceLifecycleEffect::DueLeaseExpired => {
             OccurrenceLifecycleEffect::DueLeaseExpired
         }
+        occ_dsl::OccurrenceLifecycleEffect::DueReclaimExhausted => {
+            OccurrenceLifecycleEffect::DueReclaimExhausted
+        }
+        occ_dsl::OccurrenceLifecycleEffect::ReclaimedAfterAdmission => {
+            OccurrenceLifecycleEffect::ReclaimedAfterAdmission
+        }
+        occ_dsl::OccurrenceLifecycleEffect::ReclaimedAfterUnprovenDispatch => {
+            OccurrenceLifecycleEffect::ReclaimedAfterUnprovenDispatch
+        }
         occ_dsl::OccurrenceLifecycleEffect::OccurrenceTerminalityClassified { terminal } => {
             OccurrenceLifecycleEffect::OccurrenceTerminalityClassified {
                 terminal: *terminal,
@@ -2164,6 +2322,10 @@ fn due_action_from_effects(
         OccurrenceLifecycleEffect::DueLeaseExpired => {
             Some(("DueLeaseExpired", Some(OccurrenceDueAction::LeaseExpired)))
         }
+        OccurrenceLifecycleEffect::DueReclaimExhausted => Some((
+            "DueReclaimExhausted",
+            Some(OccurrenceDueAction::ReclaimExhausted),
+        )),
         _ => None,
     });
 
@@ -3311,6 +3473,7 @@ mod tests {
                 at_utc: Utc::now(),
                 lease_expires_at_utc: Utc::now() + Duration::seconds(30),
                 claim_token: Uuid::now_v7(),
+                admission_evidence: AdmissionEvidence::None,
             })
             .expect("claim should pass generated authority")
             .into_occurrence()
@@ -3540,6 +3703,7 @@ mod tests {
                     at_utc: now,
                     lease_expires_at_utc: now + Duration::seconds(30),
                     claim_token: Uuid::now_v7(),
+                    admission_evidence: AdmissionEvidence::None,
                 },
                 occ_dsl::OccurrenceTransitionFailureClassKind::ClaimRejected,
             ),
@@ -3550,6 +3714,7 @@ mod tests {
                     at_utc: now,
                     lease_expires_at_utc: now + Duration::seconds(30),
                     claim_token: Uuid::now_v7(),
+                    admission_evidence: AdmissionEvidence::None,
                 },
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotPendingForClaim,
             ),
@@ -3610,6 +3775,7 @@ mod tests {
                 &completed,
                 OccurrenceLifecycleInput::ResolveTargetProbe {
                     outcome: OccurrenceTargetProbeOutcome::Busy,
+                    redelivery: None,
                     detail: None,
                     at_utc: now,
                 },
@@ -3658,6 +3824,7 @@ mod tests {
             at_utc: Utc::now(),
             lease_expires_at_utc: Utc::now() + Duration::seconds(30),
             claim_token: Uuid::now_v7(),
+            admission_evidence: AdmissionEvidence::None,
         };
 
         for phase in [
@@ -3803,7 +3970,7 @@ mod tests {
                 .expect("claimable occurrence planning should pass generated authority");
         assert_eq!(
             claimable
-                .classify_due_action(now)
+                .classify_due_action(now, AdmissionEvidence::None)
                 .expect("due classification should pass"),
             Some(OccurrenceDueAction::ClaimEligible)
         );
@@ -3816,7 +3983,7 @@ mod tests {
         .expect("future occurrence planning should pass generated authority");
         assert_eq!(
             future
-                .classify_due_action(now)
+                .classify_due_action(now, AdmissionEvidence::None)
                 .expect("future classification should pass"),
             None
         );
@@ -3826,6 +3993,7 @@ mod tests {
                 at_utc: now,
                 lease_expires_at_utc: now + Duration::seconds(30),
                 claim_token: Uuid::now_v7(),
+                admission_evidence: AdmissionEvidence::None,
             }),
             Err(OccurrenceLifecycleError::ClaimRejected)
         ));
@@ -3838,7 +4006,7 @@ mod tests {
         .expect("overdue occurrence planning should pass generated authority");
         assert_eq!(
             overdue
-                .classify_due_action(now)
+                .classify_due_action(now, AdmissionEvidence::None)
                 .expect("overdue classification should pass"),
             Some(OccurrenceDueAction::MisfireRequired)
         );
@@ -4233,6 +4401,7 @@ mod tests {
             at_utc: Utc::now(),
             lease_expires_at_utc: Utc::now() + Duration::seconds(30),
             claim_token: Uuid::now_v7(),
+            admission_evidence: AdmissionEvidence::None,
         })?;
         mutator
             .effects
@@ -4851,6 +5020,7 @@ mod tests {
                 at_utc: Utc::now(),
                 lease_expires_at_utc: Utc::now() + Duration::seconds(30),
                 claim_token: Uuid::now_v7(),
+                admission_evidence: AdmissionEvidence::None,
             })
             .expect("claim")
             .into_occurrence()
@@ -4971,6 +5141,372 @@ mod tests {
         assert!(
             matches!(retarget, Err(crate::ScheduleDomainError::Internal(_))),
             "a target that materializes no session records none: {retarget:?}"
+        );
+    }
+
+    // --- Recorded dispatch evidence: reclaim, exhaustion, unproven late ---
+
+    /// A Pending occurrence (Skip, 30 s grace) due 60 s ago whose earlier
+    /// `attempts` were claimed inside its window and lost their lease.
+    /// Returns it with its due time.
+    fn pending_after_attempts(attempts: u32) -> (Occurrence, DateTime<Utc>) {
+        let due = Utc::now() - Duration::seconds(60);
+        let mut occurrence =
+            Occurrence::planned_from_schedule(&sample_schedule(), crate::OccurrenceOrdinal(0), due)
+                .expect("planning should pass generated authority");
+        for _ in 0..attempts {
+            occurrence = occurrence
+                .apply(OccurrenceLifecycleInput::Claim {
+                    owner_id: "owner".into(),
+                    at_utc: due,
+                    lease_expires_at_utc: due + Duration::seconds(1),
+                    claim_token: Uuid::now_v7(),
+                    admission_evidence: AdmissionEvidence::None,
+                })
+                .expect("a claim inside the window should pass")
+                .into_occurrence()
+                .apply(OccurrenceLifecycleInput::LeaseExpired {
+                    at_utc: due + Duration::seconds(1),
+                })
+                .expect("the lease expiry should pass")
+                .into_occurrence();
+        }
+        assert_eq!(occurrence.attempt_count, attempts);
+        assert_eq!(occurrence.phase, OccurrencePhase::Pending);
+        (occurrence, due)
+    }
+
+    fn reclaim(
+        occurrence: &Occurrence,
+        at_utc: DateTime<Utc>,
+        admission_evidence: AdmissionEvidence,
+    ) -> Result<OccurrenceLifecycleMutator, OccurrenceLifecycleError> {
+        occurrence.clone().apply(OccurrenceLifecycleInput::Claim {
+            owner_id: "restarted".into(),
+            at_utc,
+            lease_expires_at_utc: at_utc + Duration::seconds(30),
+            claim_token: Uuid::now_v7(),
+            admission_evidence,
+        })
+    }
+
+    #[test]
+    fn admission_evidence_reads_the_receipt_history() {
+        use DeliveryReceiptStage::{
+            Claimed, DispatchAccepted, DispatchStarted, LeaseExpired, Planned,
+        };
+        assert_eq!(
+            AdmissionEvidence::from_receipt_stages([Planned, Claimed, LeaseExpired]),
+            AdmissionEvidence::None
+        );
+        assert_eq!(
+            AdmissionEvidence::from_receipt_stages([Claimed, DispatchStarted, LeaseExpired]),
+            AdmissionEvidence::Started
+        );
+        assert_eq!(
+            AdmissionEvidence::from_receipt_stages([
+                DispatchStarted,
+                DispatchAccepted,
+                LeaseExpired,
+                DispatchStarted,
+            ]),
+            AdmissionEvidence::Accepted,
+            "an earlier attempt's admission stays proof after a later start"
+        );
+    }
+
+    /// The pending arms partition by the deadline, the evidence and the cap:
+    /// past the deadline no evidence misfires, evidence reclaims below the
+    /// cap and is exhausted at it; inside the window every row claims.
+    #[test]
+    fn recorded_dispatch_partitions_due_classification_past_the_deadline() {
+        use AdmissionEvidence::{Accepted, None as NoEvidence, Started};
+        let cap = ADMITTED_RECLAIM_ATTEMPT_CAP;
+
+        let (occurrence, due) = pending_after_attempts(1);
+        let inside = due + Duration::seconds(10);
+        let past = due + Duration::seconds(45);
+        let classify = |occurrence: &Occurrence, at, evidence| {
+            occurrence
+                .classify_due_action(at, evidence)
+                .expect("due classification should pass")
+        };
+        assert_eq!(
+            classify(&occurrence, past, NoEvidence),
+            Some(OccurrenceDueAction::MisfireRequired)
+        );
+        assert_eq!(
+            classify(&occurrence, inside, NoEvidence),
+            Some(OccurrenceDueAction::ClaimEligible)
+        );
+        for evidence in [Started, Accepted] {
+            assert_eq!(
+                classify(&occurrence, past, evidence),
+                Some(OccurrenceDueAction::ClaimEligible),
+                "{evidence:?} past the deadline reclaims"
+            );
+            assert_eq!(
+                classify(&occurrence, inside, evidence),
+                Some(OccurrenceDueAction::ClaimEligible)
+            );
+        }
+
+        let (below, due) = pending_after_attempts(cap - 1);
+        assert_eq!(
+            classify(&below, due + Duration::seconds(45), Accepted),
+            Some(OccurrenceDueAction::ClaimEligible)
+        );
+
+        let (capped, due) = pending_after_attempts(cap);
+        for evidence in [Started, Accepted] {
+            assert_eq!(
+                classify(&capped, due + Duration::seconds(45), evidence),
+                Some(OccurrenceDueAction::ReclaimExhausted),
+                "{evidence:?} at the cap past the deadline is exhausted"
+            );
+            assert_eq!(
+                classify(&capped, due + Duration::seconds(10), evidence),
+                Some(OccurrenceDueAction::ClaimEligible),
+                "{evidence:?} at the cap inside the window still claims"
+            );
+        }
+        assert_eq!(
+            classify(&capped, due + Duration::seconds(45), NoEvidence),
+            Some(OccurrenceDueAction::MisfireRequired)
+        );
+    }
+
+    /// A reclaim's claim tells the driver which redelivery its evidence
+    /// proves: a recorded admission always (inside the window too), a
+    /// recorded start only past the deadline.
+    #[test]
+    fn a_reclaim_claim_names_the_redelivery_its_evidence_proves() {
+        let (occurrence, due) = pending_after_attempts(1);
+        let inside = due + Duration::seconds(10);
+        let past = due + Duration::seconds(45);
+        let effects = |at, evidence| {
+            reclaim(&occurrence, at, evidence)
+                .expect("the reclaim should pass")
+                .effects()
+                .to_vec()
+        };
+        for at in [inside, past] {
+            assert_eq!(
+                effects(at, AdmissionEvidence::Accepted),
+                vec![
+                    OccurrenceLifecycleEffect::Claimed,
+                    OccurrenceLifecycleEffect::ReclaimedAfterAdmission
+                ]
+            );
+        }
+        assert_eq!(
+            effects(past, AdmissionEvidence::Started),
+            vec![
+                OccurrenceLifecycleEffect::Claimed,
+                OccurrenceLifecycleEffect::ReclaimedAfterUnprovenDispatch
+            ]
+        );
+        assert_eq!(
+            effects(inside, AdmissionEvidence::Started),
+            vec![OccurrenceLifecycleEffect::Claimed],
+            "inside the window an unproven start claims as before"
+        );
+        assert!(
+            reclaim(&occurrence, past, AdmissionEvidence::None).is_err(),
+            "no evidence past the deadline is not reclaimed"
+        );
+        let reclaimed = reclaim(&occurrence, past, AdmissionEvidence::Accepted)
+            .expect("the reclaim should pass")
+            .into_occurrence();
+        assert_eq!(reclaimed.attempt_count, 2);
+
+        let (capped, due) = pending_after_attempts(ADMITTED_RECLAIM_ATTEMPT_CAP);
+        assert!(
+            reclaim(
+                &capped,
+                due + Duration::seconds(45),
+                AdmissionEvidence::Accepted
+            )
+            .is_err(),
+            "the cap ends the reclaims past the deadline"
+        );
+    }
+
+    /// Exhaustion ends an admitted occurrence delivery_failed with lease_lost
+    /// and an unproven one misfired, and fails closed without evidence,
+    /// below the cap or inside the window.
+    #[test]
+    fn exhausted_reclaims_end_by_their_evidence_and_fail_closed_without_it() {
+        let cap = ADMITTED_RECLAIM_ATTEMPT_CAP;
+        let (capped, due) = pending_after_attempts(cap);
+        let past = due + Duration::seconds(45);
+        let resolve = |occurrence: &Occurrence, at, evidence| {
+            occurrence
+                .clone()
+                .apply(OccurrenceLifecycleInput::ResolveReclaimExhausted {
+                    admission_evidence: evidence,
+                    detail: Some(occurrence.reclaim_exhausted_detail(evidence)),
+                    at_utc: at,
+                })
+                .map(OccurrenceLifecycleMutator::into_occurrence)
+        };
+
+        let failed = resolve(&capped, past, AdmissionEvidence::Accepted)
+            .expect("an admitted occurrence at the cap fails");
+        assert_eq!(failed.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            failed.failure_class,
+            Some(OccurrenceFailureClass::LeaseLost)
+        );
+        let detail = failed.failure_detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains(&format!("{cap} times")) && detail.contains("never observed"),
+            "{detail}"
+        );
+
+        let misfired = resolve(&capped, past, AdmissionEvidence::Started)
+            .expect("an unproven occurrence at the cap misfires");
+        assert_eq!(misfired.phase, OccurrencePhase::Misfired);
+
+        assert!(resolve(&capped, past, AdmissionEvidence::None).is_err());
+        assert!(
+            resolve(
+                &capped,
+                due + Duration::seconds(10),
+                AdmissionEvidence::Accepted
+            )
+            .is_err()
+        );
+        let (below, due) = pending_after_attempts(cap - 1);
+        assert!(
+            resolve(
+                &below,
+                due + Duration::seconds(45),
+                AdmissionEvidence::Accepted
+            )
+            .is_err()
+        );
+    }
+
+    /// The not-admitted answer of an unproven late redelivery ends it
+    /// misfired, from Claimed or Dispatching, and fails closed for an
+    /// admitted occurrence and inside the window.
+    #[test]
+    fn unproven_late_not_admitted_ends_misfired_and_fails_closed() {
+        let (occurrence, due) = pending_after_attempts(1);
+        let past = due + Duration::seconds(45);
+        let claimed = reclaim(&occurrence, past, AdmissionEvidence::Started)
+            .expect("the unproven reclaim should pass")
+            .into_occurrence();
+        let dispatching = claimed
+            .clone()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("stable-correlation".into()),
+                at_utc: past,
+            })
+            .expect("dispatch start should pass")
+            .into_occurrence();
+        let resolve = |occurrence: &Occurrence, at, evidence| {
+            occurrence
+                .clone()
+                .apply(OccurrenceLifecycleInput::ResolveUnprovenLateNotAdmitted {
+                    admission_evidence: evidence,
+                    detail: Some("the target never admitted it".to_string()),
+                    at_utc: at,
+                })
+                .map(OccurrenceLifecycleMutator::into_occurrence)
+        };
+        for live in [&claimed, &dispatching] {
+            let misfired =
+                resolve(live, past, AdmissionEvidence::Started).expect("not admitted misfires");
+            assert_eq!(misfired.phase, OccurrencePhase::Misfired);
+            assert_eq!(misfired.failure_class, None);
+            assert!(resolve(live, past, AdmissionEvidence::Accepted).is_err());
+            assert!(
+                resolve(
+                    live,
+                    due + Duration::seconds(10),
+                    AdmissionEvidence::Started
+                )
+                .is_err()
+            );
+        }
+    }
+
+    /// A busy target ends an ordinary claim under skip_if_running, never a
+    /// redelivery its claim named: the redelivery starts no new run and goes
+    /// on to find the earlier admission, inside the window and past it. A
+    /// missing target keeps the missing-target policy for a redelivery too.
+    #[test]
+    fn a_busy_target_skips_an_ordinary_claim_but_not_a_redelivery() {
+        use crate::ExistingDelivery::{Admitted, UnprovenLate};
+        let (occurrence, due) = pending_after_attempts(1);
+        let inside = due + Duration::seconds(10);
+        let past = due + Duration::seconds(45);
+        let probe = |claimed: &Occurrence, at, outcome, redelivery| {
+            claimed
+                .clone()
+                .apply(OccurrenceLifecycleInput::ResolveTargetProbe {
+                    outcome,
+                    redelivery,
+                    detail: Some("target busy".to_string()),
+                    at_utc: at,
+                })
+                .expect("the probe resolution should pass")
+        };
+        for (at, evidence, existing) in [
+            (inside, AdmissionEvidence::Accepted, Admitted),
+            (past, AdmissionEvidence::Accepted, Admitted),
+            (past, AdmissionEvidence::Started, UnprovenLate),
+        ] {
+            let claimed = reclaim(&occurrence, at, evidence)
+                .expect("the reclaim should pass")
+                .into_occurrence();
+
+            let continued = probe(
+                &claimed,
+                at,
+                OccurrenceTargetProbeOutcome::Busy,
+                Some(existing),
+            );
+            assert!(continued.effects().is_empty(), "{existing:?}");
+            assert_eq!(
+                continued.into_occurrence().phase,
+                OccurrencePhase::Claimed,
+                "a busy target keeps the {existing:?} redelivery claimed"
+            );
+
+            let skipped =
+                probe(&claimed, at, OccurrenceTargetProbeOutcome::Busy, None).into_occurrence();
+            assert_eq!(skipped.phase, OccurrencePhase::Skipped);
+            assert_eq!(
+                skipped.failure_class,
+                Some(OccurrenceFailureClass::TargetBusy)
+            );
+
+            let missing = probe(
+                &claimed,
+                at,
+                OccurrenceTargetProbeOutcome::Missing,
+                Some(existing),
+            )
+            .into_occurrence();
+            assert_eq!(
+                (missing.phase, missing.failure_class),
+                (
+                    OccurrencePhase::Misfired,
+                    Some(OccurrenceFailureClass::TargetMissing)
+                ),
+                "a missing target keeps the missing-target policy for {existing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reclaim_cap_is_the_occurrence_machines_cap() {
+        assert_eq!(
+            u64::from(ADMITTED_RECLAIM_ATTEMPT_CAP),
+            crate::machines::occurrence_lifecycle::ADMITTED_RECLAIM_ATTEMPT_CAP
         );
     }
 }

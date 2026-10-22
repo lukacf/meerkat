@@ -4,7 +4,7 @@ description: "HTTP endpoints for console access, experience metadata, module ins
 icon: "globe"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 Meta serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
 
@@ -97,6 +97,20 @@ that can answer (no live mob runtime, or an aggregator with no registered
 runtime), it is `null`, and the snapshot names it in an `unobserved` marker:
 `{"reason": "not_observed", "fields": ["running"]}`.
 
+An identity-first member's records take its session from the identity
+runtime, never from a walk made under an earlier identity binding. When the
+member's binding has moved (after a reset, retire or delete), a read collects
+the member again first and waits at most 2 s. Past that bound, the member's
+sidebar row answers with the identity runtime's session, the member's run
+`progress` and state `unknown`, and offers no send or retire. Each record of
+the member (the sidebar row, the `identity_status` and `health_overview`
+rows, and the topology node) withholds the other facts the earlier walk
+found and names them in an `unobserved` marker with reason
+`refresh_pending`, for example
+`{"reason": "refresh_pending", "fields": ["label", "role", "state", "wired_to", "addressable"]}`
+on the topology node. Access and visibility still decide on the last
+observed facts, so a label-scoped deny keeps such a member hidden.
+
 ### `GET /console/modules`
 
 Returns the configured module IDs from `RuntimeDecisionState`. This response
@@ -124,7 +138,12 @@ Without a console aggregator, this route returns `404` with
 
 **Response:** `{identities: ConsoleIdentityRecord[]}`. Each record carries
 `identity`, `display_name`, `runtime_key`, `runtime_member_id`, optional
-`session_id`, `visibility`, `addressable`, `health`, `labels`, and
+`session_id`, optional `member_id` (Core's mob member id of the identity's
+last binding, live or retired: the identity's roster member id, as Core's
+member tokens name it, which is Meta's comms-safe encoding of the identity and
+starts with `mk--` when the identity has a `:`; absent when Core holds no
+binding of the identity and on records of raw runtime members),
+`visibility`, `addressable`, `health`, `labels`, and
 `topology_peers` when non-empty. Use
 [`meta/console/inspect_identity`](/mobkit/api/rpc#meta%2Fconsole%2Finspect_identity)
 for identity/peer inspection and `/console/experience` for affordances;

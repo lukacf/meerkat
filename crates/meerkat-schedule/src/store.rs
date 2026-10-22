@@ -1,6 +1,6 @@
 use crate::error::ScheduleStoreError;
 use crate::lifecycle::{
-    AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, OccurrenceDueAction,
+    AdmissionEvidence, AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, OccurrenceDueAction,
     OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
     OccurrenceSupersessionAck, OccurrenceTransitionCommit, ScheduleLifecycleInput,
     ScheduleTransitionCommit,
@@ -394,13 +394,35 @@ pub(crate) fn claim_occurrence(
     occurrence: Occurrence,
     request: &ClaimDueRequest,
     at_utc: DateTime<Utc>,
+    admission_evidence: AdmissionEvidence,
 ) -> Result<OccurrenceLifecycleMutator, OccurrenceLifecycleError> {
     occurrence.apply(OccurrenceLifecycleInput::Claim {
         owner_id: request.owner_id.clone(),
         at_utc,
         lease_expires_at_utc: at_utc + request.lease_duration,
         claim_token: Uuid::now_v7(),
+        admission_evidence,
     })
+}
+
+/// What `occurrence`'s receipt history in the memory store proves about its
+/// earlier attempts' admission. A never-claimed occurrence has no dispatch
+/// receipt, so only a reclaimed one is read.
+fn memory_admission_evidence(
+    state: &MemoryScheduleState,
+    occurrence: &Occurrence,
+) -> AdmissionEvidence {
+    if occurrence.attempt_count == 0 {
+        return AdmissionEvidence::None;
+    }
+    AdmissionEvidence::from_receipt_stages(
+        state
+            .receipts
+            .get(&occurrence.occurrence_id)
+            .into_iter()
+            .flatten()
+            .map(|receipt| receipt.stage),
+    )
 }
 
 pub(crate) fn renew_occurrence_lease(
@@ -1567,7 +1589,8 @@ impl ScheduleStore for MemoryScheduleStore {
             let Some(existing) = state.occurrences.get(&occurrence_id).cloned() else {
                 continue;
             };
-            let action = match existing.classify_due_action(store_now_utc) {
+            let admission_evidence = memory_admission_evidence(&state, &existing);
+            let action = match existing.classify_due_action(store_now_utc, admission_evidence) {
                 Ok(action) => action,
                 Err(error) => {
                     row_faults.push(due_classification_fault(
@@ -1579,31 +1602,47 @@ impl ScheduleStore for MemoryScheduleStore {
                 }
             };
             match action {
-                Some(OccurrenceDueAction::MisfireRequired) => {
-                    let detail = Some(existing.due_misfire_detail_at(store_now_utc));
-                    let mut mutator =
-                        match existing
-                            .clone()
-                            .apply(OccurrenceLifecycleInput::ResolveDueMisfire {
-                                detail: detail.clone(),
+                Some(
+                    action @ (OccurrenceDueAction::MisfireRequired
+                    | OccurrenceDueAction::ReclaimExhausted),
+                ) => {
+                    // A misfire, or a recorded dispatch that used up its
+                    // reclaims: the same terminal resolution and receipt.
+                    let (stage, resolution) = if action == OccurrenceDueAction::MisfireRequired {
+                        (
+                            "misfire",
+                            OccurrenceLifecycleInput::ResolveDueMisfire {
+                                detail: Some(existing.due_misfire_detail_at(store_now_utc)),
                                 at_utc: store_now_utc,
-                            }) {
-                            Ok(mutator) => mutator,
-                            Err(error) => {
-                                row_faults.push(due_classification_fault(
-                                    &existing,
-                                    "misfire resolution",
-                                    &error,
-                                ));
-                                continue;
-                            }
-                        };
+                            },
+                        )
+                    } else {
+                        (
+                            "reclaim exhausted",
+                            OccurrenceLifecycleInput::ResolveReclaimExhausted {
+                                admission_evidence,
+                                detail: Some(existing.reclaim_exhausted_detail(admission_evidence)),
+                                at_utc: store_now_utc,
+                            },
+                        )
+                    };
+                    let mut mutator = match existing.clone().apply(resolution) {
+                        Ok(mutator) => mutator,
+                        Err(error) => {
+                            row_faults.push(due_classification_fault(
+                                &existing,
+                                &format!("{stage} resolution"),
+                                &error,
+                            ));
+                            continue;
+                        }
+                    };
                     let receipt = match mutator.occurrence().delivery_receipt_from_authority(None) {
                         Ok(receipt) => receipt,
                         Err(error) => {
                             row_faults.push(due_classification_fault(
                                 &existing,
-                                "misfire receipt",
+                                &format!("{stage} receipt"),
                                 &error,
                             ));
                             continue;
@@ -1619,7 +1658,7 @@ impl ScheduleStore for MemoryScheduleStore {
                         Err(error) => {
                             row_faults.push(due_classification_fault(
                                 &existing,
-                                "misfire receipt record",
+                                &format!("{stage} receipt record"),
                                 &error,
                             ));
                             continue;
@@ -1628,7 +1667,7 @@ impl ScheduleStore for MemoryScheduleStore {
                     if let Err(error) = mutator.absorb_followup(receipt_mutator) {
                         row_faults.push(due_classification_fault(
                             &existing,
-                            "misfire receipt record",
+                            &format!("{stage} receipt record"),
                             &error,
                         ));
                         continue;
@@ -1660,9 +1699,14 @@ impl ScheduleStore for MemoryScheduleStore {
                     if claimed_count >= request.limit {
                         continue;
                     }
-                    let write = claim_occurrence(existing.clone(), &request, store_now_utc)
-                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-                        .into_authorized_write();
+                    let write = claim_occurrence(
+                        existing.clone(),
+                        &request,
+                        store_now_utc,
+                        admission_evidence,
+                    )
+                    .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
+                    .into_authorized_write();
                     let updated = write.occurrence().clone();
                     memory_note_pending_departure(
                         &mut state,
@@ -1703,7 +1747,12 @@ impl ScheduleStore for MemoryScheduleStore {
                     // typed fault, never a silent skip: the expiry above
                     // stays applied and the row re-enters the scan on the
                     // next tick.
-                    let claim_mutator = match claim_occurrence(expired, &request, store_now_utc) {
+                    let claim_mutator = match claim_occurrence(
+                        expired,
+                        &request,
+                        store_now_utc,
+                        admission_evidence,
+                    ) {
                         Ok(updated) => updated,
                         Err(error) => {
                             let write = mutator.into_authorized_write();

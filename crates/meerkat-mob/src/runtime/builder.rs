@@ -9610,8 +9610,28 @@ impl MobBuilder {
                 // replacement session would silently abandon it).
                 let authorized_resume = match session_service
                     .materialize_session_resume_verdict(&bridge_session_id)
-                    .await?
-                {
+                    .await
+                    .inspect_err(|error| {
+                        // #1813: the start refuses, typed, rather than recover
+                        // a session another runtime owner hosts. The error
+                        // names the session; this names the member and the
+                        // remedy.
+                        if matches!(
+                            error,
+                            meerkat_core::service::SessionError::ServedElsewhere { .. }
+                                | meerkat_core::service::SessionError::HostingUnavailable { .. }
+                        ) {
+                            tracing::error!(
+                                member = %entry.agent_identity,
+                                session_id = %bridge_session_id,
+                                %error,
+                                "this runtime owner cannot host an active member's session; the \
+                                 mob start refuses rather than recover it. Stop the runtime owner \
+                                 that hosts the session, or wait until it releases it, then start \
+                                 the mob again"
+                            );
+                        }
+                    })? {
                     verdict @ super::session_service::SessionResumeVerdict::ResumeAuthorized {
                         ..
                     } => verdict.into_authorized().expect("authorized verdict"),

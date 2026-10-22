@@ -162,6 +162,14 @@ pub enum RuntimeDriverError {
         reason: String,
     },
 
+    /// An existing-only admission
+    /// ([`crate::SessionServiceRuntimeExt::accept_existing_input_with_completion`])
+    /// found no input admitted earlier under the input's idempotency key,
+    /// and admitted nothing. `key` is that idempotency key, empty when the
+    /// input carried none.
+    #[error("no input was admitted earlier under idempotency key '{key}'; nothing was admitted")]
+    NoExistingAdmission { key: String },
+
     /// Atomic unregister persistence may already be durable. The live retry
     /// anchor is retained, but no compensating durable rollback may run.
     #[error("Unregister finalization outcome is unknown: {reason}")]

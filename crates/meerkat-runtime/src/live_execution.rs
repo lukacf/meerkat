@@ -1324,6 +1324,8 @@ impl From<crate::traits::RuntimeDriverError> for LiveBridgeOutcomeBindingError {
             | E::ValidationFailed { .. }
             | E::ScopedContextGenerationNotAdvanced { .. }
             | E::InputIdempotencyConflict { .. }
+            // An existing-only admission admitted nothing.
+            | E::NoExistingAdmission { .. }
             | E::RetainedResumeRefused { .. }
             | E::Destroyed
             | E::LiveContextBarrierRevoked { .. }

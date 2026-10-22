@@ -2441,6 +2441,16 @@ impl MobSessionService for NonForwardingDecorator {
         <Service as MobSessionService>::materialize_session_resume_verdict(&self.inner, session_id)
             .await
     }
+    async fn settle_durable_tail_before_cold_start(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        <Service as MobSessionService>::settle_durable_tail_before_cold_start(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
     async fn load_persisted_session_metadata(
         &self,
         session_id: &SessionId,

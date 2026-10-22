@@ -256,6 +256,7 @@
                   "mobkit/concepts/gating",
                   "mobkit/concepts/access-control",
                   "mobkit/concepts/delivery",
+                  "mobkit/concepts/mob-announcements",
                   "mobkit/concepts/scheduling",
                   "mobkit/concepts/memory",
                   "mobkit/concepts/sessions"
@@ -270,7 +271,9 @@
                   "mobkit/guides/flow-editor",
                   "mobkit/guides/authentication",
                   "mobkit/guides/deployment",
-                  "mobkit/guides/upgrading-from-mobkit"
+                  "mobkit/guides/upgrading-to-0-9-4",
+                  "mobkit/guides/upgrading-from-mobkit",
+                  "mobkit/guides/continuity-export"
                 ]
               }
             ]

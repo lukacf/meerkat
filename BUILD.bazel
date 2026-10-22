@@ -992,6 +992,7 @@ test_suite(
         "//crates/meerkat:sdk_agentfactory_test",
         "//crates/meerkat:sdk_config_ephemeral_test",
         "//crates/meerkat:sdk_structured_output_test",
+        "//crates/meerkat:service_call_test",
         "//crates/meerkat:session_runtime_admission_test",
         "//crates/meerkat:session_runtime_builder_test",
         "//crates/meerkat:session_runtime_live_orchestration_test",

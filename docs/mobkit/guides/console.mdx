@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -29,7 +29,7 @@ Both gateway binaries bind an available loopback port and report the exact
 address. `http://localhost:8080/console` is correct only when your host or
 reverse proxy explicitly publishes Meta there.
 
-The HTML, JavaScript, and CSS are compiled into the binary via `include_str!`, so no build step is required at deployment time. The stock CSS requests optional Google Fonts; when those requests are unavailable or blocked, it uses the configured local/system fallback fonts.
+The HTML, JavaScript, and CSS are compiled into the binary via `include_str!`, so no build step is required at deployment time. The stock CSS carries its fonts, Inter Tight and IBM Plex Mono (SIL Open Font License 1.1), inline as `data:` URLs, so the console requests no font from another origin and looks the same on a host without internet access. A Content-Security-Policy in front of the console that restricts fonts must allow `font-src data:`.
 
 For development with instant hot-reload, see the [development workflow](#development-workflow), including the current Vite proxy limitations:
 
@@ -313,6 +313,14 @@ Each agent row shows:
 - Pin action; pinned agents persist in local storage after the first user interaction
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
+
+An identity-first agent whose identity binding moved (after a reset, retire or
+delete), and that the console could not collect again within 2 s, has state
+unknown and offers no send or retire until a later read collects it. Its
+records carry an `unobserved` marker with reason `refresh_pending` (see
+[`GET /console/experience`](/mobkit/api/rest#get-%2Fconsole%2Fexperience)). The
+topbar shows the mob as unknown, with an amber dot, when the health snapshot
+does not say whether the mob runs; a stopped mob's dot is red.
 
 ### Approvals
 

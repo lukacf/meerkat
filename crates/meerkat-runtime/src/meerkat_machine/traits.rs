@@ -18,6 +18,7 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
                     input,
                     register_completion: false,
                     replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                    admission_requirement: crate::accept::AdmissionRequirement::Any,
                     member_residency: MemberResidencyExpectation::Unfenced,
                     expected_attachment: None,
                 },
@@ -49,6 +50,21 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             "SessionServiceRuntimeExt::accept_input_with_completion entered"
         );
         self.accept_input_with_completion_boxed(session_id, input)
+            .await
+    }
+
+    async fn accept_existing_input_with_completion(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
+        tracing::debug!(
+            session_id = %session_id,
+            input_id = %input.id(),
+            "SessionServiceRuntimeExt::accept_existing_input_with_completion entered"
+        );
+        self.accept_existing_input_with_completion_boxed(session_id, input)
             .await
     }
 

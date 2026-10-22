@@ -59,6 +59,53 @@ them.
   absent, so loopback starts and completions and every existing error keep
   their exact JSON.
 
+- `meerkat-schedule`: the occurrence lifecycle carries the admission evidence
+  of an occurrence's receipt history (see Fixed, scheduled delivery after a
+  lost executor). `OccurrenceLifecycleInput::ClassifyDue` and `Claim` gain the
+  field `admission_evidence: AdmissionEvidence`, `ResolveTargetProbe` gains
+  the field `redelivery: Option<ExistingDelivery>` (the redelivery the claim
+  named, `None` for an ordinary claim), and the input gains the variants
+  `ResolveReclaimExhausted` and `ResolveUnprovenLateNotAdmitted`.
+  `OccurrenceLifecycleEffect` gains `DueReclaimExhausted`,
+  `ReclaimedAfterAdmission` and `ReclaimedAfterUnprovenDispatch`.
+  `OccurrenceDueAction` gains `ReclaimExhausted` and is now
+  `#[non_exhaustive]`. `Occurrence::classify_due_action` takes the evidence
+  as a second argument. The gate's findings: added enum variants, struct
+  variant fields added, a method parameter count change, and an enum marked
+  non-exhaustive. Code outside the crate that builds these inputs passes
+  `AdmissionEvidence::None` and `redelivery: None`, the earlier behaviour,
+  unless it derives the evidence with `AdmissionEvidence::from_receipt_stages`
+  and the redelivery from the claim's effects. The variants after the new
+  ones change their implicit discriminants (`OccurrenceLifecycleEffect::*`
+  and `OccurrenceLifecycleInput::*`); match them by variant name, not by
+  numeric cast. The persisted occurrence is unchanged (schema version 9).
+- `meerkat-machine-kernels`: the generated occurrence machine
+  (`generated::occurrence_lifecycle`) gains the same inputs and effects:
+  `Input`, `InputKind` and `OccurrenceLifecycleInputVariant` gain
+  `ResolveReclaimExhausted` and `ResolveUnprovenLateNotAdmitted`; `Effect`
+  and `EffectKind` gain `DueReclaimExhausted`, `ReclaimedAfterAdmission` and
+  `ReclaimedAfterUnprovenDispatch`; `TransitionId` gains
+  `ClassifyDuePendingReclaimExhausted`, `ClaimPendingAfterAdmission`,
+  `ClaimPendingAfterUnprovenDispatch`, `TargetProbeBusyExistingRedelivery`,
+  `ReclaimExhaustedAfterAdmission`, `ReclaimExhaustedAfterUnprovenDispatch`,
+  `UnprovenLateNotAdmittedFromClaimed` and
+  `UnprovenLateNotAdmittedFromDispatching`. So their implicit discriminants
+  change (`EffectKind::*`, `InputKind::*`,
+  `OccurrenceLifecycleInputVariant::*` and `TransitionId::*`), and so does
+  the `PartialOrd` order of `OccurrenceLifecycleInputVariant::*`; match them
+  by variant name, not by numeric cast or position. The input structs
+  `ClassifyDue` and `Claim` gain the public field `admission_evidence`, and
+  `ResolveTargetProbe` gains `redelivery` (struct literals need them).
+- `meerkat-machine-schema` (`catalog::dsl::occurrence_lifecycle`): the
+  occurrence machine's DSL enums gain the same variants and input fields
+  (`OccurrenceLifecycleEffectVariant` and `OccurrenceLifecycleInputVariant`
+  included), so their implicit discriminants change
+  (`OccurrenceLifecycleEffect::*`, `OccurrenceLifecycleEffectVariant::*`,
+  `OccurrenceLifecycleInput::*` and `OccurrenceLifecycleInputVariant::*`)
+  and so does the `PartialOrd` order of `OccurrenceLifecycleEffectVariant::*`
+  and `OccurrenceLifecycleInputVariant::*`; match them by variant name, not
+  by numeric cast or position.
+
 ### Added
 
 - Hosted MCP OAuth through the host's own `https` callback (#1808), for a
@@ -101,6 +148,191 @@ them.
   `remote_custody_required` (cancel the attempt by its reference and start
   again); the login window stays the shared 300 s browser window of the flow
   owner; REST and `rkat mcp login` stay loopback-only.
+
+- `meerkat-runtime`, `meerkat-authorization`: governed service calls, the
+  native seam for provider calls that no runtime input carries, such as a
+  scheduled host runnable that reads a provider through a connector-bound
+  MCP server. Such a call needs governed work authorization, and until now
+  no admitted run or control supplied it to host code, so the call was
+  refused. The trusted host enrolls a service original at
+  operator-reviewed setup: a standing association whose basis selects the
+  operator's grant for exactly the installation's MCP server, the grant
+  recording that server's connector approval. Its original source answers
+  the record through the new defaulted
+  `AuthenticatedOriginalSource::enrolled_service_original` (`EnrolledServiceOriginal`),
+  and an enrolled original always answers `NotRetained` to
+  `retained_custody`, so it never stands for admitted work. Each schedule
+  occurrence then presents a `ServiceCallRequest` to
+  `MeerkatMachine::prepare_service_call`.
+  `ServiceCallRequest::from_trusted_host` refuses as `MalformedFacts` an
+  association that cannot be a service original: one with a controller, a
+  represented subject or contributing work, a basis that selects no MCP
+  server or checked route target, or a namespace with the reserved
+  `meerkat.` prefix. The installed native host
+  (`NativeWorkAuthorizationHost::service_call_authorization`, defaulted to
+  unavailable) admits the request once, and only when its whole
+  association is the enrolled record. It returns a `ServiceCall` (not
+  `Clone`, one per occurrence) whose `dispatch` runs the ordinary fenced
+  dispatch, Domain-scoped and runless, for MCP server operations only.
+  Every operation is prepared from the current enrollment, the operator's
+  grant, the connector approval it records and the operation owner, and is
+  audited to the request's own sink. No review composition is attached,
+  so an operation that needs review is refused, and the connector owner
+  still checks the slot's credential at the call. A scoped composition's
+  admitted-work owner reaches the record through the new defaulted
+  `AdmittedWorkPolicyOwner::enrolled_service_original`; every other owner
+  keeps the default, so the seam is unavailable outside scoped
+  compositions and on ungoverned machines. The `ServiceOccurrence` a
+  request carries is host-asserted audit data, not authority. Additive:
+  no wire, contract or persistence change.
+- `meerkat-schedule`: `ScheduleTargetDelivery::deliver_existing_occurrence`,
+  a defaulted method the driver calls to redeliver a reclaimed occurrence
+  whose earlier attempt recorded its dispatch, with `ExistingDelivery`
+  (`Admitted`, `UnprovenLate`) and the answer `ExistingDeliveryAnswer`
+  (`Dispatch`, `NotAdmittedPastDeadline`), both `#[non_exhaustive]`. The
+  default delivers an admitted occurrence through `deliver_occurrence` and
+  answers `NotAdmittedPastDeadline` for an unproven late one, so an
+  implementation that cannot tell never delivers a late occurrence fresh.
+  `AdmissionEvidence`, `ADMITTED_RECLAIM_ATTEMPT_CAP` (5) and
+  `Occurrence::reclaim_exhausted_detail` come with it. `meerkat` re-exports
+  the two delivery types, and `SurfaceScheduleMobHost` gains the defaulted
+  `deliver_existing_mob_target` and `deliver_existing_identity_target`.
+  `SurfaceScheduleSessionHost` gains the defaulted
+  `decides_existing_admission` (default `false`): a host that returns `true`
+  admits its prompt and event deliveries through
+  `accept_schedule_runtime_input_with_reconciliation` on the calling task, so
+  a redelivery through it only replays the earlier input, and a host that
+  declares it but admits another way is logged as an incident. With the
+  default the adapter answers an unproven late redelivery not admitted
+  without asking the host, and delivers an admitted one through the host's
+  ordinary delivery. The built-in hosts return `true`.
+- `meerkat-runtime`: `SessionServiceRuntimeExt::accept_existing_input_with_completion`,
+  a deduplicate-only admission. It answers as `accept_input_with_completion`
+  does for a replay of an input admitted earlier under the same idempotency
+  key, and otherwise refuses with the new
+  `RuntimeDriverError::NoExistingAdmission { key }`, admitting nothing. Each
+  driver decides it where it decides deduplication, under its lock and after
+  registration's recovery, so a binding that recovery or an archive released
+  is seen as gone, never admitted again. The trait default refuses.
+  `MeerkatMachine::accept_existing_input_with_completion_for_attachment_and_member_residency`
+  is the same for a mob member's attachment.
+
+### Changed
+
+- `meerkat-core`: the `FORK_INSTRUCTION_REFUSED` message for a fork the
+  policy refuses (cause `policy_refuses`) names the setting that changes it:
+  "to carry them into the child, set the host's fork_instruction_policy
+  (inherited_instructions on a session fork call) to reactivate_inherited".
+  It said only that `reactivate_inherited` carries them into the child. The
+  cause, the keys and the error code are unchanged.
+
+### Fixed
+
+- A turn that compacts its history more often than
+  `[compaction] history_retained_rewrites` keeps (five or more compactions at
+  the default of 4) no longer ends at its intra-turn checkpoint on a
+  HeadCanonical store with "failed to prove pending rewrite suffix:
+  transcript revision ... was retired with N older rewrite(s)", which
+  abandoned the turn. The agent checkpoints at the end of a run, so every
+  compaction of the run lands before that checkpoint, and the checkpoint
+  persists them by proving the rewrite graph's suffix from the head the run
+  started on; compaction had already retired the bodies of the oldest of
+  them. A session that a HeadCanonical head describes now keeps every rewrite
+  occurrence that head does not cover yet, even past the retention bound, and
+  retires down to the bound at its first compaction after a checkpoint covers
+  them.
+- `meerkat-schedule`, `meerkat`, `meerkat-store`, `meerkat-mob-mcp`: a
+  scheduled delivery whose executor died after the target admitted it ended
+  `misfired` under `skip` once its lease lapsed: the reclaim past the misfire
+  deadline was refused, although the input had been admitted and could still
+  complete. This lifts the 0.9.4 known limitation that such a delivery was
+  reclaimed only inside its misfire window: keeping its crash recovery no
+  longer needs a `catch_up_within` window longer than the lease. A reclaim
+  now follows the misfire policy only when no earlier attempt recorded its
+  dispatch:
+  - an earlier attempt's admission is recorded (a `dispatch_accepted`
+    receipt): the occurrence is reclaimed, also past its misfire deadline, for
+    up to five attempts. The redelivery uses the runtime's deduplicate-only
+    admission, so it finds the admitted input and never admits it again, and
+    the occurrence records that input's outcome. A target still busy with
+    that input does not end the redelivery under `skip_if_running`, since a
+    redelivery starts no new run. After five lost executors it ends
+    `delivery_failed` with `lease_lost`; an input the runtime no longer knows
+    (a row that recovery discarded, a store-less runtime's archived input)
+    ends it `delivery_failed` (failure class `runtime_rejected`) with nothing
+    admitted. A host runnable keeps no admission record and runs again, so
+    for host runnables the guarantee is at-least-once and relies on the
+    runnable deduplicating on `delivery_idempotency_key`. A target delivery
+    that keeps the default `deliver_existing_occurrence` redelivers through
+    its ordinary delivery and relies on that delivery's durable
+    deduplication;
+  - only an earlier dispatch start is recorded: a reclaim past the deadline
+    asks the target, a busy one too, whether it admitted the delivery. It
+    records that input's outcome when the target did, and ends `misfired`
+    with nothing delivered when it did not. A mob target answers from its
+    durable external-delivery record and begins none;
+  - no dispatch was recorded (a crash before the dispatch start was
+    recorded): the misfire policy decides, as before.
+  The evidence is read from the occurrence's receipt history in both stores
+  (SQLite decodes `receipt_json` of a reclaimed row only), so no column and no
+  schema step is added.
+  The scheduling guide also names the failure class that the 0.9.4
+  `runtime_completion_authority_unavailable` end is recorded with:
+  `internal_error`.
+
+- `SqliteSessionStore::list` and `load_meta` no longer fail now and then
+  with `SessionStoreError::Corrupted` for an intact HeadCanonical session
+  while a commit to that session lands. Each read took the session's head
+  row and the metadata cells that head names in separate snapshots, so a
+  commit between the two paired the old head with the new metadata. Both
+  reads now take the head and its metadata from one read transaction.
+
+- `meerkat-mob`: a mob start no longer settles a durable tail on a retiring
+  member's session that another runtime owner on the realm hosts. The restore
+  of a retiring member's cleanup delivery settled such a tail (a turn's rows
+  that landed after its runtime boundary) without the session's hosting
+  claim, so it could adopt another process's in-flight tail. It now settles
+  the tail under this runtime owner's claim through the new
+  `MobSessionService::settle_durable_tail_before_cold_start`, which the
+  persistent session service implements with its cold-attach preparation. A
+  session another runtime owner hosts refuses the start, and the error log
+  names the member, its session and the remedy (stop that runtime owner, or
+  wait until it releases the session, then start again); the tail stays as
+  it was. The method's default settles through the resume verdict, which
+  takes the claim as well (see the next entry) but materializes the whole
+  resume, so a session-service wrapper around a persistent service should
+  forward it.
+- `meerkat-session`, `meerkat-mob`: resuming a session no longer settles a
+  durable tail on a session that another runtime owner on the realm hosts.
+  `PersistentSessionService::prepare_committed_boundary_resume` and
+  `recover_committed_boundary`, which every persistent resume runs (a mob
+  start's member restore, a resume spawn or respawn, a host
+  materialization, an attached actor's recovery), recovered the tail
+  without the session's hosting claim: a mob start adopted another
+  process's in-flight tail on an active member's session, then stopped the
+  mob when it bound the member. Both now take this runtime owner's claim
+  first and refuse with `SessionError::ServedElsewhere`, or
+  `HostingUnavailable` when the claim cannot be taken, before any recovery;
+  the tail stays as it was. `MobBuilder::resume` returns that error, and the
+  error log names the member, its session and the remedy (stop that runtime
+  owner, or wait until it releases the session, then start again). A
+  resume spawn of such a session returns it too, where it failed with an
+  internal error before.
+- `meerkat-mob`: a mob start no longer stops when a member whose restore
+  failed at that start (its spawn customizer refused it, say) holds a
+  durable tail. The start read that member's session to restore its
+  operation binding, met the tail as a transcript revision conflict, and
+  stopped the whole mob, at every start. It now settles the tail under this
+  runtime owner's hosting claim, as it does for a retiring member's, and
+  reads the session again. A session another runtime owner on the realm
+  hosts refuses the start, and the error log names the member, its session
+  and the remedy; the tail stays as it was.
+- `meerkat-mob`: a resume spawn onto a session whose durable tail runs past
+  its committed runtime boundary, and which no start of the mob restores
+  (another mob's member session, say), now refuses with that typed
+  transcript revision conflict (`SessionError::Store`) instead of an
+  internal "resume bridge session check failed" error. The spawn does not
+  settle the tail; it stays as it was.
 
 ## [0.9.4] - 2026-10-20
 

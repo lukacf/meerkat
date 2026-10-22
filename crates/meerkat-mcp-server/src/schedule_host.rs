@@ -541,6 +541,12 @@ fn scheduled_materialization_preload_skills(
 
 #[async_trait]
 impl SurfaceScheduleSessionHost for McpScheduleTargetAdapter {
+    /// Its prompt and event deliveries admit through
+    /// `accept_schedule_runtime_input_with_reconciliation` on the calling task.
+    fn decides_existing_admission(&self) -> bool {
+        true
+    }
+
     async fn probe_session_target(
         &self,
         binding: &SessionTargetBinding,
@@ -936,6 +942,186 @@ mod tests {
         let preload_skills: Vec<SkillKey> = Vec::new();
 
         assert_eq!(materialized_preload_skills(&preload_skills), None);
+    }
+
+    /// A planned first attempt (ordinal `ordinal`) whose target is the exact
+    /// session `session_id`.
+    fn exact_session_occurrence(session_id: &SessionId, ordinal: u64) -> Occurrence {
+        let schedule = meerkat::Schedule::new(meerkat::CreateScheduleRequest {
+            name: Some("mcp-existing-admission".to_string()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: meerkat::TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: session_id.clone(),
+                action: meerkat::ScheduledSessionAction::Prompt {
+                    prompt: ContentInput::Text("scheduled".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: meerkat::MisfirePolicy::Skip,
+            overlap_policy: meerkat::OverlapPolicy::SkipIfRunning,
+            missing_target_policy: meerkat::MissingTargetPolicy::MarkMisfired,
+            labels: Default::default(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("schedule fixture should be valid");
+        let mut occurrence = Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(ordinal),
+            chrono::Utc::now(),
+        )
+        .expect("occurrence fixture should be valid");
+        occurrence.attempt_count = 1;
+        occurrence
+    }
+
+    /// The runtime's durable admission under the occurrence's runtime key.
+    async fn durable_admission(
+        runtime_adapter: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        occurrence: &Occurrence,
+    ) -> Option<meerkat_core::lifecycle::InputId> {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+        let identity = ScheduleDeliveryIdentity::for_occurrence(occurrence);
+        let key = schedule_runtime_delivery_idempotency_key(
+            runtime_adapter,
+            session_id,
+            occurrence,
+            &identity.idempotency_key,
+        )
+        .await
+        .expect("the runtime key");
+        runtime_adapter
+            .durable_input_state_by_idempotency_key(session_id, &key)
+            .await
+            .expect("the durable index read")
+            .map(|stored| stored.state.input_id)
+    }
+
+    /// Through the MCP server's schedule host, a redelivery only finds an
+    /// earlier admission: an unproven late one the runtime never admitted
+    /// answers not admitted and writes nothing under its key; an admitted
+    /// one replays the earlier input (deduplicated, the same input); an
+    /// admitted one the runtime does not know ends delivery_failed with
+    /// nothing admitted. The adapter's scope witness stops a debug build if
+    /// the host admits without reading the redelivery scope.
+    #[tokio::test]
+    async fn the_mcp_host_redelivers_only_an_existing_admission() {
+        use meerkat::{ExistingDelivery, ExistingDeliveryAnswer, ScheduleTargetDelivery as _};
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let context = McpScheduleContext::from_state(&state).with_deterministic_test_client();
+        let runtime_adapter = Arc::clone(&context.runtime_adapter);
+        let session_id = context
+            .materialize_scheduled_session(
+                &sample_occurrence(),
+                &materialization_spec("mock-scheduled-materialization"),
+            )
+            .await
+            .expect("scheduled materialization");
+        let host = McpScheduleTargetAdapter::new(context);
+        assert!(host.decides_existing_admission());
+        let adapter = SharedScheduleTargetAdapter::new(
+            state.schedule_service.clone(),
+            Arc::new(host),
+            Arc::new(meerkat::surface::NoopScheduleMobHost::new(
+                "mob targets unused here",
+            )),
+        );
+
+        let late = exact_session_occurrence(&session_id, 0);
+        let answer = adapter
+            .deliver_existing_occurrence(
+                &late,
+                &ScheduleDeliveryIdentity::for_occurrence(&late),
+                ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the unproven late redelivery answers");
+        assert!(
+            matches!(answer, ExistingDeliveryAnswer::NotAdmittedPastDeadline),
+            "{answer:?}"
+        );
+        assert_eq!(
+            durable_admission(&runtime_adapter, &session_id, &late).await,
+            None,
+            "nothing is admitted under the late occurrence's key"
+        );
+
+        let first = exact_session_occurrence(&session_id, 1);
+        let first_identity = ScheduleDeliveryIdentity::for_occurrence(&first);
+        let dispatch = adapter
+            .deliver_occurrence(&first, &first_identity)
+            .await
+            .expect("the ordinary delivery admits the input");
+        assert_eq!(
+            format!("{:?}", dispatch.receipt.runtime_outcome),
+            "Some(AdmissionAccepted)"
+        );
+        let admitted = durable_admission(&runtime_adapter, &session_id, &first)
+            .await
+            .expect("the ordinary delivery's input is indexed under its key");
+        let answer = adapter
+            .deliver_existing_occurrence(&first, &first_identity, ExistingDelivery::Admitted)
+            .await
+            .expect("the admitted redelivery answers");
+        assert!(
+            matches!(answer, ExistingDeliveryAnswer::Dispatch(_)),
+            "an admitted redelivery answers with a dispatch: {answer:?}"
+        );
+        let ExistingDeliveryAnswer::Dispatch(replay) = answer else {
+            return;
+        };
+        assert_eq!(
+            format!("{:?}", replay.receipt.runtime_outcome),
+            "Some(AdmissionDeduplicated)",
+            "the redelivery replays the earlier input"
+        );
+        assert_eq!(
+            durable_admission(&runtime_adapter, &session_id, &first).await,
+            Some(admitted),
+            "the key still names the earlier input"
+        );
+
+        let gone = exact_session_occurrence(&session_id, 2);
+        let answer = adapter
+            .deliver_existing_occurrence(
+                &gone,
+                &ScheduleDeliveryIdentity::for_occurrence(&gone),
+                ExistingDelivery::Admitted,
+            )
+            .await
+            .expect("the admitted redelivery answers");
+        assert!(
+            matches!(answer, ExistingDeliveryAnswer::Dispatch(_)),
+            "an admitted redelivery answers with a dispatch: {answer:?}"
+        );
+        let ExistingDeliveryAnswer::Dispatch(failed) = answer else {
+            return;
+        };
+        let terminal = failed.completion.await.expect("the failure terminal");
+        assert_eq!(terminal.phase, meerkat::OccurrencePhase::DeliveryFailed);
+        assert!(
+            terminal
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("no longer known to the runtime")),
+            "{:?}",
+            terminal.detail
+        );
+        assert_eq!(
+            durable_admission(&runtime_adapter, &session_id, &gone).await,
+            None,
+            "nothing is admitted for an input the runtime does not know"
+        );
     }
 
     #[tokio::test]

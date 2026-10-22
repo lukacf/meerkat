@@ -13074,6 +13074,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn settle_durable_tail_before_cold_start(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -16148,6 +16159,12 @@ fn cli_scheduled_session_build(
 #[cfg(feature = "session-store")]
 #[async_trait::async_trait]
 impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
+    /// Its prompt and event deliveries admit through
+    /// `accept_schedule_runtime_input_with_reconciliation` on the calling task.
+    fn decides_existing_admission(&self) -> bool {
+        true
+    }
+
     async fn probe_session_target(
         &self,
         binding: &meerkat::SessionTargetBinding,
@@ -16854,6 +16871,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         session_id: &SessionId,
     ) -> Result<meerkat_mob::SessionResumeVerdict, meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::materialize_session_resume_verdict(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn settle_durable_tail_before_cold_start(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start(
             &self.inner,
             session_id,
         )
@@ -33871,6 +33899,77 @@ default_model = "gpt-5.4"
             .await
             .unwrap();
         assert_boundary_discard_wrapper_publication(&wrapper, witness).await;
+    }
+
+    /// #1813: the CLI's persistent mob session wrapper forwards the
+    /// claim-scoped durable-tail settle, which refuses a session another
+    /// runtime owner on the realm hosts. The trait default refuses it as
+    /// well, through the persistent resume verdict, so this row pins the
+    /// refusal; the forward keeps the cheaper cold-attach settle.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_cli_session_service_forwards_the_claimed_durable_tail_settle() {
+        let temp = tempfile::tempdir().unwrap();
+        let hosting_lock_dir = temp.path().join("hosting");
+        let cold_delivery_lock = temp.path().join("delivery").join("cold-delivery.lock");
+        std::fs::create_dir_all(&hosting_lock_dir).unwrap();
+        std::fs::create_dir_all(cold_delivery_lock.parent().unwrap()).unwrap();
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new(temp.path().join("runtime.sqlite3"))
+                .expect("open the runtime store")
+                .with_hosting_paths(meerkat_runtime::HostingPaths {
+                    hosting_lock_dir,
+                    cold_delivery_lock,
+                    database: None,
+                }),
+        );
+        let capability = runtime_store.hosting_capability();
+        assert!(
+            capability.is_cross_process(),
+            "the runtime store must offer cross-process hosting claims: {capability:?}"
+        );
+        let store = sqlite_session_store(&temp);
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&store),
+            runtime_store,
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        )
+        .expect("construct runtime authority");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(store)
+            .builtins(false)
+            .shell(false);
+        let (inner, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            temp.path().join("config_state.json"),
+            None,
+            None,
+            None,
+        )
+        .expect("compose the CLI runtime-backed service");
+        let wrapper = MobCliSessionService::new(Arc::clone(&inner));
+        let session_id = SessionId::new();
+        let _other_owner_claim = meerkat_runtime::SessionHostingAuthority::new(
+            capability,
+            meerkat_runtime::HostingOwner::mint(),
+        )
+        .grant(&session_id)
+        .expect("another runtime owner hosts the session");
+        let error = meerkat_mob::MobSessionService::settle_durable_tail_before_cold_start(
+            &wrapper,
+            &session_id,
+        )
+        .await
+        .expect_err("the wrapper refuses a session another runtime owner hosts");
+        assert!(
+            matches!(
+                error,
+                meerkat_core::service::SessionError::ServedElsewhere { .. }
+            ),
+            "the CLI wrapper must forward the claim-scoped settle: {error:?}"
+        );
     }
 
     /// Regression (0.8.42): `delegate` from plain `rkat run` failed with

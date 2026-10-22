@@ -19,6 +19,33 @@ pub enum InputReplayPolicy {
     ExactPrompt,
 }
 
+/// What an admission may do when no input was admitted earlier under the
+/// input's idempotency key.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AdmissionRequirement {
+    /// Admit the input fresh, or deduplicate it against an earlier admission.
+    #[default]
+    Any,
+    /// Only deduplicate against an input admitted earlier under the same
+    /// idempotency key. Without one the admission refuses with
+    /// [`crate::RuntimeDriverError::NoExistingAdmission`] and admits nothing.
+    /// Each driver decides it where it decides deduplication, under its lock.
+    ExistingOnly,
+}
+
+/// The refusal of an existing-only admission of `input`: no input was
+/// admitted earlier under its idempotency key, and nothing was admitted.
+pub(crate) fn no_existing_admission(input: &crate::input::Input) -> crate::RuntimeDriverError {
+    crate::RuntimeDriverError::NoExistingAdmission {
+        key: input
+            .header()
+            .idempotency_key
+            .as_ref()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default(),
+    }
+}
+
 // `AcceptOutcome` is a domain envelope. The wire shape lives in
 // `meerkat-contracts::wire::runtime::RuntimeAcceptResult` and is materialized
 // by per-surface handlers (see `meerkat-rpc::handlers::runtime`). The envelope
@@ -212,6 +239,7 @@ impl RuntimeIngressExecutionCapability {
 #[derive(Debug, PartialEq)]
 pub struct ResolvedAdmission {
     replay_policy: InputReplayPolicy,
+    admission_requirement: AdmissionRequirement,
     policy: PolicyDecision,
     handling_mode: HandlingMode,
     runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
@@ -238,6 +266,7 @@ impl ResolvedAdmission {
     ) -> Self {
         Self {
             replay_policy: InputReplayPolicy::KeyOnly,
+            admission_requirement: AdmissionRequirement::Any,
             policy,
             handling_mode,
             runtime_semantics,
@@ -261,6 +290,18 @@ impl ResolvedAdmission {
 
     pub(crate) fn replay_policy(&self) -> InputReplayPolicy {
         self.replay_policy
+    }
+
+    pub(crate) fn with_admission_requirement(
+        mut self,
+        admission_requirement: AdmissionRequirement,
+    ) -> Self {
+        self.admission_requirement = admission_requirement;
+        self
+    }
+
+    pub(crate) fn admission_requirement(&self) -> AdmissionRequirement {
+        self.admission_requirement
     }
 
     pub(crate) fn coarse_flags(&self) -> CoarseAdmissionFlags {

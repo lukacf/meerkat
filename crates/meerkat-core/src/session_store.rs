@@ -3072,6 +3072,7 @@ impl SessionHead {
         // EVERY row-assembled materialization. Process-global substitution or
         // verification memos must not replace this durable-byte proof.
         let component_root = self.realtime_event_prefix.clone();
+        let durable_rewrite_count = self.rewrite_count;
         let SessionHead {
             id,
             version,
@@ -3120,6 +3121,7 @@ impl SessionHead {
                 "failed to restore session from head row: {err}"
             ))
         })?;
+        session.note_durable_transcript_rewrites(durable_rewrite_count);
         match (component_root, component_sequence) {
             (None, None) => {}
             (Some(realtime_root), Some(realtime_sequence))
@@ -4043,6 +4045,7 @@ impl PreparedHeadCanonicalMutation {
                     session.id()
                 ))
             })?;
+        session.note_durable_transcript_rewrites(self.successor_head.rewrite_count);
         Ok(())
     }
 }
@@ -8425,6 +8428,94 @@ mod tests {
             .acknowledge_session(&mut session, mutation.successor_head_token())
             .expect("acknowledge HeadCanonical root");
         (session, head)
+    }
+
+    /// A session materialized from a durable head records the rewrite
+    /// occurrences that head covers as its retirement cap; a clone keeps it
+    /// and a fork, which has no durable head of its own, does not.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_session_materialized_from_a_head_records_its_rewrite_count() {
+        let mut session = Session::new();
+        for turn in 0..2 {
+            session.push(Message::User(UserMessage::text(format!("turn {turn}"))));
+            let end = session.messages().len();
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end },
+                    vec![Message::User(UserMessage::text(format!("summary {turn}")))],
+                    crate::TranscriptRewriteReason::new("test compaction"),
+                    Some("unit-test".to_string()),
+                    None,
+                )
+                .expect("compaction-shaped rewrite");
+        }
+        assert_eq!(session.durable_transcript_rewrite_count_for_test(), None);
+        let head = SessionHead::from_session(&session, TranscriptStrandId::root(), 2)
+            .expect("head projection");
+
+        let materialized = head
+            .into_session(session.messages().to_vec())
+            .expect("materialize the head");
+        assert_eq!(
+            materialized
+                .fork()
+                .durable_transcript_rewrite_count_for_test(),
+            None
+        );
+        let cloned = materialized.clone();
+        assert_eq!(
+            materialized.durable_transcript_rewrite_count_for_test(),
+            Some(2)
+        );
+        assert_eq!(cloned.durable_transcript_rewrite_count_for_test(), Some(2));
+    }
+
+    /// Every durable successor acknowledged on the live session records the
+    /// rewrite occurrences it covers: the root, the intra-turn rewrite
+    /// projection, and the runtime boundary that adopts it.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn acknowledged_successors_advance_the_retirement_cap() {
+        let (mut session, root_head) = acknowledged_head_canonical_root_with_metadata();
+        assert_eq!(session.durable_transcript_rewrite_count_for_test(), Some(0));
+
+        session.push(Message::User(UserMessage::text("long turn".to_string())));
+        let end = session.messages().len();
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end },
+                vec![Message::User(UserMessage::text("compacted".to_string()))],
+                crate::TranscriptRewriteReason::new("test compaction"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("compaction-shaped rewrite");
+        assert_eq!(
+            session.durable_transcript_rewrite_count_for_test(),
+            Some(0),
+            "a rewrite the store has not acknowledged does not move the cap"
+        );
+
+        let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &session,
+            &root_head,
+            root_head.clone(),
+        )
+        .expect("prepare the intra-turn rewrite projection");
+        let audited_head = rewrite.successor_head().clone();
+        rewrite
+            .acknowledge_physical_projection(&mut session, rewrite.successor_head_token())
+            .expect("acknowledge the rewrite projection");
+        assert_eq!(session.durable_transcript_rewrite_count_for_test(), Some(1));
+
+        let adoption =
+            PreparedHeadCanonicalMutation::prepare_intra_turn(&session, &root_head, audited_head)
+                .expect("runtime adoption of the persisted rewrite head");
+        adoption
+            .acknowledge_session(&mut session, adoption.successor_head_token())
+            .expect("acknowledge the adopting runtime boundary");
+        assert_eq!(session.durable_transcript_rewrite_count_for_test(), Some(1));
     }
 
     #[test]

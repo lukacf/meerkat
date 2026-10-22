@@ -313,3 +313,25 @@ fn retention_within_the_window_is_a_no_op() {
     );
     assert_eq!(session.to_persisted_bytes().unwrap(), before);
 }
+
+/// A session that no HeadCanonical head describes (a WholeBlob document, or
+/// one never persisted) retires to the bound after every compaction, across
+/// a persisted round trip, as before.
+#[test]
+fn a_session_without_a_durable_head_retires_to_the_bound() {
+    let mut session = Session::new();
+    for cycle in 0..6 {
+        compaction_cycle(&mut session, cycle);
+        session
+            .retire_transcript_history(retention(4))
+            .expect("retire");
+    }
+    assert_eq!(graph(&session).retired_count(), 2);
+
+    let mut reloaded = reload(&session);
+    compaction_cycle(&mut reloaded, 6);
+    reloaded
+        .retire_transcript_history(retention(4))
+        .expect("retire");
+    assert_eq!(graph(&reloaded).retired_count(), 3);
+}

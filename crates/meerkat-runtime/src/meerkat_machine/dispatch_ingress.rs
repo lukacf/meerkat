@@ -1814,6 +1814,7 @@ impl MeerkatMachine {
                 input,
                 register_completion,
                 replay_policy,
+                admission_requirement,
                 member_residency,
                 expected_attachment,
             } => {
@@ -2092,7 +2093,9 @@ impl MeerkatMachine {
                             return Err(error);
                         }
                     };
-                    let resolved = resolved.with_replay_policy(replay_policy);
+                    let resolved = resolved
+                        .with_replay_policy(replay_policy)
+                        .with_admission_requirement(admission_requirement);
                     let flags = resolved.coarse_flags();
                     let stages_run_boundary = resolved.stages_run_boundary();
                     self.preview_session_dsl_input(
@@ -2153,6 +2156,7 @@ impl MeerkatMachine {
                                 &err,
                                 RuntimeDriverError::InputRefused { .. }
                                     | RuntimeDriverError::ControllerReadinessUnavailable { .. }
+                                    | RuntimeDriverError::NoExistingAdmission { .. }
                             ) && let Some(custody) = admission_custody.as_mut()
                             {
                                 custody.settle(crate::input_admission_custody::NativeInputAdmissionSettlement::NotAdmitted);

@@ -13579,6 +13579,77 @@ async fn persistent_without_blobs_keeps_persistent_driver() {
     );
 }
 
+/// The deduplicate-only admission through the runtime's public method, on
+/// a persistent runtime. With no input admitted earlier under the key it
+/// refuses NoExistingAdmission and the durable index holds nothing under
+/// the key; after an ordinary admission under the key it deduplicates
+/// against that input.
+#[tokio::test]
+async fn existing_only_admission_on_a_persistent_runtime_never_admits_fresh() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(store as Arc<dyn crate::store::RuntimeStore>)
+            .expect("persistent machine"),
+    );
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let key = IdempotencyKey::new("scheduled-delivery");
+    let keyed = |text: &str| {
+        let mut input = make_prompt(text);
+        if let Input::Prompt(ref mut prompt) = input {
+            prompt.header.idempotency_key = Some(key.clone());
+        }
+        input
+    };
+
+    let early = keyed("redelivery before any admission");
+    let early_id = early.id().clone();
+    match adapter
+        .accept_existing_input_with_completion(&session_id, early)
+        .await
+    {
+        Err(RuntimeDriverError::NoExistingAdmission { key: refused }) => {
+            assert_eq!(refused, "scheduled-delivery");
+        }
+        other => panic!("expected NoExistingAdmission, got {other:?}"),
+    }
+    assert!(
+        adapter
+            .durable_input_state_by_idempotency_key(&session_id, "scheduled-delivery")
+            .await
+            .expect("durable index read")
+            .is_none(),
+        "a refused existing-only admission writes nothing under the key"
+    );
+    assert!(
+        adapter
+            .input_state(&session_id, &early_id)
+            .await
+            .expect("input read")
+            .is_none(),
+        "a refused existing-only admission admits nothing"
+    );
+
+    let first = keyed("first delivery");
+    let first_id = first.id().clone();
+    let (outcome, _handle) = adapter
+        .accept_input_with_completion(&session_id, first)
+        .await
+        .expect("ordinary admission");
+    assert!(outcome.is_accepted());
+    let (outcome, _handle) = adapter
+        .accept_existing_input_with_completion(&session_id, keyed("redelivery"))
+        .await
+        .expect("existing-only admission deduplicates");
+    match outcome {
+        AcceptOutcome::Deduplicated { existing_id, .. } => assert_eq!(existing_id, first_id),
+        other => panic!("expected Deduplicated, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_tracks_queued_prompt_input() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -14375,6 +14446,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
                 input: first,
                 register_completion: true,
                 replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                admission_requirement: crate::accept::AdmissionRequirement::Any,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -14407,6 +14479,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
                 input: duplicate,
                 register_completion: true,
                 replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                admission_requirement: crate::accept::AdmissionRequirement::Any,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -48378,6 +48451,7 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
                 input: runtime_parity_steered_prompt("modeled attached steer"),
                 register_completion: true,
                 replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                admission_requirement: crate::accept::AdmissionRequirement::Any,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -48475,6 +48549,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
                 input: runtime_parity_prompt("modeled idle queued admission"),
                 register_completion: true,
                 replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                admission_requirement: crate::accept::AdmissionRequirement::Any,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -48772,6 +48847,7 @@ async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_run
                 input: runtime_parity_steered_prompt("modeled running steer admission"),
                 register_completion: true,
                 replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                admission_requirement: crate::accept::AdmissionRequirement::Any,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -49630,6 +49706,7 @@ async fn modeled_meerkat_accept_with_completion_running_peer_interrupt_signal_ma
                 input: runtime_parity_peer_message("modeled running peer wake admission"),
                 register_completion: true,
                 replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                admission_requirement: crate::accept::AdmissionRequirement::Any,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -50086,6 +50163,7 @@ fn runtime_parity_probe_command(
                 input: runtime_parity_prompt("runtime parity accept with completion"),
                 register_completion: true,
                 replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                admission_requirement: crate::accept::AdmissionRequirement::Any,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             }
@@ -50224,6 +50302,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         }
         RuntimeDriverError::InputIdempotencyConflict { existing_id } => {
             format!("input_idempotency_conflict:{existing_id}")
+        }
+        RuntimeDriverError::NoExistingAdmission { key } => {
+            format!("no_existing_admission:{key}")
         }
         RuntimeDriverError::RetainedResumeRefused { reason } => {
             format!("retained_resume_refused:{reason:?}")

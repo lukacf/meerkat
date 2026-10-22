@@ -78,6 +78,7 @@ impl RunlessTerminalConvergenceError {
             | RuntimeDriverError::InputRefused { .. }
             | RuntimeDriverError::RetainedResumeRefused { .. }
             | RuntimeDriverError::InputIdempotencyConflict { .. }
+            | RuntimeDriverError::NoExistingAdmission { .. }
             | RuntimeDriverError::RecoveryCorruption { .. }
             | RuntimeDriverError::InputTerminalWithoutReceipt { .. }
             | RuntimeDriverError::ScopedResultWithheld { .. }

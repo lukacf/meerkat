@@ -30672,16 +30672,21 @@ impl MobActor {
         // Operation restoration must not resurrect an absent local session.
         // Broken cleanup and completed archive publication retain their exact
         // MobMachine journal authority without a fabricated runtime residue.
+        // A session that is not live (a member whose restore failed at this
+        // start, say) may hold a durable tail: it is settled under this
+        // runtime owner's claim before the read, not read as a failed start.
         if local_member_owner
             && !io
                 .session_service
                 .has_live_session(&generated_owner_session_id)
                 .await?
-            && io
-                .session_service
-                .load_persisted_session(&generated_owner_session_id)
-                .await?
-                .is_none()
+            && Self::load_member_session_settling_durable_tail(
+                &io,
+                &entry.agent_identity,
+                &generated_owner_session_id,
+            )
+            .await?
+            .is_none()
             && !io
                 .adapter
                 .archive_runtime_residue_present(&generated_owner_session_id)
@@ -30913,9 +30918,13 @@ impl MobActor {
                 ));
             }
             if !io.session_service.has_live_session(session).await?
-                && Self::load_cleanup_session_settling_durable_tail(&io, session)
-                    .await?
-                    .is_none()
+                && Self::load_member_session_settling_durable_tail(
+                    &io,
+                    &entry.agent_identity,
+                    session,
+                )
+                .await?
+                .is_none()
                 && !io
                     .adapter
                     .archive_runtime_residue_present(session)
@@ -30968,8 +30977,11 @@ impl MobActor {
         Ok(())
     }
 
-    /// The persisted session a local cleanup delivery restores, read once its
-    /// durable tail is settled.
+    /// The persisted session of a member the start restores without a live
+    /// actor, read once its durable tail is settled: the session a retiring
+    /// member's local cleanup delivery restores, or the session whose
+    /// operation binding the start restores for a member that is not live
+    /// (one whose restore failed at this start, say).
     ///
     /// A member whose last turn's durable rows landed after the runtime
     /// boundary it committed (a mid-turn retirement's boundary cancel, or a
@@ -30980,21 +30992,50 @@ impl MobActor {
     /// recovery the resume path runs (a proven continuation is adopted, an
     /// unprovable one is kept intact), and the session is read once more; a
     /// tail the recovery keeps still refuses, typed, as before.
+    ///
+    /// The settle runs under this runtime owner's hosting claim for the
+    /// session (#1813), taken for the settle alone; the second read takes
+    /// none. A session another runtime owner on the realm hosts is refused,
+    /// typed, without settling its tail: that owner may still commit the
+    /// tail itself. The start then fails before admission, since nothing
+    /// restores the member later in this incarnation; the refusal names the
+    /// member, its session and the remedy.
     #[cfg(feature = "runtime-adapter")]
-    async fn load_cleanup_session_settling_durable_tail(
+    async fn load_member_session_settling_durable_tail(
         io: &ResumeOperationBindingIo,
+        member: &AgentIdentity,
         session: &SessionId,
     ) -> Result<Option<meerkat_core::Session>, MobError> {
         match io.session_service.load_persisted_session(session).await {
             Err(error) if is_transcript_revision_conflict(&error) => {
                 tracing::info!(
+                    %member,
                     session_id = %session,
-                    "settling a durable tail ahead of its runtime boundary before restoring \
-                     local cleanup delivery"
+                    "settling a durable tail ahead of its runtime boundary before the mob start \
+                     restores the member"
                 );
-                io.session_service
-                    .materialize_session_resume_verdict(session)
-                    .await?;
+                if let Err(error) = io
+                    .session_service
+                    .settle_durable_tail_before_cold_start(session)
+                    .await
+                {
+                    if matches!(
+                        error,
+                        meerkat_core::service::SessionError::ServedElsewhere { .. }
+                            | meerkat_core::service::SessionError::HostingUnavailable { .. }
+                    ) {
+                        tracing::error!(
+                            %member,
+                            session_id = %session,
+                            %error,
+                            "a member's session has a durable tail and this runtime owner cannot \
+                             host it; the mob start refuses rather than settle another owner's \
+                             tail. Stop the runtime owner that hosts the session, or wait until it \
+                             releases it, then start the mob again"
+                        );
+                    }
+                    return Err(error.into());
+                }
                 Ok(io.session_service.load_persisted_session(session).await?)
             }
             loaded => Ok(loaded?),
@@ -31908,16 +31949,28 @@ impl MobActor {
                     });
                 }
 
-                // Validate the session exists and is active.
-                let is_active = preparation_context
+                // Validate the session exists and is active. A session whose
+                // durable tail runs past its committed runtime boundary
+                // refuses this read as a transcript revision conflict, and the
+                // refusal stays typed. The spawn does not settle the tail: a
+                // session no start of this mob restores (another mob's member
+                // session, say) is not this spawn's to complete.
+                let is_active = match preparation_context
                     .provisioner
                     .is_member_active(&member_ref)
                     .await
-                    .map_err(|e| {
+                {
+                    Err(MobError::SessionError(error))
+                        if is_transcript_revision_conflict(&error) =>
+                    {
+                        return Err(MobError::SessionError(error));
+                    }
+                    checked => checked.map_err(|e| {
                         MobError::Internal(format!(
                             "resume bridge session check failed for '{agent_identity}': {e}"
                         ))
-                    })?;
+                    })?,
+                };
                 if is_active.unwrap_or(false) {
                     if let Some(declared_predecessor_role) = resume_from_role.as_ref() {
                         return Err(MobError::MemberRoleMigrationRejected {

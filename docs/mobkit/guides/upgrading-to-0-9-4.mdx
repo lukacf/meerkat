@@ -1,0 +1,846 @@
+---
+title: "Upgrading to Meta 0.9.4"
+description: "What changes when a Meta 0.9.3 deployment moves to 0.9.4: the one-way migration of every state directory onto Meerkat's native session and identity stores, the removed SDK continuity providers, the first boot, the new startup refusals and how to go back to 0.9.3."
+icon: "arrow-up"
+---
+
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
+
+Meta 0.9.4 keeps sessions and identities in Meerkat Core's own stores. Meta no
+longer keeps a continuity copy of a member's transcript and no longer holds
+identity leases: Core's session store holds every transcript, and Core's mob
+store holds every identity's binding. A 0.9.3 state directory therefore needs
+one offline, one-way migration before 0.9.4 starts on it. 0.9.4 refuses to
+start on a directory that has not been migrated, and 0.9.3 refuses to start on
+one that has.
+
+Each section below names what you see, why, and what to do. Search this page
+for the text of your error.
+
+## Before you upgrade
+
+Do these while 0.9.3 is still installed:
+
+1. **Stop every 0.9.3 process that uses the state directory**: gateways,
+   SDK-hosted runtimes and maintenance tools. The migration refuses a
+   directory on which a process still hosts runtimes (`RuntimeInUse`).
+   A directory last used by Meta 0.9.2 migrates the same way, with no 0.9.3
+   start in between: 0.9.4 upgrades its mob store itself. Only the copy from
+   step 6 takes it back to 0.9.2: the `--apply` backups do not hold the mob
+   store, and any 0.9.4 start upgrades it. So does a published 0.9.3 started
+   on the migrated directory by mistake: it takes the same mob store step
+   0.9.4's first start takes, then refuses the converted `runtime.sqlite`.
+   After either, 0.9.2 refuses the directory
+   (`` schema for domain `mob` is from the future ``).
+2. **If 0.9.3 ever ran with `store_path` naming a file**, run
+   `storage-migrate --session-db` before anything else, with every process
+   that uses the directory stopped (0.9.3 gateways started with that
+   `store_path` included). See
+   [A session database named by store_path](#a-session-database-named-by-store_path).
+3. **If your deployment passed a continuity provider to the SDK builder**
+   (`continuity_store` in Python, `continuityStore` in TypeScript), export its
+   continuity now, with 0.9.3 still installed, as
+   [Exporting SDK-hosted continuity from 0.9.3](/mobkit/guides/continuity-export)
+   describes. 0.9.4 has no runtime for that provider.
+4. **Run any `meta_repair` transcript repair you still need.** 0.9.4's
+   `meta_repair` keeps only `--composition-manifests`. See
+   [Transcript repair](#transcript-repair-is-removed).
+5. **Check every identity whose spec sets a `placement`**: its placement host
+   must run with a persistent (SQLite) realm backend. Otherwise Meta 0.9.4
+   refuses to create the identity there (`HostRejectedBuild`, naming this
+   remedy). Remove the placement to host the identity in-process instead.
+6. **Take a copy of the whole stopped state directory**, and of the mob
+   store file with its `-wal` file when an embedded app keeps it outside the
+   directory (the file you pass as `--mob-store`, see
+   [Embedded builder apps](#embedded-builder-apps)). The migration is
+   one-way, and this copy is the way back to 0.9.3 (see
+   [Going back to 0.9.3](#going-back-to-0-9-3)). Rehearsing the migration on a
+   clone of the directory first is a good idea; on another machine, or as
+   another user, copy the comms identity keys with it (see
+   [Session comms identity keys](#session-comms-identity-keys)).
+
+Then upgrade the binaries and the SDKs, and migrate each state directory as
+the next sections describe, before 0.9.4 starts on it.
+
+## Continuity stores and lease providers are removed
+
+**You see:** `rpc_gateway` answers `meta/init` with invalid params (`-32602`):
+
+```text
+init param(s) has_continuity_store, has_lease_provider, scratch_dir were removed in Meta 0.9.4: SDK-hosted continuity (a host continuity store, lease provider and scratch_dir) is no longer supported; Meta keeps sessions and identities in the persistent_state directory. Remove them, and set persistent_state for durable sessions. To move an SDK-hosted 0.9.3 installation, export its continuity with 0.9.3 still installed, then run `meta_gateway storage-migrate-native` (see docs/guides/upgrading-to-0-9-4.mdx#continuity-stores-and-lease-providers-are-removed)
+```
+
+The message names only the keys the call sent.
+
+**Why:** in 0.9.3 an SDK host could keep identity continuity in its own
+process: a continuity store, a lease provider and a scratch directory, passed
+to the builder. Meta kept a second copy of every member's transcript beside
+Core's, and leased each identity to the host that ran it. 0.9.4 removes all of
+it. Core's stores in the `persistent_state` directory are the only copy, and
+an identity belongs to the one runtime that holds the directory (see
+[One runtime per state directory](#one-runtime-per-state-directory)).
+
+Removed from both SDKs (see the CHANGELOG for every name):
+
+- the builder options `continuity_store`, `lease_provider` and `scratch_dir`
+  (TypeScript `continuityStore()`, `leaseProvider()` and `scratchDir()`), the
+  provider protocols and their record and lease types;
+- the lease-lost error (`LEASE_LOST_CODE`, `LeaseLostError`);
+- `request_continuity_repair()` and the `meta/request_continuity_repair`
+  method, which now answers method not found (`-32601`);
+- the `lease`, `continuity_health` and `checkpoint_version` fields of the
+  identity status;
+- the session store argument of `session_service()` and the session store
+  config helpers: Core's session store holds every session.
+
+**Do:**
+
+- **A deployment without a continuity provider:** remove nothing but the calls
+  above, set `persistent_state` for durable sessions, and migrate the state
+  directory as the next section describes.
+- **A deployment with a continuity provider:** export its continuity with
+  0.9.3 still installed
+  ([Exporting SDK-hosted continuity from 0.9.3](/mobkit/guides/continuity-export)),
+  upgrade, then import the file with
+  `meta_gateway storage-migrate-native --continuity-export <file>` into the
+  0.9.4 state directory:
+  - a new directory (absent, or holding no store file): the migration creates
+    the native stores and imports every exported session;
+  - the host's own `persistent_state` directory, when it holds
+    `runtime.sqlite` and no local session projection: the export takes the
+    projection's place, and schedules, the work graph, the console, blobs,
+    jobs and the peer key stay where they are.
+
+  A directory that holds a local projection file, store files without
+  `runtime.sqlite`, or a store 0.9.4 already uses is refused
+  (`ContinuityExportDirectory`), and so is a file that is not a valid export
+  (`ContinuityExportUnreadable`). A rerun that finishes an unfinished run
+  needs the export file that run started with, at the same path: another
+  file, or the same file at another path, is refused
+  (`ContinuityExportChanged`, naming the path the run started with).
+- 0.9.3 hosts built with the Python or TypeScript SDK never saved session
+  snapshots. Their export names the missing snapshots, and
+  `--missing-snapshot fresh` exports those identities so that their first
+  0.9.4 wake starts fresh with an empty transcript, as every 0.9.3 restart of
+  such a host did. The export guide explains it.
+
+## Migrate the state directory
+
+Every 0.9.3 state directory (the `persistent_state` of `rpc_gateway` and the
+SDK builders, or the store directory of `meta_gateway`) is migrated once,
+offline, with 0.9.4's `meta_gateway`:
+
+```text
+meta_gateway storage-migrate-native --state-dir <dir> [--apply] [--scratch-dir <dir>] [--mob-store <path>] [--continuity-export <file>] [--discard-bodyless <session id>]... [--json]
+```
+
+```bash
+meta_gateway storage-migrate-native --state-dir <dir>          # dry run: the census
+meta_gateway storage-migrate-native --state-dir <dir> --apply  # migrate
+```
+
+A database under a legacy file name (`continuity.db`, `sessions.db`,
+`identity_continuity.sqlite`, `sessions.sqlite`) is migrated and retired in
+place under that name, as the 0.9.4 layout resolves it; the steps below that
+name `continuity.sqlite3` or `sessions.sqlite3` mean that file. Run
+`meta_gateway storage-migrate --state-dir <dir> --apply` first when two
+spellings of one database sit side by side, and add `--session-db <file>`
+when 0.9.3 ran with `store_path` naming a file (see
+[A session database named by store_path](#a-session-database-named-by-store_path)).
+
+**The dry run** changes no database in the state directory. It copies
+`runtime.sqlite` and the session projection databases, each with its `-wal`
+file, into a new scratch directory (in the state directory's parent, or
+under `--scratch-dir <dir>`), classifies every session by comparing Core's
+runtime store with Meta's session projection, checks every identity against
+Core's mob store, and prints a report (`--json` for machine-readable output,
+which spells the names below in snake_case). The scratch directory is
+removed when the run ends. A read-only open of a database
+in WAL mode may leave empty `-wal` and `-shm` files beside it, and the
+maintenance fence empty `*.mpresence` lock files beside the databases;
+nothing else changes. Exit code 0 means clean, 1 means at least one
+refusal, 2 a usage error.
+
+**`--apply`** refuses while the census refuses any row, so a refused directory
+stays usable by 0.9.3. Otherwise it writes
+`storage-migrate-native.journal.json` into the state directory before its first
+write, keeps backups (see [Going back to 0.9.3](#going-back-to-0-9-3)),
+converts `runtime.sqlite` in place onto Core's head-canonical profile,
+imports the sessions only the projection holds into Core's session store,
+writes the first-boot manifest (see [The first boot](#the-first-boot)),
+retires the old projection, and removes the journal after its last step. It
+retires `sessions.sqlite3` by replacing it with a retired stamp, and
+`continuity.sqlite3` by emptying its session tables; the identity records in
+`continuity.sqlite3` stay. The conversion and the import move each image a
+session holds inline, its compacted history included, to the state
+directory's blob store (`blobs/`) and sync it there before they write the
+row that names it; the census row says how many images move. A Rust host
+whose runtime reads images from its own blob store (one passed to
+`UnifiedRuntimeBuilder::blob_store()` or `binary_blob_store()`) copies
+`blobs/` into that store before its first 0.9.4 start; otherwise every turn
+of a session whose context names a moved image fails ("required image blob
+is unavailable").
+
+**A run that stops part way** (a crash, a kill, a power loss, or a step that
+fails, which `--apply` reports as `ApplyFailed`) leaves the journal, and 0.9.4
+refuses to start while it exists (`MigrationIncomplete`); a dry run refuses
+the same way. Run `--apply` again. Once Core had written its claim to
+`runtime.sqlite` (it does so before it converts anything), the rerun finishes
+from the journal and keeps its backups, and the report says it finished an
+interrupted run; before that, the rerun drops the journal and starts over with
+a new census and new backups (the stopped run's backups stay), and the report
+says it started over. The journal's `done` list records `start_conversion`,
+durably, before the run's first write to `runtime.sqlite`; without it, nothing
+was written there. With it but without Core's claim, the run can have written
+at most the session store's schema there (0.9.3 ignores it) and discarded the
+runtimes `--discard-bodyless` named. A session already imported is compared
+with its source and kept; a different one refuses the run, and nothing is
+written. A journal that cannot be written refuses the run before anything else
+is written (`ApplyNotStarted`). After a completed run the directory reads as
+native, and the verb reports that there is nothing to migrate.
+
+**Disk and time.** The census copies `runtime.sqlite` and the session
+projection databases (with their `-wal` files) into its scratch directory
+and deletes it when the run ends, so it needs free space there (the state
+directory's parent, or `--scratch-dir`) of about their size. `--apply` keeps
+its backups in the state directory: about the size of the retired
+projection databases plus `runtime.sqlite` (a run that starts over adds
+another set), until you delete them with
+`meta_gateway storage-prune --state-dir <dir> --apply` (a run without
+`--apply` lists what it would delete; it deletes backups at least 30 days
+old, and `--older-than-days 0` all of them). The time is dominated by
+copying and by validating each session's transcript, roughly linear in
+transcript volume. The migration uses no network.
+
+What carries over:
+
+- every session the census admits, with its transcript as Core holds it;
+- every identity's current binding. History beyond the current bindings is
+  not migrated;
+- rewrite revisions: Core keeps the newest four rewrite revisions of a
+  session's transcript, and revisions past that retention are not carried.
+  `read_transcript_revision` on such a revision answers
+  `TranscriptRevisionRetired` after the upgrade. No 0.9.3 RPC, HTTP, console,
+  SDK or CLI surface served them.
+
+**The census refuses** a directory it cannot migrate without losing what
+0.9.3 serves. The report names every refused row and its action; these are
+the common refusals:
+
+| Reason | What it means | Do |
+|---|---|---|
+| `RuntimeInUse` | A process still holds `runtime.sqlite.execution-custody` or `meta-runtime.lock`. | Stop it, then rerun. |
+| `RuntimeLockUnreadable` | A lock file exists but cannot be opened or locked. | Fix its permissions, then rerun. |
+| `MigrationIncomplete` | An earlier `--apply` stopped part way. | Run `--apply` again. |
+| `MigrationJournalUnreadable` | The journal an earlier `--apply` left cannot be read (damaged, or a journal version this build does not read), and `runtime.sqlite` carries Core's claim, so the run cannot be finished without it. Without the claim, the rerun drops the journal and starts over. | If another 0.9.4 build wrote the journal, finish the run with that build. Otherwise restore `runtime.sqlite` and each projection file from the stopped run's `.native-migration` backups (the newest timestamp), then remove the journal. Removing the journal alone can leave a partly converted `runtime.sqlite` that neither release reads. |
+| `SpellingTwins` | Two spellings of one database sit side by side (for example `continuity.db` and `continuity.sqlite3`). A retired stamp under either name (the one `storage-migrate --session-db` leaves at a file's old path, or this verb's own) does not count. | Run `meta_gateway storage-migrate --state-dir <dir> --apply`, then rerun. |
+| `LayoutRefused` | Core cannot lay the session's transcript history out as head-canonical rows; the detail names Core's reason. For a session only the projection holds, the census also runs the import itself on the copy (every step `--apply` runs for it) against a scratch directory, so a copy the import would refuse at `--apply` is refused here, with the import's reason. A history that compaction re-anchored past its oldest rewrites is not refused: Core lays it out from its retained base. | Keep the directory on 0.9.3 and report the row. |
+| `ProjectionSuffix` | The projection holds rows past Core's copy that 0.9.3 keeps, left by a retire torn by its own compaction: on a session a continuity record binds, or on any session, bound or not, of a directory whose projection is `sessions.sqlite3` (a deployment without a roster provider, or an embedded builder app). | When the report names the restart remedy (only where `continuity.sqlite3` is the projection, one continuity record binds the session, and 0.9.3 left it live): keep the identity on the roster, start the directory once with 0.9.3, stop it cleanly, and rerun the census. Otherwise keep the directory on 0.9.3 and report the row. |
+| `RuntimeLifecycleOnly` | `runtime.sqlite` lists the session but holds no committed copy of it. | Keep the directory on 0.9.3 and report the row. |
+| `BodilessRuntime` | `runtime.sqlite` holds a session's authority whose body is gone: no release can load that session, and Core's conversion would refuse the whole file. | Rerun with `--discard-bodyless <session id>` (repeatable): `--apply` then backs up `runtime.sqlite`, discards each named session's body-less runtime before the conversion (under its runtime id; an authority under the session's legacy alias, which no released Core writes, is refused as `Unreadable` before `--apply` writes anything), and the report lists each discarded runtime with the rows Core keeps for it, by table (rows neither the conversion nor 0.9.4 reads). When the projection still holds a copy of the session, `--apply` then imports that copy, and the census row says how many messages it holds; a copy that does not load is refused (`Unreadable`). Without a copy, the session is given up. A named session that `runtime.sqlite` holds and that is not body-less refuses the run (`DiscardNotBodiless`); one it no longer holds at all is skipped, so the same command works again after a run that discarded it and stopped. |
+| `ProjectionAhead` | The projection holds messages `runtime.sqlite` never committed. | Restore `runtime.sqlite` from a backup that holds them, or delete the session (or its identity) with the 0.9.3 binary, then rerun. |
+| `Divergent` | The two copies share no proven history. | Restore the session from a backup, or delete the identity with the 0.9.3 binary, then rerun. |
+| `Unreadable` | A copy cannot be read, or the projection copy of a session only it holds does not validate. | Repair or restore the database, then rerun. |
+| `UnrecognizedSessionDatabase` | A file in the state directory holds 0.9.3 sessions under a name the layout does not know. | See [A session database named by store_path](#a-session-database-named-by-store_path). |
+| `StateFileUnreadable` | A SQLite file in the state directory could not be read to check whether it holds sessions; the scan fails closed. | Fix the file, or move it out of the state directory, then rerun. |
+| `MobStoreUnnamed`, `MobStoreMissing`, `MobStoreConflict`, `MobStoreManifestWithoutStore` | The directory's mob store is not where the census looks, or `--mob-store` contradicts it. | See [Embedded builder apps](#embedded-builder-apps); the report names the remedy under each. |
+| `IdentityDisagrees` | Core's last binding for an identity is on another session or on none, or Core last bound the session to another identity. With in-memory mob storage, where Core holds no binding, two records that bind one session are both refused: one session resumes one identity. | Settle the identity's record with the 0.9.3 binary (or delete the identity), then rerun. |
+| `CoreMissing` | The projection binds an identity to a session, but Core's mob store holds no member for it since its latest reset. | Settle or delete the identity with the 0.9.3 binary, then rerun. |
+| `Unlisted` | Core's mob store binds an identity that the continuity export does not list. | Add the identity to the export's identity list, export again, then rerun. |
+
+Sessions the census reads as equal, as behind Core's copy, or as held by
+`runtime.sqlite` alone are admitted. A session only the projection holds,
+with no trace in `runtime.sqlite`, is admitted when its copy loads and its
+history validates: `--apply` imports it into Core's session store, as 0.9.3
+re-mints such a session on its next activation. Projection rows past Core's
+copy are admitted in two cases, and `--apply` then keeps Core's copy and
+drops those rows (the pre-apply backup of the projection database keeps
+them):
+
+- `ProjectionSuffixTerminal`, in any directory: the session has a lifecycle
+  terminal fact, so 0.9.3 drops those rows itself;
+- `ProjectionSuffixUnbound`, only in a directory whose projection is
+  `continuity.sqlite3`: no continuity record binds the session, so 0.9.3 can
+  never write it and never serves those rows.
+
+Every identity the projection binds is compared with Core's last binding for
+it in the mob store, and each admitted one gets a row in the first-boot
+manifest (see [The first boot](#the-first-boot)). An identity Core already
+binds to the same session (`Bound`), and, with in-memory mob storage where
+Core holds no binding, every bound identity whose session no other record
+binds (`Resume`), gets a row that
+resumes its session. An identity 0.9.3 deleted (Core's last binding is
+retired, and the projection holds no session for it) gets a row that starts
+it fresh (`FreshAfterDelete`).
+
+## Embedded builder apps
+
+An app built with the SDK builder and `persistent_state` keeps its sessions
+and identities in that directory, and migrates like a gateway's directory.
+
+- Since 0.9.4, `persistent_state` keeps durable mob storage at
+  `<state>/event_log.sqlite3` by default. In-memory mob storage together with a
+  roster under `persistent_state` is refused when the runtime is built.
+- So a definition edit between restarts (for example a profile's model or a
+  skill) now refuses with `-32019` `divergent`, as on the gateways. Declare
+  the change with `runtime_options.declare_spec_update`
+  (`{expected_revision}`; the SDK builders' `declare_spec_update` and
+  `declareSpecUpdate`, or `spec_update_ceremony::declare_spec_update` from
+  Rust), or launch the candidate with
+  `runtime_options.mob_composition.candidate_definition = "stored"`.
+- If your app kept its durable mob store anywhere other than
+  `<state>/event_log.sqlite3`, pass it to the migration with
+  `--mob-store <path>`. The report prints the mob storage it read. The census
+  refuses:
+  - `MobStoreUnnamed` without the flag, when the state directory names a mob
+    store other than `event_log.sqlite3`;
+  - `MobStoreMissing` when the file `--mob-store` names does not exist;
+  - `MobStoreConflict` when the directory has its own `event_log.sqlite3` and
+    `--mob-store` names another file;
+  - `MobStoreManifestWithoutStore` when the directory holds the composition
+    manifest 0.9.3 writes beside its own `event_log.sqlite3`, but not the
+    store, and no `--mob-store` names one: the store was moved or deleted.
+    Restore it, or name it with `--mob-store <path>`.
+- The builder no longer has `session_store()`. `ephemeral_runtime_store(true)`
+  together with `persistent_state` is refused as `ConflictingConfiguration`.
+- `rpc_gateway` with `persistent_state` refuses
+  `runtime_options.runtime_store = memory`, and refuses
+  `runtime_options.mob_storage = memory` when a roster provider is
+  registered (both `-32014`). So a roster gateway that kept mob storage in
+  memory (`runtime_options.mob_storage = {"storage": "memory"}`) to edit
+  `mob_config` freely is now refused at start: drop that declaration and
+  declare each definition edit with `declare_spec_update`.
+
+## A session database named by store_path
+
+If 0.9.3's `meta_gateway` ran with an init `store_path` that names a file (a
+path with an extension, such as `<dir>/my-sessions.db`), that file is the
+installation's session database, and its parent directory is the state
+directory. 0.9.4 opens no separate session database: sessions live in
+`runtime.sqlite` under the state directory.
+
+**You see:** `meta_gateway` refuses `meta/init` with `-32014`
+(`SessionDatabaseOverrideRetired`), naming the file and the state directory,
+whether or not the file exists. Or startup, or the census, refuses
+`UnrecognizedSessionDatabase` naming a file in the state directory.
+
+**Do:** if 0.9.3 ever ran with `store_path` naming a file, stop every
+process using the state directory (0.9.3 gateways started with that
+`store_path` included), then run `storage-migrate --session-db` before
+anything else:
+
+```bash
+meta_gateway storage-migrate --state-dir <dir> --session-db <file>          # dry run
+meta_gateway storage-migrate --state-dir <dir> --session-db <file> --apply
+meta_gateway storage-migrate-native --state-dir <dir>          # dry run
+meta_gateway storage-migrate-native --state-dir <dir> --apply
+```
+
+Then pass the state directory, not the file, as `store_path`.
+
+- The file must sit in the state directory, as 0.9.3 required. It moves to
+  `<state>/sessions.sqlite3`, and its old path keeps a retired stamp, so a
+  0.9.3 gateway restarted with the old `store_path` refuses instead of
+  starting with an empty session database.
+- If `sessions.sqlite3` already exists beside it, a byte-identical copy is
+  merged and a different one is refused: the refusal shows the command with
+  `--adopt <file>`, naming the file 0.9.3 used while the override was set.
+- A file that is not a 0.9.3 session database is refused before anything is
+  moved, and so is a run while a process still holds the directory's
+  runtime locks (`RuntimeInUse`). The dry run checks the same things. A rerun
+  after the move reports that the file already moved.
+- After 0.9.4 has started on the directory, `--session-db` refuses
+  (`NativeRuntimeAlreadyStarted`) with nothing moved, and the file's 0.9.3
+  sessions stay in that file, untouched: they cannot be brought into a
+  directory 0.9.4 already uses. Move the file out of the state directory; the
+  next 0.9.4 start refuses `UnrecognizedSessionDatabase` until you do.
+- A backup you keep in the state directory under another name is refused the
+  same way. Move it out of the directory.
+
+## The first boot
+
+When the census plans first-boot rows (any directory whose identities a
+roster bound), `--apply` writes
+`<state_dir>/storage-migrate-native.first-boot.json` and a byte copy of it
+beside the backups
+(`storage-migrate-native.first-boot.json.pre-0.9.4-<timestamp>.native-migration`,
+named when the journal starts, so a rerun rewrites the same copy).
+The first 0.9.4 boot finishes the migration from it: for each identity it
+either resumes the identity's exact migrated session or starts it fresh,
+where 0.9.3 had deleted it (or where `meta_gateway identity-reset` asked for
+a fresh life, see [Offline reset](#offline-reset)); a resume row whose
+session Core already binds reads as done. `rpc_gateway` with `persistent_state`, `meta_gateway` with persistent
+sessions and the SDK builder all carry the manifest out; `meta_gateway`'s
+ephemeral launch has no state directory to read. `meta_gateway
+storage-prune` keeps the copy, however old, while the manifest is still in
+the directory; after that the copy ages out like the other backups.
+
+- An identity the roster lists is carried out when the roster compiles,
+  before any wake of it. An identity the roster does not list stays pending,
+  and is carried out first when it is added back. The file is rewritten as
+  rows are carried out and removed after the last one.
+- The bootstrap status (`meta/status_identity_bootstrap` and
+  `meta/wait_identity_bootstrap`, the SDKs' `identity_bootstrap_status()`
+  and `wait_identity_bootstrap()`) lists the pending rows as
+  `first_boot_pending`; the storage doctor lists them too, each with Core's
+  verdict from the directory's mob store (carried out, still to carry out,
+  or contradicted).
+- `reset`, `delete_identity` and the delivery verbs of an identity whose row
+  is pending are refused (`-32014`, `first_boot_row_pending`, retryable). The
+  refusal's `remedy` says what to do: `add_to_roster` when no roster lists the
+  identity (add it, so its row is carried out, then retry), or
+  `wake_identity` when the roster lists it and its row waits to be carried
+  out (wake the identity, then retry). Every Meta entry point
+  that reaches Core's mob-level reset refuses while any row is pending. A reset
+  Meta does not initiate is not guarded while a row is pending: avoid one
+  until the bootstrap status lists no pending row.
+- A row that Core contradicts blocks only that identity
+  (`first_boot_row_refused`), not startup. A resume row whose session Core
+  holds no durable copy of is refused the same way.
+- If the file cannot be read, the roster compile refuses
+  (`first_boot_manifest_unreadable`) and nothing wakes; every delivery is
+  refused the same way, also to an identity whose Core member survived the
+  restart. The gateway stays up for status and the doctor. The refusal names
+  the remedy: move the file aside and keep it. If no 0.9.4 runtime has
+  started on the directory since `storage-migrate-native --apply`, restore
+  the copy that run kept beside it
+  (`storage-migrate-native.first-boot.json.pre-0.9.4-<timestamp>.native-migration`),
+  then run `meta_gateway identity-reset` again for every reset made since
+  that run: identity-reset keeps no copy, so the restored file lacks them.
+  If a runtime has started since, restore no older copy (its rows were
+  carried out already): start with no manifest, and run identity-reset again
+  for each reset made since the last start (see
+  [Offline reset](#offline-reset)). Removing the manifest also drops a
+  migration row still pending for an identity no roster listed since: that
+  identity starts fresh when it is added back, and nothing reports it, so
+  compare against the last `meta_gateway identity-census` output before
+  removing it.
+- The first 0.9.4 roster pass respawns each live member of a rostered
+  identity whose Core binding lacks the durable-identity marker (a member
+  0.9.3 spawned has none) onto its session: the transcript stays, and the
+  generation advances. A member that is not live gets the marker at its
+  next wake. A failed respawn shows as the identity's typed refusal in the
+  bootstrap status and is retried at every roster pass. A live member
+  labelled for an identity the roster no longer lists is retired.
+
+## Starting 0.9.4
+
+### One runtime per state directory
+
+A 0.9.4 runtime claims its state directory before it opens any store: it takes
+an exclusive, non-blocking lock on `<state>/meta-runtime.lock` and holds it for
+the runtime's life, until a clean shutdown has run to its end or the runtime
+is dropped. It also checks that no other process still hosts runtimes there:
+it try-locks Core's `<state>/runtime.sqlite.execution-custody` (read-only,
+never creating it) and releases it at once. A shut-down runtime this process
+composed keeps that lock while its handles are still in scope, and a new
+runtime in the same process starts anyway. On Linux it reads the kernel's
+lock table (`/proc/locks`) and is refused when the table names any other
+holder of the lock. On macOS and Windows, and on Linux where the table cannot
+name the lock's holders (it cannot be read, or has no entry for the lock
+file, as on btrfs subvolumes and on overlayfs such as a container root
+without a volume), no other holder can be named, so while the previous
+runtime is alive a holder that does not run 0.9.4's startup check (an older
+release, or a Core-only tool on the same directory) is not detected; another
+0.9.4 process is still excluded by its own directory claim and check.
+
+A second runtime on the same directory, in another process or the same one,
+is refused with STORAGE_RESOLUTION (`-32014`); a Rust builder caller gets the
+typed `StorageLayoutError` with the same text:
+
+| Refusal | Message | Meaning |
+|---|---|---|
+| `StateDirInUse` | `state directory <dir> is in use by another Meta runtime` | A 0.9.4 runtime holds the directory. |
+| `StateDirUnavailable` | `cannot claim state directory <dir>: <detail>` | The lock file cannot be created or locked. |
+| `RuntimeInUse` | `state directory <dir> is in use: another process still hosts runtimes there (<dir>/runtime.sqlite.execution-custody is locked); stop it before starting this runtime` | A process without Meta's claim, typically a 0.9.3 gateway, still hosts runtimes there. |
+| `RuntimeLockUnreadable` | `cannot check whether another process hosts runtimes in state directory <dir> (<file>): <detail>` | The custody check itself failed. |
+
+These are kernel locks on open files. They are released when the process
+exits, also after a crash or `kill -9`: there is no lease or timeout to wait
+for and nothing to clean up, and child processes never inherit them. The lock
+files stay on disk, and the storage doctor lists `meta-runtime.lock` as
+inventory. Core also keeps one hosting claim per hosted session under
+`<state>/<realm>/hosting/` and a cold-delivery lock under
+`<state>/<realm>/delivery/` (`<realm>` is `meta` on a fresh install); they
+refuse only a second host of the same session, after the checks above.
+
+### Startup refusals
+
+0.9.4 checks the state directory before it opens any store, and refuses with
+STORAGE_RESOLUTION (`-32014`). Rows marked builder only reach a Rust
+`UnifiedRuntimeBuilder` caller as a build error; no gateway reaches them:
+
+| Refusal | Meaning | Do |
+|---|---|---|
+| `NativeStorageMigrationRequired` | The directory holds 0.9.3 state that has not been migrated. | Run `meta_gateway storage-migrate-native --state-dir <dir>`, then `--apply`. |
+| `MigrationIncomplete` | A migration stopped part way. | Run `--apply` again. |
+| `RuntimeInUse` | Another process holds the runtime's custody lock. | Stop it. |
+| `RuntimeStoreMissing` | Identities are bound to sessions, but `runtime.sqlite` is missing or holds no session. | Restore `runtime.sqlite` together with its `-wal` file from the same backup; do not start on the directory without it. |
+| `RuntimeStoreLostSessions` (builder only, `UnifiedRuntimeBuilderError::StorageLayout`) | Identities are bound to sessions, but a non-disk `storage_provider()` backend's runtime store holds no session: the backend lost its data, or the store does not outlive the process. | Restore the backend's runtime data; or start over on a new, empty state directory (and a new mob store, if you pass one with `persistent_mob_storage()`): the identities then start from the roster on fresh sessions, and their custody and generation history starts over. |
+| `RuntimeStoreUnreadable` (builder only) | That backend's runtime store could not be read for the check. | Make the backend readable, then start again. |
+| `ConflictingConfiguration` naming `ephemeral_runtime_store(true)` (builder only) | An identity-first build without `persistent_state()`, a non-disk `storage_provider()` or `mob_spec()` keeps its sessions in memory, so a restart would start every identity with an empty transcript. | Build with `persistent_state()`, or with a `storage_provider()` whose backend keeps the sessions; or declare `ephemeral_runtime_store(true)` if sessions may end with the process. |
+| `RuntimeLockUnreadable`, `StartupProbeUnreadable` | A lock file or a store could not be read. | Fix the file, then start again. |
+| `SessionDatabaseOverrideRetired` (`meta_gateway`) | `store_path` names a file. | See [A session database named by store_path](#a-session-database-named-by-store_path). |
+| `UnrecognizedSessionDatabase` | A session database sits in the directory under an unknown name. | The same section. |
+
+**A mob the previous process left stopping.** When the previous process
+stopped uncleanly part way through its shutdown Stop, Core finishes that Stop
+after the resume, and the boot waits up to 60 seconds for it to land before it
+resumes the mob to Running. If it does not land in time, the start is refused:
+`meta/init` fails with `-32603`
+(`Runtime bootstrap failed: ... mob lifecycle operation made no progress at boot awaiting a Stop an earlier process placed ...`;
+a Rust builder caller gets `MobError::LifecycleOperationProgressStalled` with
+intent `Stop`, which Core classes as retryable), and the gateway log keeps
+`automatic recovery of typed placed lifecycle intent remains incomplete`
+warnings with Core's reason. Start the gateway again: the Stop stays durable,
+and Core's recovery drives it again at the next start. If it keeps failing,
+the warning names what holds the Stop (usually a member that cannot settle);
+fix that first.
+
+**An adopted identity after a restart.** An identity a host adopted (with
+`mob/adopt_member_identity_declaration`) runs again after a gateway restart
+only once the previous process's identity lease expires, at most 30 seconds
+after that process last renewed it. Until then its status's
+`convergence.decision` reads `await_lease`, and a send or dispatch to it
+answers `-32052` (`identity_wake_retryable`, retryable): retry it, or wait
+until the status shows the member live. A scoped dispatch (with
+`expected_scope`) is refused with `-32603` (`scoped_delivery_rejected`) while
+Core holds no live member. No Core runtime path releases the lease at
+shutdown; a Core fix is planned for a later release.
+
+**A runtime store in a storage provider.** The `RuntimeStoreMissing` check
+reads only a local `runtime.sqlite`. A `UnifiedRuntimeBuilder` composition
+whose runtime store is a non-disk `storage_provider()` backend is checked
+against that store instead, once the provider has opened its realm and before
+any identity wakes: identities bound to sessions while the store holds no
+session at all refuse with `RuntimeStoreLostSessions`. This happens when the
+backend lost its runtime data, or when the store does not outlive the
+process. Without this check such a start went ahead: an identity that was live
+at the last shutdown came back Active on its lost session, where its turns,
+resets and deletes failed with `session not found`; any other bound identity
+started fresh, with no history (its status reports `replaced_session`).
+Restore the backend's runtime data; or start over on a new, empty state
+directory (and a new mob store, if you pass one with
+`persistent_mob_storage()`): the identities then start from the roster on
+fresh sessions, and their custody and generation history starts over. An
+identity that does come back on a lost
+session (see the known limitations for the stores this check cannot read)
+recovers when you retire it (`IdentityRuntime::retire`): its next wake starts
+it on a new, empty session. The check reads continuity records in the state
+directory and the mob store under it or at a `persistent_mob_storage()` path;
+mob storage without a persistent path and a host-built `mob_spec()` are not
+read yet, see the known limitations.
+Back up the state directory as well: a lost or replaced one cannot be
+detected.
+
+`meta/init_progress` no longer reports the `prewarm` phase:
+`owner_publication` now covers only the early roster callback.
+
+## What changes for identities
+
+- **View states:** an identity is `active`, `dormant` or `broken`. The 0.9.3
+  states `retiring`, `suspended` and `uninitialized` are gone. Meta's 0.9.3
+  `broken` mark is not migrated: after the upgrade Core's history decides an
+  identity's state, so an identity that 0.9.3 marked broken can come up
+  `active`. The status and the inspection carry Core's facts: the generation,
+  the session and runtime Core binds, Core's convergence status for an
+  intent-managed identity, the last wake refusal and the session a fresh wake
+  replaced.
+- **Typed refusals:** an identity Core cannot resume answers
+  `IdentityUnresumableError` (`-32051`, final); history Core cannot read yet
+  answers `IdentityHistoryUnavailableError` (`-32052`, retryable); an identity
+  a host adopted answers `IdentityHostAdoptedError` (`-32053`); a wake held
+  until an operator acts answers `IdentityWakeHeldError` (`-32603` with a
+  structured `kind`). The lease codes `-32003` and `-32005` are no longer
+  answered, and `-32005` is never reused.
+- **Answers:** `meta/reconcile_identity` reports a refused identity as
+  `refused` with its error (the `broken` outcome, the outcomes' `generation`
+  and `continuity_repair` are gone), `meta/retire` no longer returns a
+  `fencing_token`, and the respawn and reset results drop
+  `checkpoint_version`. [Identity lifecycle methods](/mobkit/api/rpc#identity-lifecycle-methods)
+  lists the shapes.
+- **A fresh session when Core has none:** when Core reports that an
+  identity's session no longer exists, the identity wakes on a fresh session
+  instead of failing, and the status names the session it replaced. A
+  delivery to a live member whose session Core holds no durable copy of is
+  refused once (`-32052`, `identity_session_absent`, retryable) with nothing
+  delivered; the next delivery starts the identity's fresh session first and
+  carries over the inputs other senders had queued on the stuck member (any
+  it cannot carry are named in the log). If that member's queue cannot be
+  read, the fresh session waits: the delivery answers `-32052` (retryable)
+  and nothing is replaced.
+- **Respawn, reload, reset and delete:** a status read during one of these on
+  a live member can report `dormant` for a short window, with the
+  predecessor's session and generation; the next read reports `active` at the
+  successor's generation. A respawn advances the generation.
+- **Saved delivery scopes:** a scope's `generation` and `lease_fencing_token`
+  are now Core's member generation and fence token. A scope saved by 0.9.3,
+  captured before a respawn, or captured at another incarnation of the mob
+  (one destroyed and created again under its id) is refused as stale
+  (`-32007`) and nothing is submitted: capture a new one from the status.
+- **Retention:** `delete_identity` and `reset` leave the old session in Core,
+  archived with its transcript: a history read by the old session id still
+  serves it after a restart, and session listings hide it. Read the session id from
+  the status before you delete to keep a handle on it. 0.9.3 deleted Meta's
+  copy but also left Core's runtime body on disk, so nothing that 0.9.3 kept
+  is lost.
+- **Extension documents:** an identity acts as itself on extension documents
+  only when Core's durable-identity marker is on its binding, and a member
+  Meta 0.9.3 spawned has none. The first 0.9.4 roster pass respawns each
+  such live member onto its session (see [The first boot](#the-first-boot));
+  the transcript is kept, and no `meta/respawn` is needed. A dormant
+  identity is marked at its next wake. Until then, and for an identity whose
+  respawn failed, extension documents refuse its sessions
+  `AuthorityUnavailable`; the refusal's `agent_identity` label tells it
+  apart from a worker's refusal. A failed respawn shows as that identity's
+  typed refusal in the bootstrap status and is retried at every roster pass;
+  `meta/respawn` stays the manual remedy. The pass leaves some live members
+  as they are, with only a warning in the log. One whose role differs from
+  the roster profile needs `meta/respawn`, declaring the role migration.
+  Leave one whose session Core holds no durable copy of running: a respawn
+  would start it fresh and lose the transcript it holds only in memory.
+  Once Core holds its session (after its next turn), the next roster pass
+  respawns it. `delete_identity` is not the remedy: it starts a fresh
+  session, and the earlier documents stay with the identity's agent either
+  way.
+- **Held bootstraps:** a member that a held bootstrap pass did not publish
+  (the pass was refused or expired) keeps owing its host a held completion
+  across a restart. The pass marks each roster identity in
+  `<state>/held-completion-owed/` before it creates any member and removes
+  the mark when it publishes the member. After a restart, an ordinary
+  bootstrap or wake refuses a marked member (`HeldCompletionOwed`) instead of
+  publishing it without the host's completion, and so does its reset (a
+  delete finds nothing to delete, since Core never spawned the member); a
+  held pass that covers it publishes it. Each mark is a file named
+  by the SHA-256 of its identity and holds the identity. The refusal names
+  the remedy: run the host's held bootstrap again, or, if the host will never
+  complete it, remove that identity's mark file.
+- **Role migrations:** a profile change of an identity is still gated by its
+  role-migration declarations; an undeclared change is held
+  (`identity_role_migration_refused`).
+- **Placement hosts:** see step 5 of [Before you upgrade](#before-you-upgrade).
+- **The console:** the roster and the identity details no longer show a
+  checkpoint version or lease health, and the console JSON API sends
+  `checkpoint_version`, `continuity_health`, `lease_healthy` and `lease` no
+  more.
+- **Reading identity state:** a host that read Meta's continuity database
+  directly finds its session tables empty after the migration, and its
+  identity records keep their 0.9.3 values: 0.9.4 never updates them, and
+  Core's mob store holds every identity's binding. Read an identity's bound
+  session (`session_id`) and its Core mob member id (`member_id`, the
+  identity's roster member id: the identity itself when it is already a
+  valid comms name, such as `planner`, and its `mk--...` encoding otherwise,
+  as for an identity with a `:`) from `meta/status_identity`, or from the
+  records of `meta/console/list_identities`. A deploy-time reader that works
+  on a copy of the directory while no gateway runs reads the same facts
+  offline with `meta_gateway identity-census --state-dir <dir> --json`
+  (format `meerkat-meta.identity-census`, version 1): per identity the
+  `session_id`, `generation` and `member_id` of Core's last binding, `live`
+  and `agent_runtime_id` while the member is live, `runtime_id` (the
+  runtime id `runtime.sqlite` holds the session under), `retired`,
+  `held_completion_owed` and the `pending_first_boot_row`. It writes
+  nothing in the directory: it reads copies of the directory's top-level
+  files, taken into a temporary directory or under `--scratch-dir`, which
+  needs room for them, `runtime.sqlite` included. It refuses a directory a
+  runtime holds, and one that is not migrated yet. Exit codes: 0 read, 1
+  refused, 2 usage error.
+
+### Offline reset
+
+`meta_gateway identity-reset` gives one identity of a stopped state
+directory a fresh life at its next start:
+
+```bash
+meta_gateway identity-reset --state-dir <dir> --identity <identity>           # dry run
+meta_gateway identity-reset --state-dir <dir> --identity <identity> --apply
+```
+
+- It writes nothing to Core. `--apply` adds a `Fresh` row to the directory's
+  first-boot manifest naming the session of Core's last binding of the
+  identity; the dry run, the default, runs every check and writes nothing.
+  The manifest is written atomically (created when none is pending), and no
+  backup of it is kept, so the copy `storage-migrate-native --apply` kept
+  does not hold the rows a reset wrote. If the manifest becomes unreadable,
+  follow the remedy in [The first boot](#the-first-boot): move it aside,
+  restore that copy only if no runtime has started since the migration, and
+  run identity-reset again for the resets made since. `--mob-store <path>`
+  names the mob store as for `storage-migrate-native`.
+- The next roster compile that lists the identity carries the row out, as
+  [The first boot](#the-first-boot) describes: a live member is replaced by
+  its successor on a fresh session and stays live; a retired identity gets
+  a fresh session and stays dormant. The old session stays in Core's store,
+  bound to nothing. Unlike the online reset, nothing of the old session is
+  distilled into agent memory.
+- It refuses, and writes nothing (`refusal.kind` in `--json`):
+  - a directory a runtime holds (`directory`, whose nested refusal is
+    `runtime_in_use`: stop the process first);
+  - a directory the migration has not finished (`not_native`: run
+    `storage-migrate-native`, or finish its `--apply`);
+  - in-memory mob storage (`mob_store_in_memory`), an identity Core has no
+    binding of since the latest mob reset (`unknown_identity`), or a
+    binding with no session (`no_session`, a peer-only member);
+  - an identity that owes its host a held completion
+    (`held_completion_owed`: its held-completion mark is present and Core
+    binds it to nothing yet; run the host's held bootstrap instead);
+  - an identity a host adopted (`identity_host_adopted`: Core holds an
+    identity intent row for it; change it through the host that declared
+    it);
+  - an identity with another pending first-boot row (`pending_row`: start
+    the runtime once so that row is carried out, then reset);
+  - the other kinds: `invalid_identity`, `member_history_unreadable` (also
+    an intent row that cannot be read), `held_marks_unreadable`,
+    `manifest_unreadable` and `write_failed`; `directory` also nests
+    `not_a_directory`, `runtime_lock_unreadable`, `fence_unavailable` and the
+    `--mob-store` refusals.
+- A held-completion mark beside a Core binding is stale (a held pass
+  published the member and did not get to remove it): the reset proceeds,
+  reports `stale_held_completion_mark`, and the next start drops the mark.
+- The same reset already pending is not refused: the run says so and writes
+  nothing.
+- `--json` prints format `meerkat-meta.identity-reset`, version 1, with the
+  `retired_session`, its `binding_state` (`live` or `retired`), `written`,
+  `already_pending`, `stale_held_completion_mark` and `refusal`. Exit codes:
+  0 done (a clean dry run, a written row, or a reset already pending), 1
+  refused, 2 usage error.
+- To withdraw a reset before the next start, remove the manifest when
+  `meta_gateway identity-census` shows the reset row as the directory's only
+  pending row. Never edit the file.
+
+## Session comms identity keys
+
+Members' comms identity keys live outside the state directory, one
+directory per session (`<root>/<session_id>/identity.key` and
+`identity.pub`), where `<root>` is:
+
+- `<dir>/.rkat/session_comms_identity` when the gateway's
+  `runtime_options.session_identity_config_root` names `<dir>`;
+- on macOS, `~/Library/Application Support/meerkat/session_comms_identity`;
+- on Linux, `$XDG_STATE_HOME/meerkat/session_comms_identity`, or
+  `~/.local/state/meerkat/session_comms_identity` when `XDG_STATE_HOME` is
+  not set;
+- on Windows, `%LOCALAPPDATA%\meerkat\session_comms_identity`.
+
+The migration leaves them where they are, and 0.9.4 run by the same user on
+the same machine, with the same `session_identity_config_root`, reads the
+same keys.
+
+Migrate in place, as the same user on the same machine. In a state
+directory moved or copied to another user or machine without these keys,
+every restored member comes up broken, and the first send to one is refused:
+
+```text
+restored member '<identity>' cannot publish its comms endpoint: live endpoint (peer '<peer>' at '<address>') disagrees with its durable generation endpoint (peer '<peer>' at '<address>'); respawn the member to mint a new endpoint
+```
+
+If you must copy a state directory to another user or machine (a rehearsal,
+or a move), copy the `session_comms_identity` directory with it, to the root
+the new user and machine resolve.
+After a continuity-export import onto another host, members get new keys,
+and peers that pinned the old keys see them as new identities.
+
+## Transcript repair is removed
+
+`meta_repair`'s session transcript modes are removed: the default System-row
+dedup, `--keep-newest`, `--truncate-tool-results` and
+`--drop-tool-results-older-than`, with the `--db`, `--session` and
+`--all-sessions` selectors. They rewrote transcripts in Meta's 0.9.3
+continuity copy, and 0.9.4 has no such copy and no replacement: Core
+compaction manages the size of the transcript a member's next turn reads (the
+gateway's compaction options set when it runs). Run any 0.9.3 repair you still
+need before you migrate. In 0.9.4 each removed flag refuses:
+
+```text
+<flag> was removed in 0.9.4 with the session transcript repair modes: 0.9.4 no longer reads the 0.9.3 continuity projection they rewrote. Move a 0.9.3 state directory with `meta_gateway storage-migrate-native`; meta-repair keeps --composition-manifests
+```
+
+`meta_repair --composition-manifests` and the `meta-repair` release archive
+are unchanged.
+
+## Forks of members with activated instructions
+
+A member's activated instructions (everything a host appended with
+`meta/member_activate_instruction`, skill bodies activated that way included)
+reach a fork only as history. The gateway's
+`runtime_options.fork_instruction_policy` decides what happens to them, and its
+default changes what a fork of such a member does:
+
+- In 0.9.3, the fork was committed and the child's first turn failed with
+  `forked session must explicitly activate inherited instruction keys`.
+- In 0.9.4, under the default `require_explicit_activation`, a fork that starts
+  its own first turn (`fork_off`, a delegation fork, a council participant) is
+  refused before anything is committed, with `fork_instruction_refused`; a
+  temporary council ends with the exit reason
+  `participant_fork_instruction_refused`. A fork you
+  drive with `UnifiedRuntime::fork_member` is still committed, and you activate
+  each inherited key on the child before its first turn.
+
+Nothing in your state directory changes. Decide how forks of activated members
+should behave:
+
+1. To let forks keep their source's activations, set the policy to
+   `reactivate_inherited`: `runtime_options.fork_instruction_policy`, Python
+   `.fork_instruction_policy("reactivate_inherited")`, TypeScript
+   `.forkInstructionPolicy("reactivate_inherited")` or Rust
+   `UnifiedRuntimeBuilder::fork_instruction_policy`. Read
+   [what it trusts](/mobkit/reference/configuration#what-reactivate_inherited-trusts)
+   first: the child runs the copied instructions without your application
+   checking them again.
+2. Otherwise, expect the refusal: an agent's `fork_off` call gets it as a tool
+   error, and nothing is forked.
+3. Set the policy on every boot. The mob does not store it, and it cannot be
+   chosen per fork.
+
+See [Fork instruction policy](/mobkit/reference/configuration#fork-instruction-policy)
+for what a fork copies and what each value does.
+
+## Going back to 0.9.3
+
+The migration is one-way. `--apply` converts `runtime.sqlite` in place to
+Core's head-canonical profile, which cannot be undone and which 0.9.3 refuses
+to open, so 0.9.3 refuses a migrated directory instead of starting on it
+without its sessions. A retired `sessions.sqlite3` stamp is refused the same
+way: 0.9.3 reads it as a schema from the future.
+
+The way back to 0.9.3 is the copy you took before `--apply` (step 6 of
+[Before you upgrade](#before-you-upgrade)): stop 0.9.4, put the copy of the
+state directory back in place of the directory, and put the copy of a mob
+store kept outside the directory back at its path, with its `-wal` file:
+0.9.4 writes the mob store from its first boot on. Changes 0.9.4 made after
+the migration are not carried back.
+
+`--apply` also keeps a pre-apply backup of each database it changes, beside
+it as `<name>.pre-0.9.4-<timestamp>.native-migration`, and the report prints
+each path (`backup: <path>`): `runtime.sqlite`, and the projection database
+it retires (`sessions.sqlite3`, `continuity.sqlite3` or both). Each backup is one
+consistent copy of its database, with what its `-wal` file held. The storage
+doctor lists them, and they stay until you delete them with
+`meta_gateway storage-prune --state-dir <dir> --apply` (by default it deletes
+backups at least 30 days old). A run that started over leaves the stopped
+run's backups beside its own, under an earlier timestamp: going back uses
+the ones the finished run's report printed.
+
+The backups are a way back only until 0.9.4 first starts on the directory:
+from its first boot on, 0.9.4 writes the mob store (`event_log.sqlite3` in
+the directory, or the store you pass as `--mob-store`), which no backup
+holds, so after that only the copy takes you back. Before that, with every
+process stopped, copy each backup back to its own path and delete that
+database's `-wal` and `-shm` files, then start 0.9.3. Restore every backup:
+with only `runtime.sqlite` back, 0.9.3 refuses the stamped `sessions.sqlite3`
+or finds `continuity.sqlite3` without its session rows, and with only the
+projection back it still refuses the converted `runtime.sqlite`.
+
+**After an `--apply` that stopped part way**, run `--apply` again to
+finish, or go back:
+
+- If the journal's `done` list does not hold `start_conversion`, nothing was
+  written to `runtime.sqlite` and the databases are unchanged: 0.9.3 still
+  starts on the directory (it does not read the journal), and a later
+  `--apply` starts over. Delete `storage-migrate-native.journal.json` and
+  any partial `.native-migration` files.
+- If it holds `start_conversion` (a run killed during the conversion
+  included), do not start 0.9.3 on the directory (it refuses once the
+  conversion wrote Core's claim): restore every backup the journal lists
+  (deleting each database's `-wal` and `-shm` files), then delete the
+  journal. Deleting the journal alone can leave a directory neither release
+  reads.
+- Or put back the copy from step 6.

@@ -4,7 +4,7 @@ description: "JWT validation, OIDC discovery, provider configuration, and email 
 icon: "lock"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 Meta authenticates protected console, REST, JSON-RPC, Flow Editor, and SSE
 requests with JWTs. Signature and claim validation establishes a principal;
@@ -269,6 +269,63 @@ ConsoleAccessRequest {
 Service identities are validated separately:
 - The email must start with `svc:` and have content after the prefix
 - The full `svc:` identity must appear in the allowlist
+
+## Token lifetime and revocation
+
+The Console accepts a token until 30 seconds after its `exp`. Issue every
+Console token with an `exp` (and an `iat`): the tokens the bundled installer
+mints expire two minutes after they are issued. A token without `exp` is
+still accepted, but it never expires; the Console records its principal and
+lists it, by the principal and a non-expiring flag only, in `meta/status`
+(`non_expiring_console_principals`) and in the storage doctor
+(`console-non-expiring-principal`).
+
+To revoke every session of a principal, call `meta/console/revoke_sessions`
+with the principal (the email, or the `sub` when the token carries no
+email), on the runtime's RPC surface or on the console's `/console/rpc`. On
+the console route an access admin may revoke when an access controller is
+installed, enforced or not; without an access controller, any authenticated
+console caller may revoke sessions, as with other console actions. The
+principal is matched exactly as the token names it, case included, as the
+allowlist compares it: a revocation for another spelling answers success and
+fences nothing.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"meta/console/revoke_sessions","params":{"principal":"alice@example.com"}}
+```
+
+From then on the Console refuses with 401 each token of that principal whose
+`iat` is earlier than the revocation plus 30 seconds, or that has no `iat`,
+on every route the runtime serves, and it ends every event stream, gating
+stream and console voice session such a token opened, with or without access
+control and with or without `exp`. The 30 seconds are the verifier's clock
+leeway: a token minted just before the revocation by an issuer whose clock
+runs ahead is refused, and so is a sign-in within 30 seconds after the
+revocation; sign in again after that. An issuer whose clock runs behind
+mints tokens that stay refused for as much longer.
+
+The revocations live in `console-session-fences.json` in the gateway's
+state directory, a file of their own beside the access configuration. A
+binary without revocation neither reads nor rewrites that file: it does not
+enforce the revocations while it runs, and they apply again after the
+upgrade. A gateway
+without a durable state directory refuses `meta/console/revoke_sessions`
+(`-32004`) rather than keep a revocation a restart would lose. Revocations
+are kept for as long as the file exists.
+
+The routers a `UnifiedRuntime` builds, and both bundled gateways, apply
+revocations. The standalone router constructors, the
+`handle_console_rest_json_route*` functions and `validate_console_token`
+apply no session fence; use the runtime's routers, or
+`validate_console_token_under_session_fences` for a host's own token check.
+
+Non-human callers are revoked the same way when they sign in with a token:
+revoke the service identity's principal (`svc:...`). A credential that is
+part of the Console's configuration itself (an HS256 shared secret in
+`auth_config`, or a key in the trusted JWKS) is revoked by replacing it and
+restarting the gateway. Removing a principal's access grants, or adding a
+deny rule, is an access change: it applies to open streams at once, but it
+does not refuse the token.
 
 ## Validation errors
 

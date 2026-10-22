@@ -363,8 +363,9 @@ fn fork_instruction_refusal_message(
     match cause {
         ForkInstructionRefusalCause::PolicyRefuses => format!(
             "fork refused: the child would inherit activated instruction keys [{keys}] and the \
-             fork instruction policy refuses them; reactivate_inherited carries them into the \
-             child"
+             fork instruction policy refuses them; to carry them into the child, set the host's \
+             fork_instruction_policy (inherited_instructions on a session fork call) to \
+             reactivate_inherited"
         ),
         ForkInstructionRefusalCause::NotEffectiveInSource => format!(
             "fork refused: instruction keys [{keys}] were inherited but never activated in the \

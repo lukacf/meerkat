@@ -1,0 +1,110 @@
+---
+title: "Mob announcements"
+description: "Announce a development to a mob and deliver it, in bounded batches, to the members that subscribed to its topics."
+icon: "bullhorn"
+---
+
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
+
+Mob announcements carry developments to the members that asked for them. The
+host, or a member through its tools, announces a development to a mob. Every
+member subscription that names that mob and one of the announcement's topics
+captures it, and each subscriber receives what it is owed in bounded batches.
+Each batch is one Meerkat host continuation keyed by its batch id.
+
+Mob announcements are optional, and a persistent, identity-first host
+enables them the same way on every surface: `rpc_gateway` with
+`runtime_options.mob_announcements = {"enabled": true}`, `meta_gateway` with
+its `mob_announcements` init param, and a Rust host with
+`UnifiedRuntimeBuilder::mob_announcements`. Each refuses a configuration it
+cannot compose before it builds anything. The batch, retention and limit
+options are in [Configuration](/mobkit/reference/configuration). Without them,
+nothing opens the announcement database (`mob_announcements.sqlite3`), and
+the methods answer `mob_announcements_unavailable`.
+
+The console serves the same methods on `/console/rpc`. Every one of them,
+the reads included, needs the `runtime.admin` grant, and a read-only console
+refuses the ones that change state.
+
+## Announcements
+
+An announcement belongs to one mob hosted on the gateway, and its source key
+identifies it within that mob. Announcing the same key with the same content
+again replays the first announcement; the same key with other content is
+refused as a conflict. An announcement names its topics and its body, and can
+carry a correlation id and the announcements that caused it. Batch bodies
+quote each announcement and name its mob and its announcer.
+
+## Subscriptions
+
+A subscription belongs to one member, `{mob_id, identity}`, and names the
+topics it wants from the mobs it names (the gateway's own mob by default). It
+captures announcements from now on, or from a frontier of per-mob sequence
+numbers. Pause, resume and cancel name the revision they expect, so a stale
+caller is refused instead of overwriting a newer change.
+
+A subscriber can be:
+
+- a registered identity of the gateway's mob that the gateway's runtime serves;
+- a member of another mob hosted on the gateway, such as a mob a member
+  created, subscribed by the host by its plain roster id;
+- a member of a mob on a peer gateway, reached through
+  [keyed inject](/mobkit/concepts/access-control#keyed-inject) when this gateway's
+  contact directory files that mob with a pinned key and this gateway holds a
+  signing key.
+
+Members announce and subscribe for themselves through the `mob_announcements`
+tool bundle (`mob_announce` and `mob_subscription`) when their profile lists
+it in `tools.rust_bundles`. A member of a mob a member created gets them only
+under the host's `member_tools_in_child_mobs` ceiling, by naming
+`mob_announcements` in its own profile's `tools.bundles`. A member announces
+into its own mob as itself and manages only its own subscriptions. It may name
+its own mob and the mobs above and below it among the mobs members created,
+never a sibling's. Each call is attributed to exactly one member or refused,
+within per-member limits.
+
+## Delivery
+
+- An announcement is captured for every matching subscription in the same
+  transaction that records it.
+- A lost acknowledgment is reconciled from the native status, without a second
+  submission. A batch is submitted again only after a signed answer that
+  nothing was committed.
+- A delivery stranded on a retired incarnation moves to a successor batch that
+  names its predecessor.
+- What waited past the retention window for a delivery that never started
+  expires, and the member's next batch reports it as a gap. A batch whose
+  outcome, or whose admission, was never confirmed settles without being
+  submitted again, and the next batch reports its announcements as not
+  confirmed.
+- Reading a batch shows the native status and the admitted input's runtime
+  state. Admission is not processing: the input's state says what the
+  runtime did with it.
+
+## When a subscription ends
+
+A subscription ends, with a typed reason, only on a final fact:
+
+- every mob it named was destroyed;
+- for a member of another mob hosted here, that mob was destroyed, created
+  again, completed or reset after the subscription was made;
+- a peer gateway answered, signed, that its member departed. No gateway of
+  this release records a final fact that a member left, so none gives that
+  answer yet.
+
+A member that is not registered, or not served where its deliveries go, ends
+nothing: it may be registered or served again. Neither does a member that
+left this gateway, is governed, or has no live incarnation. Its deliveries
+wait, and the subscription's `marker` says why and on what evidence (a
+verified signed answer, an unverified one, or this gateway's own fact). Its
+owed batches expire after the retention window, and `subscriptions/cancel`
+ends a subscription whose member is not coming back.
+
+## See also
+
+- [Mob announcement methods](/mobkit/api/rpc#mob-announcements-optional) - methods,
+  fields, batch states and typed errors
+- [Configuration](/mobkit/reference/configuration) - `runtime_options.mob_announcements`,
+  `control_request_window_ms` and `serve_keyed_inject`
+- [Access control](/mobkit/concepts/access-control#keyed-inject) - keyed inject grants
+  and signing

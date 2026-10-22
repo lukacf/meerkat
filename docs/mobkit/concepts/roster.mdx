@@ -4,7 +4,7 @@ description: "Understand Meta's lightweight roster projection, deep member statu
 icon: "users"
 ---
 
-*Mirrored from MobKit main at [703f86615ceb](https://github.com/lukacf/meerkat-meta/commit/703f86615ceb7ec6f7d85870d01720f54114cd8c) on 2026-10-20; MobKit workspace version 0.9.3 at that commit.*
+*Mirrored from MobKit main at [982c76ab266e](https://github.com/lukacf/meerkat-meta/commit/982c76ab266ef73f028c1ba7dce9e021fa6587e0) on 2026-10-22; MobKit workspace version 0.9.4 at that commit.*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -127,7 +127,7 @@ All operations are available through the gateway's JSON-RPC interface.
 | `meta/ensure_member` | Gateway-profile dependent | Ensure a durable identity or an ephemeral worker as described below |
 | `meta/member_status` | `MobMemberSnapshot` | Inspect one member's deep execution and connectivity state |
 | `meta/retire_member` | Acceptance acknowledgement | Retire a member |
-| `meta/respawn_member` | Acceptance acknowledgement | Replace a member with a fresh runtime incarnation (identity-first: a destructive continuity reset) |
+| `meta/respawn_member` | Acceptance acknowledgement | Replace a member with a fresh runtime incarnation (identity-first: resets the identity onto a fresh session at a new generation) |
 | `meta/reload_member` | `{reloaded, disposition, session_id, generation}` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
 | `meta/member_health` | `MemberHealthReport` | Lifecycle and delivery health from in-process reads; answers while the mob actor loop is stalled |
 
@@ -148,8 +148,8 @@ you must pass `plane: "worker"`. Omitting it creates or retains a durable
 identity and returns an identity receipt, not a `MobMemberListEntry`.
 </Warning>
 
-The identity receipt's `outcome` is `created`, `resumed`, `dormant`, `broken`,
-or `unchanged`. The other roster operations keep the contracts shown in the
+The identity receipt's `outcome` is `created`, `resumed`, `dormant`,
+`refused` or `unchanged`. The other roster operations keep the contracts shown in the
 operation table.
 
 ## Lightweight roster entries
@@ -324,13 +324,14 @@ adopts the member as it is:
   its profile and MobMachine owns its materialization, so Meta refuses
   rather than retire it. Declare the new profile in the identity intent.
 
-A refusal parks the identity Broken with the typed kind
-`role_migration_not_applied`, and the `meta/init` result reports it under
-`identity_bootstrap` (the identity is `broken` with that restore kind, and
-`ready` is false), so a refused migration is visible at boot. The park holds
-for the roster spec it was refused against: the continuity repair supervisor
-does not retry it, and no later restore or reconcile pass retires the member
-the refusal kept. Change the declaration (next boot) or the member's roster
+A refusal holds the identity's wake with the typed kind
+`identity_role_migration_refused` (`-32603`): the identity reads `dormant`,
+its `wake_refusal` names the remedy `resolve_role_migration`, and the
+`meta/init` result reports it under `identity_bootstrap` (restore stage
+`refused` with that kind), so a refused migration is visible at boot. The
+hold stands for the roster spec it was refused against: nothing retries it,
+and no later restore or reconcile pass retires the member the refusal
+kept. Change the declaration (next boot) or the member's roster
 spec to try again.
 
 <Warning>
@@ -393,8 +394,8 @@ wraps that outcome as `status` (`completed` or `topology_restore_failed`), a
 
 Meta's compatibility RPC consumes the worker-plane respawn receipt and
 projects both mutations as acceptance acknowledgements. Identity-owned targets
-can add identity-first receipt fields such as a fencing token for retire, or a
-session ID and generation for respawn. The Python and TypeScript SDK wrappers
+can add identity-first receipt fields such as a session ID and generation for
+respawn. The Python and TypeScript SDK wrappers
 discard these acknowledgement objects and return `None` or `void`. Re-read the
 member when the caller needs the resulting roster or execution state.
 

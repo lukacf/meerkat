@@ -232,7 +232,8 @@ async fn documented_builtin_preload_survives_cli_precreated_session_shape() {
     .expect("construct runtime authority");
     let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
     builder.default_llm_client = Some(client.clone());
-    let (service, machine) = build_runtime_backed_service(builder, 4, persistence);
+    let (service, machine) = build_runtime_backed_service(builder, 4, persistence)
+        .expect("compose the runtime-backed service");
     let service = Arc::new(service);
     let (tx, mut rx) = tokio::sync::mpsc::channel(128);
     // Use the surface's real materialization protocol: it binds the precreated

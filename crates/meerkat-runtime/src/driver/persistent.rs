@@ -1912,6 +1912,14 @@ impl PersistentRuntimeDriver {
                 .inner
                 .accept_resolved_input_with_credential(input, resolved, custody);
         };
+        // An existing-only admission only deduplicates. The durable index
+        // holds no earlier admission under the key and the live preview would
+        // admit fresh, so it refuses here, under the driver lock and before
+        // any write. Registration ran cold recovery first, so a binding that
+        // recovery released is already gone.
+        if resolved.admission_requirement() == crate::accept::AdmissionRequirement::ExistingOnly {
+            return Err(crate::accept::no_existing_admission(&input));
+        }
 
         let flags = resolved.coarse_flags();
         let changed_input_ids = resolved.persistence_changed_input_ids(&expected_input_id);

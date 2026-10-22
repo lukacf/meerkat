@@ -44,6 +44,29 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<CompletionHandle>), RuntimeDriverError>;
 
+    /// A deduplicate-only admission. When an input was admitted earlier under
+    /// `input`'s idempotency key, it answers as
+    /// [`Self::accept_input_with_completion`] does for that replay:
+    /// [`AcceptOutcome::Deduplicated`], with the earlier input's live
+    /// completion handle, or none once that input is terminal. Otherwise it
+    /// refuses with [`RuntimeDriverError::NoExistingAdmission`] and admits
+    /// nothing: an input without an idempotency key, and one whose earlier
+    /// admission's binding is gone (a row that recovery discarded, a
+    /// store-less runtime's archived input), are never admitted fresh. The
+    /// runtime decides it where it decides deduplication, so the binding is
+    /// seen or not, never both.
+    ///
+    /// The default refuses: an implementation that cannot decide it inside
+    /// its admission never admits fresh.
+    async fn accept_existing_input_with_completion(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+    ) -> Result<(AcceptOutcome, Option<CompletionHandle>), RuntimeDriverError> {
+        let _ = session_id;
+        Err(crate::accept::no_existing_admission(&input))
+    }
+
     /// Get the runtime state for a session.
     async fn runtime_state(
         &self,

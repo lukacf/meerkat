@@ -1122,7 +1122,7 @@ The child does not inherit:
 
 The child's first turn continues the transcript prefix, System message included; it does not write a second System message from the inherited instructions.
 
-A fork derives the child's build state from its source's. A source with session metadata but no build state is refused before anything is committed, with `INVALID_PARAMS` (-32602) and data `{"kind": "fork_source_build_state_missing", "source_session_id": "<source id>"}`. A child forked by Meerkat 0.9.3 or earlier that never ran a turn has no build state: its `turn/start` fails with `INTERNAL_ERROR` (-32603) "turn abandoned: persisted session <id> is missing session build state". Fork its source again instead.
+A fork derives the child's build state from its source's. A source with session metadata but no build state is refused before anything is committed, with `INVALID_PARAMS` (-32602) and data `{"kind": "fork_source_build_state_missing", "source_session_id": "<source id>"}`. A child forked by Meerkat 0.9.3 or earlier that never ran a turn has no build state: its `turn/start` fails with `INTERNAL_ERROR` (-32603) "turn abandoned: persisted session `<id>` is missing session build state". Fork its source again instead.
 
 ### session/list
 

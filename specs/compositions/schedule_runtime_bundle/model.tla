@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for schedule_runtime_bundle.
 
-CONSTANTS BooleanValues, ClaimOwnerValues, ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, CompletionSupersessionDispositionValues, CorrelationIdValues, DeliveryAdmissionOutcomeValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, LateCompletionResolutionClassValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, RuntimeOutcomeKeyValues, ScheduleIdValues, ScheduleLifecycleStateValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues, TargetBindingIdValues, TriggerKeyValues
+CONSTANTS AdmissionEvidenceValues, BooleanValues, ClaimOwnerValues, ClaimRedeliveryValues, ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, CompletionSupersessionDispositionValues, CorrelationIdValues, DeliveryAdmissionOutcomeValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, LateCompletionResolutionClassValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, RuntimeOutcomeKeyValues, ScheduleIdValues, ScheduleLifecycleStateValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues, TargetBindingIdValues, TriggerKeyValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -2014,7 +2014,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_refusal_kind, 
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Pending"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Pending"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2034,7 +2034,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_refusal_kind, 
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Claimed"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Claimed"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2054,7 +2054,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalDispatching(arg_refusal_ki
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Dispatching"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Dispatching"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2074,7 +2074,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion(arg_ref
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "AwaitingCompletion"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "AwaitingCompletion"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2094,7 +2094,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalCompleted(arg_refusal_kind
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Completed"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Completed"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2114,7 +2114,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalSkipped(arg_refusal_kind, 
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Skipped"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Skipped"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2134,7 +2134,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalMisfired(arg_refusal_kind,
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Misfired"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Misfired"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2154,7 +2154,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalSuperseded(arg_refusal_kin
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Superseded"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "Superseded"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2174,7 +2174,7 @@ occurrence_ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed(arg_refusal
        /\ packet.payload.trigger = arg_trigger
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "DeliveryFailed"
-       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition")))
        /\ occurrence_phase' = "DeliveryFailed"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2621,11 +2621,12 @@ occurrence_PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_sch
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDuePendingFuture(arg_now_utc_ms) ==
+occurrence_ClassifyDuePendingFuture(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Pending"
        /\ (packet.payload.now_utc_ms < occurrence_due_at_utc_ms)
@@ -2640,14 +2641,15 @@ occurrence_ClassifyDuePendingFuture(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms) ==
+occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Pending"
-       /\ ((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.now_utc_ms))
+       /\ ((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.now_utc_ms) /\ (packet.payload.admission_evidence = "Unrecorded"))
        /\ occurrence_phase' = "Pending"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2659,14 +2661,15 @@ occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms) ==
+occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Pending"
-       /\ ((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (packet.payload.now_utc_ms <= occurrence_misfire_deadline_utc_ms))
+       /\ ((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (IF (packet.payload.now_utc_ms <= occurrence_misfire_deadline_utc_ms) THEN TRUE ELSE ((packet.payload.admission_evidence # "Unrecorded") /\ (occurrence_attempt_count < 5))))
        /\ occurrence_phase' = "Pending"
        /\ UnchangedFrame_f0a226b84dec6595
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2678,11 +2681,32 @@ occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms) ==
+occurrence_ClassifyDuePendingReclaimExhausted(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ ((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.now_utc_ms) /\ (packet.payload.admission_evidence # "Unrecorded") /\ (occurrence_attempt_count >= 5))
+       /\ occurrence_phase' = "Pending"
+       /\ UnchangedFrame_f0a226b84dec6595
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "DueReclaimExhausted", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyDuePendingReclaimExhausted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyDuePendingReclaimExhausted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms, arg_admission_evidence) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyDue"
+       /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Claimed"
        /\ ((occurrence_lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))
@@ -2697,11 +2721,12 @@ occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms) ==
+occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Dispatching"
        /\ ((occurrence_lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))
@@ -2716,11 +2741,12 @@ occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms) ==
+occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "AwaitingCompletion"
        /\ ((occurrence_lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))
@@ -2735,11 +2761,12 @@ occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms) ==
+occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Claimed"
        /\ (IF (occurrence_lease_expires_at_utc_ms = None) THEN TRUE ELSE (packet.payload.now_utc_ms < (IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None)))
@@ -2754,11 +2781,12 @@ occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueDispatchingLeaseCurrent(arg_now_utc_ms) ==
+occurrence_ClassifyDueDispatchingLeaseCurrent(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Dispatching"
        /\ (IF (occurrence_lease_expires_at_utc_ms = None) THEN TRUE ELSE (packet.payload.now_utc_ms < (IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None)))
@@ -2773,11 +2801,12 @@ occurrence_ClassifyDueDispatchingLeaseCurrent(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueAwaitingCompletionLeaseCurrent(arg_now_utc_ms) ==
+occurrence_ClassifyDueAwaitingCompletionLeaseCurrent(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "AwaitingCompletion"
        /\ (IF (occurrence_lease_expires_at_utc_ms = None) THEN TRUE ELSE (packet.payload.now_utc_ms < (IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None)))
@@ -2792,11 +2821,12 @@ occurrence_ClassifyDueAwaitingCompletionLeaseCurrent(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueCompletedNoAction(arg_now_utc_ms) ==
+occurrence_ClassifyDueCompletedNoAction(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Completed"
        /\ occurrence_phase' = "Completed"
@@ -2810,11 +2840,12 @@ occurrence_ClassifyDueCompletedNoAction(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms) ==
+occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Skipped"
        /\ occurrence_phase' = "Skipped"
@@ -2828,11 +2859,12 @@ occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms) ==
+occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Misfired"
        /\ occurrence_phase' = "Misfired"
@@ -2846,11 +2878,12 @@ occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms) ==
+occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Superseded"
        /\ occurrence_phase' = "Superseded"
@@ -2864,11 +2897,12 @@ occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms) ==
+occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ClassifyDue"
        /\ packet.payload.now_utc_ms = arg_now_utc_ms
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "DeliveryFailed"
        /\ occurrence_phase' = "DeliveryFailed"
@@ -3549,7 +3583,7 @@ occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_mater
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token) ==
+occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, arg_admission_evidence) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "Claim"
@@ -3557,9 +3591,10 @@ occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ packet.payload.lease_expires_at_utc_ms = arg_lease_expires_at_utc_ms
        /\ packet.payload.claim_token = arg_claim_token
+       /\ packet.payload.admission_evidence = arg_admission_evidence
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Pending"
-       /\ ((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.at_utc_ms <= occurrence_misfire_deadline_utc_ms))
+       /\ ((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.at_utc_ms <= occurrence_misfire_deadline_utc_ms) /\ (packet.payload.admission_evidence # "Accepted"))
        /\ occurrence_phase' = "Claimed"
        /\ occurrence_claimed_by' = Some(packet.payload.owner_id)
        /\ occurrence_lease_expires_at_utc_ms' = Some(packet.payload.lease_expires_at_utc_ms)
@@ -3590,6 +3625,96 @@ occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "Claimed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimPending"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClaimPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClaimPendingAfterAdmission(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, arg_admission_evidence) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "Claim"
+       /\ packet.payload.owner_id = arg_owner_id
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ packet.payload.lease_expires_at_utc_ms = arg_lease_expires_at_utc_ms
+       /\ packet.payload.claim_token = arg_claim_token
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ ((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.admission_evidence = "Accepted") /\ (IF (packet.payload.at_utc_ms <= occurrence_misfire_deadline_utc_ms) THEN TRUE ELSE (occurrence_attempt_count < 5)))
+       /\ occurrence_phase' = "Claimed"
+       /\ occurrence_claimed_by' = Some(packet.payload.owner_id)
+       /\ occurrence_lease_expires_at_utc_ms' = Some(packet.payload.lease_expires_at_utc_ms)
+       /\ occurrence_claimed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_claim_token' = Some(packet.payload.claim_token)
+       /\ occurrence_delivery_correlation_id' = None
+       /\ occurrence_receipt_recorded_at_utc_ms' = None
+       /\ occurrence_last_receipt_recorded_at_utc_ms' = None
+       /\ occurrence_last_receipt_attempt' = None
+       /\ occurrence_last_receipt_stage' = None
+       /\ occurrence_last_receipt_failure_class' = None
+       /\ occurrence_last_receipt_detail' = None
+       /\ occurrence_last_receipt_correlation_id' = None
+       /\ occurrence_last_receipt_materialized_session_id' = None
+       /\ occurrence_runtime_outcome_key' = None
+       /\ occurrence_receipt_stage' = None
+       /\ occurrence_receipt_failure_class' = None
+       /\ occurrence_receipt_detail' = None
+       /\ occurrence_failure_class' = None
+       /\ occurrence_failure_detail' = None
+       /\ occurrence_dispatched_at_utc_ms' = None
+       /\ occurrence_completed_at_utc_ms' = None
+       /\ occurrence_attempt_count' = (occurrence_attempt_count) + 1
+       /\ UnchangedFrame_d4878f49892bb87b
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "Claimed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimPendingAfterAdmission"], [machine |-> "occurrence", variant |-> "ReclaimedAfterAdmission", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimPendingAfterAdmission"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClaimPendingAfterAdmission", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClaimPendingAfterUnprovenDispatch(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, arg_admission_evidence) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "Claim"
+       /\ packet.payload.owner_id = arg_owner_id
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ packet.payload.lease_expires_at_utc_ms = arg_lease_expires_at_utc_ms
+       /\ packet.payload.claim_token = arg_claim_token
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ ((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.admission_evidence = "Started") /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms) /\ (occurrence_attempt_count < 5))
+       /\ occurrence_phase' = "Claimed"
+       /\ occurrence_claimed_by' = Some(packet.payload.owner_id)
+       /\ occurrence_lease_expires_at_utc_ms' = Some(packet.payload.lease_expires_at_utc_ms)
+       /\ occurrence_claimed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_claim_token' = Some(packet.payload.claim_token)
+       /\ occurrence_delivery_correlation_id' = None
+       /\ occurrence_receipt_recorded_at_utc_ms' = None
+       /\ occurrence_last_receipt_recorded_at_utc_ms' = None
+       /\ occurrence_last_receipt_attempt' = None
+       /\ occurrence_last_receipt_stage' = None
+       /\ occurrence_last_receipt_failure_class' = None
+       /\ occurrence_last_receipt_detail' = None
+       /\ occurrence_last_receipt_correlation_id' = None
+       /\ occurrence_last_receipt_materialized_session_id' = None
+       /\ occurrence_runtime_outcome_key' = None
+       /\ occurrence_receipt_stage' = None
+       /\ occurrence_receipt_failure_class' = None
+       /\ occurrence_receipt_detail' = None
+       /\ occurrence_failure_class' = None
+       /\ occurrence_failure_detail' = None
+       /\ occurrence_dispatched_at_utc_ms' = None
+       /\ occurrence_completed_at_utc_ms' = None
+       /\ occurrence_attempt_count' = (occurrence_attempt_count) + 1
+       /\ UnchangedFrame_d4878f49892bb87b
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "Claimed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimPendingAfterUnprovenDispatch"], [machine |-> "occurrence", variant |-> "ReclaimedAfterUnprovenDispatch", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ClaimPendingAfterUnprovenDispatch"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClaimPendingAfterUnprovenDispatch", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -4118,11 +4243,12 @@ occurrence_DeliveryFailureScheduleMandateUnavailable(arg_reason, arg_detail, arg
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_TargetProbeReadyClaimed(arg_outcome, arg_detail, arg_at_utc_ms) ==
+occurrence_TargetProbeReadyClaimed(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ResolveTargetProbe"
        /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.redelivery = arg_redelivery
        /\ packet.payload.detail = arg_detail
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
@@ -4139,11 +4265,12 @@ occurrence_TargetProbeReadyClaimed(arg_outcome, arg_detail, arg_at_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_TargetProbeBusyAllowedByPolicy(arg_outcome, arg_detail, arg_at_utc_ms) ==
+occurrence_TargetProbeBusyAllowedByPolicy(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ResolveTargetProbe"
        /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.redelivery = arg_redelivery
        /\ packet.payload.detail = arg_detail
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
@@ -4161,17 +4288,43 @@ occurrence_TargetProbeBusyAllowedByPolicy(arg_outcome, arg_detail, arg_at_utc_ms
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms) ==
+occurrence_TargetProbeBusyExistingRedelivery(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ResolveTargetProbe"
        /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.redelivery = arg_redelivery
        /\ packet.payload.detail = arg_detail
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Claimed"
        /\ (packet.payload.outcome = "Busy")
        /\ (occurrence_overlap_policy = "SkipIfRunning")
+       /\ (packet.payload.redelivery # "Ordinary")
+       /\ occurrence_phase' = "Claimed"
+       /\ UnchangedFrame_f0a226b84dec6595
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "TargetProbeBusyExistingRedelivery", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveTargetProbe"
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.redelivery = arg_redelivery
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.outcome = "Busy")
+       /\ (occurrence_overlap_policy = "SkipIfRunning")
+       /\ (packet.payload.redelivery = "Ordinary")
        /\ occurrence_phase' = "Skipped"
        /\ occurrence_claimed_by' = None
        /\ occurrence_lease_expires_at_utc_ms' = None
@@ -4194,11 +4347,12 @@ occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms) =
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms) ==
+occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ResolveTargetProbe"
        /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.redelivery = arg_redelivery
        /\ packet.payload.detail = arg_detail
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
@@ -4227,11 +4381,12 @@ occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_TargetProbeMissingMisfireByPolicy(arg_outcome, arg_detail, arg_at_utc_ms) ==
+occurrence_TargetProbeMissingMisfireByPolicy(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "ResolveTargetProbe"
        /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.redelivery = arg_redelivery
        /\ packet.payload.detail = arg_detail
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
@@ -4288,6 +4443,134 @@ occurrence_DueMisfirePending(arg_detail, arg_at_utc_ms) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "Misfired", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "DueMisfirePending"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "DueMisfirePending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ReclaimExhaustedAfterAdmission(arg_admission_evidence, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveReclaimExhausted"
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ ((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms) /\ (occurrence_attempt_count >= 5) /\ (packet.payload.admission_evidence = "Accepted"))
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ occurrence_claimed_by' = None
+       /\ occurrence_lease_expires_at_utc_ms' = None
+       /\ occurrence_claim_token' = None
+       /\ occurrence_delivery_correlation_id' = None
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("DeliveryFailed")
+       /\ occurrence_receipt_failure_class' = Some("LeaseLost")
+       /\ occurrence_receipt_detail' = packet.payload.detail
+       /\ occurrence_failure_class' = Some("LeaseLost")
+       /\ occurrence_failure_detail' = packet.payload.detail
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UnchangedFrame_b5b21f501595ac0e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "DeliveryFailed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ReclaimExhaustedAfterAdmission"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ReclaimExhaustedAfterAdmission", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ReclaimExhaustedAfterUnprovenDispatch(arg_admission_evidence, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveReclaimExhausted"
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ ((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms) /\ (occurrence_attempt_count >= 5) /\ (packet.payload.admission_evidence = "Started"))
+       /\ occurrence_phase' = "Misfired"
+       /\ occurrence_claimed_by' = None
+       /\ occurrence_lease_expires_at_utc_ms' = None
+       /\ occurrence_claim_token' = None
+       /\ occurrence_delivery_correlation_id' = None
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("Misfired")
+       /\ occurrence_receipt_failure_class' = None
+       /\ occurrence_receipt_detail' = packet.payload.detail
+       /\ occurrence_failure_class' = None
+       /\ occurrence_failure_detail' = packet.payload.detail
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UnchangedFrame_b5b21f501595ac0e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "Misfired", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ReclaimExhaustedAfterUnprovenDispatch"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ReclaimExhaustedAfterUnprovenDispatch", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_UnprovenLateNotAdmittedFromClaimed(arg_admission_evidence, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveUnprovenLateNotAdmitted"
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ ((packet.payload.admission_evidence = "Started") /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms))
+       /\ occurrence_phase' = "Misfired"
+       /\ occurrence_claimed_by' = None
+       /\ occurrence_lease_expires_at_utc_ms' = None
+       /\ occurrence_claim_token' = None
+       /\ occurrence_delivery_correlation_id' = None
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("Misfired")
+       /\ occurrence_receipt_failure_class' = None
+       /\ occurrence_receipt_detail' = packet.payload.detail
+       /\ occurrence_failure_class' = None
+       /\ occurrence_failure_detail' = packet.payload.detail
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UnchangedFrame_b5b21f501595ac0e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "Misfired", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "UnprovenLateNotAdmittedFromClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "UnprovenLateNotAdmittedFromClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_UnprovenLateNotAdmittedFromDispatching(arg_admission_evidence, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveUnprovenLateNotAdmitted"
+       /\ packet.payload.admission_evidence = arg_admission_evidence
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ ((packet.payload.admission_evidence = "Started") /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms))
+       /\ occurrence_phase' = "Misfired"
+       /\ occurrence_claimed_by' = None
+       /\ occurrence_lease_expires_at_utc_ms' = None
+       /\ occurrence_claim_token' = None
+       /\ occurrence_delivery_correlation_id' = None
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("Misfired")
+       /\ occurrence_receipt_failure_class' = None
+       /\ occurrence_receipt_detail' = packet.payload.detail
+       /\ occurrence_failure_class' = None
+       /\ occurrence_failure_detail' = packet.payload.detail
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UnchangedFrame_b5b21f501595ac0e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "Misfired", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "UnprovenLateNotAdmittedFromDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "UnprovenLateNotAdmittedFromDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -5194,15 +5477,15 @@ EntryPacketAdmissible_occurrence(packet) ==
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Misfired") /\ (((IF (packet.payload.trigger = "LeaseExpired") THEN TRUE ELSE (IF (packet.payload.trigger = "ReleaseLeaseForPausedSchedule") THEN TRUE ELSE (packet.payload.trigger = "RenewLease"))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Superseded") /\ (((IF (packet.payload.trigger = "LeaseExpired") THEN TRUE ELSE (IF (packet.payload.trigger = "ReleaseLeaseForPausedSchedule") THEN TRUE ELSE (packet.payload.trigger = "RenewLease"))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "DeliveryFailed") /\ (((IF (packet.payload.trigger = "LeaseExpired") THEN TRUE ELSE (IF (packet.payload.trigger = "ReleaseLeaseForPausedSchedule") THEN TRUE ELSE (packet.payload.trigger = "RenewLease"))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Pending") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Claimed") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Dispatching") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "AwaitingCompletion") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Completed") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Skipped") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Misfired") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Superseded") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
-    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "DeliveryFailed") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Pending") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Claimed") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Dispatching") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "AwaitingCompletion") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Completed") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Skipped") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Misfired") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Superseded") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
+    \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "DeliveryFailed") /\ (((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveTargetProbe") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDueMisfire") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveReclaimExhausted") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveUnprovenLateNotAdmitted") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))))) /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Pending") /\ (((packet.payload.trigger = "ClassifyStaleCompletionArrival") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Claimed") /\ (((packet.payload.trigger = "ClassifyStaleCompletionArrival") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
     \/ /\ (packet.variant = "ClassifyTransitionFailure") /\ (occurrence_phase = "Dispatching") /\ (((packet.payload.trigger = "ClassifyStaleCompletionArrival") /\ (IF (packet.payload.refusal_kind = "GuardRejected") THEN TRUE ELSE (packet.payload.refusal_kind = "NoMatchingTransition"))))
@@ -5223,8 +5506,9 @@ EntryPacketAdmissible_occurrence(packet) ==
     \/ /\ (packet.variant = "ClassifyStaleCompletionArrival") /\ (occurrence_phase = "DeliveryFailed") /\ ((IF (packet.payload.trigger = "Complete") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveRuntimeCompletion") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryCompletionFailure") THEN TRUE ELSE (IF (packet.payload.trigger = "ResolveDeliveryFailure") THEN TRUE ELSE (packet.payload.trigger = "Supersede"))))))
     \/ /\ (packet.variant = "PlanOccurrence") /\ (occurrence_phase = "Pending") /\ (((occurrence_attempt_count = 0) /\ (occurrence_claimed_by = None) /\ (occurrence_claim_token = None) /\ (occurrence_delivery_correlation_id = None) /\ (occurrence_target_materialized_session_id = None) /\ (occurrence_completed_at_utc_ms = None) /\ (occurrence_superseded_by_revision = None) /\ (packet.payload.misfire_deadline_utc_ms >= packet.payload.due_at_utc_ms)))
     \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "Pending") /\ ((packet.payload.now_utc_ms < occurrence_due_at_utc_ms))
-    \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.now_utc_ms)))
-    \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (packet.payload.now_utc_ms <= occurrence_misfire_deadline_utc_ms)))
+    \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.now_utc_ms) /\ (packet.payload.admission_evidence = "Unrecorded")))
+    \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (IF (packet.payload.now_utc_ms <= occurrence_misfire_deadline_utc_ms) THEN TRUE ELSE ((packet.payload.admission_evidence # "Unrecorded") /\ (occurrence_attempt_count < 5)))))
+    \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.now_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.now_utc_ms) /\ (packet.payload.admission_evidence # "Unrecorded") /\ (occurrence_attempt_count >= 5)))
     \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "Claimed") /\ (((occurrence_lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms)))
     \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "Dispatching") /\ (((occurrence_lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms)))
     \/ /\ (packet.variant = "ClassifyDue") /\ (occurrence_phase = "AwaitingCompletion") /\ (((occurrence_lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN occurrence_lease_expires_at_utc_ms THEN occurrence_lease_expires_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms)))
@@ -5266,7 +5550,9 @@ EntryPacketAdmissible_occurrence(packet) ==
     \/ /\ (packet.variant = "RecordReceipt") /\ (occurrence_phase = "Misfired") /\ (((occurrence_receipt_stage # None) /\ (occurrence_receipt_recorded_at_utc_ms # None) /\ (occurrence_receipt_detail = packet.payload.detail) /\ (occurrence_delivery_correlation_id = packet.payload.correlation_id) /\ (occurrence_target_materialized_session_id = packet.payload.materialized_session_id)))
     \/ /\ (packet.variant = "RecordReceipt") /\ (occurrence_phase = "Superseded") /\ (((occurrence_receipt_stage # None) /\ (occurrence_receipt_recorded_at_utc_ms # None) /\ (occurrence_receipt_detail = packet.payload.detail) /\ (occurrence_delivery_correlation_id = packet.payload.correlation_id) /\ (occurrence_target_materialized_session_id = packet.payload.materialized_session_id)))
     \/ /\ (packet.variant = "RecordReceipt") /\ (occurrence_phase = "DeliveryFailed") /\ (((occurrence_receipt_stage # None) /\ (occurrence_receipt_recorded_at_utc_ms # None) /\ (occurrence_receipt_detail = packet.payload.detail) /\ (occurrence_delivery_correlation_id = packet.payload.correlation_id) /\ (occurrence_target_materialized_session_id = packet.payload.materialized_session_id)))
-    \/ /\ (packet.variant = "Claim") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.at_utc_ms <= occurrence_misfire_deadline_utc_ms)))
+    \/ /\ (packet.variant = "Claim") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.at_utc_ms <= occurrence_misfire_deadline_utc_ms) /\ (packet.payload.admission_evidence # "Accepted")))
+    \/ /\ (packet.variant = "Claim") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.admission_evidence = "Accepted") /\ (IF (packet.payload.at_utc_ms <= occurrence_misfire_deadline_utc_ms) THEN TRUE ELSE (occurrence_attempt_count < 5))))
+    \/ /\ (packet.variant = "Claim") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.admission_evidence = "Started") /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms) /\ (occurrence_attempt_count < 5)))
     \/ /\ (packet.variant = "DispatchStarted") /\ (occurrence_phase = "Claimed")
     \/ /\ (packet.variant = "DispatchAccepted") /\ (occurrence_phase = "Dispatching") /\ ((occurrence_delivery_correlation_id # None)) /\ ((packet.payload.admission_outcome = "Accepted"))
     \/ /\ (packet.variant = "DispatchAccepted") /\ (occurrence_phase = "Dispatching") /\ ((occurrence_delivery_correlation_id # None)) /\ ((packet.payload.admission_outcome = "Deduplicated"))
@@ -5289,10 +5575,15 @@ EntryPacketAdmissible_occurrence(packet) ==
     \/ /\ (packet.variant = "ResolveDeliveryFailure") /\ (occurrence_phase = "Claimed" \/ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion") /\ ((packet.payload.reason = "ScheduleMandateUnavailable"))
     \/ /\ (packet.variant = "ResolveTargetProbe") /\ (occurrence_phase = "Claimed") /\ ((packet.payload.outcome = "Ready"))
     \/ /\ (packet.variant = "ResolveTargetProbe") /\ (occurrence_phase = "Claimed") /\ ((packet.payload.outcome = "Busy")) /\ ((occurrence_overlap_policy = "AllowConcurrent"))
-    \/ /\ (packet.variant = "ResolveTargetProbe") /\ (occurrence_phase = "Claimed") /\ ((packet.payload.outcome = "Busy")) /\ ((occurrence_overlap_policy = "SkipIfRunning"))
+    \/ /\ (packet.variant = "ResolveTargetProbe") /\ (occurrence_phase = "Claimed") /\ ((packet.payload.outcome = "Busy")) /\ ((occurrence_overlap_policy = "SkipIfRunning")) /\ ((packet.payload.redelivery # "Ordinary"))
+    \/ /\ (packet.variant = "ResolveTargetProbe") /\ (occurrence_phase = "Claimed") /\ ((packet.payload.outcome = "Busy")) /\ ((occurrence_overlap_policy = "SkipIfRunning")) /\ ((packet.payload.redelivery = "Ordinary"))
     \/ /\ (packet.variant = "ResolveTargetProbe") /\ (occurrence_phase = "Claimed") /\ ((packet.payload.outcome = "Missing")) /\ ((occurrence_missing_target_policy = "Skip"))
     \/ /\ (packet.variant = "ResolveTargetProbe") /\ (occurrence_phase = "Claimed") /\ ((packet.payload.outcome = "Missing")) /\ ((occurrence_missing_target_policy = "MarkMisfired"))
     \/ /\ (packet.variant = "ResolveDueMisfire") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms)))
+    \/ /\ (packet.variant = "ResolveReclaimExhausted") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms) /\ (occurrence_attempt_count >= 5) /\ (packet.payload.admission_evidence = "Accepted")))
+    \/ /\ (packet.variant = "ResolveReclaimExhausted") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms) /\ (occurrence_attempt_count >= 5) /\ (packet.payload.admission_evidence = "Started")))
+    \/ /\ (packet.variant = "ResolveUnprovenLateNotAdmitted") /\ (occurrence_phase = "Claimed") /\ (((packet.payload.admission_evidence = "Started") /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms)))
+    \/ /\ (packet.variant = "ResolveUnprovenLateNotAdmitted") /\ (occurrence_phase = "Dispatching") /\ (((packet.payload.admission_evidence = "Started") /\ (occurrence_misfire_deadline_utc_ms < packet.payload.at_utc_ms)))
     \/ /\ (packet.variant = "Supersede") /\ (occurrence_phase = "Pending" \/ occurrence_phase = "Claimed" \/ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion")
     \/ /\ (packet.variant = "Supersede") /\ (occurrence_phase = "Superseded")
     \/ /\ (packet.variant = "Complete") /\ (occurrence_phase = "Superseded")
@@ -5511,20 +5802,21 @@ CoreNext ==
     \/ \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyStaleCompletionArrivalObservedSuperseded(arg_trigger)
     \/ \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyStaleCompletionArrivalObservedDeliveryFailed(arg_trigger)
     \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_trigger_key \in TriggerKeyValues : \E arg_target_binding_key \in TargetBindingIdValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_misfire_policy_key \in StringValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_overlap_policy_key \in StringValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_missing_target_policy_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : \E arg_due_at_utc_ms \in 0..2 : \E arg_misfire_deadline_utc_ms \in 0..2 : occurrence_PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingFuture(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseCurrent(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseCurrent(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueCompletedNoAction(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms)
-    \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDuePendingFuture(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDuePendingReclaimExhausted(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueDispatchingLeaseCurrent(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueAwaitingCompletionLeaseCurrent(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueCompletedNoAction(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms, arg_admission_evidence)
+    \/ \E arg_now_utc_ms \in 0..2 : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms, arg_admission_evidence)
     \/ occurrence_ClassifyOccurrenceTerminalityTerminalCompleted
     \/ occurrence_ClassifyOccurrenceTerminalityTerminalSkipped
     \/ occurrence_ClassifyOccurrenceTerminalityTerminalMisfired
@@ -5555,7 +5847,9 @@ CoreNext ==
     \/ \E arg_correlation_id \in OptionCorrelationIdValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : occurrence_RecordReceiptMisfired(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key)
     \/ \E arg_correlation_id \in OptionCorrelationIdValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : occurrence_RecordReceiptSuperseded(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key)
     \/ \E arg_correlation_id \in OptionCorrelationIdValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key)
-    \/ \E arg_owner_id \in ClaimOwnerValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)
+    \/ \E arg_owner_id \in ClaimOwnerValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, arg_admission_evidence)
+    \/ \E arg_owner_id \in ClaimOwnerValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClaimPendingAfterAdmission(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, arg_admission_evidence)
+    \/ \E arg_owner_id \in ClaimOwnerValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : \E arg_admission_evidence \in AdmissionEvidenceValues : occurrence_ClaimPendingAfterUnprovenDispatch(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token, arg_admission_evidence)
     \/ \E arg_correlation_id \in OptionCorrelationIdValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms)
     \/ \E arg_admission_outcome \in DeliveryAdmissionOutcomeValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchAcceptedFromDispatching(arg_admission_outcome, arg_at_utc_ms)
     \/ \E arg_admission_outcome \in DeliveryAdmissionOutcomeValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchDeduplicatedFromDispatching(arg_admission_outcome, arg_at_utc_ms)
@@ -5576,12 +5870,17 @@ CoreNext ==
     \/ \E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTransportError(arg_reason, arg_detail, arg_at_utc_ms)
     \/ \E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureInternalError(arg_reason, arg_detail, arg_at_utc_ms)
     \/ \E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureScheduleMandateUnavailable(arg_reason, arg_detail, arg_at_utc_ms)
-    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeReadyClaimed(arg_outcome, arg_detail, arg_at_utc_ms)
-    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusyAllowedByPolicy(arg_outcome, arg_detail, arg_at_utc_ms)
-    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms)
-    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms)
-    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingMisfireByPolicy(arg_outcome, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_redelivery \in ClaimRedeliveryValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeReadyClaimed(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_redelivery \in ClaimRedeliveryValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusyAllowedByPolicy(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_redelivery \in ClaimRedeliveryValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusyExistingRedelivery(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_redelivery \in ClaimRedeliveryValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_redelivery \in ClaimRedeliveryValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_redelivery \in ClaimRedeliveryValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingMisfireByPolicy(arg_outcome, arg_redelivery, arg_detail, arg_at_utc_ms)
     \/ \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DueMisfirePending(arg_detail, arg_at_utc_ms)
+    \/ \E arg_admission_evidence \in AdmissionEvidenceValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_ReclaimExhaustedAfterAdmission(arg_admission_evidence, arg_detail, arg_at_utc_ms)
+    \/ \E arg_admission_evidence \in AdmissionEvidenceValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_ReclaimExhaustedAfterUnprovenDispatch(arg_admission_evidence, arg_detail, arg_at_utc_ms)
+    \/ \E arg_admission_evidence \in AdmissionEvidenceValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_UnprovenLateNotAdmittedFromClaimed(arg_admission_evidence, arg_detail, arg_at_utc_ms)
+    \/ \E arg_admission_evidence \in AdmissionEvidenceValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_UnprovenLateNotAdmittedFromDispatching(arg_admission_evidence, arg_detail, arg_at_utc_ms)
     \/ \E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms)
     \/ \E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedeAlreadySuperseded(arg_superseded_by_revision, arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_LateCompleteAfterSupersession(arg_at_utc_ms)

@@ -339,7 +339,18 @@ where
 /// Every mob operator surface of that session admits against the narrowed
 /// context: a `MobToolsFactory` surface, and the mob runtime's own mob
 /// operator tools for the member (`spawn_member`, `spawn_many_members` and
-/// the rest).
+/// the rest). This covers a member whose session this process builds: a
+/// host-materialized member's operator tools are upcalls that the
+/// controlling host admits against its recorded authority facts, which a
+/// session hook does not edit.
+///
+/// The narrowing applies to the one session build the hook edits, and so
+/// does a disable of the member's mob tools made there. Neither is restored
+/// from persisted state: the build with which the mob restores a member
+/// reaches the hook with its profile's mob tools setting and the default
+/// authority again. A host applies the narrowing (or the disable) on every
+/// build, restores included, or a restored member returns to the default
+/// authority.
 ///
 /// It refuses a mob the context holds no spawn-profile scope for, and a
 /// context that generated authority did not mint.

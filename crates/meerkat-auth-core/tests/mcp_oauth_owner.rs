@@ -6689,6 +6689,48 @@ async fn registered_start_joins_only_its_own_redirect() {
     );
 }
 
+/// The reverse of the cross-redirect refusal above: a loopback start while a
+/// registered attempt is pending joins nothing, since its callback could
+/// never finish an attempt whose browser goes to the host's https callback.
+#[tokio::test]
+async fn loopback_start_refuses_to_join_a_registered_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "loopback-beside-registered");
+    let registered = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let crossed = authority.login_start(&target, SPLIT_REDIRECT, None).await;
+    assert!(
+        matches!(
+            crossed,
+            Err(McpOAuthError::Flow(OAuthFlowError::RedirectUriMismatch))
+        ),
+        "{crossed:?}"
+    );
+    assert_eq!(
+        authority
+            .pending_attempt(&target)
+            .unwrap()
+            .map(|attempt| attempt.attempt_ref),
+        Some(registered.attempt_ref()),
+        "the registered attempt stays pending, untouched"
+    );
+    // Two loopback starts still join, on any port.
+    let other = split_target(&base, "loopback-beside-loopback");
+    let first = authority
+        .login_start(&other, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    let joined = authority
+        .login_start(&other, "http://127.0.0.1:10/mcp/oauth/callback", None)
+        .await
+        .unwrap();
+    assert_eq!(joined.disposition, McpOAuthLoginDisposition::Joined);
+    assert_eq!(joined.state, first.state);
+}
+
 #[tokio::test]
 async fn registered_completion_checks_rfc9207_iss_byte_for_byte() {
     let (base, state) = spawn_oauth_fixture().await;

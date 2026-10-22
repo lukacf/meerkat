@@ -1948,7 +1948,8 @@ impl McpOAuthAuthority {
     /// only an attempt pending on this same redirect, and the joined
     /// projection carries no handle; an attempt pending on another redirect
     /// is refused ([`OAuthFlowError::RedirectUriMismatch`]) and can be
-    /// cancelled by its reference. A slot whose credential's client was
+    /// cancelled by its reference, and so is a loopback start while a
+    /// registered attempt is pending. A slot whose credential's client was
     /// registered for another redirect needs a disconnect first.
     pub async fn login_start_registered(
         &self,
@@ -1994,10 +1995,16 @@ impl McpOAuthAuthority {
             .pending_connector_browser_attempt(&credential_identity)
             .map_err(McpOAuthError::Flow)?
         {
-            // A registered start joins only the attempt pending on its own
-            // redirect: a joined projection must send the browser to the
-            // callback this host serves.
-            if mode == RedirectMode::Registered && record.redirect_uri != redirect_uri {
+            // A start joins only an attempt its own callback can finish: a
+            // registered start the attempt pending on exactly its redirect,
+            // a loopback start a loopback attempt (any port). A joined
+            // projection must send the browser to a callback this host
+            // serves.
+            let joinable = match mode {
+                RedirectMode::Registered => record.redirect_uri == redirect_uri,
+                RedirectMode::Loopback => !is_https_redirect(&record.redirect_uri),
+            };
+            if !joinable {
                 return Err(McpOAuthError::Flow(OAuthFlowError::RedirectUriMismatch));
             }
             // `None`: the pending attempt no longer matches the server, or

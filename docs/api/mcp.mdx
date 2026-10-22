@@ -475,7 +475,8 @@ ask its user.
   after a runtime restart, cancel the attempt with `{mcp, attempt_ref}` and
   start again. A joined start (an attempt already pending on the same
   redirect) carries no handle; an attempt pending on another redirect is
-  refused (`attempt_mismatch`) until it is cancelled. The credential lands in
+  refused (`attempt_mismatch`) until it is cancelled, and so is a loopback
+  start while a registered attempt is pending. The credential lands in
   the same slot as a loopback login's, with the same refresh, status, cancel
   and logout; a credential whose client was registered for the other
   redirect kind needs a logout first. The window is the same 300 s. REST and

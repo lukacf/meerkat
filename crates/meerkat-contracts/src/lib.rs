@@ -448,6 +448,7 @@ pub use wire::{
     WireAuthError,
     WireAuthErrorBody,
     WireAuthErrorData,
+    WireAuthErrorDetail,
     WireAuthErrorReason,
     WireAuthLogoutResult,
     WireAuthProfile,

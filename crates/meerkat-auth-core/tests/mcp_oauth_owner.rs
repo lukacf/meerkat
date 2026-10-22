@@ -22,7 +22,8 @@ use meerkat_auth_core::mcp_oauth::{
     MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpOAuthAccountStrategy,
     McpOAuthAttemptCleanup, McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback,
     McpOAuthCeremonyContext, McpOAuthError, McpOAuthListenerCleanup, McpOAuthLoginDisposition,
-    McpOAuthLoginStart, McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpServerIdentity,
+    McpOAuthLoginStart, McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpOAuthRegisteredCallback,
+    McpRegisteredRedirectBase, McpServerIdentity,
 };
 use meerkat_auth_core::oauth_flow::OAuthFlowError;
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
@@ -329,6 +330,12 @@ struct TestState {
     /// Serve the authorization-server metadata only through OpenID Connect
     /// discovery: the RFC 8414 well-known path is absent.
     authorization_metadata_via_openid_configuration: AtomicBool,
+    /// The `token_endpoint_auth_method` dynamic registration answers with,
+    /// in place of `none`.
+    token_endpoint_auth_method_override: Mutex<Option<String>>,
+    /// The authorization-server metadata advertises
+    /// `authorization_response_iss_parameter_supported` (RFC 9207).
+    iss_parameter_supported: AtomicBool,
 }
 
 struct RecordingBrowser {
@@ -622,6 +629,9 @@ fn authorization_server_document(state: &TestState, host: &str) -> Value {
     if let Some(scopes) = state.authorization_scopes_supported.lock().clone() {
         body["scopes_supported"] = serde_json::json!(scopes);
     }
+    if state.iss_parameter_supported.load(Ordering::SeqCst) {
+        body["authorization_response_iss_parameter_supported"] = serde_json::json!(true);
+    }
     body
 }
 
@@ -638,7 +648,13 @@ async fn register_client(
         "token_endpoint_auth_method": if *state.omit_token_endpoint_auth_method.lock() {
             Value::Null
         } else {
-            Value::String("none".to_string())
+            Value::String(
+                state
+                    .token_endpoint_auth_method_override
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string()),
+            )
         }
     }))
 }
@@ -6232,4 +6248,599 @@ async fn coalesced_readers_share_the_typed_userinfo_egress_refusal() {
         store.load(&target.token_key().unwrap()).await.unwrap(),
         Some(expired)
     );
+}
+
+// --- Registered https callback (#1808) ----------------------------------------
+
+/// The host's registered callback base. The authorization server's redirect
+/// to it is never followed here: the host delivers the callback directly.
+const REGISTERED_BASE: &str = "https://host.example/mcp/oauth/callback";
+
+fn registered_base() -> McpRegisteredRedirectBase {
+    McpRegisteredRedirectBase::parse(REGISTERED_BASE).unwrap()
+}
+
+fn registered_callback(
+    start: &McpOAuthLoginStart,
+    state: &str,
+    host_attempt_handle: &str,
+) -> McpOAuthRegisteredCallback {
+    McpOAuthRegisteredCallback {
+        redirect_uri: start.redirect_uri.clone(),
+        state: state.to_owned(),
+        code: "fixture-code".to_owned(),
+        iss: None,
+        host_attempt_handle: host_attempt_handle.to_owned(),
+    }
+}
+
+fn handle_of(start: &McpOAuthLoginStart) -> String {
+    start
+        .host_attempt_handle
+        .clone()
+        .expect("a registered start returns the host handle")
+}
+
+fn is_custody_refusal(result: &Result<impl std::fmt::Debug, McpOAuthError>) -> bool {
+    matches!(result, Err(McpOAuthError::RemoteCustodyRequired { .. }))
+}
+
+#[tokio::test]
+async fn registered_https_callback_completes_once_from_host_custody() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = split_authority(&state, store.clone());
+    let target = split_target(&base, "registered-success");
+    let redirect = authority
+        .registered_redirect_uri(&target, &registered_base())
+        .unwrap();
+    assert_eq!(
+        redirect
+            .strip_prefix(&format!("{REGISTERED_BASE}/"))
+            .map(|segment| segment.contains('/')),
+        Some(false),
+        "one path segment under the base: {redirect}"
+    );
+
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .expect("a registered start is admitted");
+    assert_eq!(start.disposition, McpOAuthLoginDisposition::Started);
+    assert_eq!(start.redirect_uri, redirect);
+    let handle = handle_of(&start);
+    assert_ne!(handle, start.state, "the handle is not the state");
+    let pending = authority.pending_attempt(&target).unwrap().unwrap();
+    assert_eq!(pending.attempt_ref, start.attempt_ref());
+    let start_debug = format!("{start:?}");
+    assert!(
+        !start_debug.contains(&handle),
+        "Debug must redact the handle"
+    );
+    assert!(
+        !start_debug.contains(&start.state),
+        "Debug must redact the state"
+    );
+    let registration = state.registration_requests.lock()[0].clone();
+    assert_eq!(registration["application_type"], "web");
+    assert_eq!(registration["redirect_uris"], serde_json::json!([redirect]));
+    assert_eq!(registration["token_endpoint_auth_method"], "none");
+    assert!(
+        start
+            .authorize_url
+            .contains(&format!("redirect_uri={}", urlencoding::encode(&redirect))),
+        "the authorize request names the registered redirect"
+    );
+
+    let callback = registered_callback(&start, &start.state, &handle);
+    let callback_debug = format!("{callback:?}");
+    for secret in [handle.as_str(), start.state.as_str(), "fixture-code"] {
+        assert!(!callback_debug.contains(secret), "Debug leaked {secret:?}");
+    }
+    let complete = authority
+        .login_complete_registered(&target, callback.clone())
+        .await
+        .expect("the host's own callback completes");
+    assert_eq!(complete.account_id.as_deref(), Some("fixture-account-42"));
+    let token_requests = state.token_requests.lock().clone();
+    assert_eq!(token_requests.len(), 1);
+    assert_eq!(token_requests[0]["redirect_uri"], redirect.as_str());
+    assert!(token_requests[0].get("client_secret").is_none());
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token"),
+        "the credential lands under the same server identity"
+    );
+
+    let replay = authority.login_complete_registered(&target, callback).await;
+    assert!(
+        matches!(replay, Err(McpOAuthError::Flow(OAuthFlowError::Missing))),
+        "a consumed attempt cannot be replayed: {replay:?}"
+    );
+    assert_eq!(state.token_requests.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn registered_redirects_are_distinct_per_target_and_realm() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let one = authority
+        .registered_redirect_uri(&split_target(&base, "one"), &registered_base())
+        .unwrap();
+    let two = authority
+        .registered_redirect_uri(&split_target(&base, "two"), &registered_base())
+        .unwrap();
+    let realm = meerkat_core::connection::RealmId::parse("realm-a").unwrap();
+    let in_realm = authority
+        .native
+        .clone()
+        .in_realm(realm)
+        .registered_redirect_uri(&split_target(&base, "one"), &registered_base())
+        .unwrap();
+    assert_ne!(one, two);
+    assert_ne!(one, in_realm);
+    // A base with a trailing slash adds no empty segment.
+    let slashed = McpRegisteredRedirectBase::parse(&format!("{REGISTERED_BASE}/")).unwrap();
+    assert_eq!(
+        authority
+            .registered_redirect_uri(&split_target(&base, "one"), &slashed)
+            .unwrap(),
+        one
+    );
+}
+
+#[test]
+fn registered_redirect_base_is_exact_https_only() {
+    for refused in [
+        "http://host.example/mcp/oauth/callback",
+        "https://user@host.example/mcp/oauth/callback",
+        "https://host.example/mcp/oauth/callback?tenant=a",
+        "https://host.example/mcp/oauth/callback#fragment",
+        "https://HOST.example/mcp/oauth/callback",
+        "https://host.example",
+        "https://host.example/a/../callback",
+        "http://127.0.0.1:9/mcp/oauth/callback",
+        "not a url",
+        "",
+    ] {
+        assert!(
+            matches!(
+                McpRegisteredRedirectBase::parse(refused),
+                Err(McpOAuthError::Verification(
+                    ConnectorOAuthRefusal::InvalidDescriptor
+                ))
+            ),
+            "{refused:?} must be refused"
+        );
+    }
+    assert_eq!(registered_base().as_str(), REGISTERED_BASE);
+}
+
+#[tokio::test]
+async fn registered_callback_without_host_custody_is_refused_and_leaves_the_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "registered-custody");
+    let other = split_target(&base, "registered-custody-other");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let other_start = authority
+        .login_start_registered(&other, &registered_base(), None)
+        .await
+        .unwrap();
+    let before = state.request_paths.lock().len();
+
+    for handle in [
+        "forged-handle".to_owned(),
+        String::new(),
+        handle_of(&other_start),
+        start.state.clone(),
+    ] {
+        let refused = authority
+            .login_complete_registered(&target, registered_callback(&start, &start.state, &handle))
+            .await;
+        assert!(is_custody_refusal(&refused), "{refused:?}");
+    }
+    // The loopback completion never completes a registered attempt.
+    let loopback = authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await;
+    assert!(is_custody_refusal(&loopback), "{loopback:?}");
+    assert_eq!(
+        state.request_paths.lock().len(),
+        before,
+        "a custody refusal sends nothing"
+    );
+    assert!(state.token_requests.lock().is_empty());
+    assert_eq!(
+        authority
+            .pending_attempt(&target)
+            .unwrap()
+            .map(|attempt| attempt.attempt_ref),
+        Some(start.attempt_ref()),
+        "a refused callback leaves the attempt to its owner"
+    );
+    // A registered completion never completes a loopback attempt either.
+    let loopback_target = split_target(&base, "loopback-under-registered");
+    let loopback_start = authority
+        .login_start(&loopback_target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    let crossed = authority
+        .login_complete_registered(
+            &loopback_target,
+            McpOAuthRegisteredCallback {
+                redirect_uri: SPLIT_REDIRECT.to_owned(),
+                state: loopback_start.state.clone(),
+                code: "fixture-code".to_owned(),
+                iss: None,
+                host_attempt_handle: handle_of(&start),
+            },
+        )
+        .await;
+    assert!(is_custody_refusal(&crossed), "{crossed:?}");
+
+    authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        )
+        .await
+        .expect("the host's own handle still completes the attempt");
+}
+
+#[tokio::test]
+async fn registered_callback_refuses_wrong_state_redirect_and_ended_attempts() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = split_authority(&state, store.clone());
+    let target = split_target(&base, "registered-negative");
+
+    // An unknown state names no attempt; the pending one is untouched.
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let unknown = authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, "st-unknown", &handle_of(&start)),
+        )
+        .await;
+    assert!(
+        matches!(unknown, Err(McpOAuthError::Flow(OAuthFlowError::Missing))),
+        "{unknown:?}"
+    );
+    assert!(authority.pending_attempt(&target).unwrap().is_some());
+    authority
+        .cancel_attempt_by_ref(&target, start.attempt_ref().as_str())
+        .unwrap();
+
+    // The redirect must equal the admitted one byte for byte; a mismatch
+    // under the host's custody retires the attempt. (Each variant uses its
+    // own target: a retired attempt leaves its slot's lifecycle awaiting
+    // reauthorization, where the flow owner reports a later mismatch as a
+    // lifecycle refusal, as it does for loopback attempts.)
+    for (index, variant) in [
+        |redirect: &str| format!("{redirect}/"),
+        |redirect: &str| redirect.replacen("https://", "http://", 1),
+        |redirect: &str| redirect.replacen("host.example", "HOST.example", 1),
+        |redirect: &str| format!("{redirect}?x=1"),
+        |_: &str| REGISTERED_BASE.to_owned(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let target = split_target(&base, &format!("registered-mismatch-{index}"));
+        let start = authority
+            .login_start_registered(&target, &registered_base(), None)
+            .await
+            .unwrap();
+        let mut callback = registered_callback(&start, &start.state, &handle_of(&start));
+        callback.redirect_uri = variant(&start.redirect_uri);
+        let refused = authority.login_complete_registered(&target, callback).await;
+        assert!(
+            matches!(
+                refused,
+                Err(McpOAuthError::Flow(OAuthFlowError::RedirectUriMismatch))
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            authority.pending_attempt(&target).unwrap().is_none(),
+            "the mismatched completion retired the attempt"
+        );
+    }
+
+    // Cancelled by its reference, then completed: nothing to complete.
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    authority
+        .cancel_attempt_by_ref(&target, start.attempt_ref().as_str())
+        .unwrap();
+    let cancelled = authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        )
+        .await;
+    assert!(
+        matches!(cancelled, Err(McpOAuthError::Flow(OAuthFlowError::Missing))),
+        "{cancelled:?}"
+    );
+
+    // Logged out, then completed: the slot stays empty.
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    authority.logout(&target).await.unwrap();
+    let logged_out = authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        )
+        .await;
+    assert!(
+        matches!(
+            logged_out,
+            Err(McpOAuthError::Flow(OAuthFlowError::Missing))
+        ),
+        "{logged_out:?}"
+    );
+    assert!(
+        state.token_requests.lock().is_empty(),
+        "no code was exchanged"
+    );
+    assert_eq!(authority.stored_bearer_token(&target).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn registered_attempt_expires_with_the_login_window() {
+    let (base, state) = spawn_oauth_fixture().await;
+    // A flow owner whose login window is short enough to pass in a test.
+    let auth = test_auth_lease();
+    let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
+        Duration::from_millis(300),
+        auth.lifecycle,
+    ));
+    let authority = McpOAuthAuthority::with_http(
+        ProviderAuthPersistence::new(
+            Arc::new(EphemeralTokenStore::new()),
+            Arc::new(InMemoryCoordinator::new()),
+        ),
+        no_redirect_client(),
+        auth.generated,
+    )
+    .with_interactive_strategy(flows, Arc::new(FixtureAccountStrategy))
+    .unwrap();
+    let target = split_target(&base, "registered-expiry");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let expired = authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        )
+        .await;
+    assert!(
+        matches!(expired, Err(McpOAuthError::Flow(OAuthFlowError::Missing))),
+        "{expired:?}"
+    );
+    assert!(state.token_requests.lock().is_empty());
+}
+
+#[tokio::test]
+async fn registered_start_joins_only_its_own_redirect() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "registered-join");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let joined = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    assert_eq!(joined.disposition, McpOAuthLoginDisposition::Joined);
+    assert_eq!(joined.state, start.state);
+    assert_eq!(joined.redirect_uri, start.redirect_uri);
+    assert_eq!(
+        joined.host_attempt_handle, None,
+        "a joined projection carries no custody"
+    );
+    authority
+        .cancel_attempt_by_ref(&target, start.attempt_ref().as_str())
+        .unwrap();
+
+    // A loopback attempt pending: a registered start admits nothing beside it.
+    let loopback = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    let crossed = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await;
+    assert!(
+        matches!(
+            crossed,
+            Err(McpOAuthError::Flow(OAuthFlowError::RedirectUriMismatch))
+        ),
+        "{crossed:?}"
+    );
+    assert_eq!(
+        authority
+            .pending_attempt(&target)
+            .unwrap()
+            .map(|attempt| attempt.attempt_ref),
+        Some(loopback.attempt_ref())
+    );
+}
+
+#[tokio::test]
+async fn registered_completion_checks_rfc9207_iss_byte_for_byte() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let issuer = base.clone();
+
+    // Not advertised: an absent iss is accepted, a variant is refused.
+    let target = split_target(&base, "iss-variant");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let mut callback = registered_callback(&start, &start.state, &handle_of(&start));
+    callback.iss = Some(format!("{issuer}/"));
+    let refused = authority.login_complete_registered(&target, callback).await;
+    assert!(
+        matches!(
+            refused,
+            Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::DescriptorMismatch
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert!(authority.pending_attempt(&target).unwrap().is_none());
+    assert!(
+        state.token_requests.lock().is_empty(),
+        "no code went anywhere"
+    );
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        )
+        .await
+        .expect("an absent iss is accepted when the server does not advertise it");
+
+    // Advertised: iss is required, and the exact issuer completes.
+    state.iss_parameter_supported.store(true, Ordering::SeqCst);
+    let target = split_target(&base, "iss-advertised");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let absent = authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        )
+        .await;
+    assert!(
+        matches!(
+            absent,
+            Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::DescriptorMismatch
+            ))
+        ),
+        "{absent:?}"
+    );
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let mut callback = registered_callback(&start, &start.state, &handle_of(&start));
+    callback.iss = Some(issuer);
+    authority
+        .login_complete_registered(&target, callback)
+        .await
+        .expect("the exact issuer completes");
+    assert_eq!(state.token_requests.lock().len(), 2);
+}
+
+#[tokio::test]
+async fn registered_start_refuses_a_confidential_client_before_any_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "registered-confidential");
+    *state.token_endpoint_auth_method_override.lock() = Some("client_secret_basic".to_owned());
+    let refused = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await;
+    let Err(McpOAuthError::RegistrationFailed { reason, .. }) = &refused else {
+        panic!("a confidential registration must be refused, got {refused:?}");
+    };
+    assert!(reason.contains("public PKCE client"), "{reason}");
+    assert!(reason.contains("loopback"), "the remedy is named: {reason}");
+    assert!(
+        authority.pending_attempt(&target).unwrap().is_none(),
+        "no attempt and no authorize URL exist"
+    );
+    assert!(
+        !state
+            .request_paths
+            .lock()
+            .iter()
+            .any(|path| path == "/authorize")
+    );
+}
+
+#[tokio::test]
+async fn reconnect_across_redirect_classes_needs_a_logout_first() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+
+    // A credential whose client was registered for a loopback redirect.
+    let target = split_target(&base, "class-loopback");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .unwrap();
+    let refused = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await;
+    let Err(error @ McpOAuthError::DisconnectRequired { .. }) = &refused else {
+        panic!("expected DisconnectRequired, got {refused:?}");
+    };
+    assert!(
+        error.to_string().contains("log it out, then log in again"),
+        "{error}"
+    );
+    assert!(authority.pending_attempt(&target).unwrap().is_none());
+
+    // A credential whose client was registered for the https redirect.
+    let target = split_target(&base, "class-registered");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        )
+        .await
+        .unwrap();
+    let refused = authority.login_start(&target, SPLIT_REDIRECT, None).await;
+    assert!(
+        matches!(refused, Err(McpOAuthError::DisconnectRequired { .. })),
+        "{refused:?}"
+    );
+    // The same registered redirect reconnects with the admitted client.
+    let again = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .expect("the same redirect reconnects");
+    assert_eq!(again.disposition, McpOAuthLoginDisposition::Started);
 }

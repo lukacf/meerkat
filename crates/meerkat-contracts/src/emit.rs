@@ -416,6 +416,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireScopeEvidence": schema_for!(crate::wire::WireScopeEvidence),
         "WireAuthErrorReason": schema_for!(crate::wire::WireAuthErrorReason),
         "WireAuthErrorData": schema_for!(crate::wire::WireAuthErrorData),
+        "WireAuthErrorDetail": schema_for!(crate::wire::WireAuthErrorDetail),
         "WireAuthErrorBody": schema_for!(crate::wire::WireAuthErrorBody),
         "WireConnectorAuthStatus": schema_for!(crate::wire::WireConnectorAuthStatus),
         "WireAuthStatusResult": schema_for!(crate::wire::WireAuthStatusResult),

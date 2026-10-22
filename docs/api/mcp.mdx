@@ -402,7 +402,8 @@ ask its user.
    "redirect_uri": "http://127.0.0.1:53682/mcp/oauth/callback"}
   ```
 
-  `redirect_uri` must be an http loopback URL. Completion sends only the
+  `redirect_uri` must be an http loopback URL, or the host's registered
+  `https` callback (next item). Completion sends only the
   callback's `code` and `state` (and the same `redirect_uri`): issuer, client
   and resource come from the admitted attempt, and nothing network-facing
   happens until `state` is proven. Cancel takes `{mcp, state}`. A joined start
@@ -421,6 +422,64 @@ ask its user.
   `oauth_account_selection`, if given, the configured value; they never
   select or change the mode. Anything else is refused before any network
   request.
+- **Hosted callback (registered `https` redirect).** A host whose users'
+  browsers cannot reach its loopback address (a server-hosted app) serves
+  its own `https` callback endpoint and configures its base as host
+  configuration: `rkat-rpc --mcp-oauth-redirect-base
+  https://host.example/mcp/oauth/callback`, or
+  `HostAuthService::with_mcp_registered_redirect_base` in an embedding host.
+  Agents, MCP server definitions and mob profiles cannot set it. Each
+  server's exact redirect is the base followed by one path segment, its
+  credential binding, so every server, realm and account selection has its
+  own redirect. `auth/login/start` with `redirect_uri` set to the base (or
+  to that server's derived redirect) starts on it and adds two fields:
+
+  ```json
+  {"authorize_url": "https://idp.example/authorize?...",
+   "state": "st-...",
+   "redirect_uri": "https://host.example/mcp/oauth/callback/remote-oauth-AbC123dEf456GhI7",
+   "host_attempt_handle": "...",
+   "mcp": {"server_name": "remote-oauth", "server_url": "https://mcp.example.com/api", "oauth_account": "subject-id"},
+   "disposition": "started",
+   "attempt_ref": "oauth-action:..."}
+  ```
+
+  `host_attempt_handle` is a secret: the host keeps it server-side with the
+  ceremony it started, keyed by `state`, and never puts it in the browser, a
+  URL, a model, a transcript or a log. `attempt_ref` is the public reference
+  `auth/status/get` reports; it authorizes nothing. Dynamic registration
+  registers a public PKCE `web` client for exactly the derived redirect; a
+  server that answers with a confidential client is refused with its remedy
+  before any attempt exists. The host routes the derived redirect to its
+  callback endpoint, which must authenticate the user's own session and match
+  it to the session and realm that started the attempt, then call
+  `auth/login/complete` once:
+
+  ```json
+  {"mcp": {"server_name": "remote-oauth", "server_url": "https://mcp.example.com/api", "oauth_account": "subject-id"},
+   "code": "<callback code>",
+   "state": "<callback state>",
+   "redirect_uri": "<the start result's redirect_uri, from the host's route config>",
+   "host_attempt_handle": "<the start's handle>",
+   "iss": "<the callback's iss, when the authorization server sent one>"}
+  ```
+
+  `redirect_uri` must equal the admitted redirect byte for byte. `iss`
+  (RFC 9207) must equal the attempt's issuer byte for byte, and is required
+  when the authorization server advertises
+  `authorization_response_iss_parameter_supported`. A completion without the
+  handle, with another one, or through a loopback-only path is refused
+  (`error.data.reason` `invalid_target`, `error.data.detail`
+  `remote_custody_required`) and leaves the attempt pending, so a forged
+  callback cannot cancel it. The handle's key lives in the runtime process:
+  after a runtime restart, cancel the attempt with `{mcp, attempt_ref}` and
+  start again. A joined start (an attempt already pending on the same
+  redirect) carries no handle; an attempt pending on another redirect is
+  refused (`attempt_mismatch`) until it is cancelled. The credential lands in
+  the same slot as a loopback login's, with the same refresh, status, cancel
+  and logout; a credential whose client was registered for the other
+  redirect kind needs a logout first. The window is the same 300 s. REST and
+  `rkat mcp login` serve loopback logins only.
 
 <Warning>
 The authorize URL and `state`, and the callback's `code` and `state`, let

@@ -3890,6 +3890,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias(
         "WireAuthErrorReason", wire_schema, "Typed reason of an auth error (RPC error.data.reason, REST reason)."
     )
+    append_python_alias(
+        "WireAuthErrorDetail", wire_schema, "Stable sub-kind of an auth refusal (RPC error.data.detail, REST detail)."
+    )
     append_python_dataclass("WireAuthErrorData", wire_schema, "error.data of an auth RPC error.")
     append_python_dataclass("WireAuthErrorBody", wire_schema, "Body of a REST auth endpoint error.")
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
@@ -4755,6 +4758,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireConnectorVerifiedAccount", wire_schema)
     append_typescript_alias("WireScopeEvidence", wire_schema)
     append_typescript_alias("WireAuthErrorReason", wire_schema)
+    append_typescript_alias("WireAuthErrorDetail", wire_schema)
     append_typescript_interface("WireAuthErrorData", wire_schema)
     append_typescript_interface("WireAuthErrorBody", wire_schema)
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:

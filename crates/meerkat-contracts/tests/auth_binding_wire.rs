@@ -401,12 +401,14 @@ mod mcp_login_target {
             "code": "code-canary",
             "state": "state-canary",
             "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+            "host_attempt_handle": "handle-canary",
         }))
         .unwrap();
         let start = WireLoginStart {
             authorize_url: "https://idp.example/authorize?state=state-canary".into(),
             state: "state-canary".into(),
             redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".into(),
+            host_attempt_handle: Some("handle-canary".into()),
             target: WireLoginStartTarget::Mcp(WireMcpLoginStart {
                 mcp: WireMcpAuthTarget {
                     server_name: "glean".into(),
@@ -415,12 +417,77 @@ mod mcp_login_target {
                     oauth_account_selection: None,
                 },
                 disposition: meerkat_contracts::WireMcpLoginDisposition::Joined,
+                attempt_ref: None,
             }),
         };
         let rendered = format!("{complete:?} {start:?}");
-        for canary in ["code-canary", "state-canary", "idp.example/authorize"] {
+        for canary in [
+            "code-canary",
+            "state-canary",
+            "idp.example/authorize",
+            "handle-canary",
+        ] {
             assert!(!rendered.contains(canary), "{canary} leaked: {rendered}");
         }
+    }
+
+    /// The registered-callback fields are optional and omitted when absent,
+    /// so a loopback start and completion keep their exact wire shape.
+    #[test]
+    fn registered_callback_fields_are_optional_and_omitted_for_loopback() {
+        let loopback: LoginCompleteParams = serde_json::from_value(json!({
+            "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+            "code": "c",
+            "state": "s",
+            "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+        }))
+        .unwrap();
+        assert_eq!(loopback.host_attempt_handle, None);
+        assert_eq!(loopback.iss, None);
+        let rendered = serde_json::to_value(&loopback).unwrap();
+        assert!(rendered.get("host_attempt_handle").is_none());
+        assert!(rendered.get("iss").is_none());
+
+        let registered: LoginCompleteParams = serde_json::from_value(json!({
+            "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+            "code": "c",
+            "state": "s",
+            "redirect_uri": "https://host.example/mcp/oauth/callback",
+            "host_attempt_handle": "h",
+            "iss": "https://idp.example",
+        }))
+        .unwrap();
+        assert_eq!(registered.host_attempt_handle.as_deref(), Some("h"));
+        assert_eq!(registered.iss.as_deref(), Some("https://idp.example"));
+
+        let start = WireLoginStart {
+            authorize_url: "u".into(),
+            state: "s".into(),
+            redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".into(),
+            host_attempt_handle: None,
+            target: WireLoginStartTarget::Mcp(WireMcpLoginStart {
+                mcp: WireMcpAuthTarget {
+                    server_name: "glean".into(),
+                    server_url: "https://glean.example/mcp".into(),
+                    oauth_account: None,
+                    oauth_account_selection: None,
+                },
+                disposition: meerkat_contracts::WireMcpLoginDisposition::Started,
+                attempt_ref: None,
+            }),
+        };
+        let rendered = serde_json::to_value(&start).unwrap();
+        assert_eq!(
+            rendered,
+            json!({
+                "authorize_url": "u",
+                "state": "s",
+                "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+                "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+                "disposition": "started",
+            }),
+            "a loopback start keeps its exact wire shape"
+        );
     }
 
     #[test]

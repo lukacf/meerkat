@@ -1229,10 +1229,18 @@ class MeerkatClient:
         Returns `{authorize_url, state, redirect_uri, mcp, disposition}`;
         `disposition` is `"joined"` when an attempt was already pending for the
         server (its URL and state are returned; no second attempt exists).
-        `redirect_uri` must be an http loopback URL you bind yourself. The
-        authorize URL and state are host-channel data: open the URL in the
-        user's own browser (not one an agent tool drives), and never pass these
-        values to an agent, tool result, transcript or log. Finish with
+        `redirect_uri` is an http loopback URL you bind yourself, or the
+        host's registered `https` callback base (`rkat-rpc
+        --mcp-oauth-redirect-base`). On the base, the result's `redirect_uri`
+        is this server's exact redirect under it (route it to your callback
+        endpoint and pass it back unchanged), and the result adds
+        `host_attempt_handle`, a secret you keep server-side with the
+        ceremony (never in the browser, a URL, a model or a log), and
+        `attempt_ref`, the public reference `auth_mcp_status` reports, which
+        authorizes nothing. A joined start carries no handle. The authorize
+        URL and state are host-channel data: open the URL in the user's own
+        browser (not one an agent tool drives), and never pass these values
+        to an agent, tool result, transcript or log. Finish with
         `auth_mcp_login_complete`, or retire the attempt with
         `auth_mcp_login_cancel`.
         """
@@ -1253,19 +1261,31 @@ class MeerkatClient:
         state: str,
         redirect_uri: str,
         oauth_account: str | None = None,
+        host_attempt_handle: str | None = None,
+        iss: str | None = None,
     ) -> dict[str, Any]:
         """Complete host-driven MCP OAuth via `auth/login/complete` with the
-        loopback callback's `code` and `state`. Issuer, client and resource
-        come from the admitted attempt. Returns a secret-free summary."""
-        return await self._request(
-            "auth/login/complete",
-            {
-                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
-                "code": code,
-                "state": state,
-                "redirect_uri": redirect_uri,
-            },
-        )
+        callback's `code` and `state`. Issuer, client and resource come from
+        the admitted attempt. Returns a secret-free summary.
+
+        For an attempt started on the host's registered `https` callback,
+        pass the start result's `redirect_uri` (from your route
+        configuration, never from the request) and its
+        `host_attempt_handle`, after your callback endpoint authenticated
+        the user's session; pass `iss` when the authorization server sent
+        one. Without the handle the attempt is refused (`auth_error_detail`
+        is `"remote_custody_required"`) and stays pending."""
+        params: dict[str, Any] = {
+            "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+            "code": code,
+            "state": state,
+            "redirect_uri": redirect_uri,
+        }
+        if host_attempt_handle is not None:
+            params["host_attempt_handle"] = host_attempt_handle
+        if iss is not None:
+            params["iss"] = iss
+        return await self._request("auth/login/complete", params)
 
     async def auth_mcp_login_cancel(
         self,

@@ -153016,6 +153016,13 @@
   },
   "WireAuthErrorBody": {
     "$defs": {
+      "WireAuthErrorDetail": {
+        "description": "A stable sub-kind of some auth refusals, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again.",
+        "enum": [
+          "remote_custody_required"
+        ],
+        "type": "string"
+      },
       "WireAuthErrorReason": {
         "description": "Typed reason of an auth error on the RPC and REST surfaces: RPC\n`error.data.reason`, REST body `reason`. Hosts branch on it, never on the\nerror text. One native mapping (`HostAuthError::reason`) owns it; the\nexisting status codes and RPC error codes are unchanged.",
         "oneOf": [
@@ -153121,6 +153128,17 @@
     "additionalProperties": false,
     "description": "Body of a REST auth endpoint error.",
     "properties": {
+      "detail": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAuthErrorDetail"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The refusal's stable sub-kind, when it has one."
+      },
       "error": {
         "description": "Human-readable, secret-free text; never part of the contract.",
         "type": "string"
@@ -153138,6 +153156,13 @@
   },
   "WireAuthErrorData": {
     "$defs": {
+      "WireAuthErrorDetail": {
+        "description": "A stable sub-kind of some auth refusals, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again.",
+        "enum": [
+          "remote_custody_required"
+        ],
+        "type": "string"
+      },
       "WireAuthErrorReason": {
         "description": "Typed reason of an auth error on the RPC and REST surfaces: RPC\n`error.data.reason`, REST body `reason`. Hosts branch on it, never on the\nerror text. One native mapping (`HostAuthError::reason`) owns it; the\nexisting status codes and RPC error codes are unchanged.",
         "oneOf": [
@@ -153243,6 +153268,17 @@
     "additionalProperties": false,
     "description": "`error.data` of an auth RPC error.",
     "properties": {
+      "detail": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAuthErrorDetail"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The refusal's stable sub-kind, when it has one."
+      },
       "reason": {
         "$ref": "#/$defs/WireAuthErrorReason"
       }
@@ -153252,6 +153288,15 @@
     ],
     "title": "WireAuthErrorData",
     "type": "object"
+  },
+  "WireAuthErrorDetail": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A stable sub-kind of some auth refusals, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again.",
+    "enum": [
+      "remote_custody_required"
+    ],
+    "title": "WireAuthErrorDetail",
+    "type": "string"
   },
   "WireAuthErrorReason": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -173639,6 +173684,13 @@
         "additionalProperties": false,
         "description": "MCP arm of [`WireLoginStartTarget`]. A joined start returns the pending\nattempt's authorize URL and state: wire callers are host-privileged by\ncontract.",
         "properties": {
+          "attempt_ref": {
+            "description": "For a start on a registered `https` redirect: the attempt's\nnon-secret reference, as `auth/status/get` reports it, for status\nreads and `auth/login/cancel` by reference. It authorizes nothing.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "disposition": {
             "$ref": "#/$defs/WireMcpLoginDisposition"
           },
@@ -173677,7 +173729,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`POST /auth/login/start` success body. Host-channel data: the\nauthorize URL and state must never reach an agent, tool result,\ntranscript or log.",
+    "description": "`POST /auth/login/start` success body. Host-channel data: the\nauthorize URL, state and host attempt handle must never reach an agent,\ntool result, transcript or log.",
     "oneOf": [
       {
         "$ref": "#/$defs/WireProviderLoginStart"
@@ -173692,6 +173744,13 @@
     "properties": {
       "authorize_url": {
         "type": "string"
+      },
+      "host_attempt_handle": {
+        "description": "For an attempt started on a registered `https` redirect: a secret\nthat proves this host started it. The host keeps it server-side with\nits ceremony (never in the browser, a URL, a model or a log) and\npasses it to `auth/login/complete`. Absent for loopback attempts and\njoined projections.",
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "redirect_uri": {
         "type": "string"

@@ -568,11 +568,15 @@ export type WireScopeEvidence = WireScopeEvidenceTokenEndpointResponse | WireSco
 
 export type WireAuthErrorReason = "realm_not_found" | "binding_not_found" | "mcp_server_not_configured" | "account_selection_required" | "unknown_strategy" | "device_poll_in_progress" | "device_code_already_admitted" | "device_expiry_invalid" | "missing_scopes" | "slot_occupied" | "slot_account_mismatch" | "slot_context_mismatch" | "slot_mode_mismatch" | "unverified_connector_publication" | "reauth_required" | "configuration_invalid" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable" | "invalid_target" | "binding_invalid" | "binding_inherited" | "flow_unsupported" | "mcp_server_mismatch" | "attempt_missing" | "attempt_mismatch" | "account_mismatch" | "credential_mismatch" | "verification_unavailable" | "authorization_required" | "callback_unavailable" | "upstream_failure" | "infrastructure";
 
+export type WireAuthErrorDetail = "remote_custody_required";
+
 export interface WireAuthErrorData {
+  detail?: WireAuthErrorDetail | null;
   reason: WireAuthErrorReason;
 }
 
 export interface WireAuthErrorBody {
+  detail?: WireAuthErrorDetail | null;
   error: string;
   reason: WireAuthErrorReason;
 }
@@ -732,6 +736,8 @@ export type LoginCancelParams = LoginCancelParamsMcpLoginCancelParams | LoginCan
 
 export interface LoginCompleteParamsProviderLoginTarget {
   code: string;
+  host_attempt_handle?: string | null;
+  iss?: string | null;
   redirect_uri: string;
   state: string;
   binding_id: string;
@@ -742,6 +748,8 @@ export interface LoginCompleteParamsProviderLoginTarget {
 
 export interface LoginCompleteParamsMcpLoginTarget {
   code: string;
+  host_attempt_handle?: string | null;
+  iss?: string | null;
   redirect_uri: string;
   state: string;
   mcp: WireMcpAuthTarget;
@@ -749,6 +757,8 @@ export interface LoginCompleteParamsMcpLoginTarget {
 
 export interface LoginCompleteParamsConnectorLoginTarget {
   code: string;
+  host_attempt_handle?: string | null;
+  iss?: string | null;
   redirect_uri: string;
   state: string;
   connector: WireConnectorAuthTarget;
@@ -6538,6 +6548,7 @@ export interface WireMcpAuthStatus {
 
 export interface WireLoginStartProviderLoginStart {
   authorize_url: string;
+  host_attempt_handle?: string | null;
   redirect_uri: string;
   state: string;
   provider: "anthropic" | "openai" | "google" | "copilot";
@@ -6545,14 +6556,17 @@ export interface WireLoginStartProviderLoginStart {
 
 export interface WireLoginStartMcpLoginStart {
   authorize_url: string;
+  host_attempt_handle?: string | null;
   redirect_uri: string;
   state: string;
+  attempt_ref?: string | null;
   disposition: "started" | "joined";
   mcp: WireMcpAuthTarget;
 }
 
 export interface WireLoginStartConnectorSlotTarget {
   authorize_url: string;
+  host_attempt_handle?: string | null;
   redirect_uri: string;
   state: string;
   connector: WireConnectorSlot;

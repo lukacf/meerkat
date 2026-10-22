@@ -764,10 +764,20 @@ WireScopeEvidence = WireScopeEvidenceTokenEndpointResponse | WireScopeEvidenceRe
 # existing status codes and RPC error codes are unchanged.
 WireAuthErrorReason = Literal['realm_not_found', 'binding_not_found', 'mcp_server_not_configured', 'account_selection_required', 'unknown_strategy', 'device_poll_in_progress', 'device_code_already_admitted', 'device_expiry_invalid', 'missing_scopes', 'slot_occupied', 'slot_account_mismatch', 'slot_context_mismatch', 'slot_mode_mismatch', 'unverified_connector_publication', 'reauth_required', 'configuration_invalid', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable'] | Literal['invalid_target'] | Literal['binding_invalid'] | Literal['binding_inherited'] | Literal['flow_unsupported'] | Literal['mcp_server_mismatch'] | Literal['attempt_missing'] | Literal['attempt_mismatch'] | Literal['account_mismatch'] | Literal['credential_mismatch'] | Literal['verification_unavailable'] | Literal['authorization_required'] | Literal['callback_unavailable'] | Literal['upstream_failure'] | Literal['infrastructure']
 
+# A stable sub-kind of some auth refusals, carried beside their `reason`
+# for hosts that must act on it. `remote_custody_required` (reason
+# `invalid_target`): an attempt started on a registered `https` redirect
+# was completed without the handle its start returned, with another one,
+# or through a path that cannot carry it, for example after the host or
+# the runtime restarted. The attempt stays pending: cancel it by its
+# reference and start again.
+WireAuthErrorDetail = Literal['remote_custody_required']
+
 @dataclass
 class WireAuthErrorData:
     """`error.data` of an auth RPC error."""
     reason: WireAuthErrorReason
+    detail: Optional[WireAuthErrorDetail] = None
 
 
 @dataclass
@@ -775,6 +785,7 @@ class WireAuthErrorBody:
     """Body of a REST auth endpoint error."""
     error: str
     reason: WireAuthErrorReason
+    detail: Optional[WireAuthErrorDetail] = None
 
 
 # The recorded consent transition a notice reports.
@@ -952,9 +963,12 @@ LoginCancelParams = LoginCancelParamsMcpLoginCancelParams | LoginCancelParamsMcp
 
 # Request payload for `auth/login/complete`. For an MCP target, issuer,
 # client and resource come from the admitted attempt named by `state`;
-# nothing else is echoed. `Debug` redacts `code` and `state`.
+# nothing else is echoed. `Debug` redacts `code`, `state` and
+# `host_attempt_handle`.
 class LoginCompleteParamsProviderLoginTarget(TypedDict, total=False):
     code: Required[str]
+    host_attempt_handle: NotRequired[Optional[str]]
+    iss: NotRequired[Optional[str]]
     redirect_uri: Required[str]
     state: Required[str]
     binding_id: Required[str]
@@ -964,12 +978,16 @@ class LoginCompleteParamsProviderLoginTarget(TypedDict, total=False):
 
 class LoginCompleteParamsMcpLoginTarget(TypedDict, total=False):
     code: Required[str]
+    host_attempt_handle: NotRequired[Optional[str]]
+    iss: NotRequired[Optional[str]]
     redirect_uri: Required[str]
     state: Required[str]
     mcp: Required[WireMcpAuthTarget]
 
 class LoginCompleteParamsConnectorLoginTarget(TypedDict, total=False):
     code: Required[str]
+    host_attempt_handle: NotRequired[Optional[str]]
+    iss: NotRequired[Optional[str]]
     redirect_uri: Required[str]
     state: Required[str]
     connector: Required[WireConnectorAuthTarget]
@@ -6433,23 +6451,27 @@ class WireMcpAuthStatus:
 
 
 # `POST /auth/login/start` success body. Host-channel data: the
-# authorize URL and state must never reach an agent, tool result,
-# transcript or log.
+# authorize URL, state and host attempt handle must never reach an agent,
+# tool result, transcript or log.
 class WireLoginStartProviderLoginStart(TypedDict, total=False):
     authorize_url: Required[str]
+    host_attempt_handle: NotRequired[Optional[str]]
     redirect_uri: Required[str]
     state: Required[str]
     provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
 
 class WireLoginStartMcpLoginStart(TypedDict, total=False):
     authorize_url: Required[str]
+    host_attempt_handle: NotRequired[Optional[str]]
     redirect_uri: Required[str]
     state: Required[str]
+    attempt_ref: NotRequired[Optional[str]]
     disposition: Required[Literal['started', 'joined']]
     mcp: Required[WireMcpAuthTarget]
 
 class WireLoginStartConnectorSlotTarget(TypedDict, total=False):
     authorize_url: Required[str]
+    host_attempt_handle: NotRequired[Optional[str]]
     redirect_uri: Required[str]
     state: Required[str]
     connector: Required[WireConnectorSlot]

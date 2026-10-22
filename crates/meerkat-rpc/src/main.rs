@@ -105,6 +105,14 @@ struct Cli {
     /// Repeatable.
     #[arg(long, value_name = "PATH", requires = "confinement")]
     confinement_write: Vec<PathBuf>,
+    /// The base of this host's own `https` callback for MCP OAuth logins,
+    /// for clients whose users' browsers cannot reach this host's loopback
+    /// address. Each MCP server's exact redirect is this base followed by
+    /// one path segment (its credential binding); `auth/login/start` returns
+    /// it, and its completion needs the start's `host_attempt_handle`.
+    /// Absent, MCP logins use loopback redirects only.
+    #[arg(long, value_name = "HTTPS_URL")]
+    mcp_oauth_redirect_base: Option<String>,
 }
 
 /// `--confinement`: how this server confines the processes it launches.
@@ -294,6 +302,20 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cli = Cli::parse();
+    // Refused before any realm or state work: a host callback base is an
+    // exact https URL or nothing.
+    let mcp_registered_redirect_base = cli
+        .mcp_oauth_redirect_base
+        .as_deref()
+        .map(meerkat::McpRegisteredRedirectBase::parse)
+        .transpose()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--mcp-oauth-redirect-base must be an absolute https URL with a host and no \
+                 userinfo, query or fragment, in canonical form",
+            )
+        })?;
     let tcp_bind_policy = resolved_tcp_bind_policy(cli.allow_remote);
     if let Some(ref tcp_addr) = cli.tcp {
         meerkat_rpc::secure_rpc::validate_tcp_bind_policy("rpc", tcp_addr, tcp_bind_policy)
@@ -609,6 +631,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         Some(manifest.backend.as_str().to_string()),
     );
     runtime.set_config_runtime(config_runtime);
+    runtime.set_mcp_registered_redirect_base(mcp_registered_redirect_base);
 
     // Inheritance composition (decision 2/3): attach the per-realm config-document
     // source so the auth-resolution read path composes the active realm's parent

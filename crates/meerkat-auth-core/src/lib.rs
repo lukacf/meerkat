@@ -83,7 +83,8 @@ pub use mcp_oauth::{
     McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback, McpOAuthCancelHandle,
     McpOAuthCeremonyContext, McpOAuthError, McpOAuthListenerCleanup, McpOAuthLoginComplete,
     McpOAuthLoginDisposition, McpOAuthLoginStart, McpOAuthLoopbackBegin, McpOAuthPendingAttempt,
-    McpOAuthPendingClose, McpOAuthPendingLogin, McpServerIdentity, OidcUserInfoAccountStrategy,
+    McpOAuthPendingClose, McpOAuthPendingLogin, McpOAuthRegisteredCallback,
+    McpRegisteredRedirectBase, McpServerIdentity, OidcUserInfoAccountStrategy,
     UNVERIFIED_RESOURCE_STRATEGY_ID, stored_credential_matches_selection,
 };
 #[cfg(not(target_arch = "wasm32"))]

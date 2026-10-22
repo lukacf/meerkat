@@ -35,6 +35,70 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-auth-core` (hosted MCP OAuth, #1808): `McpOAuthError` gains the
+  variant `RemoteCustodyRequired { server_name }`, a refusal: an attempt
+  started on a registered `https` redirect was completed without the host's
+  retained attempt handle. The semver gate reports it as an enum variant
+  added to an exhaustive enum; a match outside the crate needs the arm
+  (surfaces map it to the reason `invalid_target` with the detail
+  `remote_custody_required`). The text of `DisconnectRequired` now names its
+  remedy: "disconnect it first: log it out, then log in again".
+- `meerkat-contracts` (hosted MCP OAuth, #1808): `WireLoginStart` gains
+  `host_attempt_handle: Option<String>`, `WireMcpLoginStart` gains
+  `attempt_ref: Option<String>`, `LoginCompleteParams` gains
+  `host_attempt_handle: Option<String>` and `iss: Option<String>`, and
+  `WireAuthErrorData` and `WireAuthErrorBody` gain
+  `detail: Option<WireAuthErrorDetail>`. The semver gate reports each as a
+  field added to a constructible struct; struct literals pass `None` for the
+  earlier behaviour. On the wire every new field is optional and omitted when
+  absent, so loopback starts and completions and every existing error keep
+  their exact JSON.
+
+### Added
+
+- Hosted MCP OAuth through the host's own `https` callback (#1808), for a
+  host whose users' browsers cannot reach its loopback address. The host
+  configures one registered redirect base (`rkat-rpc
+  --mcp-oauth-redirect-base <https-url>`, or
+  `HostAuthService::with_mcp_registered_redirect_base` /
+  `SessionRuntime::set_mcp_registered_redirect_base` for an embedding host);
+  agents, MCP server definitions and mob profiles cannot set it. Each MCP
+  server's exact redirect is the base followed by one path segment, its
+  credential binding (`McpOAuthAuthority::registered_redirect_uri`), so every
+  server, realm and account selection has its own redirect.
+  `auth/login/start` with an MCP target and `redirect_uri` naming the base
+  (or the server's derived redirect) admits the attempt on that redirect:
+  dynamic client registration as a public PKCE `web` client for exactly that
+  URI, then the same PKCE, one-time state, account selection, window and
+  start-or-join as a loopback login, through the same AuthMachine-owned flow
+  owner. The result adds `host_attempt_handle`, a secret the host keeps
+  server-side with its ceremony (never in the browser, a URL, a model or a
+  log), and the public `attempt_ref` that `auth/status/get` reports, which
+  authorizes nothing. The host's callback endpoint authenticates the user's
+  session, then `auth/login/complete` passes `code`, `state`, the exact
+  `redirect_uri` from the start result, `host_attempt_handle` and, when the
+  authorization server sent one, `iss`. Without the handle, with another one
+  or through the loopback completion, the attempt is refused
+  (`invalid_target`, detail `remote_custody_required`) and left pending; a
+  forged callback cannot cancel it. `iss` (RFC 9207) must equal the
+  attempt's issuer byte for byte, and is required when the server advertises
+  `authorization_response_iss_parameter_supported`. A confidential client
+  answer from dynamic registration is refused with its remedy before any
+  attempt exists, and a credential whose client was registered for the other
+  redirect kind needs a logout first. The credential lands in the same slot
+  as a loopback login's, with the same refresh, status, cancel by reference
+  and logout. Rust: `McpOAuthAuthority::login_start_registered` and
+  `login_complete_registered` (`McpRegisteredRedirectBase`,
+  `McpOAuthRegisteredCallback`), `HostAuthService::mcp_login_start_registered`,
+  `mcp_login_complete_registered` and `mcp_registered_redirect_uri`, and
+  `HostAuthError::detail`. Limits: the handle's key lives in the process, so
+  after a runtime restart a completion is refused with
+  `remote_custody_required` (cancel the attempt by its reference and start
+  again); the login window stays the shared 300 s browser window of the flow
+  owner; REST and `rkat mcp login` stay loopback-only.
+
 ## [0.9.4] - 2026-10-20
 
 ### Breaking

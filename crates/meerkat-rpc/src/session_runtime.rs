@@ -2574,6 +2574,9 @@ pub struct SessionRuntime {
     /// Connector client-auth profiles the embedding host installed from its
     /// own configuration.
     connector_client_auth_profiles: StdRwLock<Vec<meerkat::ConnectorClientAuthProfile>>,
+    /// The host's registered `https` redirect base for MCP logins, from host
+    /// configuration (`rkat-rpc --mcp-oauth-redirect-base`).
+    mcp_registered_redirect_base: StdRwLock<Option<meerkat::McpRegisteredRedirectBase>>,
     /// Wire-admitted MCP login attempts this runtime started and has not
     /// seen reach a terminal disposition, keyed by their state. Shutdown
     /// retires what is left through the flow owner.
@@ -3585,6 +3588,7 @@ impl SessionRuntime {
             #[cfg(feature = "mcp")]
             mcp_attachment_identity_key_custody: None,
             connector_client_auth_profiles: StdRwLock::new(Vec::new()),
+            mcp_registered_redirect_base: StdRwLock::new(None),
             mcp_wire_attempts: Arc::new(StdMutex::new(BTreeMap::new())),
             mcp_attempt_admission: Arc::new(RwLock::new(false)),
             mcp_shutting_down: Arc::new(AtomicBool::new(false)),
@@ -3758,6 +3762,7 @@ impl SessionRuntime {
             #[cfg(feature = "mcp")]
             mcp_attachment_identity_key_custody: None,
             connector_client_auth_profiles: StdRwLock::new(Vec::new()),
+            mcp_registered_redirect_base: StdRwLock::new(None),
             mcp_wire_attempts: Arc::new(StdMutex::new(BTreeMap::new())),
             mcp_attempt_admission: Arc::new(RwLock::new(false)),
             mcp_shutting_down: Arc::new(AtomicBool::new(false)),
@@ -4951,6 +4956,26 @@ impl SessionRuntime {
 
     pub fn connector_client_auth_profiles(&self) -> Vec<meerkat::ConnectorClientAuthProfile> {
         self.connector_client_auth_profiles
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Install the host's registered `https` redirect base for MCP logins
+    /// (host configuration; a request never supplies it). Each MCP target's
+    /// exact redirect is derived from it.
+    pub fn set_mcp_registered_redirect_base(
+        &self,
+        base: Option<meerkat::McpRegisteredRedirectBase>,
+    ) {
+        *self
+            .mcp_registered_redirect_base
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = base;
+    }
+
+    pub fn mcp_registered_redirect_base(&self) -> Option<meerkat::McpRegisteredRedirectBase> {
+        self.mcp_registered_redirect_base
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()

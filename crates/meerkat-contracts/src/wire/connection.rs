@@ -366,12 +366,29 @@ pub enum WireAuthErrorReason {
     Infrastructure,
 }
 
+/// A stable sub-kind of some auth refusals, carried beside their `reason`
+/// for hosts that must act on it. `remote_custody_required` (reason
+/// `invalid_target`): an attempt started on a registered `https` redirect
+/// was completed without the handle its start returned, with another one,
+/// or through a path that cannot carry it, for example after the host or
+/// the runtime restarted. The attempt stays pending: cancel it by its
+/// reference and start again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAuthErrorDetail {
+    RemoteCustodyRequired,
+}
+
 /// `error.data` of an auth RPC error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WireAuthErrorData {
     pub reason: WireAuthErrorReason,
+    /// The refusal's stable sub-kind, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<WireAuthErrorDetail>,
 }
 
 /// Body of a REST auth endpoint error.
@@ -382,6 +399,9 @@ pub struct WireAuthErrorBody {
     /// Human-readable, secret-free text; never part of the contract.
     pub error: String,
     pub reason: WireAuthErrorReason,
+    /// The refusal's stable sub-kind, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<WireAuthErrorDetail>,
 }
 
 /// Provider binding addressed by `auth/login/*`.
@@ -428,7 +448,8 @@ pub struct LoginStartParams {
 
 /// Request payload for `auth/login/complete`. For an MCP target, issuer,
 /// client and resource come from the admitted attempt named by `state`;
-/// nothing else is echoed. `Debug` redacts `code` and `state`.
+/// nothing else is echoed. `Debug` redacts `code`, `state` and
+/// `host_attempt_handle`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoginCompleteParams {
@@ -437,6 +458,17 @@ pub struct LoginCompleteParams {
     pub code: String,
     pub state: String,
     pub redirect_uri: String,
+    /// The secret handle `auth/login/start` returned for an attempt on a
+    /// registered `https` redirect, from the host's server-side ceremony.
+    /// Required to complete such an attempt (MCP or connector); omitted for
+    /// a loopback one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_attempt_handle: Option<String>,
+    /// The callback's `iss` parameter (RFC 9207), when the authorization
+    /// server sent one. Checked against the attempt's issuer; accepted only
+    /// with `host_attempt_handle` for an MCP target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iss: Option<String>,
 }
 
 impl std::fmt::Debug for LoginCompleteParams {
@@ -446,6 +478,11 @@ impl std::fmt::Debug for LoginCompleteParams {
             .field("code", &"<redacted>")
             .field("state", &"<redacted>")
             .field("redirect_uri", &self.redirect_uri)
+            .field(
+                "host_attempt_handle",
+                &self.host_attempt_handle.as_ref().map(|_| "<redacted>"),
+            )
+            .field("iss", &self.iss)
             .finish()
     }
 }
@@ -904,14 +941,21 @@ pub struct WireAuthProfileCleared {
 }
 
 /// `POST /auth/login/start` success body. Host-channel data: the
-/// authorize URL and state must never reach an agent, tool result,
-/// transcript or log.
+/// authorize URL, state and host attempt handle must never reach an agent,
+/// tool result, transcript or log.
 #[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireLoginStart {
     pub authorize_url: String,
     pub state: String,
     pub redirect_uri: String,
+    /// For an attempt started on a registered `https` redirect: a secret
+    /// that proves this host started it. The host keeps it server-side with
+    /// its ceremony (never in the browser, a URL, a model or a log) and
+    /// passes it to `auth/login/complete`. Absent for loopback attempts and
+    /// joined projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_attempt_handle: Option<String>,
     #[serde(flatten)]
     pub target: WireLoginStartTarget,
 }
@@ -922,6 +966,10 @@ impl std::fmt::Debug for WireLoginStart {
             .field("authorize_url", &"<redacted>")
             .field("state", &"<redacted>")
             .field("redirect_uri", &self.redirect_uri)
+            .field(
+                "host_attempt_handle",
+                &self.host_attempt_handle.as_ref().map(|_| "<redacted>"),
+            )
             .field("target", &self.target)
             .finish()
     }
@@ -955,6 +1003,11 @@ pub struct WireProviderLoginStart {
 pub struct WireMcpLoginStart {
     pub mcp: WireMcpAuthTarget,
     pub disposition: WireMcpLoginDisposition,
+    /// For a start on a registered `https` redirect: the attempt's
+    /// non-secret reference, as `auth/status/get` reports it, for status
+    /// reads and `auth/login/cancel` by reference. It authorizes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_ref: Option<String>,
 }
 
 /// Whether `auth/login/start` admitted a new MCP attempt or returned the one

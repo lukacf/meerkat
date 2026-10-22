@@ -1,8 +1,9 @@
 //! Runtime-discovered OAuth for HTTP MCP servers.
 //!
 //! The MCP config owns only server intent. This module owns OAuth discovery,
-//! dynamic client registration, PKCE loopback flow, token persistence, and
-//! refresh for MCP resources.
+//! dynamic client registration, the PKCE browser flow (through a loopback
+//! redirect, or a host-registered `https` callback completed from the host's
+//! custody), token persistence, and refresh for MCP resources.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1038,6 +1039,7 @@ impl McpOAuthPendingLogin {
                     state: outcome.state,
                     code: outcome.code,
                 },
+                CompletionCustody::Loopback,
                 Some(self.guard_retirement.clone()),
             )
             .await;
@@ -1181,6 +1183,14 @@ pub struct McpOAuthLoginStart {
     /// Whether this call admitted the attempt or joined one already pending
     /// for the target.
     pub disposition: McpOAuthLoginDisposition,
+    /// For an attempt this call admitted on the target's registered `https`
+    /// redirect ([`McpOAuthAuthority::login_start_registered`]): the
+    /// host-only proof that this host started it. The host keeps it
+    /// server-side with its ceremony and passes it back in
+    /// [`McpOAuthRegisteredCallback::host_attempt_handle`]; it never goes to
+    /// the browser, a model or a log. `None` for loopback attempts and for a
+    /// joined projection, which carries no custody.
+    pub host_attempt_handle: Option<String>,
     /// Admitted attempt identity, constructible only by `login_start`, used
     /// to retire an abandoned attempt through its flow owner.
     identity: OAuthBrowserFlowIdentity,
@@ -1193,6 +1203,13 @@ impl McpOAuthLoginStart {
     pub fn remaining(&self) -> Duration {
         self.expires_at
             .saturating_duration_since(std::time::Instant::now())
+    }
+
+    /// The attempt's non-secret reference, as [`McpOAuthPendingAttempt`]
+    /// reports it: status reads and cancel by reference take it. It is a
+    /// digest of the state and authorizes nothing.
+    pub fn attempt_ref(&self) -> OAuthBrowserActionRef {
+        OAuthBrowserActionRef::project(&self.state)
     }
 }
 
@@ -1214,6 +1231,10 @@ impl std::fmt::Debug for McpOAuthLoginStart {
             .field("state", &"<redacted>")
             .field("redirect_uri", &self.redirect_uri)
             .field("disposition", &self.disposition)
+            .field(
+                "host_attempt_handle",
+                &self.host_attempt_handle.as_ref().map(|_| "<redacted>"),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1236,6 +1257,112 @@ impl std::fmt::Debug for McpOAuthCallback {
             .field("code", &"<redacted>")
             .finish()
     }
+}
+
+/// The base of the `https` redirect URIs a host registered for MCP OAuth
+/// logins: its own callback endpoint, for a host whose users' browsers cannot
+/// reach its loopback address. It is host configuration only (an embedding
+/// host's own setting, `rkat-rpc --mcp-oauth-redirect-base`), never a
+/// request, an agent tool, an MCP server definition or a mob profile.
+///
+/// Each target's redirect is derived from it: the base followed by one path
+/// segment, the target's credential binding slug
+/// ([`McpOAuthAuthority::registered_redirect_uri`]). So every server, realm
+/// and account selection has its own exact redirect, and a callback compares
+/// byte for byte: no normalization, prefix or pattern matching.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct McpRegisteredRedirectBase(String);
+
+impl McpRegisteredRedirectBase {
+    /// Admit `base`: an absolute `https` URL with a host and no userinfo,
+    /// query or fragment, already in its canonical form. Anything else is
+    /// refused ([`ConnectorOAuthRefusal::InvalidDescriptor`]).
+    pub fn parse(base: &str) -> Result<Self, McpOAuthError> {
+        if valid_registered_redirect(base) {
+            Ok(Self(base.to_owned()))
+        } else {
+            Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::InvalidDescriptor,
+            ))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The redirect for one target's binding slug: one more path segment.
+    fn redirect_for(&self, binding_slug: &str) -> String {
+        if self.0.ends_with('/') {
+            format!("{}{binding_slug}", self.0)
+        } else {
+            format!("{}/{binding_slug}", self.0)
+        }
+    }
+}
+
+impl std::fmt::Debug for McpRegisteredRedirectBase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("McpRegisteredRedirectBase")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+/// The host's callback for an attempt admitted on a registered `https`
+/// redirect ([`McpOAuthAuthority::login_complete_registered`]).
+///
+/// `redirect_uri` is the URI of the host route that received the callback,
+/// from the host's own route configuration (never from the request's `Host`
+/// or forwarded headers): it must equal the admitted attempt's redirect.
+/// `state`, `code` and `iss` (RFC 9207, when the authorization server sent
+/// it) come from the callback query. `host_attempt_handle` is the handle the
+/// start returned, from the host's retained ceremony: it proves the host
+/// started this attempt and never stands in for the state, the PKCE
+/// verifier or the redirect check. Everything else comes from the admitted
+/// attempt. `Debug` redacts the secrets.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpOAuthRegisteredCallback {
+    pub redirect_uri: String,
+    pub state: String,
+    pub code: String,
+    pub iss: Option<String>,
+    pub host_attempt_handle: String,
+}
+
+impl std::fmt::Debug for McpOAuthRegisteredCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOAuthRegisteredCallback")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("state", &"<redacted>")
+            .field("code", &"<redacted>")
+            .field("iss", &self.iss)
+            .field("host_attempt_handle", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Where an attempt's authorization response is delivered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RedirectMode {
+    /// An http loopback redirect (RFC 8252): a native client.
+    Loopback,
+    /// The target's registered `https` redirect: the host's own callback,
+    /// completed only from the host's retained custody.
+    Registered,
+}
+
+/// What a completion proves about the attempt it completes.
+#[derive(Clone, Copy)]
+enum CompletionCustody<'a> {
+    /// A loopback completion. A registered attempt never completes this way.
+    Loopback,
+    /// A registered completion: the host's retained handle, and the
+    /// authorization response's issuer when the callback carried one.
+    Registered {
+        host_attempt_handle: &'a str,
+        iss: Option<&'a str>,
+    },
 }
 
 /// Retires an admitted attempt through its flow owner unless disarmed: every
@@ -1277,6 +1404,8 @@ struct AuthorizationServerEndpoints {
     registration_endpoint: String,
     /// The server advertises `offline_access` in its `scopes_supported`.
     offline_access: bool,
+    /// The server says its authorization responses carry `iss` (RFC 9207).
+    iss_parameter_supported: bool,
 }
 
 /// An attempt pending for an MCP target, as a host may observe it: a
@@ -1335,6 +1464,13 @@ pub enum McpOAuthError {
     /// The host's loopback callback could not be bound, failed, or timed out.
     #[error("MCP OAuth callback failed for '{server_name}': {reason}")]
     Callback { server_name: String, reason: String },
+    /// An attempt admitted on a registered `https` redirect was completed
+    /// without the host's retained attempt handle, with another one, or
+    /// through the loopback completion; or a registered completion named a
+    /// loopback attempt. Refused before anything else: the attempt is left
+    /// to its owner, so such a callback cannot cancel it.
+    #[error("MCP OAuth callback for '{server_name}' requires the host's retained attempt")]
+    RemoteCustodyRequired { server_name: String },
     #[error("MCP OAuth discovery failed for '{server_name}': {reason}")]
     DiscoveryFailed { server_name: String, reason: String },
     #[error("MCP OAuth dynamic client registration failed for '{server_name}': {reason}")]
@@ -1364,7 +1500,7 @@ pub enum McpOAuthError {
     /// may not replace (an unverified grant, another context or a
     /// credential without an account binding). Disconnect first.
     #[error(
-        "MCP server '{server_name}' already has a credential this login cannot replace; disconnect it first"
+        "MCP server '{server_name}' already has a credential this login cannot replace; disconnect it first: log it out, then log in again"
     )]
     DisconnectRequired { server_name: String },
     /// The credential slot refused the commit inside its exclusive
@@ -1427,6 +1563,7 @@ impl McpOAuthError {
             | Self::Verification(_)
             | Self::MissingStoredToken { .. }
             | Self::HumanAuthorizationRequired { .. }
+            | Self::RemoteCustodyRequired { .. }
             | Self::ReauthRequired { .. }
             | Self::DisconnectRequired { .. }
             | Self::CredentialSlot { .. }
@@ -1770,6 +1907,72 @@ impl McpOAuthAuthority {
         redirect_uri: &str,
         www_authenticate: Option<&str>,
     ) -> Result<McpOAuthLoginStart, McpOAuthError> {
+        self.admit_attempt(
+            target,
+            redirect_uri,
+            RedirectMode::Loopback,
+            www_authenticate,
+        )
+        .await
+    }
+
+    /// The exact registered redirect of `target` under `base`: the base
+    /// followed by the target's credential binding slug, for the target as
+    /// this authority serves it (its realm and account selection included).
+    /// Local and secret-free; it admits nothing.
+    pub fn registered_redirect_uri(
+        &self,
+        target: &McpServerIdentity,
+        base: &McpRegisteredRedirectBase,
+    ) -> Result<String, McpOAuthError> {
+        let target = self.scoped(target)?;
+        let redirect = base.redirect_for(&target.binding_slug());
+        // The slug adds only unreserved path characters, so the derived
+        // redirect is itself a valid registered redirect.
+        McpRegisteredRedirectBase::parse(&redirect)?;
+        Ok(redirect)
+    }
+
+    /// [`Self::login_start`] for a host whose users' browsers cannot reach
+    /// its loopback address: the attempt redirects to the target's registered
+    /// `https` callback under `base` ([`Self::registered_redirect_uri`]), the
+    /// host's own endpoint. Everything else is the same admission: realm,
+    /// account selection, discovery, preflight, client registration (as a
+    /// `web` public PKCE client registering exactly that redirect), PKCE and
+    /// one-time state through the AuthMachine-owned flow owner, the same
+    /// window and the same start-or-join.
+    ///
+    /// A started attempt returns [`McpOAuthLoginStart::host_attempt_handle`]:
+    /// a host-only secret its completion
+    /// ([`Self::login_complete_registered`]) must present. A start joins
+    /// only an attempt pending on this same redirect, and the joined
+    /// projection carries no handle; an attempt pending on another redirect
+    /// is refused ([`OAuthFlowError::RedirectUriMismatch`]) and can be
+    /// cancelled by its reference. A slot whose credential's client was
+    /// registered for another redirect needs a disconnect first.
+    pub async fn login_start_registered(
+        &self,
+        target: &McpServerIdentity,
+        base: &McpRegisteredRedirectBase,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoginStart, McpOAuthError> {
+        let redirect = self.registered_redirect_uri(target, base)?;
+        self.admit_attempt(
+            target,
+            &redirect,
+            RedirectMode::Registered,
+            www_authenticate,
+        )
+        .await
+    }
+
+    async fn admit_attempt(
+        &self,
+        target: &McpServerIdentity,
+        redirect_uri: &str,
+        mode: RedirectMode,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoginStart, McpOAuthError> {
         let target = &self.scoped(target)?;
         self.validate_interactive_selection(target)?;
         let (authority, strategy) = self
@@ -1777,14 +1980,26 @@ impl McpOAuthAuthority {
             .as_ref()
             .ok_or(ConnectorOAuthRefusal::VerificationUnavailable)?;
         self.require_bound_strategy(target, strategy.as_ref())?;
-        require_loopback_redirect(redirect_uri)?;
-        let credential_identity: meerkat_core::AuthCredentialIdentity =
-            target.auth_binding_ref()?.into();
+        match mode {
+            RedirectMode::Loopback => require_loopback_redirect(redirect_uri)?,
+            // Only a redirect derived from a host's registered base gets here.
+            RedirectMode::Registered => {
+                McpRegisteredRedirectBase::parse(redirect_uri)?;
+            }
+        }
+        let binding = target.auth_binding_ref()?;
+        let credential_identity: meerkat_core::AuthCredentialIdentity = binding.clone().into();
         let _admission = acquire_admission_lock(target.binding_slug()).await;
         if let Some((state, record)) = authority
             .pending_connector_browser_attempt(&credential_identity)
             .map_err(McpOAuthError::Flow)?
         {
+            // A registered start joins only the attempt pending on its own
+            // redirect: a joined projection must send the browser to the
+            // callback this host serves.
+            if mode == RedirectMode::Registered && record.redirect_uri != redirect_uri {
+                return Err(McpOAuthError::Flow(OAuthFlowError::RedirectUriMismatch));
+            }
             // `None`: the pending attempt no longer matches the server, or
             // its preflight is not retained; it was retired, so admit a
             // fresh one.
@@ -1809,11 +2024,19 @@ impl McpOAuthAuthority {
         let client = match &occupant {
             // Reconnect with the admitted client: a fresh registration would
             // change the credential's context. A loopback redirect may use
-            // any port (RFC 8252 section 7.3).
+            // any port (RFC 8252 section 7.3); a registered `https` one is
+            // registered exactly, so a client registered for another redirect
+            // cannot serve this attempt.
             Some(occupant) => {
+                let client_redirect = &occupant.metadata.client.redirect_uri;
+                let redirect_fits = match mode {
+                    RedirectMode::Loopback => !is_https_redirect(client_redirect),
+                    RedirectMode::Registered => client_redirect == redirect_uri,
+                };
                 if occupant.metadata.discovery.authorization_server
                     != discovery.authorization_server
                     || occupant.metadata.discovery.resource != discovery.resource
+                    || !redirect_fits
                 {
                     return Err(McpOAuthError::DisconnectRequired {
                         server_name: target.server_name().to_owned(),
@@ -1825,7 +2048,7 @@ impl McpOAuthAuthority {
                 }
             }
             None => {
-                self.register_client(target, &discovery, redirect_uri)
+                self.register_client(target, &discovery, redirect_uri, mode)
                     .await?
             }
         };
@@ -1881,12 +2104,15 @@ impl McpOAuthAuthority {
         let expires_at = std::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
         let authorize_url = authorize_endpoints(&discovery, &client, requested.offline_access)
             .authorize_url_with_pkce(&pkce.challenge, &state);
+        let host_attempt_handle = (mode == RedirectMode::Registered)
+            .then(|| mcp_remote_attempt_handle(&binding, &state, redirect_uri));
         Ok(McpOAuthLoginStart {
             target: target.clone(),
             authorize_url,
             state,
             redirect_uri: redirect_uri.to_owned(),
             disposition: McpOAuthLoginDisposition::Started,
+            host_attempt_handle,
             identity,
             expires_at,
         })
@@ -1979,6 +2205,8 @@ impl McpOAuthAuthority {
             state: state.to_owned(),
             redirect_uri: record.redirect_uri,
             disposition: McpOAuthLoginDisposition::Joined,
+            // A joined projection never carries custody of the attempt.
+            host_attempt_handle: None,
             identity: record.provider,
             expires_at: record.created_at + MCP_INTERACTIVE_LOGIN_TIMEOUT,
         }))
@@ -2070,7 +2298,53 @@ impl McpOAuthAuthority {
         target: &McpServerIdentity,
         callback: McpOAuthCallback,
     ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
-        self.login_complete_observed(target, callback, None).await
+        self.login_complete_observed(target, callback, CompletionCustody::Loopback, None)
+            .await
+    }
+
+    /// Complete one attempt admitted by [`Self::login_start_registered`] from
+    /// the host's `https` callback.
+    ///
+    /// The flow owner must name a live attempt admitted under `state` for
+    /// this exact target, on a registered redirect, and
+    /// `host_attempt_handle` must be the handle its start returned. Both are
+    /// checked before anything else: a callback without the host's custody
+    /// is refused ([`McpOAuthError::RemoteCustodyRequired`]) and leaves the
+    /// attempt to its owner. Then, as for [`Self::login_complete`],
+    /// `redirect_uri` must equal the admitted redirect, the recorded
+    /// issuer's metadata is fetched, the code is exchanged with the retained
+    /// PKCE verifier and the canonical commit verifies, persists and consumes
+    /// the attempt; every non-success exit after the custody check retires
+    /// it. When the callback carries `iss` (RFC 9207) it must be the
+    /// attempt's issuer, and an authorization server that advertises
+    /// `authorization_response_iss_parameter_supported` must send it. A
+    /// consumed attempt cannot be replayed.
+    pub async fn login_complete_registered(
+        &self,
+        target: &McpServerIdentity,
+        callback: McpOAuthRegisteredCallback,
+    ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
+        let McpOAuthRegisteredCallback {
+            redirect_uri,
+            state,
+            code,
+            iss,
+            host_attempt_handle,
+        } = callback;
+        self.login_complete_observed(
+            target,
+            McpOAuthCallback {
+                redirect_uri,
+                state,
+                code,
+            },
+            CompletionCustody::Registered {
+                host_attempt_handle: &host_attempt_handle,
+                iss: iss.as_deref(),
+            },
+            None,
+        )
+        .await
     }
 
     /// [`login_complete`](Self::login_complete) that records its retire
@@ -2079,6 +2353,7 @@ impl McpOAuthAuthority {
         &self,
         target: &McpServerIdentity,
         callback: McpOAuthCallback,
+        custody: CompletionCustody<'_>,
         observed: Option<RetireObserver>,
     ) -> Result<McpOAuthLoginComplete, McpOAuthError> {
         let target = &self.scoped(target)?;
@@ -2093,12 +2368,42 @@ impl McpOAuthAuthority {
             state,
             code,
         } = callback;
-        let credential_identity: meerkat_core::AuthCredentialIdentity =
-            target.auth_binding_ref()?.into();
+        let binding = target.auth_binding_ref()?;
+        let credential_identity: meerkat_core::AuthCredentialIdentity = binding.clone().into();
         let admitted = authority
             .admitted_connector_browser_attempt(&state, &credential_identity)
             .map_err(McpOAuthError::Flow)?
             .ok_or(McpOAuthError::Flow(OAuthFlowError::Missing))?;
+        // A registered attempt completes only from the custody of the host
+        // that started it: its retained handle for exactly this slot, state
+        // and admitted redirect. Refused before the attempt is armed for
+        // retirement, so a forged callback cannot cancel it.
+        let registered_attempt = is_https_redirect(&admitted.redirect_uri);
+        let response_issuer = match custody {
+            CompletionCustody::Loopback if registered_attempt => {
+                return Err(McpOAuthError::RemoteCustodyRequired {
+                    server_name: target.server_name().to_owned(),
+                });
+            }
+            CompletionCustody::Loopback => None,
+            CompletionCustody::Registered {
+                host_attempt_handle,
+                iss,
+            } => {
+                let expected = mcp_remote_attempt_handle(&binding, &state, &admitted.redirect_uri);
+                if !registered_attempt
+                    || !crate::connector_protocol::bytes_equal(
+                        host_attempt_handle.as_bytes(),
+                        expected.as_bytes(),
+                    )
+                {
+                    return Err(McpOAuthError::RemoteCustodyRequired {
+                        server_name: target.server_name().to_owned(),
+                    });
+                }
+                Some(iss)
+            }
+        };
         let mut retire = AttemptRetireGuard {
             authority: Arc::clone(authority),
             state: state.clone(),
@@ -2108,6 +2413,11 @@ impl McpOAuthAuthority {
             armed: true,
             observed,
         };
+        // A registered completion names the admitted redirect byte for byte:
+        // a mismatch is refused as what it is, and retires the attempt.
+        if response_issuer.is_some() && redirect_uri != admitted.redirect_uri {
+            return Err(McpOAuthError::Flow(OAuthFlowError::RedirectUriMismatch));
+        }
         let record = authority
             .verify(
                 &state,
@@ -2147,6 +2457,20 @@ impl McpOAuthAuthority {
         let endpoints = self
             .discover_authorization_server(target, &facts.issuer)
             .await?;
+        // RFC 9207: a registered completion's response names the attempt's
+        // own issuer, and a server that says it sends `iss` must have sent
+        // it. Checked before the code or the verifier goes anywhere.
+        if let Some(iss) = response_issuer {
+            let issuer_fits = match iss {
+                Some(iss) => iss == facts.issuer,
+                None => !endpoints.iss_parameter_supported,
+            };
+            if !issuer_fits {
+                return Err(McpOAuthError::Verification(
+                    ConnectorOAuthRefusal::DescriptorMismatch,
+                ));
+            }
+        }
         let discovery = completion_discovery(target, facts, endpoints)?;
         let client = StoredMcpOAuthClient {
             client_id: facts.client.clone(),
@@ -3248,6 +3572,7 @@ impl McpOAuthAuthority {
             token_endpoint,
             registration_endpoint,
             offline_access,
+            iss_parameter_supported: auth.authorization_response_iss_parameter_supported,
         })
     }
 
@@ -3287,13 +3612,19 @@ impl McpOAuthAuthority {
         target: &McpServerIdentity,
         discovery: &StoredMcpOAuthDiscovery,
         redirect_uri: &str,
+        mode: RedirectMode,
     ) -> Result<StoredMcpOAuthClient, McpOAuthError> {
-        // MCP authorization requires the application type. Every redirect
-        // admitted here is a loopback redirect (RFC 8252), i.e. a native
-        // client; OIDC servers default an omitted type to `web`.
+        // MCP authorization requires the application type. A loopback
+        // redirect (RFC 8252) is a native client; a registered `https`
+        // redirect is the host's own web callback. OIDC servers default an
+        // omitted type to `web`.
+        let application_type = match mode {
+            RedirectMode::Loopback => "native",
+            RedirectMode::Registered => "web",
+        };
         let body = serde_json::json!({
             "client_name": CLIENT_NAME,
-            "application_type": "native",
+            "application_type": application_type,
             "redirect_uris": [redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -3333,9 +3664,19 @@ impl McpOAuthAuthority {
         if token_endpoint_auth_method != "none" {
             return Err(McpOAuthError::RegistrationFailed {
                 server_name: target.server_name().to_string(),
-                reason: format!(
-                    "unsupported token_endpoint_auth_method '{token_endpoint_auth_method}'"
-                ),
+                reason: match mode {
+                    RedirectMode::Loopback => format!(
+                        "unsupported token_endpoint_auth_method '{token_endpoint_auth_method}'"
+                    ),
+                    // Nothing was admitted and no authorize URL exists.
+                    RedirectMode::Registered => format!(
+                        "the authorization server registered a confidential client \
+                         (token_endpoint_auth_method '{token_endpoint_auth_method}') for the \
+                         registered https redirect; a hosted login needs a public PKCE client \
+                         (token_endpoint_auth_method 'none'): allow public web clients on that \
+                         server, or log in through a loopback redirect"
+                    ),
+                },
             });
         }
         Ok(StoredMcpOAuthClient {
@@ -3627,6 +3968,50 @@ fn require_loopback_redirect(redirect_uri: &str) -> Result<(), McpOAuthError> {
         ));
     }
     Ok(())
+}
+
+/// Whether `redirect_uri` is an `https` URL: a registered redirect, never a
+/// loopback one.
+fn is_https_redirect(redirect_uri: &str) -> bool {
+    reqwest::Url::parse(redirect_uri).is_ok_and(|url| url.scheme() == "https")
+}
+
+/// A registered redirect: an absolute `https` URL with a host and no
+/// userinfo, query or fragment, already in its canonical form (so the value
+/// sent, registered and compared is exactly the configured one).
+fn valid_registered_redirect(redirect_uri: &str) -> bool {
+    reqwest::Url::parse(redirect_uri).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str().is_some_and(|host| !host.is_empty())
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.as_str() == redirect_uri
+    })
+}
+
+/// The host-only handle of an attempt admitted on a registered redirect: an
+/// HMAC over the slot's binding, the state and the admitted redirect under a
+/// key that never leaves this process. It proves the host that started the
+/// attempt completes it; a process restart invalidates it.
+fn mcp_remote_attempt_handle(binding: &AuthBindingRef, state: &str, redirect_uri: &str) -> String {
+    static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let key = KEY.get_or_init(|| {
+        crate::oauth_flow::OAuthFlowRegistry::new_state()
+            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
+    });
+    let message = format!(
+        "mcp-remote-attempt-v1\0{}\0{}\0{}\0{}",
+        binding.realm.as_str(),
+        binding.binding.as_str(),
+        state,
+        redirect_uri
+    );
+    URL_SAFE_NO_PAD.encode(crate::connector_protocol::hmac_sha256(
+        key.as_bytes(),
+        message.as_bytes(),
+    ))
 }
 
 /// Discovery for an admitted attempt, built only from its descriptor and the
@@ -4180,6 +4565,8 @@ struct AuthorizationServerMetadata {
     registration_endpoint: Option<String>,
     #[serde(default)]
     scopes_supported: Vec<String>,
+    #[serde(default)]
+    authorization_response_iss_parameter_supported: bool,
 }
 
 #[derive(Debug, Deserialize)]

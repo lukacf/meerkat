@@ -4734,8 +4734,13 @@ export class MeerkatClient {
   /**
    * Begin an OAuth login for a provider binding, an MCP server
    * (`{ mcp: { server_name, server_url, oauth_account? }, redirect_uri }`,
-   * where `redirect_uri` is an http loopback URL; `disposition` is `joined`
-   * when an attempt was already pending), or a connector (`{ connector: {
+   * where `redirect_uri` is an http loopback URL or the host's registered
+   * https callback base; `disposition` is `joined` when an attempt was
+   * already pending). On the base, the result's `redirect_uri` is the
+   * server's exact redirect under it, `host_attempt_handle` is a secret the
+   * host keeps server-side (never in the browser, a URL, a model or a log)
+   * and `attempt_ref` is the public reference, which authorizes nothing; a
+   * joined start carries no handle. Or a connector (`{ connector: {
    * slot, issuer, client, resource, scopes, strategy_id, account_selection },
    * redirect_uri }`). A connector `discover` login binds the provider-verified
    * account to the slot and publishes only into an empty slot.
@@ -4750,7 +4755,12 @@ export class MeerkatClient {
   /**
    * Finish an OAuth login. For an MCP target (`{ mcp, code, state,
    * redirect_uri }`) issuer, client and resource come from the admitted
-   * attempt named by `state`.
+   * attempt named by `state`. An MCP attempt started on the host's
+   * registered https callback completes only with `host_attempt_handle`
+   * (and the callback's `iss`, when sent), after the host's callback
+   * endpoint authenticated the user's session; without it the refusal's
+   * `authErrorDetail` is `remote_custody_required` and the attempt stays
+   * pending.
    */
   async authLoginComplete(params: RpcLoginCompleteParams): Promise<RpcWireLoginReady> {
     return this.request("auth/login/complete", params);

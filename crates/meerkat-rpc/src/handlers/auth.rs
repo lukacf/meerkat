@@ -53,6 +53,11 @@ fn host_auth_service(
     let service =
         meerkat::HostAuthService::new(persistence, runtime.provider_auth_runtime_authority())
             .with_connector_client_auth_profiles(runtime.connector_client_auth_profiles());
+    // MCP logins may also use the host's registered `https` callback.
+    let service = match runtime.mcp_registered_redirect_base() {
+        Some(base) => service.with_mcp_registered_redirect_base(base),
+        None => service,
+    };
     // MCP logins, status and logout address the runtime realm's own slot;
     // connector logins use the realm's configured clients.
     Ok(match runtime.realm_id() {
@@ -132,7 +137,8 @@ fn host_auth_error_response(id: Option<RpcId>, error_value: meerkat::HostAuthErr
             "auth failure; detail withheld from the public text"
         );
     }
-    match serde_json::to_value(meerkat_contracts::WireAuthErrorData { reason }) {
+    let detail = error_value.detail();
+    match serde_json::to_value(meerkat_contracts::WireAuthErrorData { reason, detail }) {
         Ok(data) => RpcResponse::error_with_data(id, code, error_value.public_message(), data),
         Err(_) => RpcResponse::error(id, code, error_value.public_message()),
     }
@@ -1578,6 +1584,11 @@ async fn configured_mcp_target(
     .map_err(|error_value| host_auth_error_response(id.clone(), error_value))
 }
 
+/// A registered-callback field on a completion that cannot take it.
+fn registered_callback_field_refused(id: Option<RpcId>, detail: &str) -> RpcResponse {
+    RpcResponse::error(id, error::INVALID_PARAMS, detail.to_owned())
+}
+
 pub async fn handle_auth_login_start(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -1598,26 +1609,51 @@ pub async fn handle_auth_login_start(
                 Ok(target) => target,
                 Err(response) => return response,
             };
+            // The registered path, when this host serves a registered
+            // redirect base and the request names it or this target's
+            // derived redirect, byte for byte. Any other redirect takes the
+            // loopback admission, which refuses a non-loopback one as before.
+            let registered = match service.mcp_registered_redirect_uri(&target) {
+                Ok(Some(derived)) => {
+                    parsed.redirect_uri == derived
+                        || service
+                            .mcp_registered_redirect_base()
+                            .is_some_and(|base| base.as_str() == parsed.redirect_uri)
+                }
+                Ok(None) => false,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
             // Discovery falls back to the server's well-known metadata. A
             // started attempt is recorded for shutdown before this responds.
             let started = match runtime
-                .admit_mcp_wire_login(&target, || {
-                    service.mcp_login_start(&target, &parsed.redirect_uri, None)
+                .admit_mcp_wire_login(&target, || async {
+                    if registered {
+                        service.mcp_login_start_registered(&target, None).await
+                    } else {
+                        service
+                            .mcp_login_start(&target, &parsed.redirect_uri, None)
+                            .await
+                    }
                 })
                 .await
             {
                 Ok(started) => started,
                 Err(error_value) => return host_auth_error_response(id, error_value),
             };
+            // Only a registered start reports the public reference; a
+            // loopback start keeps its exact wire shape.
+            let attempt_ref = registered.then(|| started.attempt_ref().as_str().to_owned());
             return RpcResponse::success(
                 id,
                 WireLoginStart {
                     authorize_url: started.authorize_url,
                     state: started.state,
                     redirect_uri: started.redirect_uri,
+                    host_attempt_handle: started.host_attempt_handle,
                     target: WireLoginStartTarget::Mcp(WireMcpLoginStart {
                         mcp,
                         disposition: meerkat::mcp_login_disposition_to_wire(started.disposition),
+                        attempt_ref,
                     }),
                 },
             );
@@ -1638,6 +1674,7 @@ pub async fn handle_auth_login_start(
                         authorize_url: started.authorize_url,
                         state: started.state,
                         redirect_uri: started.redirect_uri,
+                        host_attempt_handle: None,
                         target: WireLoginStartTarget::Connector(WireConnectorSlotTarget {
                             connector: connector.slot,
                         }),
@@ -1675,6 +1712,7 @@ pub async fn handle_auth_login_start(
             authorize_url: started.authorize_url,
             state: started.state,
             redirect_uri: started.redirect_uri,
+            host_attempt_handle: None,
             target: WireLoginStartTarget::Provider(WireProviderLoginStart {
                 provider: provider_target.provider,
             }),
@@ -1703,17 +1741,42 @@ pub async fn handle_auth_login_complete(
                 Err(response) => return response,
             };
             let state = parsed.state.clone();
-            let completed = match service
-                .mcp_login_complete(
-                    &target,
-                    meerkat::McpOAuthCallback {
-                        redirect_uri: parsed.redirect_uri,
-                        state: parsed.state,
-                        code: parsed.code,
-                    },
-                )
-                .await
-            {
+            let completed = match (parsed.host_attempt_handle, parsed.iss) {
+                // A registered attempt completes only with the host's handle.
+                (Some(host_attempt_handle), iss) => {
+                    service
+                        .mcp_login_complete_registered(
+                            &target,
+                            meerkat::McpOAuthRegisteredCallback {
+                                redirect_uri: parsed.redirect_uri,
+                                state: parsed.state,
+                                code: parsed.code,
+                                iss,
+                                host_attempt_handle,
+                            },
+                        )
+                        .await
+                }
+                (None, Some(_)) => {
+                    return registered_callback_field_refused(
+                        id,
+                        "iss is accepted only with host_attempt_handle (a registered-callback completion)",
+                    );
+                }
+                (None, None) => {
+                    service
+                        .mcp_login_complete(
+                            &target,
+                            meerkat::McpOAuthCallback {
+                                redirect_uri: parsed.redirect_uri,
+                                state: parsed.state,
+                                code: parsed.code,
+                            },
+                        )
+                        .await
+                }
+            };
+            let completed = match completed {
                 Ok(completed) => completed,
                 // A failed completion does not prove the attempt's removal:
                 // it stays recorded for shutdown.
@@ -1750,6 +1813,12 @@ pub async fn handle_auth_login_complete(
             );
         }
         WireLoginTarget::Connector(WireConnectorLoginTarget { connector }) => {
+            if parsed.host_attempt_handle.is_some() || parsed.iss.is_some() {
+                return registered_callback_field_refused(
+                    id,
+                    "host_attempt_handle and iss are accepted only for an MCP target",
+                );
+            }
             let completed = match meerkat::connector_target_from_wire(&connector) {
                 Ok(target) => {
                     service
@@ -1782,6 +1851,12 @@ pub async fn handle_auth_login_complete(
             };
         }
     };
+    if parsed.host_attempt_handle.is_some() || parsed.iss.is_some() {
+        return registered_callback_field_refused(
+            id,
+            "host_attempt_handle and iss are accepted only for an MCP target",
+        );
+    }
     let target = match host_auth_target(
         provider_target.provider.identity(),
         &provider_target.realm_id,
@@ -6448,6 +6523,288 @@ mod tests {
             handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
         assert_invalid_params_message(resp, "missing field `binding_id`");
+    }
+
+    /// The host callback base the registered-callback rows serve.
+    const REGISTERED_BASE: &str = "https://connect.example/mcp/oauth/callback";
+
+    fn auth_error_data(resp: &RpcResponse) -> serde_json::Value {
+        resp.error
+            .as_ref()
+            .expect("an auth refusal")
+            .data
+            .clone()
+            .expect("auth refusals carry typed data")
+    }
+
+    /// A configured MCP server over the fixture, with the runtime serving
+    /// `base` as its registered callback base (when given).
+    fn registered_callback_runtime(
+        fixture: &meerkat::test_fixtures::mcp_oauth::McpOAuthFixture,
+        project: &tempfile::TempDir,
+        base: Option<&str>,
+    ) -> (SessionRuntime, serde_json::Value) {
+        use meerkat::test_fixtures::mcp_oauth::SUBJECT;
+        std::fs::create_dir_all(project.path().join(".rkat")).unwrap();
+        std::fs::write(
+            project.path().join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"hosted\"\nurl = \"{}\"\noauth_account = \"{SUBJECT}\"\n",
+                fixture.mcp_url()
+            ),
+        )
+        .unwrap();
+        let runtime = test_runtime();
+        runtime.set_skill_identity_roots(Some(project.path().to_path_buf()), None);
+        runtime.set_mcp_registered_redirect_base(
+            base.map(|base| meerkat::McpRegisteredRedirectBase::parse(base).unwrap()),
+        );
+        let mcp = serde_json::json!({
+            "server_name": "hosted",
+            "server_url": fixture.mcp_url(),
+            "oauth_account": SUBJECT,
+        });
+        (runtime, mcp)
+    }
+
+    /// #1808 over RPC: a host serving a registered callback base starts on
+    /// it and gets the host-only handle and the public reference; the
+    /// completion with that handle lands the credential once. Without the
+    /// handle the attempt is refused with a typed detail and left pending.
+    #[tokio::test]
+    async fn mcp_registered_https_login_over_rpc_completes_with_host_custody() {
+        use meerkat::test_fixtures::mcp_oauth::{CODE_CANARY, McpOAuthFixture, SUBJECT};
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (runtime, mcp) = registered_callback_runtime(&fixture, &project, Some(REGISTERED_BASE));
+        let start = |id: i64, redirect_uri: &str| {
+            let params = serde_json::json!({ "mcp": mcp, "redirect_uri": redirect_uri });
+            let runtime = &runtime;
+            async move {
+                handle_auth_login_start(
+                    Some(RpcId::Num(id)),
+                    Some(raw_params(params).as_ref()),
+                    runtime,
+                )
+                .await
+            }
+        };
+        let complete = |id: i64, params: serde_json::Value| {
+            let runtime = &runtime;
+            async move {
+                handle_auth_login_complete(
+                    Some(RpcId::Num(id)),
+                    Some(raw_params(params).as_ref()),
+                    runtime,
+                )
+                .await
+            }
+        };
+
+        // A loopback start keeps its exact wire shape beside a served base.
+        let loopback = rpc_result(start(1, "http://127.0.0.1:1/mcp/oauth/callback").await);
+        assert!(loopback.get("host_attempt_handle").is_none(), "{loopback}");
+        assert!(loopback.get("attempt_ref").is_none(), "{loopback}");
+        rpc_result(
+            handle_auth_login_cancel(
+                Some(RpcId::Num(2)),
+                Some(
+                    raw_params(serde_json::json!({ "mcp": mcp, "state": loopback["state"] }))
+                        .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+
+        // Naming the base takes the registered path.
+        let started = rpc_result(start(3, REGISTERED_BASE).await);
+        assert_eq!(started["disposition"], "started");
+        let redirect = started["redirect_uri"].as_str().unwrap().to_owned();
+        assert!(
+            redirect.starts_with(&format!("{REGISTERED_BASE}/")),
+            "{redirect}"
+        );
+        let handle = started["host_attempt_handle"].as_str().unwrap().to_owned();
+        let attempt_ref = started["attempt_ref"].as_str().unwrap().to_owned();
+        let state = started["state"].as_str().unwrap().to_owned();
+        let status = rpc_result(
+            handle_auth_status_get(
+                Some(RpcId::Num(4)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(status["attempt"]["ref"], attempt_ref.as_str());
+        assert!(
+            !status.to_string().contains(&handle),
+            "status never carries the handle"
+        );
+
+        // Naming the derived redirect joins it, without custody.
+        let joined = rpc_result(start(5, &redirect).await);
+        assert_eq!(joined["disposition"], "joined");
+        assert_eq!(joined["state"], state.as_str());
+        assert!(joined.get("host_attempt_handle").is_none(), "{joined}");
+        assert_eq!(joined["attempt_ref"], attempt_ref.as_str());
+
+        // Without the host's handle: typed refusal, attempt left pending.
+        let callback = |handle: Option<&str>| {
+            let mut params = serde_json::json!({
+                "mcp": mcp,
+                "code": CODE_CANARY,
+                "state": state,
+                "redirect_uri": redirect,
+            });
+            if let Some(handle) = handle {
+                params["host_attempt_handle"] = serde_json::json!(handle);
+            }
+            params
+        };
+        for (id, params) in [
+            (6, callback(Some("forged-handle"))),
+            (7, callback(Some(&attempt_ref))),
+            (8, callback(None)),
+        ] {
+            let refused = complete(id, params).await;
+            let data = auth_error_data(&refused);
+            assert_eq!(data["reason"], "invalid_target", "{data}");
+            assert_eq!(data["detail"], "remote_custody_required", "{data}");
+        }
+        let mut with_iss = callback(None);
+        with_iss["iss"] = serde_json::json!(fixture.base());
+        let refused = complete(9, with_iss).await;
+        assert_eq!(
+            refused.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+        let still = rpc_result(
+            handle_auth_status_get(
+                Some(RpcId::Num(10)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(still["attempt"]["ref"], attempt_ref.as_str());
+
+        // With it: the credential lands once.
+        let ready = rpc_result(complete(11, callback(Some(&handle))).await);
+        assert_eq!(ready["account_id"], SUBJECT);
+        let replay = complete(12, callback(Some(&handle))).await;
+        let data = auth_error_data(&replay);
+        assert_eq!(data["reason"], "attempt_missing", "{data}");
+        assert!(data.get("detail").is_none(), "{data}");
+        let authorized = rpc_result(
+            handle_auth_status_get(
+                Some(RpcId::Num(13)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(authorized["phase"], "authorized");
+    }
+
+    /// The registered-callback completion fields belong to an MCP target: on
+    /// a provider or connector completion they are refused before any
+    /// lookup, never ignored.
+    #[tokio::test]
+    async fn registered_callback_fields_are_refused_off_mcp_targets() {
+        let runtime = test_runtime();
+        let connector = serde_json::json!({
+            "slot": {"realm_id": "tenant-a", "slot_id": "drive-work"},
+            "issuer": "https://accounts.example.invalid",
+            "client": "connector-client-id",
+            "resource": "https://api.example.invalid",
+            "scopes": ["openid"],
+            "strategy_id": "oidc-userinfo-v1",
+            "account_selection": {"mode": "discover"},
+        });
+        for extra in [
+            serde_json::json!({"host_attempt_handle": "handle"}),
+            serde_json::json!({"iss": "https://idp.example.invalid"}),
+        ] {
+            let mut provider = serde_json::json!({
+                "provider": "openai",
+                "realm_id": "dev",
+                "binding_id": "default_openai",
+                "code": "code",
+                "state": "state",
+                "redirect_uri": "http://127.0.0.1:0/callback",
+            });
+            let mut connector_params = serde_json::json!({
+                "connector": connector,
+                "code": "code",
+                "state": "state",
+                "redirect_uri": "http://127.0.0.1:0/callback",
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                provider[key] = value.clone();
+                connector_params[key] = value.clone();
+            }
+            for params in [provider, connector_params] {
+                let refused = handle_auth_login_complete(
+                    Some(RpcId::Num(1)),
+                    Some(raw_params(params.clone()).as_ref()),
+                    &runtime,
+                )
+                .await;
+                let error = refused.error.expect("refused");
+                assert_eq!(error.code, error::INVALID_PARAMS, "{params}");
+                assert!(
+                    error.message.contains("only for an MCP target"),
+                    "{}",
+                    error.message
+                );
+            }
+        }
+    }
+
+    /// An https redirect is admitted only as the host's own registered base
+    /// (or a target's redirect under it); any other one is refused before
+    /// any network request, as it always was, and a host with no base
+    /// refuses every https redirect.
+    #[tokio::test]
+    async fn mcp_registered_https_start_refuses_other_redirects_without_network() {
+        use meerkat::test_fixtures::mcp_oauth::McpOAuthFixture;
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        for base in [Some(REGISTERED_BASE), None] {
+            let project = tempfile::tempdir().unwrap();
+            let (runtime, mcp) = registered_callback_runtime(&fixture, &project, base);
+            let before = fixture.request_paths().len();
+            for redirect in [
+                "https://other.example/mcp/oauth/callback",
+                "https://connect.example/mcp/oauth/callback/",
+                "https://connect.example/mcp/oauth/callback/hosted-not-the-slug",
+                "http://connect.example/mcp/oauth/callback",
+                "https://connect.example/mcp/oauth/callback?x=1",
+            ]
+            .into_iter()
+            .chain(base.is_none().then_some(REGISTERED_BASE))
+            {
+                let refused = handle_auth_login_start(
+                    Some(RpcId::Num(1)),
+                    Some(
+                        raw_params(serde_json::json!({ "mcp": mcp, "redirect_uri": redirect }))
+                            .as_ref(),
+                    ),
+                    &runtime,
+                )
+                .await;
+                let data = auth_error_data(&refused);
+                assert_eq!(data["reason"], "invalid_target", "{redirect}: {data}");
+                assert!(data.get("detail").is_none(), "{data}");
+            }
+            assert_eq!(
+                fixture.request_paths().len(),
+                before,
+                "a refused redirect sends nothing"
+            );
+        }
     }
 }
 #[cfg(test)]

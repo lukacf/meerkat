@@ -27194,7 +27194,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `auth/login/complete`. For an MCP target, issuer,\nclient and resource come from the admitted attempt named by `state`;\nnothing else is echoed. `Debug` redacts `code` and `state`.",
+    "description": "Request payload for `auth/login/complete`. For an MCP target, issuer,\nclient and resource come from the admitted attempt named by `state`;\nnothing else is echoed. `Debug` redacts `code`, `state` and\n`host_attempt_handle`.",
     "oneOf": [
       {
         "$ref": "#/$defs/WireProviderLoginTarget"
@@ -27209,6 +27209,20 @@
     "properties": {
       "code": {
         "type": "string"
+      },
+      "host_attempt_handle": {
+        "description": "The secret handle `auth/login/start` returned for an attempt on a\nregistered `https` redirect, from the host's server-side ceremony.\nRequired to complete such an attempt (MCP or connector); omitted for\na loopback one.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "iss": {
+        "description": "The callback's `iss` parameter (RFC 9207), when the authorization\nserver sent one. Checked against the attempt's issuer; accepted only\nwith `host_attempt_handle` for an MCP target.",
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "redirect_uri": {
         "type": "string"

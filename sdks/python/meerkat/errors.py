@@ -32,6 +32,7 @@ from typing import Any as _Any, get_args as _get_args, get_type_hints as _get_ty
 
 from .generated.types import (
     CommsSendErrorData as CommsSendErrorData,
+    WireAuthErrorDetail as WireAuthErrorDetail,
     WireAuthErrorReason as WireAuthErrorReason,
 )
 
@@ -63,6 +64,36 @@ def auth_error_reason(error: BaseException) -> WireAuthErrorReason | None:
     reason = details.get("reason")
     if isinstance(reason, str) and reason in WIRE_AUTH_ERROR_REASONS:
         return reason  # type: ignore[return-value]
+    return None
+
+
+def _literal_strings(alias: _Any) -> frozenset[str]:
+    # A single `Literal[...]` (its arguments are the strings), or a union of
+    # them.
+    args = _get_args(alias)
+    if args and all(isinstance(value, str) for value in args):
+        return frozenset(args)
+    return _literal_values(alias)
+
+
+WIRE_AUTH_ERROR_DETAILS: frozenset[str] = _literal_strings(WireAuthErrorDetail)
+
+
+def auth_error_detail(error: BaseException) -> WireAuthErrorDetail | None:
+    """The stable sub-kind of an auth refusal, beside its reason.
+
+    ``auth/*`` RPC methods carry it in ``error.data.detail``. For example
+    ``"remote_custody_required"`` (reason ``"invalid_target"``): an MCP login
+    started on the host's registered https callback was completed without
+    its ``host_attempt_handle``, for example after a restart; cancel the
+    attempt by its reference and start again. ``None`` when absent.
+    """
+    details = getattr(error, "details", None)
+    if not isinstance(details, dict):
+        return None
+    detail = details.get("detail")
+    if isinstance(detail, str) and detail in WIRE_AUTH_ERROR_DETAILS:
+        return detail  # type: ignore[return-value]
     return None
 
 

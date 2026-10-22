@@ -44,3 +44,20 @@ if TYPE_CHECKING:
             return True
         bad: WireAuthErrorReason = "slot_full"  # type: ignore[assignment]
         return bad == reason
+
+
+def test_auth_error_detail_reads_the_typed_sub_kind_only() -> None:
+    from meerkat import WIRE_AUTH_ERROR_DETAILS, auth_error_detail
+
+    assert WIRE_AUTH_ERROR_DETAILS == {"remote_custody_required"}
+    refused = MeerkatError(
+        "-32602",
+        "text",
+        {"reason": "invalid_target", "detail": "remote_custody_required"},
+    )
+    assert auth_error_reason(refused) == "invalid_target"
+    assert auth_error_detail(refused) == "remote_custody_required"
+    assert auth_error_detail(MeerkatError("-32602", "text", {"reason": "invalid_target"})) is None
+    assert auth_error_detail(MeerkatError("-32602", "text", {"detail": "other"})) is None
+    assert auth_error_detail(MeerkatError("-32602", "remote_custody_required")) is None
+    assert auth_error_detail(ValueError("x")) is None

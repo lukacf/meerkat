@@ -60,7 +60,8 @@ use meerkat_providers::connector_oauth::{AccountSelection, ScopeEvidence};
 use meerkat_providers::mcp_oauth::{
     McpAccountSelection, McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback,
     McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin,
-    McpOAuthPendingAttempt, McpServerIdentity, OidcUserInfoAccountStrategy,
+    McpOAuthPendingAttempt, McpOAuthRegisteredCallback, McpRegisteredRedirectBase,
+    McpServerIdentity, OidcUserInfoAccountStrategy,
 };
 use meerkat_providers::oauth_flow::{
     OAuthFlowError, OAuthTargetValidationError, oauth_provider_resolution,
@@ -716,6 +717,20 @@ impl HostAuthError {
         }
     }
 
+    /// The stable sub-kind every auth surface projects beside
+    /// [`Self::reason`], for the refusals a host must tell apart within one
+    /// reason.
+    pub fn detail(&self) -> Option<meerkat_contracts::WireAuthErrorDetail> {
+        use meerkat_contracts::WireAuthErrorDetail as D;
+        match self {
+            Self::McpOAuth(McpOAuthError::RemoteCustodyRequired { .. })
+            | Self::Connector(ConnectorLoginError::RemoteCustodyRequired) => {
+                Some(D::RemoteCustodyRequired)
+            }
+            _ => None,
+        }
+    }
+
     /// The error text a public surface may show. Infrastructure failures and
     /// refused credential accesses use fixed text per reason; their detail
     /// goes only to protected diagnostics.
@@ -868,6 +883,9 @@ fn mcp_oauth_reason(error: &McpOAuthError) -> meerkat_contracts::WireAuthErrorRe
         McpOAuthError::MissingStoredToken { .. }
         | McpOAuthError::HumanAuthorizationRequired { .. } => R::AuthorizationRequired,
         McpOAuthError::Callback { .. } => R::CallbackUnavailable,
+        // A registered attempt's completion without the host's custody; the
+        // error data's `detail` tells it apart from a malformed target.
+        McpOAuthError::RemoteCustodyRequired { .. } => R::InvalidTarget,
         McpOAuthError::DiscoveryFailed { .. }
         | McpOAuthError::RegistrationFailed { .. }
         | McpOAuthError::TokenExchangeFailed { .. }
@@ -924,6 +942,9 @@ pub struct HostAuthService {
     connector_strategies: ConnectorStrategies,
     /// The runtime realm whose MCP credentials this service owns.
     mcp_realm: Option<RealmId>,
+    /// The host's registered `https` redirect base for MCP logins (host
+    /// configuration), when the host serves a hosted callback.
+    mcp_registered_redirect_base: Option<McpRegisteredRedirectBase>,
     /// Host-installed connector client-auth profiles (secrets from host
     /// configuration).
     connector_client_auth: Vec<ConnectorClientAuthProfile>,
@@ -950,6 +971,7 @@ impl HostAuthService {
             mcp_account_strategy: Arc::new(OidcUserInfoAccountStrategy::new()),
             connector_strategies: ConnectorStrategies::with_defaults(),
             mcp_realm: None,
+            mcp_registered_redirect_base: None,
             connector_client_auth: Vec::new(),
             connector_protocols:
                 meerkat_providers::connector_protocol::ConnectorProtocols::with_defaults(),
@@ -965,6 +987,37 @@ impl HostAuthService {
     pub fn with_mcp_realm(mut self, realm: RealmId) -> Self {
         self.mcp_realm = Some(realm);
         self
+    }
+
+    /// Serve MCP logins through the host's own `https` callback under
+    /// `base` as well as through loopback redirects. Host configuration
+    /// only: each target's exact redirect is derived from it
+    /// ([`Self::mcp_registered_redirect_uri`]).
+    pub fn with_mcp_registered_redirect_base(mut self, base: McpRegisteredRedirectBase) -> Self {
+        self.mcp_registered_redirect_base = Some(base);
+        self
+    }
+
+    /// The host's registered redirect base, if it serves one.
+    pub fn mcp_registered_redirect_base(&self) -> Option<&McpRegisteredRedirectBase> {
+        self.mcp_registered_redirect_base.as_ref()
+    }
+
+    /// The exact registered `https` redirect of `target` in this service's
+    /// realm, when the host serves a registered base: the URI the
+    /// authorization server redirects to, which the host routes to its
+    /// callback endpoint. Local and secret-free.
+    pub fn mcp_registered_redirect_uri(
+        &self,
+        target: &McpServerIdentity,
+    ) -> Result<Option<String>, HostAuthError> {
+        let Some(base) = &self.mcp_registered_redirect_base else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.mcp_oauth_authority()?
+                .registered_redirect_uri(target, base)?,
+        ))
     }
 
     /// Replace the provider protocols client-auth profiles may name. The
@@ -1186,6 +1239,47 @@ impl HostAuthService {
         Ok(self
             .mcp_oauth_authority()?
             .login_start(target, redirect_uri, www_authenticate)
+            .await?)
+    }
+
+    /// Admit one host-driven MCP OAuth attempt on the target's registered
+    /// `https` redirect under this service's base: the host's own callback
+    /// endpoint, for a host whose users' browsers cannot reach its loopback
+    /// address. A started attempt returns a host-only `host_attempt_handle`,
+    /// a secret the host keeps server-side with its ceremony and passes to
+    /// [`Self::mcp_login_complete_registered`]; a joined projection carries
+    /// none. Refused when the service has no registered base. See
+    /// [`McpOAuthAuthority::login_start_registered`].
+    pub async fn mcp_login_start_registered(
+        &self,
+        target: &McpServerIdentity,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoginStart, HostAuthError> {
+        let Some(base) = &self.mcp_registered_redirect_base else {
+            return Err(McpOAuthError::Verification(
+                meerkat_providers::connector_oauth::ConnectorOAuthRefusal::InvalidDescriptor,
+            )
+            .into());
+        };
+        Ok(self
+            .mcp_oauth_authority()?
+            .login_start_registered(target, base, www_authenticate)
+            .await?)
+    }
+
+    /// Complete an attempt admitted on a registered redirect from the host's
+    /// `https` callback, with the host's retained `host_attempt_handle`. A
+    /// callback without that custody is refused and leaves the attempt to
+    /// its owner. Returns a secret-free projection. See
+    /// [`McpOAuthAuthority::login_complete_registered`].
+    pub async fn mcp_login_complete_registered(
+        &self,
+        target: &McpServerIdentity,
+        callback: McpOAuthRegisteredCallback,
+    ) -> Result<McpOAuthLoginComplete, HostAuthError> {
+        Ok(self
+            .mcp_oauth_authority()?
+            .login_complete_registered(target, callback)
             .await?)
     }
 

@@ -365,8 +365,13 @@ export { BinaryIntegrityError } from "./binary-errors.js";
 export type { BinaryIntegrityFailure } from "./binary-errors.js";
 
 export { CONTRACT_VERSION } from "./generated/types.js";
-export { WIRE_AUTH_ERROR_REASONS, authErrorReason } from "./auth-errors.js";
-export type { WireAuthErrorReason } from "./generated/types.js";
+export {
+  WIRE_AUTH_ERROR_DETAILS,
+  WIRE_AUTH_ERROR_REASONS,
+  authErrorDetail,
+  authErrorReason,
+} from "./auth-errors.js";
+export type { WireAuthErrorDetail, WireAuthErrorReason } from "./generated/types.js";
 export type {
   AttentionBindingRequest,
   AttentionBindingResult,

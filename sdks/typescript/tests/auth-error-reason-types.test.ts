@@ -44,6 +44,7 @@ function retryWithKnownAccount(reason: WireAuthErrorReason): boolean {
     case "credential_access_pending":
     case "credential_store_unavailable":
     case "infrastructure":
+    case "commit_unsettled":
       return false;
     default: {
       const unreachable: never = reason;

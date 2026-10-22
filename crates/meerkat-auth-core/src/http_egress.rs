@@ -417,7 +417,8 @@ struct CompiledHttpEgress {
     /// Protected tool calls: no redirect and no retry.
     protected: reqwest::Client,
     /// Credential endpoints (OAuth discovery, registration, exchange,
-    /// refresh, userinfo): no redirect.
+    /// refresh, userinfo): no redirect, each request bounded by
+    /// [`crate::auth_oauth::CREDENTIAL_REQUEST_TIMEOUT`].
     credential: reqwest::Client,
 }
 
@@ -449,10 +450,15 @@ impl CompiledHttpEgress {
             .dns_resolver(Arc::clone(&resolver))
             .build()
             .map_err(|_| HttpEgressUnavailable::ClientUnavailable)?;
+        // Credential requests are single exchanges: each is bounded like the
+        // trusted-host credential client's. The ordinary and protected
+        // clients carry MCP traffic and its streams, so they stay unbounded.
         let credential = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .dns_resolver(resolver)
+            .connect_timeout(crate::auth_oauth::CREDENTIAL_CONNECT_TIMEOUT)
+            .timeout(crate::auth_oauth::CREDENTIAL_REQUEST_TIMEOUT)
             .build()
             .map_err(|_| HttpEgressUnavailable::ClientUnavailable)?;
         Ok(Self {
@@ -591,8 +597,9 @@ impl HttpEgressProfile {
             .map(|compiled| compiled.map(|compiled| &compiled.protected))
     }
 
-    /// The required credential-endpoint client (no redirect); `None` for a
-    /// trusted-host profile.
+    /// The required credential-endpoint client (no redirect, each request
+    /// bounded like [`crate::auth_oauth::credential_http_client`]'s); `None`
+    /// for a trusted-host profile.
     pub fn credential_client(&self) -> Option<Result<&reqwest::Client, HttpEgressUnavailable>> {
         self.compiled()
             .map(|compiled| compiled.map(|compiled| &compiled.credential))

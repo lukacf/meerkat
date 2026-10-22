@@ -1780,7 +1780,18 @@ pub async fn handle_auth_login_complete(
                 Ok(completed) => completed,
                 // A failed completion does not prove the attempt's removal:
                 // it stays recorded for shutdown.
-                Err(error_value) => return host_auth_error_response(id, error_value),
+                Err(error_value) => {
+                    if matches!(
+                        error_value,
+                        meerkat::HostAuthError::McpOAuth(
+                            meerkat::McpOAuthError::CommitUnsettled { .. }
+                        )
+                    ) {
+                        // Its credential commit may still publish.
+                        runtime.note_unsettled_credential_commit();
+                    }
+                    return host_auth_error_response(id, error_value);
+                }
             };
             runtime.forget_mcp_wire_attempt(&state);
             // Wake the exact operation awaiting this target in this runtime's

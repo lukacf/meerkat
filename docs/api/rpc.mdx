@@ -287,7 +287,7 @@ of this full catalog.
 | `realm/list` | Realm | — | `WireRealmList` | List realm summaries |
 | `realm/get` | Realm | `RealmIdParams` | `WireRealmConnectionSet` | Get full realm connection set |
 
-Auth method errors (`auth/*`) carry a typed reason in `error.data.reason`, one of the closed `WireAuthErrorReason` values (for example `slot_occupied`, `account_mismatch`, `attempt_missing`, `reauth_required`, `infrastructure`). Branch on the reason, not the message text. Infrastructure failures have a fixed message.
+Auth method errors (`auth/*`) carry a typed reason in `error.data.reason`, one of the closed `WireAuthErrorReason` values (for example `slot_occupied`, `account_mismatch`, `attempt_missing`, `reauth_required`, `infrastructure`). Branch on the reason, not the message text. Infrastructure failures have a fixed message. Some errors also carry a stable sub-kind in `error.data.detail`: `remote_custody_required` (reason `invalid_target`), and `upstream_timeout` or `upstream_timeout_after_code` (reason `upstream_failure`: a network stage of an MCP login got no answer within its bound, before or after the authorization code was sent; nothing was published). The reason `commit_unsettled` means an MCP login's credential commit has not reported: whether the credential landed is unknown until it settles, so read `auth/status/get` later.
 
 Both helper parameter types (`MobSpawnHelperParams`, `MobForkHelperParams`)
 require `result_label` and `max_text_bytes`. `MobHelperResult` is the exact

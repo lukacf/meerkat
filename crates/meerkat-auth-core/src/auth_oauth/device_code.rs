@@ -72,10 +72,7 @@ pub async fn request_device_code(
     for (k, v) in &endpoints.extra_headers {
         req = req.header(k, v);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| OAuthError::Network(e.to_string()))?;
+    let resp = req.send().await.map_err(super::credential_request_error)?;
     let status = resp.status();
     super::refuse_credential_redirect(status)?;
     if !status.is_success() {
@@ -85,9 +82,7 @@ pub async fn request_device_code(
             body,
         });
     }
-    resp.json()
-        .await
-        .map_err(|e| OAuthError::Network(format!("decode: {e}")))
+    resp.json().await.map_err(super::credential_decode_error)
 }
 
 pub async fn poll_device_code(
@@ -111,20 +106,14 @@ pub async fn poll_device_code(
     for (k, v) in &endpoints.extra_headers {
         req = req.header(k, v);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| OAuthError::Network(e.to_string()))?;
+    let resp = req.send().await.map_err(super::credential_request_error)?;
     let status = resp.status();
     super::refuse_credential_redirect(status)?;
 
     // Device token endpoints carry typed errors in the body. GitHub returns
     // pending with 200 while RFC-style providers commonly use 4xx, so classify
     // the body before interpreting the HTTP status.
-    let body: TokenResponseWire = resp
-        .json()
-        .await
-        .map_err(|e| OAuthError::Network(format!("decode: {e}")))?;
+    let body: TokenResponseWire = resp.json().await.map_err(super::credential_decode_error)?;
 
     if let Some(error) = body.error.as_deref() {
         return match error {

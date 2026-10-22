@@ -1314,7 +1314,7 @@ target, `{"connector": {"slot", "issuer", "client", "resource", "scopes",
 [Host-driven OAuth](/api/mcp#host-driven-oauth) and
 [Connector OAuth](/guides/auth#connector-oauth).
 
-Auth endpoint errors return `{"error": "<text>", "reason": "<WireAuthErrorReason>"}`. Branch on `reason` (for example `slot_occupied`, `account_mismatch`, `attempt_missing`, `reauth_required`, `infrastructure`), not on the text; status codes are unchanged.
+Auth endpoint errors return `{"error": "<text>", "reason": "<WireAuthErrorReason>"}`. Branch on `reason` (for example `slot_occupied`, `account_mismatch`, `attempt_missing`, `reauth_required`, `infrastructure`), not on the text; status codes are unchanged. Some errors also carry a stable sub-kind in `detail`, for example `upstream_timeout` or `upstream_timeout_after_code` (reason `upstream_failure`) when a network stage of an MCP login got no answer within its bound. The reason `commit_unsettled` means an MCP login's credential commit has not reported: whether the credential landed is unknown until it settles.
 
 ### POST /auth/login/cancel
 

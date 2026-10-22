@@ -240,18 +240,52 @@ pub const CREDENTIAL_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration:
 /// HTTP client for server-to-server credential requests (token, refresh,
 /// device-code and credential-exchange endpoints). It follows no redirects,
 /// same-origin included: a credential request goes only to the endpoint it
-/// names. A build failure is returned, never replaced by a default client.
-/// Browser authorization redirects and loopback callbacks are not requests
-/// of this client and are unaffected.
+/// names. Every request is bounded by [`CREDENTIAL_REQUEST_TIMEOUT`] in total
+/// and [`CREDENTIAL_CONNECT_TIMEOUT`] to connect. A build failure is
+/// returned, never replaced by a default client. Browser authorization
+/// redirects and loopback callbacks are not requests of this client and are
+/// unaffected.
 pub fn credential_http_client() -> Result<reqwest::Client, CredentialHttpClientUnavailable> {
+    bounded_credential_http_client(CREDENTIAL_REQUEST_TIMEOUT)
+}
+
+/// [`credential_http_client`] whose requests are bounded by `total` (and by
+/// [`CREDENTIAL_CONNECT_TIMEOUT`] to connect, or `total` when shorter).
+pub(crate) fn bounded_credential_http_client(
+    total: std::time::Duration,
+) -> Result<reqwest::Client, CredentialHttpClientUnavailable> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CREDENTIAL_CONNECT_TIMEOUT.min(total))
+        .timeout(total)
         .build()
         .map_err(|_| CredentialHttpClientUnavailable)
 }
 
 /// Same-origin redirects a same-origin credential client follows at most.
 pub const MAX_SAME_ORIGIN_REDIRECTS: usize = 3;
+
+/// A failed credential request: a request that passed its client's bound is
+/// [`OAuthError::Timeout`], anything else a network failure.
+#[cfg(feature = "oauth")]
+pub(crate) fn credential_request_error(error: reqwest::Error) -> OAuthError {
+    if error.is_timeout() {
+        OAuthError::Timeout
+    } else {
+        OAuthError::Network(error.to_string())
+    }
+}
+
+/// A credential response body that could not be read or decoded: a body
+/// still unread when its client's bound passed is [`OAuthError::Timeout`].
+#[cfg(feature = "oauth")]
+pub(crate) fn credential_decode_error(error: reqwest::Error) -> OAuthError {
+    if error.is_timeout() {
+        OAuthError::Timeout
+    } else {
+        OAuthError::Network(format!("decode: {error}"))
+    }
+}
 
 /// Whether two URLs share an origin: scheme, host and port (explicit or the
 /// scheme's default) all equal. A scheme change (for example https to http

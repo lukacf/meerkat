@@ -481,6 +481,33 @@ ask its user.
   and logout; a credential whose client was registered for the other
   redirect kind needs a logout first. The window is the same 300 s. REST and
   `rkat mcp login` serve loopback logins only.
+- **Bounded network stages.** No stalled authorization server holds a login,
+  its host or the credential. Each network stage of a login or refresh
+  (protected resource metadata, authorization-server metadata, account
+  preflight, client registration, the code exchange, account evidence, and a
+  refresh's token request and subject check) gets 20 s for all of its
+  requests; a start's stages get 60 s together, and a completion's get 60 s
+  together, never past the attempt's 300 s window. Every credential request
+  Core sends is also bounded at 30 s (10 s to connect). A stage that runs out
+  of time ends the call with `error.data.reason` `upstream_failure` and
+  `error.data.detail` `upstream_timeout` (the authorization code had not been
+  sent) or `upstream_timeout_after_code` (it had, and may be spent at the
+  provider; any tokens it issued are never stored). Nothing is published: a
+  start admits no attempt and a completion's attempt is retired, so start a
+  new login. A refresh that runs out of time fails transiently and keeps the
+  credential.
+
+  Cancelling an attempt (`auth/login/cancel` by `state` or `attempt_ref`, or
+  a logout) while its `auth/login/complete` is in flight ends that call at
+  once with `attempt_missing`, and `cancelled: true` means nothing from that
+  attempt is ever published. A cancel answered `attempt_missing` while a
+  completion of the attempt is still in flight means the credential commit
+  already consumed it: the completion answers its true end, or, when the
+  commit has not reported within 60 s, `error.data.reason`
+  `commit_unsettled`. Whether that credential landed is unknown until the
+  commit settles; read `auth/status/get` later. It is neither a success nor
+  a failure. An embedding host sets the bounds with
+  `HostAuthService::with_mcp_network_bounds`.
 
 <Warning>
 The authorize URL and `state`, and the callback's `code` and `state`, let

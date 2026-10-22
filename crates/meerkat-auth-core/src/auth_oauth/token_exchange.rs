@@ -114,7 +114,7 @@ async fn send_token_request(
         // The host egress profile's own resolver refused the endpoint.
         match crate::http_egress::egress_refusal_in(&e) {
             Some(refusal) => OAuthError::EgressRefused(refusal),
-            None => OAuthError::Network(e.to_string()),
+            None => super::credential_request_error(e),
         }
     })?;
     let status = resp.status();
@@ -126,10 +126,7 @@ async fn send_token_request(
             body,
         });
     }
-    let wire: TokenResponseWire = resp
-        .json()
-        .await
-        .map_err(|e| OAuthError::Network(format!("decode: {e}")))?;
+    let wire: TokenResponseWire = resp.json().await.map_err(super::credential_decode_error)?;
     Ok(OAuthTokenResult {
         access_token: wire.access_token,
         refresh_token: wire.refresh_token,

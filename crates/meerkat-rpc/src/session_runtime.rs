@@ -12885,6 +12885,14 @@ impl SessionRuntime {
         self.unsettled_requests.fetch_add(count, Ordering::AcqRel);
     }
 
+    /// An MCP login completion stopped observing its credential commit
+    /// before the commit reported (`CommitUnsettled`). Like an aborted
+    /// handler's, that work may still publish, so the shutdown sweep never
+    /// reports its absent attempt as resolved.
+    pub(crate) fn note_unsettled_credential_commit(&self) {
+        self.unsettled_requests.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// The wire attempt admitted under `state` reached a terminal disposition
     /// (completed or cancelled). Only that exact attempt is forgotten.
     pub(crate) fn forget_mcp_wire_attempt(&self, state: &str) {

@@ -2885,7 +2885,10 @@ fn map_mutation_error(error: CredentialMutationError) -> ConnectorLoginError {
         CredentialMutationError::TokenStore(reason) => ConnectorLoginError::TokenStore(reason),
         CredentialMutationError::AuthLifecycle(reason)
         | CredentialMutationError::Operation(reason)
-        | CredentialMutationError::LockFailed(reason) => ConnectorLoginError::AuthLifecycle(reason),
+        | CredentialMutationError::LockFailed(reason)
+        | CredentialMutationError::RollbackFailed(reason) => {
+            ConnectorLoginError::AuthLifecycle(reason)
+        }
         CredentialMutationError::Cancelled => ConnectorLoginError::AuthLifecycle(
             "credential mutation coordinator cancelled the login commit".to_owned(),
         ),

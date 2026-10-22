@@ -7724,3 +7724,149 @@ async fn dropping_a_start_admits_no_attempt() {
     assert_eq!(fresh.disposition, McpOAuthLoginDisposition::Started);
     authority.login_cancel(&target, &fresh).unwrap();
 }
+
+// --- A credential commit whose rollback fails --------------------------------
+
+/// Fails every save and every clear: a first login's commit fails to save,
+/// and its rollback then fails to clear.
+struct FailSaveAndRollbackStore {
+    inner: Arc<EphemeralTokenStore>,
+}
+
+#[async_trait]
+impl TokenStore for FailSaveAndRollbackStore {
+    async fn load(
+        &self,
+        key: &TokenKey,
+    ) -> Result<Option<PersistedTokens>, meerkat_auth_core::auth_store::TokenStoreError> {
+        self.inner.load(key).await
+    }
+
+    async fn save(
+        &self,
+        _key: &TokenKey,
+        _tokens: &PersistedTokens,
+    ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
+        Err(meerkat_auth_core::auth_store::TokenStoreError::Io(
+            "injected save failure".to_string(),
+        ))
+    }
+
+    async fn clear(
+        &self,
+        _key: &TokenKey,
+    ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
+        Err(meerkat_auth_core::auth_store::TokenStoreError::Io(
+            "injected clear failure".to_string(),
+        ))
+    }
+
+    async fn list(&self) -> Result<Vec<TokenKey>, meerkat_auth_core::auth_store::TokenStoreError> {
+        self.inner.list().await
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "fail-save-and-rollback"
+    }
+}
+
+/// A commit that fails after it consumed the attempt and cannot restore the
+/// previous state leaves what is stored unsettled: the completion ends
+/// `CommitUnsettled`, never a clean infrastructure failure. Once the
+/// in-flight credential work settles, a read of the store reports the
+/// outcome.
+#[tokio::test]
+async fn a_login_commit_whose_rollback_fails_is_unsettled() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let inner = Arc::new(EphemeralTokenStore::new());
+    let store = Arc::new(FailSaveAndRollbackStore {
+        inner: Arc::clone(&inner),
+    });
+    let authority = FixtureAuthority::with_fixture_http(
+        ProviderAuthPersistence::new(store, Arc::new(InMemoryCoordinator::new())),
+        recording_browser(Arc::clone(&state)),
+        no_redirect_client(),
+        test_auth_lease(),
+    );
+    let target = split_target(&base, "rollback-fails");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+
+    let error = authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect_err("a commit whose save and rollback fail never succeeds");
+
+    assert!(
+        matches!(
+            &error,
+            McpOAuthError::CommitUnsettled { server_name }
+                if server_name == target.server_name()
+        ),
+        "a failed rollback leaves the outcome unsettled: {error:?}"
+    );
+    assert!(!error.is_refusal());
+    // The commit consumed the attempt: it never completes again.
+    assert_attempt_retired(&authority, &target, &start).await;
+    assert_eq!(
+        settle_in_flight_credential_mutations(Duration::from_secs(5)).await,
+        CredentialSettlement::Settled
+    );
+    assert_eq!(
+        inner.load(&target.token_key().unwrap()).await.unwrap(),
+        None,
+        "settled, the store reports that nothing landed"
+    );
+}
+
+/// GUARD: a commit whose save fails but whose rollback succeeds stays a
+/// terminal failure and publishes nothing.
+#[tokio::test]
+async fn a_login_commit_whose_rollback_succeeds_stays_terminal_and_publishes_nothing() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let inner = Arc::new(EphemeralTokenStore::new());
+    let store = Arc::new(FailNextSaveStore {
+        inner: Arc::clone(&inner),
+        fail_next_save: AtomicBool::new(true),
+    });
+    let auth_lease = test_auth_lease();
+    let authority = FixtureAuthority::with_fixture_http(
+        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+        recording_browser(Arc::clone(&state)),
+        no_redirect_client(),
+        auth_lease.clone(),
+    );
+    let target = split_target(&base, "rollback-succeeds");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+
+    let error = authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect_err("a commit whose save fails never succeeds");
+
+    assert_compensated_save_failure(&error, &target);
+    assert!(
+        !store.fail_next_save.load(Ordering::SeqCst),
+        "the injected save failure must have been consumed"
+    );
+    assert_attempt_retired(&authority, &target, &start).await;
+    assert_eq!(
+        settle_in_flight_credential_mutations(Duration::from_secs(5)).await,
+        CredentialSettlement::Settled
+    );
+    assert_eq!(
+        inner.load(&target.token_key().unwrap()).await.unwrap(),
+        None,
+        "a rolled-back commit publishes nothing"
+    );
+    assert_ne!(
+        auth_lease.snapshot(&target.lease_key().unwrap()).phase,
+        Some(meerkat_core::handles::AuthLeasePhase::Valid),
+        "the acquired lifecycle was rolled back with the save"
+    );
+}

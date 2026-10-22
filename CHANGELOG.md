@@ -67,9 +67,10 @@ them.
   `McpOAuthNetworkStage::code_sent` says whether the authorization code had
   been sent. `CommitUnsettled`: the credential commit consumed the attempt,
   or may have, and did not report within its observation bound, or its owner
-  was lost; whether the credential landed is unknown until the commit
-  settles, and a later read of the stored credential reports it. It is never
-  a success and never a clean failure. The semver gate reports each as an
+  was lost, or it failed after the consume and could not restore the
+  previous credential and lifecycle; whether the credential landed is
+  unknown until the commit settles, and a later read of the stored
+  credential reports it. It is never a success and never a clean failure. The semver gate reports each as an
   enum variant added to an exhaustive enum (`McpOAuthError` stays
   exhaustive, as above); a match outside the crate needs the arms. Surfaces
   map `NetworkTimedOut` to the reason `upstream_failure` with the detail
@@ -84,6 +85,20 @@ them.
   (`upstream_timeout`, `upstream_timeout_after_code`, `commit_unsettled`);
   the SDK helpers of earlier releases read an unknown reason or detail as
   absent.
+- `meerkat-core` (bounded MCP OAuth network stages):
+  `CredentialMutationError` gains the variant `RollbackFailed(String)`,
+  appended last: a publication failed after it acquired the credential
+  lifecycle, and restoring the previous credential and lifecycle failed too,
+  so what is stored is unsettled. The commit paths of `meerkat-auth-core`
+  (`save_tokens_and_publish_lifecycle`,
+  `save_oauth_tokens_and_consume_browser_flow` and
+  `save_oauth_tokens_and_consume_device_flow`) return it where they returned
+  `AuthLifecycle` ("acquired lease rollback failed"). The semver gate reports
+  it as an enum variant added to an exhaustive enum; a match outside the
+  crate needs the arm. An MCP login completion now ends such a commit as
+  `McpOAuthError::CommitUnsettled` (reason `commit_unsettled`), where it
+  ended as `AuthLifecycle` (reason `infrastructure`). Connector and provider
+  logins keep their earlier error and reason for it.
 - Behaviour-only (not measured by the gate): `meerkat-auth-core`:
   `auth_oauth::credential_http_client` and a required egress profile's
   credential client now bound every request: 30 s in total

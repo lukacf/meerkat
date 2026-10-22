@@ -365,9 +365,10 @@ pub enum WireAuthErrorReason {
     /// An internal failure; its detail is only in protected diagnostics.
     Infrastructure,
     /// An MCP login's attempt was consumed by its credential commit, or may
-    /// have been, and the commit did not report in time: whether the
-    /// credential landed is unknown until it settles, so read the status
-    /// later. Neither a success nor a failure.
+    /// have been, and the commit's outcome is unknown: it did not report in
+    /// time, or it failed and could not restore the previous credential.
+    /// Whether the credential landed is unknown until it settles, so read the
+    /// status later. Neither a success nor a failure.
     CommitUnsettled,
 }
 

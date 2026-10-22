@@ -1151,6 +1151,13 @@ pub enum CredentialMutationError {
         refusal: TokenStoreRefusal,
         detail: String,
     },
+    /// A publication failed after it acquired the credential lifecycle, and
+    /// restoring the previous credential and lifecycle failed too. The stored
+    /// credential and its lifecycle may hold the new state, the previous one,
+    /// or a mix of both: the outcome is unsettled, never a clean failure. A
+    /// read of the stored credential reports what is durable.
+    #[error("credential publication and its rollback failed: {0}")]
+    RollbackFailed(String),
 }
 
 impl CredentialMutationError {

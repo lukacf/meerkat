@@ -506,7 +506,10 @@ ask its user.
   commit has not reported within 60 s, `error.data.reason`
   `commit_unsettled`. Whether that credential landed is unknown until the
   commit settles; read `auth/status/get` later. It is neither a success nor
-  a failure. An embedding host sets the bounds with
+  a failure. A commit that fails after it consumed the attempt and cannot
+  restore the previous credential also answers `commit_unsettled`; if a call
+  to that server is then refused for authorization, log in again. An
+  embedding host sets the bounds with
   `HostAuthService::with_mcp_network_bounds`.
 
 <Warning>

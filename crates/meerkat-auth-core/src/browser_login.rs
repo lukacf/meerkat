@@ -484,7 +484,7 @@ async fn compensated_error(
         Ok(()) => {
             CredentialMutationError::Operation(format!("{message}; acquired lease rolled back"))
         }
-        Err(rollback) => CredentialMutationError::AuthLifecycle(format!(
+        Err(rollback) => CredentialMutationError::RollbackFailed(format!(
             "{message}; acquired lease rollback failed: {rollback}"
         )),
     }
@@ -808,6 +808,97 @@ mod tests {
         assert!(matches!(
             snapshot.phase,
             None | Some(AuthLeasePhase::Released)
+        ));
+    }
+
+    /// Fails every save and every clear, so a commit's rollback fails too.
+    struct FailingSaveAndRollbackStore;
+
+    #[async_trait]
+    impl TokenStore for FailingSaveAndRollbackStore {
+        async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+            Ok(None)
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            _tokens: &PersistedTokens,
+        ) -> Result<(), TokenStoreError> {
+            Err(TokenStoreError::Io("injected save failure".to_string()))
+        }
+
+        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            Err(TokenStoreError::Io("injected clear failure".to_string()))
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "failing-save-and-rollback"
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_commit_whose_rollback_fails_is_rollback_failed() {
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let authority: Arc<dyn OAuthFlowAuthority> =
+            Arc::new(AuthMachineOwnedTestFlowAuthority::new());
+        let auth_lease = runtime.generated_auth_lease_handle();
+        let persistence = ProviderAuthPersistence::new(
+            Arc::new(FailingSaveAndRollbackStore),
+            Arc::new(crate::auth_store::InMemoryCoordinator::new()),
+        );
+        let binding = binding();
+        let credential_identity = AuthCredentialIdentity::from_auth_binding(&binding);
+        let state = authority
+            .start(
+                credential_identity.clone(),
+                crate::oauth_flow::OAuthBrowserFlowIdentity::from(
+                    OAuthProviderIdentity::OpenAiChatGpt,
+                ),
+                "http://127.0.0.1/callback".to_string(),
+                "pkce-verifier".to_string(),
+            )
+            .expect("start browser flow");
+
+        let error = save_oauth_tokens_and_consume_browser_flow(
+            persistence,
+            auth_lease.clone(),
+            credential_identity.clone(),
+            tokens(),
+            BrowserOAuthFlowCommit {
+                authority: Arc::clone(&authority),
+                state: state.clone(),
+                completion: (OAuthProviderIdentity::OpenAiChatGpt).into(),
+                redirect_uri: "http://127.0.0.1/callback".to_string(),
+            },
+        )
+        .await
+        .expect_err("injected save and rollback failures must fail the commit");
+
+        assert!(
+            matches!(
+                &error,
+                CredentialMutationError::RollbackFailed(message)
+                    if message.contains("TokenStore save failed after OAuth consume")
+                        && message.contains("TokenStore rollback clear failed")
+            ),
+            "a failed rollback is its own typed outcome: {error:?}"
+        );
+        // The terminal OAuth response stays consumed: it is never replayable.
+        assert!(matches!(
+            authority.verify(
+                &state,
+                &credential_identity,
+                crate::oauth_flow::OAuthBrowserFlowIdentity::from(
+                    OAuthProviderIdentity::OpenAiChatGpt
+                ),
+                "http://127.0.0.1/callback"
+            ),
+            Err(OAuthFlowError::Missing | OAuthFlowError::RegistryProjectionMissing { .. })
         ));
     }
 }

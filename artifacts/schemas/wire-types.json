@@ -153125,7 +153125,7 @@
           },
           {
             "const": "commit_unsettled",
-            "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit did not report in time: whether the\ncredential landed is unknown until it settles, so read the status\nlater. Neither a success nor a failure.",
+            "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit's outcome is unknown: it did not report in\ntime, or it failed and could not restore the previous credential.\nWhether the credential landed is unknown until it settles, so read the\nstatus later. Neither a success nor a failure.",
             "type": "string"
           }
         ]
@@ -153272,7 +153272,7 @@
           },
           {
             "const": "commit_unsettled",
-            "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit did not report in time: whether the\ncredential landed is unknown until it settles, so read the status\nlater. Neither a success nor a failure.",
+            "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit's outcome is unknown: it did not report in\ntime, or it failed and could not restore the previous credential.\nWhether the credential landed is unknown until it settles, so read the\nstatus later. Neither a success nor a failure.",
             "type": "string"
           }
         ]
@@ -153415,7 +153415,7 @@
       },
       {
         "const": "commit_unsettled",
-        "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit did not report in time: whether the\ncredential landed is unknown until it settles, so read the status\nlater. Neither a success nor a failure.",
+        "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit's outcome is unknown: it did not report in\ntime, or it failed and could not restore the previous credential.\nWhether the credential landed is unknown until it settles, so read the\nstatus later. Neither a success nor a failure.",
         "type": "string"
       }
     ],

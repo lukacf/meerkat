@@ -870,7 +870,8 @@ fn credential_mutation_reason(
         | CredentialMutationError::TokenStore(_)
         | CredentialMutationError::AuthLifecycle(_)
         | CredentialMutationError::Cancelled
-        | CredentialMutationError::LockFailed(_) => {
+        | CredentialMutationError::LockFailed(_)
+        | CredentialMutationError::RollbackFailed(_) => {
             meerkat_contracts::WireAuthErrorReason::Infrastructure
         }
     }

@@ -1805,13 +1805,17 @@ pub enum McpOAuthError {
         server_name: String,
         stage: McpOAuthNetworkStage,
     },
-    /// The credential commit consumed the attempt, or may have, and did not
-    /// report within its observation bound, or its owner was lost. Whether the
-    /// credential landed is unknown until the commit settles: its owner keeps
-    /// running to its end, and a later read of the stored credential reports
-    /// the outcome. Never a success and never a clean failure.
+    /// The credential commit consumed the attempt, or may have, and its
+    /// outcome is unknown: it did not report within its observation bound,
+    /// its owner was lost, or it failed after the consume and could not
+    /// restore the previous credential and lifecycle. A commit still running
+    /// keeps running to its end; once the in-flight credential mutations
+    /// settle ([`crate::auth_store::settle_in_flight_credential_mutations`]),
+    /// a read of the stored credential reports the outcome. After a failed
+    /// restore, a stored credential that read reports may still be refused at
+    /// use until a new login. Never a success and never a clean failure.
     #[error(
-        "MCP OAuth login for '{server_name}': the credential commit has not reported; whether the credential landed is unknown until it settles"
+        "MCP OAuth login for '{server_name}': whether the credential landed is unknown until the credential commit settles"
     )]
     CommitUnsettled { server_name: String },
 }
@@ -4755,6 +4759,19 @@ fn map_coordinated_login_error(
         },
         CredentialMutationError::CredentialAccess { refusal, detail } => {
             McpOAuthError::CredentialAccess { refusal, detail }
+        }
+        // The commit failed after it consumed the attempt and could not
+        // restore the previous credential and lifecycle: what is stored is
+        // known only from a read of the stored credential.
+        CredentialMutationError::RollbackFailed(reason) => {
+            tracing::warn!(
+                mcp_server = %target.server_name(),
+                %reason,
+                "MCP OAuth credential commit failed and its rollback failed; the stored credential is unsettled"
+            );
+            McpOAuthError::CommitUnsettled {
+                server_name: target.server_name().to_string(),
+            }
         }
     }
 }

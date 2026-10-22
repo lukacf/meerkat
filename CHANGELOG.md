@@ -43,8 +43,11 @@ them.
   retained attempt handle. The semver gate reports it as an enum variant
   added to an exhaustive enum; a match outside the crate needs the arm
   (surfaces map it to the reason `invalid_target` with the detail
-  `remote_custody_required`). The text of `DisconnectRequired` now names its
-  remedy: "disconnect it first: log it out, then log in again".
+  `remote_custody_required`). The enum stays exhaustive on purpose (the
+  facade maps every variant to a reason with no wildcard arm), so every
+  future variant is a declared break too. The text of `DisconnectRequired`
+  now names its remedy: "disconnect it first: log it out, then log in
+  again".
 - `meerkat-contracts` (hosted MCP OAuth, #1808): `WireLoginStart` gains
   `host_attempt_handle: Option<String>`, `WireMcpLoginStart` gains
   `attempt_ref: Option<String>`, `LoginCompleteParams` gains

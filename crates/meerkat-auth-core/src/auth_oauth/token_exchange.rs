@@ -205,6 +205,32 @@ mod tests {
         );
     }
 
+    /// A token endpoint that accepts the request and never answers ends the
+    /// exchange as [`OAuthError::Timeout`]. Virtual time.
+    #[tokio::test(start_paused = true)]
+    async fn a_token_request_its_endpoint_never_answers_is_oauth_timeout() {
+        let address = crate::auth_oauth::redirect_fixture::spawn_slow_endpoint(None).await;
+        let http = credential_http_client().unwrap();
+        let endpoints = endpoints(&format!("http://{address}/token"));
+        let bound = crate::auth_oauth::CREDENTIAL_REQUEST_TIMEOUT * 10;
+        let error = tokio::time::timeout(
+            bound,
+            exchange_authorization_code(&http, &endpoints, "code", "verifier", None),
+        )
+        .await
+        .expect("the client ends the exchange itself")
+        .unwrap_err();
+        assert!(matches!(error, OAuthError::Timeout), "{error:?}");
+        let error = tokio::time::timeout(
+            bound,
+            exchange_refresh_token(&http, &endpoints, "refresh-secret", None),
+        )
+        .await
+        .expect("the client ends the refresh itself")
+        .unwrap_err();
+        assert!(matches!(error, OAuthError::Timeout), "{error:?}");
+    }
+
     #[test]
     fn same_origin_compares_scheme_host_and_port() {
         use crate::auth_oauth::same_origin;

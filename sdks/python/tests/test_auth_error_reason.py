@@ -17,7 +17,7 @@ EXPECTED = {
     "authorization_required", "callback_unavailable", "upstream_failure",
     "configuration_invalid", "credential_access_denied",
     "credential_interaction_required", "credential_access_pending",
-    "credential_store_unavailable", "infrastructure",
+    "credential_store_unavailable", "infrastructure", "commit_unsettled",
 }
 
 
@@ -49,7 +49,11 @@ if TYPE_CHECKING:
 def test_auth_error_detail_reads_the_typed_sub_kind_only() -> None:
     from meerkat import WIRE_AUTH_ERROR_DETAILS, auth_error_detail
 
-    assert WIRE_AUTH_ERROR_DETAILS == {"remote_custody_required"}
+    assert WIRE_AUTH_ERROR_DETAILS == {
+        "remote_custody_required",
+        "upstream_timeout",
+        "upstream_timeout_after_code",
+    }
     refused = MeerkatError(
         "-32602",
         "text",
@@ -61,3 +65,17 @@ def test_auth_error_detail_reads_the_typed_sub_kind_only() -> None:
     assert auth_error_detail(MeerkatError("-32602", "text", {"detail": "other"})) is None
     assert auth_error_detail(MeerkatError("-32602", "remote_custody_required")) is None
     assert auth_error_detail(ValueError("x")) is None
+
+
+def test_an_mcp_network_timeout_says_whether_the_code_was_sent() -> None:
+    from meerkat import auth_error_detail
+
+    for detail in ("upstream_timeout", "upstream_timeout_after_code"):
+        timed_out = MeerkatError(
+            "-32603", "text", {"reason": "upstream_failure", "detail": detail}
+        )
+        assert auth_error_reason(timed_out) == "upstream_failure"
+        assert auth_error_detail(timed_out) == detail
+    unsettled = MeerkatError("-32603", "text", {"reason": "commit_unsettled"})
+    assert auth_error_reason(unsettled) == "commit_unsettled"
+    assert auth_error_detail(unsettled) is None

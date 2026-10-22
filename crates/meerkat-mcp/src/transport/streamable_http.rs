@@ -1095,6 +1095,42 @@ mod tests {
         Ok(())
     }
 
+    /// GUARD: the transport's own client puts no total bound on a call. An
+    /// answer slower than any credential request bound still arrives, so the
+    /// bound on credential requests never cuts a long tool call. Virtual time.
+    #[tokio::test(start_paused = true)]
+    async fn a_call_slower_than_any_credential_bound_still_completes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const SLOWER_THAN_ANY_CREDENTIAL_BOUND: std::time::Duration =
+            std::time::Duration::from_secs(120);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let uri = format!("http://{}/mcp", listener.local_addr()?);
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                tokio::time::sleep(SLOWER_THAN_ANY_CREDENTIAL_BOUND).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let client = ReqwestStreamableHttpClient::new_with_auth_challenge(
+            HeaderMap::default(),
+            AuthChallengeRecorder::default(),
+        );
+
+        let result = client
+            .post_message(Arc::from(uri), test_message(), None, None, HashMap::new())
+            .await;
+
+        assert!(
+            matches!(result, Ok(StreamableHttpPostResponse::Accepted)),
+            "{result:?}"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn post_message_maps_attached_not_found_to_session_expired()
     -> Result<(), Box<dyn std::error::Error>> {

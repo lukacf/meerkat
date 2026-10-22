@@ -79,13 +79,15 @@ pub use browser_login::{
 #[cfg(feature = "oauth")]
 pub use mcp_oauth::{
     CredentialHttpClientUnavailable, MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH,
-    McpAccountSelection, McpAuthMode, McpOAuthAccountStrategy, McpOAuthAttemptCleanup,
-    McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback, McpOAuthCancelHandle,
-    McpOAuthCeremonyContext, McpOAuthError, McpOAuthListenerCleanup, McpOAuthLoginComplete,
-    McpOAuthLoginDisposition, McpOAuthLoginStart, McpOAuthLoopbackBegin, McpOAuthPendingAttempt,
-    McpOAuthPendingClose, McpOAuthPendingLogin, McpOAuthRegisteredCallback,
-    McpRegisteredRedirectBase, McpServerIdentity, OidcUserInfoAccountStrategy,
-    UNVERIFIED_RESOURCE_STRATEGY_ID, stored_credential_matches_selection,
+    MCP_OAUTH_COMMIT_OBSERVATION_BOUND, MCP_OAUTH_COMPLETION_BOUND, MCP_OAUTH_STAGE_BOUND,
+    MCP_OAUTH_START_BOUND, McpAccountSelection, McpAuthMode, McpOAuthAccountStrategy,
+    McpOAuthAttemptCleanup, McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback,
+    McpOAuthCancelHandle, McpOAuthCeremonyContext, McpOAuthError, McpOAuthListenerCleanup,
+    McpOAuthLoginComplete, McpOAuthLoginDisposition, McpOAuthLoginStart, McpOAuthLoopbackBegin,
+    McpOAuthNetworkBounds, McpOAuthNetworkStage, McpOAuthPendingAttempt, McpOAuthPendingClose,
+    McpOAuthPendingLogin, McpOAuthRegisteredCallback, McpRegisteredRedirectBase, McpServerIdentity,
+    OidcUserInfoAccountStrategy, UNVERIFIED_RESOURCE_STRATEGY_ID,
+    stored_credential_matches_selection,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_core::auth::{

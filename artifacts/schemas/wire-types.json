@@ -153017,9 +153017,11 @@
   "WireAuthErrorBody": {
     "$defs": {
       "WireAuthErrorDetail": {
-        "description": "A stable sub-kind of some auth refusals, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again.",
+        "description": "A stable sub-kind of some auth errors, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again. `upstream_timeout` (reason\n`upstream_failure`): a network stage of an MCP login got no answer within\nits bound before the authorization code was sent; nothing was published\nand the attempt is gone, so start again. `upstream_timeout_after_code`\n(reason `upstream_failure`): the same after the code was sent, so it may\nbe spent at the provider; any tokens it issued were never stored.",
         "enum": [
-          "remote_custody_required"
+          "remote_custody_required",
+          "upstream_timeout",
+          "upstream_timeout_after_code"
         ],
         "type": "string"
       },
@@ -153119,6 +153121,11 @@
           {
             "const": "infrastructure",
             "description": "An internal failure; its detail is only in protected diagnostics.",
+            "type": "string"
+          },
+          {
+            "const": "commit_unsettled",
+            "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit did not report in time: whether the\ncredential landed is unknown until it settles, so read the status\nlater. Neither a success nor a failure.",
             "type": "string"
           }
         ]
@@ -153157,9 +153164,11 @@
   "WireAuthErrorData": {
     "$defs": {
       "WireAuthErrorDetail": {
-        "description": "A stable sub-kind of some auth refusals, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again.",
+        "description": "A stable sub-kind of some auth errors, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again. `upstream_timeout` (reason\n`upstream_failure`): a network stage of an MCP login got no answer within\nits bound before the authorization code was sent; nothing was published\nand the attempt is gone, so start again. `upstream_timeout_after_code`\n(reason `upstream_failure`): the same after the code was sent, so it may\nbe spent at the provider; any tokens it issued were never stored.",
         "enum": [
-          "remote_custody_required"
+          "remote_custody_required",
+          "upstream_timeout",
+          "upstream_timeout_after_code"
         ],
         "type": "string"
       },
@@ -153260,6 +153269,11 @@
             "const": "infrastructure",
             "description": "An internal failure; its detail is only in protected diagnostics.",
             "type": "string"
+          },
+          {
+            "const": "commit_unsettled",
+            "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit did not report in time: whether the\ncredential landed is unknown until it settles, so read the status\nlater. Neither a success nor a failure.",
+            "type": "string"
           }
         ]
       }
@@ -153291,9 +153305,11 @@
   },
   "WireAuthErrorDetail": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "A stable sub-kind of some auth refusals, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again.",
+    "description": "A stable sub-kind of some auth errors, carried beside their `reason`\nfor hosts that must act on it. `remote_custody_required` (reason\n`invalid_target`): an attempt started on a registered `https` redirect\nwas completed without the handle its start returned, with another one,\nor through a path that cannot carry it, for example after the host or\nthe runtime restarted. The attempt stays pending: cancel it by its\nreference and start again. `upstream_timeout` (reason\n`upstream_failure`): a network stage of an MCP login got no answer within\nits bound before the authorization code was sent; nothing was published\nand the attempt is gone, so start again. `upstream_timeout_after_code`\n(reason `upstream_failure`): the same after the code was sent, so it may\nbe spent at the provider; any tokens it issued were never stored.",
     "enum": [
-      "remote_custody_required"
+      "remote_custody_required",
+      "upstream_timeout",
+      "upstream_timeout_after_code"
     ],
     "title": "WireAuthErrorDetail",
     "type": "string"
@@ -153395,6 +153411,11 @@
       {
         "const": "infrastructure",
         "description": "An internal failure; its detail is only in protected diagnostics.",
+        "type": "string"
+      },
+      {
+        "const": "commit_unsettled",
+        "description": "An MCP login's attempt was consumed by its credential commit, or may\nhave been, and the commit did not report in time: whether the\ncredential landed is unknown until it settles, so read the status\nlater. Neither a success nor a failure.",
         "type": "string"
       }
     ],

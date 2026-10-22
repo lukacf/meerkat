@@ -336,6 +336,13 @@ struct TestState {
     /// The authorization-server metadata advertises
     /// `authorization_response_iss_parameter_supported` (RFC 9207).
     iss_parameter_supported: AtomicBool,
+    /// Paths whose requests are accepted and never answered (the connection
+    /// stays open).
+    stalled_paths: Mutex<Vec<String>>,
+    /// Signalled when a request to a stalled path has arrived.
+    stalled: Notify,
+    /// Every answer is delayed by this long.
+    answer_delay: Mutex<Option<Duration>>,
 }
 
 struct RecordingBrowser {
@@ -537,10 +544,18 @@ async fn record_request(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    state
-        .request_paths
-        .lock()
-        .push(request.uri().path().to_owned());
+    let path = request.uri().path().to_owned();
+    state.request_paths.lock().push(path.clone());
+    let stalled = state.stalled_paths.lock().contains(&path);
+    if stalled {
+        // Accepted, never answered.
+        state.stalled.notify_one();
+        std::future::pending::<()>().await;
+    }
+    let delay = *state.answer_delay.lock();
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    }
     next.run(request).await
 }
 
@@ -6885,4 +6900,827 @@ async fn reconnect_across_redirect_classes_needs_a_logout_first() {
         .await
         .expect("the same redirect reconnects");
     assert_eq!(again.disposition, McpOAuthLoginDisposition::Started);
+}
+
+// --- Bounded network stages and an honest commit end --------------------------
+
+use meerkat_auth_core::auth_store::{CredentialSettlement, settle_in_flight_credential_mutations};
+use meerkat_auth_core::mcp_oauth::{McpOAuthNetworkBounds, McpOAuthNetworkStage};
+
+/// Bounds short enough for a test: every stalled stage ends in well under a
+/// second.
+fn short_bounds() -> McpOAuthNetworkBounds {
+    McpOAuthNetworkBounds::default()
+        .with_stage(Duration::from_millis(300))
+        .with_start(Duration::from_secs(3))
+        .with_completion(Duration::from_secs(3))
+        .with_commit_observation(Duration::from_millis(300))
+}
+
+fn with_bounds(authority: FixtureAuthority, bounds: McpOAuthNetworkBounds) -> FixtureAuthority {
+    FixtureAuthority {
+        native: authority.native.with_network_bounds(bounds),
+        ..authority
+    }
+}
+
+/// `future`, or a clean failure (never a stuck run) when it has not ended
+/// within `limit`.
+async fn within<F: std::future::Future>(limit: Duration, what: &str, future: F) -> F::Output {
+    tokio::time::timeout(limit, future)
+        .await
+        .unwrap_or_else(|_| panic!("{what} did not end within {limit:?}"))
+}
+
+/// Requests to `path` are accepted and never answered.
+fn stall(state: &TestState, path: &str) {
+    state.stalled_paths.lock().push(path.to_owned());
+}
+
+/// Requests that reached the UserInfo path, stalled ones included.
+fn userinfo_arrivals(state: &TestState) -> usize {
+    state
+        .request_paths
+        .lock()
+        .iter()
+        .filter(|path| *path == "/userinfo")
+        .count()
+}
+
+fn assert_timed_out(
+    result: &Result<impl std::fmt::Debug, McpOAuthError>,
+    expected: McpOAuthNetworkStage,
+) {
+    match result {
+        Err(error @ McpOAuthError::NetworkTimedOut { stage, .. }) => {
+            assert_eq!(*stage, expected, "{error:?}");
+            assert!(!error.is_refusal(), "a stall is not a refusal");
+        }
+        other => panic!("expected the {expected} stage's typed timeout, got {other:?}"),
+    }
+}
+
+/// The token endpoint accepts the exchange and never answers it; the host
+/// retires the login by its public reference and joins the completion, which
+/// ends at once. Nothing is published and the code is not replayed.
+#[tokio::test]
+async fn cancel_by_reference_ends_a_registered_completion_held_at_the_token_endpoint() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = split_authority(&state, store.clone());
+    let target = split_target(&base, "registered-held-exchange");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    state.pause_code_exchange.store(true, Ordering::SeqCst);
+    let completion = tokio::spawn({
+        let authority = authority.native.clone();
+        let target = target.clone();
+        let callback = registered_callback(&start, &start.state, &handle_of(&start));
+        async move { authority.login_complete_registered(&target, callback).await }
+    });
+    within(
+        Duration::from_secs(10),
+        "the token request",
+        state.code_exchange_started.notified(),
+    )
+    .await;
+
+    authority
+        .cancel_attempt_by_ref(&target, start.attempt_ref().as_str())
+        .unwrap();
+    let completed = within(
+        Duration::from_secs(5),
+        "the retired login's completion",
+        completion,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            completed,
+            Err(McpOAuthError::AttemptRetired { cleanup: None, .. })
+        ),
+        "{completed:?}"
+    );
+    assert!(
+        store.list().await.unwrap().is_empty(),
+        "nothing is published"
+    );
+    assert_eq!(state.token_requests.lock().len(), 1, "no code replay");
+    let fresh = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    assert_eq!(fresh.disposition, McpOAuthLoginDisposition::Started);
+    authority.login_cancel(&target, &fresh).unwrap();
+}
+
+/// The same with the account evidence stalled: the code was redeemed, and
+/// the tokens are never stored.
+#[tokio::test]
+async fn cancel_by_reference_ends_a_registered_completion_held_at_userinfo() {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.token_scope_override.lock() = Some("openid mcp.read".to_owned());
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = oidc_authority(store.clone());
+    let target = oidc_target(&base, "oidc-subject-7");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    stall(&state, "/userinfo");
+    let completion = tokio::spawn({
+        let authority = authority.clone();
+        let target = target.clone();
+        let callback = registered_callback(&start, &start.state, &handle_of(&start));
+        async move { authority.login_complete_registered(&target, callback).await }
+    });
+    within(
+        Duration::from_secs(10),
+        "the userinfo request",
+        state.stalled.notified(),
+    )
+    .await;
+
+    authority
+        .cancel_attempt_by_ref(&target, start.attempt_ref().as_str())
+        .unwrap();
+    let completed = within(
+        Duration::from_secs(5),
+        "the retired login's completion",
+        completion,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            completed,
+            Err(McpOAuthError::AttemptRetired { cleanup: None, .. })
+        ),
+        "{completed:?}"
+    );
+    assert!(
+        store.list().await.unwrap().is_empty(),
+        "nothing is published"
+    );
+    assert_eq!(state.token_requests.lock().len(), 1, "no code replay");
+    assert_eq!(userinfo_arrivals(&state), 1);
+}
+
+/// With no cancel at all, a token endpoint that never answers ends the
+/// completion at its stage bound, typed, with the code known to be sent. The
+/// attempt is retired and nothing is published.
+#[tokio::test]
+async fn a_stalled_token_exchange_ends_typed_with_the_code_sent() {
+    // Registered.
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = with_bounds(split_authority(&state, store.clone()), short_bounds());
+    let target = split_target(&base, "registered-stalled-exchange");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    state.pause_code_exchange.store(true, Ordering::SeqCst);
+    let callback = registered_callback(&start, &start.state, &handle_of(&start));
+    let completed = within(
+        Duration::from_secs(10),
+        "the stalled registered completion",
+        authority.login_complete_registered(&target, callback.clone()),
+    )
+    .await;
+    assert_timed_out(&completed, McpOAuthNetworkStage::TokenExchange);
+    assert!(McpOAuthNetworkStage::TokenExchange.code_sent());
+    let replay = authority.login_complete_registered(&target, callback).await;
+    assert!(
+        matches!(replay, Err(McpOAuthError::Flow(OAuthFlowError::Missing))),
+        "the attempt was retired: {replay:?}"
+    );
+    assert!(store.list().await.unwrap().is_empty());
+    assert_eq!(state.token_requests.lock().len(), 1, "no code replay");
+
+    // Loopback split.
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = with_bounds(split_authority(&state, store.clone()), short_bounds());
+    let target = split_target(&base, "split-stalled-exchange");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    state.pause_code_exchange.store(true, Ordering::SeqCst);
+    let completed = within(
+        Duration::from_secs(10),
+        "the stalled split completion",
+        authority.login_complete(&target, split_callback(&start, &start.state)),
+    )
+    .await;
+    assert_timed_out(&completed, McpOAuthNetworkStage::TokenExchange);
+    assert_attempt_retired(&authority, &target, &start).await;
+    assert!(store.list().await.unwrap().is_empty());
+    assert_eq!(state.token_requests.lock().len(), 1, "no code replay");
+}
+
+#[tokio::test]
+async fn a_stalled_userinfo_ends_typed_after_the_code_was_redeemed() {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.token_scope_override.lock() = Some("openid mcp.read".to_owned());
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = oidc_authority(store.clone()).with_network_bounds(short_bounds());
+    let target = oidc_target(&base, "oidc-subject-7");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    stall(&state, "/userinfo");
+    let completed = within(
+        Duration::from_secs(10),
+        "the completion held at userinfo",
+        authority.login_complete(&target, split_callback(&start, &start.state)),
+    )
+    .await;
+    assert_timed_out(&completed, McpOAuthNetworkStage::AccountEvidence);
+    assert!(McpOAuthNetworkStage::AccountEvidence.code_sent());
+    assert!(!McpOAuthNetworkStage::AuthorizationServerMetadata.code_sent());
+    assert!(
+        store.list().await.unwrap().is_empty(),
+        "nothing is published"
+    );
+    assert_eq!(state.token_requests.lock().len(), 1);
+    assert_eq!(userinfo_arrivals(&state), 1);
+}
+
+/// Discovery stalls before any attempt exists: the start ends typed, admits
+/// nothing, and frees the target's admission for the next start.
+#[tokio::test]
+async fn a_stalled_start_discovery_ends_typed_admits_nothing_and_frees_the_target() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = with_bounds(
+        split_authority(&state, Arc::new(EphemeralTokenStore::new())),
+        short_bounds(),
+    );
+    let target = split_target(&base, "stalled-discovery");
+    stall(&state, "/.well-known/oauth-authorization-server");
+    let started = within(
+        Duration::from_secs(10),
+        "the stalled registered start",
+        authority.login_start_registered(&target, &registered_base(), None),
+    )
+    .await;
+    assert_timed_out(&started, McpOAuthNetworkStage::AuthorizationServerMetadata);
+    assert_eq!(
+        authority.pending_attempt(&target).unwrap(),
+        None,
+        "nothing was admitted"
+    );
+    assert!(state.registration_requests.lock().is_empty());
+
+    // The loopback start binds its listener first and ends the same way.
+    match within(
+        Duration::from_secs(10),
+        "the stalled loopback start",
+        authority.begin_loopback_login(&target, None),
+    )
+    .await
+    {
+        Err(McpOAuthError::NetworkTimedOut { stage, .. }) => {
+            assert_eq!(stage, McpOAuthNetworkStage::AuthorizationServerMetadata);
+        }
+        Err(other) => panic!("expected the typed discovery timeout, got {other:?}"),
+        Ok(_) => panic!("a stalled discovery admits nothing"),
+    }
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+
+    state.stalled_paths.lock().clear();
+    let fresh = within(
+        Duration::from_secs(10),
+        "a start after the stall",
+        authority.login_start_registered(&target, &registered_base(), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fresh.disposition, McpOAuthLoginDisposition::Started);
+    authority.login_cancel(&target, &fresh).unwrap();
+}
+
+/// A well-known probe whose request timed out at its own client's bound is
+/// a typed stage timeout, never an absent document (the next candidates
+/// would answer 404 and read as "no metadata").
+#[tokio::test]
+async fn a_stalled_well_known_probe_is_a_timeout_not_an_absent_document() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let short_request_client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let authority = FixtureAuthority::with_test_http(
+        Arc::new(EphemeralTokenStore::new()),
+        recording_browser(Arc::clone(&state)),
+        short_request_client,
+        test_auth_lease(),
+    );
+    let target = split_target(&base, "stalled-probe");
+    stall(&state, "/.well-known/oauth-protected-resource/mcp");
+    let started = within(
+        Duration::from_secs(10),
+        "the start with a stalled probe",
+        authority.login_start(&target, SPLIT_REDIRECT, None),
+    )
+    .await;
+    assert_timed_out(&started, McpOAuthNetworkStage::ResourceMetadata);
+    assert!(state.registration_requests.lock().is_empty());
+}
+
+/// A refresh whose token endpoint never answers held the credential's
+/// exclusive mutation without bound, so a re-login's commit for the same
+/// credential (or a logout) waited forever. It now fails transient at its
+/// stage bound and the re-login lands.
+async fn relogin_behind_a_stalled_refresh(
+    persistence: ProviderAuthPersistence,
+    store: Arc<dyn TokenStore>,
+    base: &str,
+    state: &Arc<TestState>,
+) {
+    let authority = with_bounds(
+        FixtureAuthority::with_fixture_http(
+            persistence,
+            recording_browser(Arc::clone(state)),
+            Client::new(),
+            test_auth_lease(),
+        ),
+        short_bounds().with_commit_observation(Duration::from_secs(10)),
+    );
+    let target = McpServerIdentity::from_server_config("stalled-refresh", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    authority.interactive_login(&target, None).await.unwrap();
+    republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+        tokens.primary_secret = Some("stale-access-token".to_string());
+        tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    })
+    .await;
+    // The token endpoint accepts the refresh and never answers it.
+    state.pause_refresh.store(true, Ordering::SeqCst);
+    let refresh = tokio::spawn({
+        let authority = authority.clone();
+        let target = target.clone();
+        async move { authority.stored_bearer_token(&target).await }
+    });
+    within(
+        Duration::from_secs(10),
+        "the refresh request",
+        state.refresh_started.notified(),
+    )
+    .await;
+
+    let relogin = within(
+        Duration::from_secs(10),
+        "the re-login behind the stalled refresh",
+        authority.interactive_login(&target, None),
+    )
+    .await;
+    assert_eq!(relogin.unwrap(), "access-token");
+    let refreshed = within(Duration::from_secs(10), "the stalled refresh", refresh)
+        .await
+        .unwrap();
+    assert!(
+        matches!(refreshed, Err(McpOAuthError::RefreshFailed { .. })),
+        "a transient refresh failure: {refreshed:?}"
+    );
+    let stored = store
+        .load(&target.token_key().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.primary_secret.as_deref(), Some("access-token"));
+}
+
+#[tokio::test]
+async fn a_stalled_refresh_fails_transient_and_lets_a_relogin_commit_land() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    relogin_behind_a_stalled_refresh(
+        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+        store,
+        &base,
+        &state,
+    )
+    .await;
+}
+
+#[cfg(feature = "file-lock")]
+#[tokio::test]
+async fn a_stalled_refresh_under_the_file_lock_lets_a_relogin_commit_land() {
+    use meerkat_auth_core::auth_store::{FileLockCoordinator, FileTokenStore};
+    let (base, state) = spawn_oauth_fixture().await;
+    let temp = tempfile::tempdir().unwrap();
+    let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(temp.path().join("credentials")));
+    relogin_behind_a_stalled_refresh(
+        ProviderAuthPersistence::new(
+            Arc::clone(&store),
+            Arc::new(FileLockCoordinator::new(temp.path().join("locks"))),
+        ),
+        store,
+        &base,
+        &state,
+    )
+    .await;
+}
+
+/// The commit consumed the attempt and its save is held past the
+/// observation bound: the completion ends as an explicit unsettled outcome
+/// (never success, never a clean failure); the commit's owner finishes on
+/// its own and a later read of the stored credential reports the true end.
+#[tokio::test]
+async fn a_commit_held_past_its_observation_bound_is_unsettled_then_settles() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let inner = Arc::new(EphemeralTokenStore::new());
+    let paused = Arc::new(PausedSaveStore {
+        inner: inner.clone(),
+        pause: AtomicBool::new(true),
+        save_started: Notify::new(),
+        save_release: Notify::new(),
+        saved: Notify::new(),
+    });
+    let authority = with_bounds(
+        FixtureAuthority::with_fixture_http(
+            ProviderAuthPersistence::new(paused.clone(), Arc::new(InMemoryCoordinator::new())),
+            recording_browser(Arc::clone(&state)),
+            no_redirect_client(),
+            test_auth_lease(),
+        ),
+        short_bounds(),
+    );
+
+    // Registered.
+    let target = split_target(&base, "commit-unsettled");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let completed = within(
+        Duration::from_secs(10),
+        "the completion observing a held commit",
+        authority.login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        ),
+    )
+    .await;
+    match &completed {
+        Err(error @ McpOAuthError::CommitUnsettled { .. }) => assert!(!error.is_refusal()),
+        other => panic!("expected the unsettled commit, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            settle_in_flight_credential_mutations(Duration::from_millis(50)).await,
+            CredentialSettlement::Unsettled { .. }
+        ),
+        "the commit's owner is still running"
+    );
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+    let saved = paused.saved.notified();
+    paused.save_release.notify_one();
+    within(Duration::from_secs(10), "the commit owner's save", saved).await;
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token"),
+        "the later read reports the true end: the credential landed"
+    );
+
+    // Loopback: the pending login reports the commit as unobserved.
+    paused.pause.store(true, Ordering::SeqCst);
+    let target = split_target(&base, "commit-unsettled-loopback");
+    let mut pending = started_loopback_login(&authority, &target).await;
+    let start = pending.start().clone();
+    let browser = tokio::spawn({
+        let url = start.authorize_url.clone();
+        async move { follow_authorize(&url).await }
+    });
+    let far = tokio::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
+    let completed = within(
+        Duration::from_secs(10),
+        "the loopback completion observing a held commit",
+        pending.complete_until(far),
+    )
+    .await;
+    assert!(
+        matches!(completed, Err(McpOAuthError::CommitUnsettled { .. })),
+        "{completed:?}"
+    );
+    browser.await.unwrap();
+    let closed = pending.close().await;
+    assert!(
+        matches!(
+            closed.attempt,
+            McpOAuthAttemptCleanup::Absent {
+                completion_unobserved: true
+            }
+        ),
+        "{closed:?}"
+    );
+    let saved = paused.saved.notified();
+    paused.save_release.notify_one();
+    within(Duration::from_secs(10), "the commit owner's save", saved).await;
+    assert_eq!(inner.list().await.unwrap().len(), 2);
+    assert_eq!(state.token_requests.lock().len(), 2, "no code replay");
+}
+
+/// A cancel handle used while the delivered callback's completion is held at
+/// the token endpoint ends that completion at once, with the login's close
+/// receipt.
+#[tokio::test]
+async fn a_cancel_handle_ends_an_entered_loopback_completion() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = split_authority(&state, store.clone());
+    let target = split_target(&base, "loopback-held-exchange");
+    let pending = started_loopback_login(&authority, &target).await;
+    let start = pending.start().clone();
+    let handle = pending.cancel_handle();
+    state.pause_code_exchange.store(true, Ordering::SeqCst);
+    let browser = tokio::spawn({
+        let url = start.authorize_url.clone();
+        async move { follow_authorize(&url).await }
+    });
+    let canceller = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            state.code_exchange_started.notified().await;
+            handle.cancel()
+        }
+    });
+    let completed = within(
+        Duration::from_secs(10),
+        "the entered completion",
+        pending.complete(MCP_INTERACTIVE_LOGIN_TIMEOUT),
+    )
+    .await;
+    within(Duration::from_secs(5), "the cancel", canceller)
+        .await
+        .unwrap()
+        .unwrap();
+    browser.await.unwrap();
+    match completed {
+        Err(McpOAuthError::AttemptRetired {
+            cleanup: Some(closed),
+            ..
+        }) => {
+            assert!(
+                matches!(closed.attempt, McpOAuthAttemptCleanup::Retired),
+                "{closed:?}"
+            );
+            assert!(
+                matches!(closed.listener, McpOAuthListenerCleanup::Joined(_)),
+                "{closed:?}"
+            );
+        }
+        other => panic!("expected the retired completion with its receipt, got {other:?}"),
+    }
+    assert!(store.list().await.unwrap().is_empty());
+    assert_eq!(state.token_requests.lock().len(), 1, "no code replay");
+    assert_fresh_continuation(&authority, &target, &start).await;
+}
+
+/// Two waiters of one attempt: a loopback wait, and a completion of the
+/// same attempt through the split seam (a pasted callback). One cancel by
+/// reference wakes both: a second registration never displaces the first.
+#[tokio::test]
+async fn a_cancel_wakes_both_a_loopback_wait_and_a_completion_of_its_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = split_authority(&state, store.clone());
+    let target = split_target(&base, "two-waiters");
+    let mut pending = started_loopback_login(&authority, &target).await;
+    let start = pending.start().clone();
+    state.pause_code_exchange.store(true, Ordering::SeqCst);
+    let completion = tokio::spawn({
+        let authority = authority.native.clone();
+        let target = target.clone();
+        let callback = split_callback(&start, &start.state);
+        async move { authority.login_complete(&target, callback).await }
+    });
+    let far = tokio::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
+    let (waited, ()) = within(Duration::from_secs(10), "the loopback wait", async {
+        tokio::join!(pending.complete_until(far), async {
+            state.code_exchange_started.notified().await;
+            authority
+                .cancel_attempt_by_ref(&target, start.attempt_ref().as_str())
+                .unwrap();
+        })
+    })
+    .await;
+    assert!(
+        matches!(
+            waited,
+            Err(McpOAuthError::AttemptRetired { cleanup: None, .. })
+        ),
+        "the loopback wait is woken: {waited:?}"
+    );
+    let completed = within(Duration::from_secs(5), "the split completion", completion)
+        .await
+        .unwrap();
+    assert!(
+        matches!(completed, Err(McpOAuthError::AttemptRetired { .. })),
+        "the completion is woken: {completed:?}"
+    );
+    let closed = pending.close().await;
+    assert!(
+        matches!(closed.attempt, McpOAuthAttemptCleanup::Retired),
+        "{closed:?}"
+    );
+    assert!(store.list().await.unwrap().is_empty());
+}
+
+/// Earlier credential work holds the credential's lifecycle, so the commit
+/// cannot reach its consume within the observation bound: the flow owner
+/// retires the attempt, so nothing can be published, and the completion
+/// ends with the typed pending refusal.
+#[tokio::test]
+async fn a_commit_not_admitted_within_its_bound_is_retired_and_publishes_nothing() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = with_bounds(split_authority(&state, store.clone()), short_bounds());
+    let target = split_target(&base, "commit-not-admitted");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    let callback = registered_callback(&start, &start.state, &handle_of(&start));
+    let held = meerkat_core::acquire_auth_login_lifecycle_guard(&target.lease_key().unwrap()).await;
+    let completed = within(
+        Duration::from_secs(10),
+        "the completion behind a held lifecycle",
+        authority.login_complete_registered(&target, callback.clone()),
+    )
+    .await;
+    assert!(
+        matches!(
+            completed,
+            Err(McpOAuthError::CredentialAccess {
+                refusal: meerkat_core::auth::TokenStoreRefusal::Pending,
+                ..
+            })
+        ),
+        "{completed:?}"
+    );
+    assert_eq!(
+        authority.pending_attempt(&target).unwrap(),
+        None,
+        "the flow owner retired the attempt"
+    );
+    drop(held);
+    // The commit, admitted now, is refused at its consume.
+    let _ = settle_in_flight_credential_mutations(Duration::from_secs(5)).await;
+    assert!(
+        store.list().await.unwrap().is_empty(),
+        "nothing is published"
+    );
+    let replay = authority.login_complete_registered(&target, callback).await;
+    assert!(
+        matches!(replay, Err(McpOAuthError::Flow(OAuthFlowError::Missing))),
+        "{replay:?}"
+    );
+    assert_eq!(state.token_requests.lock().len(), 1, "no code replay");
+}
+
+/// The flow owner linearizes a consume against a retirement of the same
+/// attempt: exactly one wins, and the other is told the attempt is missing.
+/// The commit's arbitration rests on this.
+#[test]
+fn consume_and_retire_race_has_exactly_one_winner() {
+    use meerkat_auth_core::connector_oauth::OAuthBrowserFlowCompletion;
+    use meerkat_auth_core::oauth_flow::{OAuthBrowserFlowIdentity, OAuthFlowAuthority};
+    let owner = test_auth_lease();
+    let flows =
+        RuntimeOAuthFlowHandle::new_with_auth_lease(MCP_INTERACTIVE_LOGIN_TIMEOUT, owner.lifecycle);
+    let target = split_target("http://127.0.0.1:9", "race");
+    let credential: meerkat_core::AuthCredentialIdentity =
+        target.auth_binding_ref().unwrap().into();
+    let redirect = SPLIT_REDIRECT.to_owned();
+    let descriptor: ConnectorOAuthDescriptor =
+        meerkat_auth_core::connector_oauth::ConnectorOAuthParameters {
+            issuer: "http://127.0.0.1:9".to_owned(),
+            client: "client-123".to_owned(),
+            resource: "http://127.0.0.1:9/mcp".to_owned(),
+            redirect_uri: redirect.clone(),
+            scopes: ["mcp.read".to_owned()].into(),
+            expected_account: "fixture-account-42".into(),
+            strategy_id: "test-provider-authenticated-evidence".into(),
+            client_auth_profile: None,
+            protocol: None,
+        }
+        .try_into()
+        .unwrap();
+    let tokens = OAuthTokenResult {
+        access_token: "access-token".to_owned(),
+        refresh_token: None,
+        id_token: None,
+        expires_in_secs: Some(3600),
+        scope: Some("mcp.read".to_owned()),
+    };
+    let (mut consumed_wins, mut retired_wins) = (0, 0);
+    for _ in 0..32 {
+        let identity: OAuthBrowserFlowIdentity = descriptor.clone().into();
+        let state = flows
+            .start(
+                credential.clone(),
+                identity.clone(),
+                redirect.clone(),
+                "race-verifier-0123456789-0123456789-0123456789".to_owned(),
+            )
+            .unwrap();
+        let completion: OAuthBrowserFlowCompletion = descriptor
+            .verify_account(
+                ConnectorAccountObservation {
+                    account: "fixture-account-42".to_owned(),
+                    granted_scopes: ["mcp.read".to_owned()].into(),
+                },
+                &tokens,
+            )
+            .unwrap()
+            .into();
+        let barrier = std::sync::Barrier::new(2);
+        let (consumed, retired) = std::thread::scope(|scope| {
+            let consumed = scope.spawn(|| {
+                barrier.wait();
+                flows.consume(&state, &credential, completion, &redirect)
+            });
+            let retired = scope.spawn(|| {
+                barrier.wait();
+                flows.expire(&state, &credential, identity, &redirect)
+            });
+            (consumed.join().unwrap(), retired.join().unwrap())
+        });
+        match (&consumed, &retired) {
+            (Ok(_), Err(OAuthFlowError::Missing)) => consumed_wins += 1,
+            (Err(OAuthFlowError::Missing), Ok(())) => retired_wins += 1,
+            (consumed, retired) => {
+                panic!("exactly one wins: consume {consumed:?}, retire {retired:?}")
+            }
+        }
+    }
+    assert_eq!(consumed_wins + retired_wins, 32);
+}
+
+/// GUARD: a provider that answers every request, if slowly, inside its
+/// bounds still logs in, with exactly one token request.
+#[tokio::test]
+async fn a_slow_provider_inside_its_bounds_still_logs_in() {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.answer_delay.lock() = Some(Duration::from_millis(100));
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = with_bounds(
+        split_authority(&state, store.clone()),
+        McpOAuthNetworkBounds::default()
+            .with_stage(Duration::from_secs(5))
+            .with_start(Duration::from_secs(10))
+            .with_completion(Duration::from_secs(10))
+            .with_commit_observation(Duration::from_secs(10)),
+    );
+    let target = split_target(&base, "slow-provider");
+    let start = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    authority
+        .login_complete_registered(
+            &target,
+            registered_callback(&start, &start.state, &handle_of(&start)),
+        )
+        .await
+        .expect("a slow provider inside its bounds completes");
+    assert_eq!(state.token_requests.lock().len(), 1);
+    assert_eq!(store.list().await.unwrap().len(), 1);
+}
+
+/// GUARD: dropping a start before it returns admits no attempt.
+#[tokio::test]
+async fn dropping_a_start_admits_no_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "dropped-start");
+    stall(&state, "/register");
+    let base_redirect = registered_base();
+    let mut start = Box::pin(authority.login_start_registered(&target, &base_redirect, None));
+    tokio::select! {
+        started = &mut start => panic!("registration is stalled: {started:?}"),
+        () = state.stalled.notified() => {}
+    }
+    drop(start);
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+    state.stalled_paths.lock().clear();
+    let fresh = authority
+        .login_start_registered(&target, &registered_base(), None)
+        .await
+        .unwrap();
+    assert_eq!(fresh.disposition, McpOAuthLoginDisposition::Started);
+    authority.login_cancel(&target, &fresh).unwrap();
 }

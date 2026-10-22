@@ -10,7 +10,7 @@ use meerkat_providers::auth_store::{
 };
 use meerkat_providers::connector_login::ConnectorLoginError;
 use meerkat_providers::connector_oauth::ConnectorOAuthRefusal;
-use meerkat_providers::mcp_oauth::McpOAuthError;
+use meerkat_providers::mcp_oauth::{McpOAuthError, McpOAuthNetworkStage};
 use meerkat_providers::oauth_flow::OAuthFlowError;
 
 use crate::{HostAuthError, HostMcpTargetRefusal};
@@ -55,6 +55,7 @@ pub fn all_reasons() -> Vec<R> {
         R::CredentialAccessPending,
         R::CredentialStoreUnavailable,
         R::Infrastructure,
+        R::CommitUnsettled,
     ];
     for reason in &reasons {
         // Adding a reason without listing it above fails to compile here.
@@ -92,7 +93,8 @@ pub fn all_reasons() -> Vec<R> {
             | R::CredentialInteractionRequired
             | R::CredentialAccessPending
             | R::CredentialStoreUnavailable
-            | R::Infrastructure => {}
+            | R::Infrastructure
+            | R::CommitUnsettled => {}
         }
     }
     reasons
@@ -360,6 +362,19 @@ pub fn reason_examples() -> Vec<(HostAuthError, R)> {
                 reason: "token endpoint refused the refresh".into(),
             }),
             R::UpstreamFailure,
+        ),
+        (
+            HostAuthError::McpOAuth(McpOAuthError::NetworkTimedOut {
+                server_name: "s".into(),
+                stage: McpOAuthNetworkStage::TokenExchange,
+            }),
+            R::UpstreamFailure,
+        ),
+        (
+            HostAuthError::McpOAuth(McpOAuthError::CommitUnsettled {
+                server_name: "s".into(),
+            }),
+            R::CommitUnsettled,
         ),
         (
             HostAuthError::Connector(ConnectorLoginError::CredentialAccess {

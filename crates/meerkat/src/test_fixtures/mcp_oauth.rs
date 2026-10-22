@@ -64,6 +64,11 @@ struct FixtureState {
     redirect_uri: Mutex<Option<String>>,
     request_paths: Mutex<Vec<String>>,
     fail_token_exchange: AtomicBool,
+    /// The token endpoint accepts an authorization-code exchange and never
+    /// answers it.
+    stall_token_exchange: AtomicBool,
+    /// Signalled when a stalled exchange has arrived.
+    token_exchange_stalled: tokio::sync::Notify,
 }
 
 /// A running fixture. The listener lives for the rest of the process.
@@ -130,6 +135,19 @@ impl McpOAuthFixture {
     pub fn fail_token_exchange(&self, fail: bool) {
         self.state.fail_token_exchange.store(fail, Ordering::SeqCst);
     }
+
+    /// Make the token endpoint accept authorization-code exchanges and never
+    /// answer them (the connection stays open).
+    pub fn stall_token_exchange(&self, stall: bool) {
+        self.state
+            .stall_token_exchange
+            .store(stall, Ordering::SeqCst);
+    }
+
+    /// Resolves once a stalled authorization-code exchange has arrived.
+    pub async fn token_exchange_stalled(&self) {
+        self.state.token_exchange_stalled.notified().await;
+    }
 }
 
 /// Follow an authorize URL the way a browser would (redirects followed), so
@@ -189,6 +207,15 @@ async fn serve_connection(
     };
     if let Ok(mut paths) = state.request_paths.lock() {
         paths.push(request.path.clone());
+    }
+    if request.method == "POST"
+        && request.path == "/token"
+        && state.stall_token_exchange.load(Ordering::SeqCst)
+        && form(&request.body).get("grant_type").map(String::as_str) == Some("authorization_code")
+    {
+        // Accepted, never answered: the connection stays open.
+        state.token_exchange_stalled.notify_one();
+        std::future::pending::<()>().await;
     }
     let response = route(&request, base, state);
     let reason = match response.status {

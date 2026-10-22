@@ -52,6 +52,156 @@ const CLIENT_NAME: &str = "Meerkat rkat";
 pub const MCP_INTERACTIVE_LOGIN_TIMEOUT: Duration =
     crate::connector_oauth::CONNECTOR_BROWSER_LOGIN_WINDOW;
 
+/// Default bound of one network stage of an MCP OAuth start, completion or
+/// refresh ([`McpOAuthNetworkStage`]): every request of the stage, from its
+/// first send to its last body byte. Shorter than
+/// [`crate::auth_oauth::CREDENTIAL_REQUEST_TIMEOUT`], so a stall ends as this
+/// owner's typed stage outcome.
+pub const MCP_OAUTH_STAGE_BOUND: Duration = Duration::from_secs(20);
+
+/// Default bound of a start's network stages together (resource and
+/// authorization-server discovery, account preflight, client registration).
+pub const MCP_OAUTH_START_BOUND: Duration = Duration::from_secs(60);
+
+/// Default bound of a completion's network stages together (issuer metadata,
+/// token exchange, account evidence). It never extends past the attempt's own
+/// validity: a result after that would be refused anyway.
+pub const MCP_OAUTH_COMPLETION_BOUND: Duration = Duration::from_secs(60);
+
+/// Default time a completion observes its credential commit before the flow
+/// owner decides which side of the attempt's consume the commit is on. Longer
+/// than a refresh holds the credential (two stages), so a login queued behind
+/// a stalled refresh lands once that refresh has failed.
+pub const MCP_OAUTH_COMMIT_OBSERVATION_BOUND: Duration = Duration::from_secs(60);
+
+/// One network stage of an MCP OAuth start or completion, as named by
+/// [`McpOAuthError::NetworkTimedOut`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum McpOAuthNetworkStage {
+    /// The protected resource's metadata: its well-known probes and the
+    /// metadata document. A start stage.
+    ResourceMetadata,
+    /// The authorization server's metadata (RFC 8414 or OpenID Connect
+    /// discovery). A start stage, and the first completion stage: the code
+    /// has not been sent.
+    AuthorizationServerMetadata,
+    /// The account strategy's preflight of the issuer. A start stage.
+    AccountPreflight,
+    /// Dynamic client registration. A start stage.
+    ClientRegistration,
+    /// The authorization-code exchange: the code was sent and no answer
+    /// arrived, so it may be spent at the provider. A completion stage.
+    TokenExchange,
+    /// The account strategy's evidence for the exchanged token: the code was
+    /// redeemed and the tokens were discarded unpublished. A completion stage.
+    AccountEvidence,
+}
+
+impl McpOAuthNetworkStage {
+    /// Whether the authorization code had been sent when this stage ended.
+    /// Either way nothing was published and the code is never replayed.
+    pub fn code_sent(self) -> bool {
+        matches!(self, Self::TokenExchange | Self::AccountEvidence)
+    }
+}
+
+impl std::fmt::Display for McpOAuthNetworkStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ResourceMetadata => "protected resource metadata discovery",
+            Self::AuthorizationServerMetadata => "authorization server metadata discovery",
+            Self::AccountPreflight => "account strategy preflight",
+            Self::ClientRegistration => "dynamic client registration",
+            Self::TokenExchange => "authorization-code exchange",
+            Self::AccountEvidence => "account evidence",
+        })
+    }
+}
+
+/// How long the MCP OAuth owner waits on the network.
+///
+/// Each network stage ([`McpOAuthNetworkStage`], and a refresh's token
+/// request and subject re-observation) is bounded by `stage`; one bound covers
+/// all of a stage's sequential requests (the up to three well-known probes and
+/// the resource metadata document; the two or three authorization-server
+/// candidates), so a slow provider spends one bound across them. A start's
+/// stages together are bounded by `start`, and a completion's by `completion`,
+/// never past the attempt's own validity. A completion observes its credential
+/// commit for `commit_observation`, then the flow owner decides: an attempt it
+/// can still retire publishes nothing, one it cannot is
+/// [`McpOAuthError::CommitUnsettled`]. The defaults are
+/// [`MCP_OAUTH_STAGE_BOUND`], [`MCP_OAUTH_START_BOUND`],
+/// [`MCP_OAUTH_COMPLETION_BOUND`] and [`MCP_OAUTH_COMMIT_OBSERVATION_BOUND`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpOAuthNetworkBounds {
+    stage: Duration,
+    start: Duration,
+    completion: Duration,
+    commit_observation: Duration,
+}
+
+impl Default for McpOAuthNetworkBounds {
+    fn default() -> Self {
+        Self {
+            stage: MCP_OAUTH_STAGE_BOUND,
+            start: MCP_OAUTH_START_BOUND,
+            completion: MCP_OAUTH_COMPLETION_BOUND,
+            commit_observation: MCP_OAUTH_COMMIT_OBSERVATION_BOUND,
+        }
+    }
+}
+
+impl McpOAuthNetworkBounds {
+    /// The bound of one network stage.
+    #[must_use]
+    pub fn with_stage(mut self, bound: Duration) -> Self {
+        self.stage = bound;
+        self
+    }
+
+    /// The bound of a start's network stages together.
+    #[must_use]
+    pub fn with_start(mut self, bound: Duration) -> Self {
+        self.start = bound;
+        self
+    }
+
+    /// The bound of a completion's network stages together.
+    #[must_use]
+    pub fn with_completion(mut self, bound: Duration) -> Self {
+        self.completion = bound;
+        self
+    }
+
+    /// How long a completion observes its credential commit.
+    #[must_use]
+    pub fn with_commit_observation(mut self, bound: Duration) -> Self {
+        self.commit_observation = bound;
+        self
+    }
+
+    /// The bound of one network stage.
+    pub fn stage(&self) -> Duration {
+        self.stage
+    }
+
+    /// The bound of a start's network stages together.
+    pub fn start(&self) -> Duration {
+        self.start
+    }
+
+    /// The bound of a completion's network stages together.
+    pub fn completion(&self) -> Duration {
+        self.completion
+    }
+
+    /// How long a completion observes its credential commit.
+    pub fn commit_observation(&self) -> Duration {
+        self.commit_observation
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpAuthMode {
     Stored,
@@ -1547,6 +1697,26 @@ pub enum McpOAuthError {
         server_name: String,
         reason: HttpEgressUnavailable,
     },
+    /// A network stage of a start or completion got no answer within its
+    /// bound ([`McpOAuthNetworkBounds`]). Nothing was published: a start
+    /// admitted no attempt, and a completion's attempt was retired. Retry with
+    /// a new login; the authorization code is never replayed.
+    /// [`McpOAuthNetworkStage::code_sent`] tells whether the code had been
+    /// sent (and may be spent at the provider).
+    #[error("MCP OAuth {stage} for '{server_name}' got no answer within its bound")]
+    NetworkTimedOut {
+        server_name: String,
+        stage: McpOAuthNetworkStage,
+    },
+    /// The credential commit consumed the attempt, or may have, and did not
+    /// report within its observation bound, or its owner was lost. Whether the
+    /// credential landed is unknown until the commit settles: its owner keeps
+    /// running to its end, and a later read of the stored credential reports
+    /// the outcome. Never a success and never a clean failure.
+    #[error(
+        "MCP OAuth login for '{server_name}': the credential commit has not reported; whether the credential landed is unknown until it settles"
+    )]
+    CommitUnsettled { server_name: String },
 }
 
 impl McpOAuthError {
@@ -1584,7 +1754,9 @@ impl McpOAuthError {
             | Self::MissingStoredMetadata { .. }
             | Self::HttpClientUnavailable(_)
             | Self::EgressUnavailable { .. }
-            | Self::AuthLifecycle { .. } => false,
+            | Self::AuthLifecycle { .. }
+            | Self::NetworkTimedOut { .. }
+            | Self::CommitUnsettled { .. } => false,
         }
     }
 
@@ -1629,6 +1801,8 @@ pub struct McpOAuthAuthority {
     /// The host egress profile every OAuth request of this authority is
     /// admitted by; a required profile also supplies its client.
     egress: HttpEgressProfile,
+    /// How long this authority waits on the network.
+    bounds: McpOAuthNetworkBounds,
 }
 
 impl McpOAuthAuthority {
@@ -1662,6 +1836,7 @@ impl McpOAuthAuthority {
             interactive: None,
             realm: None,
             egress: HttpEgressProfile::trusted_host(),
+            bounds: McpOAuthNetworkBounds::default(),
         }
     }
 
@@ -1679,6 +1854,7 @@ impl McpOAuthAuthority {
             interactive: None,
             realm: None,
             egress: HttpEgressProfile::trusted_host(),
+            bounds: McpOAuthNetworkBounds::default(),
         }
     }
 
@@ -1693,6 +1869,21 @@ impl McpOAuthAuthority {
     pub fn with_http_egress(mut self, profile: &HttpEgressProfile) -> Self {
         self.egress = profile.clone();
         self
+    }
+
+    /// Wait on the network at most `bounds` (see [`McpOAuthNetworkBounds`]).
+    /// They hold for every client this authority uses, a host-supplied one
+    /// and the egress profile's included, and for its account strategy's
+    /// calls.
+    #[must_use]
+    pub fn with_network_bounds(mut self, bounds: McpOAuthNetworkBounds) -> Self {
+        self.bounds = bounds;
+        self
+    }
+
+    /// The network bounds this authority waits within.
+    pub fn network_bounds(&self) -> McpOAuthNetworkBounds {
+        self.bounds
     }
 
     /// The required egress profile this authority enforces for all of its
@@ -3911,13 +4102,19 @@ fn retire_attempt(
     redirect_uri: &str,
 ) -> Result<(), OAuthFlowError> {
     authority.expire(state, target, identity, redirect_uri)?;
+    wake_attempt_waiters(state);
+    Ok(())
+}
+
+/// Wake every waiter of the attempt admitted under `state`. Only a confirmed
+/// retirement calls it.
+fn wake_attempt_waiters(state: &str) {
     if let Some((_, sender)) = attempt_wakers()
         .lock()
         .get(OAuthBrowserActionRef::project(state).as_str())
     {
         sender.send_replace(true);
     }
-    Ok(())
 }
 
 /// Serializes start-or-join per MCP target within this process, so a target
@@ -6055,6 +6252,38 @@ mod tests {
                 0
             );
         }
+    }
+
+    /// A loopback wait and the completion it entered both register for the
+    /// same attempt: one confirmed retirement wakes both, and one waiter's
+    /// departure never takes the other's registration with it.
+    #[tokio::test]
+    async fn a_confirmed_retirement_wakes_every_waiter_of_the_attempt() {
+        let bound = Duration::from_secs(5);
+        let mut wait = AttemptWakeRegistration::register("fan-out-state");
+        let mut completion = AttemptWakeRegistration::register("fan-out-state");
+        wake_attempt_waiters("fan-out-state");
+        tokio::time::timeout(bound, wait.retired())
+            .await
+            .expect("the wait is woken");
+        tokio::time::timeout(bound, completion.retired())
+            .await
+            .expect("the completion is woken");
+
+        let mut remaining = AttemptWakeRegistration::register("fan-out-later");
+        drop(AttemptWakeRegistration::register("fan-out-later"));
+        wake_attempt_waiters("fan-out-later");
+        tokio::time::timeout(bound, remaining.retired())
+            .await
+            .expect("the remaining waiter is still registered");
+        drop(remaining);
+        let key = OAuthBrowserActionRef::project("fan-out-later")
+            .as_str()
+            .to_owned();
+        assert!(
+            !attempt_wakers().lock().contains_key(&key),
+            "the last waiter removes the entry"
+        );
     }
 
     #[test]

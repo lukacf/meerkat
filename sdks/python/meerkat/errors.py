@@ -80,13 +80,17 @@ WIRE_AUTH_ERROR_DETAILS: frozenset[str] = _literal_strings(WireAuthErrorDetail)
 
 
 def auth_error_detail(error: BaseException) -> WireAuthErrorDetail | None:
-    """The stable sub-kind of an auth refusal, beside its reason.
+    """The stable sub-kind of an auth error, beside its reason.
 
     ``auth/*`` RPC methods carry it in ``error.data.detail``. For example
     ``"remote_custody_required"`` (reason ``"invalid_target"``): an MCP login
     started on the host's registered https callback was completed without
     its ``host_attempt_handle``, for example after a restart; cancel the
-    attempt by its reference and start again. ``None`` when absent.
+    attempt by its reference and start again. ``"upstream_timeout"`` and
+    ``"upstream_timeout_after_code"`` (reason ``"upstream_failure"``): a
+    network stage of an MCP login got no answer within its bound, before or
+    after the authorization code was sent; nothing was published, so start
+    again. ``None`` when absent.
     """
     details = getattr(error, "details", None)
     if not isinstance(details, dict):

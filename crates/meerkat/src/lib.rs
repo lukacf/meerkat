@@ -445,9 +445,9 @@ pub use meerkat_providers::mcp_oauth::{
     McpOAuthAttemptCleanup, McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback,
     McpOAuthCancelHandle, McpOAuthCeremonyContext, McpOAuthError, McpOAuthListenerCleanup,
     McpOAuthLoginComplete, McpOAuthLoginDisposition, McpOAuthLoginStart, McpOAuthLoopbackBegin,
-    McpOAuthPendingAttempt, McpOAuthPendingClose, McpOAuthPendingLogin, McpOAuthRegisteredCallback,
-    McpRegisteredRedirectBase, McpServerIdentity, OidcUserInfoAccountStrategy,
-    open_system_browser_guarded, open_system_browser_trusting,
+    McpOAuthNetworkBounds, McpOAuthNetworkStage, McpOAuthPendingAttempt, McpOAuthPendingClose,
+    McpOAuthPendingLogin, McpOAuthRegisteredCallback, McpRegisteredRedirectBase, McpServerIdentity,
+    OidcUserInfoAccountStrategy, open_system_browser_guarded, open_system_browser_trusting,
 };
 
 pub mod help;

@@ -762,16 +762,21 @@ WireScopeEvidence = WireScopeEvidenceTokenEndpointResponse | WireScopeEvidenceRe
 # `error.data.reason`, REST body `reason`. Hosts branch on it, never on the
 # error text. One native mapping (`HostAuthError::reason`) owns it; the
 # existing status codes and RPC error codes are unchanged.
-WireAuthErrorReason = Literal['realm_not_found', 'binding_not_found', 'mcp_server_not_configured', 'account_selection_required', 'unknown_strategy', 'device_poll_in_progress', 'device_code_already_admitted', 'device_expiry_invalid', 'missing_scopes', 'slot_occupied', 'slot_account_mismatch', 'slot_context_mismatch', 'slot_mode_mismatch', 'unverified_connector_publication', 'reauth_required', 'configuration_invalid', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable'] | Literal['invalid_target'] | Literal['binding_invalid'] | Literal['binding_inherited'] | Literal['flow_unsupported'] | Literal['mcp_server_mismatch'] | Literal['attempt_missing'] | Literal['attempt_mismatch'] | Literal['account_mismatch'] | Literal['credential_mismatch'] | Literal['verification_unavailable'] | Literal['authorization_required'] | Literal['callback_unavailable'] | Literal['upstream_failure'] | Literal['infrastructure']
+WireAuthErrorReason = Literal['realm_not_found', 'binding_not_found', 'mcp_server_not_configured', 'account_selection_required', 'unknown_strategy', 'device_poll_in_progress', 'device_code_already_admitted', 'device_expiry_invalid', 'missing_scopes', 'slot_occupied', 'slot_account_mismatch', 'slot_context_mismatch', 'slot_mode_mismatch', 'unverified_connector_publication', 'reauth_required', 'configuration_invalid', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable'] | Literal['invalid_target'] | Literal['binding_invalid'] | Literal['binding_inherited'] | Literal['flow_unsupported'] | Literal['mcp_server_mismatch'] | Literal['attempt_missing'] | Literal['attempt_mismatch'] | Literal['account_mismatch'] | Literal['credential_mismatch'] | Literal['verification_unavailable'] | Literal['authorization_required'] | Literal['callback_unavailable'] | Literal['upstream_failure'] | Literal['infrastructure'] | Literal['commit_unsettled']
 
-# A stable sub-kind of some auth refusals, carried beside their `reason`
+# A stable sub-kind of some auth errors, carried beside their `reason`
 # for hosts that must act on it. `remote_custody_required` (reason
 # `invalid_target`): an attempt started on a registered `https` redirect
 # was completed without the handle its start returned, with another one,
 # or through a path that cannot carry it, for example after the host or
 # the runtime restarted. The attempt stays pending: cancel it by its
-# reference and start again.
-WireAuthErrorDetail = Literal['remote_custody_required']
+# reference and start again. `upstream_timeout` (reason
+# `upstream_failure`): a network stage of an MCP login got no answer within
+# its bound before the authorization code was sent; nothing was published
+# and the attempt is gone, so start again. `upstream_timeout_after_code`
+# (reason `upstream_failure`): the same after the code was sent, so it may
+# be spent at the provider; any tokens it issued were never stored.
+WireAuthErrorDetail = Literal['remote_custody_required', 'upstream_timeout', 'upstream_timeout_after_code']
 
 @dataclass
 class WireAuthErrorData:

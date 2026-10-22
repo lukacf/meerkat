@@ -60,8 +60,8 @@ use meerkat_providers::connector_oauth::{AccountSelection, ScopeEvidence};
 use meerkat_providers::mcp_oauth::{
     McpAccountSelection, McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback,
     McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin,
-    McpOAuthPendingAttempt, McpOAuthRegisteredCallback, McpRegisteredRedirectBase,
-    McpServerIdentity, OidcUserInfoAccountStrategy,
+    McpOAuthNetworkBounds, McpOAuthPendingAttempt, McpOAuthRegisteredCallback,
+    McpRegisteredRedirectBase, McpServerIdentity, OidcUserInfoAccountStrategy,
 };
 use meerkat_providers::oauth_flow::{
     OAuthFlowError, OAuthTargetValidationError, oauth_provider_resolution,
@@ -727,6 +727,15 @@ impl HostAuthError {
             | Self::Connector(ConnectorLoginError::RemoteCustodyRequired) => {
                 Some(D::RemoteCustodyRequired)
             }
+            // Whether the authorization code had been sent when the stage
+            // ran out of time.
+            Self::McpOAuth(McpOAuthError::NetworkTimedOut { stage, .. }) => {
+                Some(if stage.code_sent() {
+                    D::UpstreamTimeoutAfterCode
+                } else {
+                    D::UpstreamTimeout
+                })
+            }
             _ => None,
         }
     }
@@ -903,6 +912,11 @@ fn mcp_oauth_reason(error: &McpOAuthError) -> meerkat_contracts::WireAuthErrorRe
         | McpOAuthError::AuthLifecycle { .. }
         | McpOAuthError::EgressUnavailable { .. }
         | McpOAuthError::HttpClientUnavailable(_) => R::Infrastructure,
+        // A stage of the provider's servers got no answer within its bound;
+        // the error data's `detail` says whether the code had been sent.
+        McpOAuthError::NetworkTimedOut { .. } => R::UpstreamFailure,
+        // Neither a success nor a failure: the commit may still land.
+        McpOAuthError::CommitUnsettled { .. } => R::CommitUnsettled,
     }
 }
 
@@ -945,6 +959,8 @@ pub struct HostAuthService {
     /// The host's registered `https` redirect base for MCP logins (host
     /// configuration), when the host serves a hosted callback.
     mcp_registered_redirect_base: Option<McpRegisteredRedirectBase>,
+    /// How long the MCP OAuth owner waits on the network.
+    mcp_network_bounds: McpOAuthNetworkBounds,
     /// Host-installed connector client-auth profiles (secrets from host
     /// configuration).
     connector_client_auth: Vec<ConnectorClientAuthProfile>,
@@ -972,6 +988,7 @@ impl HostAuthService {
             connector_strategies: ConnectorStrategies::with_defaults(),
             mcp_realm: None,
             mcp_registered_redirect_base: None,
+            mcp_network_bounds: McpOAuthNetworkBounds::default(),
             connector_client_auth: Vec::new(),
             connector_protocols:
                 meerkat_providers::connector_protocol::ConnectorProtocols::with_defaults(),
@@ -1001,6 +1018,14 @@ impl HostAuthService {
     /// The host's registered redirect base, if it serves one.
     pub fn mcp_registered_redirect_base(&self) -> Option<&McpRegisteredRedirectBase> {
         self.mcp_registered_redirect_base.as_ref()
+    }
+
+    /// Bound the MCP OAuth owner's network waits by `bounds` (see
+    /// [`McpOAuthNetworkBounds`]; the default applies otherwise). They hold
+    /// for the MCP authority's own client and its account strategy.
+    pub fn with_mcp_network_bounds(mut self, bounds: McpOAuthNetworkBounds) -> Self {
+        self.mcp_network_bounds = bounds;
+        self
     }
 
     /// The exact registered `https` redirect of `target` in this service's
@@ -1208,12 +1233,14 @@ impl HostAuthService {
     /// `McpAuthResolver` so agent connections share the host's credentials.
     ///
     /// It uses its own HTTP client, which follows no redirects, rather than
-    /// [`Self::with_http_client`]'s.
+    /// [`Self::with_http_client`]'s, and waits on the network within this
+    /// service's [`Self::with_mcp_network_bounds`].
     pub fn mcp_oauth_authority(&self) -> Result<McpOAuthAuthority, HostAuthError> {
         let authority = McpOAuthAuthority::new(
             self.persistence.clone(),
             self.authority.generated_auth_lease_handle(),
         )
+        .with_network_bounds(self.mcp_network_bounds)
         .with_interactive_strategy(
             self.authority.oauth_flow_authority(),
             Arc::clone(&self.mcp_account_strategy),

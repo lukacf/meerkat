@@ -491,6 +491,38 @@ mod mcp_login_target {
     }
 
     #[test]
+    fn mcp_timeouts_and_unsettled_commits_have_stable_wire_names() {
+        use meerkat_contracts::{WireAuthErrorData, WireAuthErrorDetail, WireAuthErrorReason};
+        for (detail, wire) in [
+            (WireAuthErrorDetail::UpstreamTimeout, "upstream_timeout"),
+            (
+                WireAuthErrorDetail::UpstreamTimeoutAfterCode,
+                "upstream_timeout_after_code",
+            ),
+        ] {
+            let data = WireAuthErrorData {
+                reason: WireAuthErrorReason::UpstreamFailure,
+                detail: Some(detail),
+            };
+            let rendered = json!({"reason": "upstream_failure", "detail": wire});
+            assert_eq!(serde_json::to_value(data).unwrap(), rendered);
+            assert_eq!(
+                serde_json::from_value::<WireAuthErrorData>(rendered).unwrap(),
+                data
+            );
+        }
+        let unsettled = WireAuthErrorData {
+            reason: WireAuthErrorReason::CommitUnsettled,
+            detail: None,
+        };
+        assert_eq!(
+            serde_json::to_value(unsettled).unwrap(),
+            json!({"reason": "commit_unsettled"}),
+            "an absent detail stays omitted"
+        );
+    }
+
+    #[test]
     fn mcp_login_ready_is_secret_free_and_distinct_from_provider_ready() {
         let ready = WireLoginReady {
             state: None,

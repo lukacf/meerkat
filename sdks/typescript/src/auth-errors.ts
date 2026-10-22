@@ -36,6 +36,7 @@ export const WIRE_AUTH_ERROR_REASONS: readonly WireAuthErrorReason[] = [
   "credential_access_pending",
   "credential_store_unavailable",
   "infrastructure",
+  "commit_unsettled",
 ];
 
 /**
@@ -57,15 +58,21 @@ export function authErrorReason(error: unknown): WireAuthErrorReason | undefined
 /** Every stable auth refusal sub-kind (`error.data.detail`). */
 export const WIRE_AUTH_ERROR_DETAILS: readonly WireAuthErrorDetail[] = [
   "remote_custody_required",
+  "upstream_timeout",
+  "upstream_timeout_after_code",
 ];
 
 /**
- * The stable sub-kind of an auth refusal, beside its reason (`auth/*` RPC
+ * The stable sub-kind of an auth error, beside its reason (`auth/*` RPC
  * methods carry it in `error.data.detail`). For example
  * `remote_custody_required` (reason `invalid_target`): an MCP login started
  * on the host's registered https callback was completed without its
  * `host_attempt_handle`, for example after a restart; cancel the attempt by
- * its reference and start again. `undefined` when absent.
+ * its reference and start again. `upstream_timeout` and
+ * `upstream_timeout_after_code` (reason `upstream_failure`): a network stage
+ * of an MCP login got no answer within its bound, before or after the
+ * authorization code was sent; nothing was published, so start again.
+ * `undefined` when absent.
  */
 export function authErrorDetail(error: unknown): WireAuthErrorDetail | undefined {
   if (typeof error !== "object" || error === null) return undefined;

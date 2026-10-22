@@ -227,6 +227,16 @@ pub enum OAuthError {
 #[error("the redirect-free credential HTTP client could not be built")]
 pub struct CredentialHttpClientUnavailable;
 
+/// The total bound of one request of [`credential_http_client`]: name
+/// resolution, connect, TLS, the request, and the response headers and body.
+/// A credential endpoint that accepts a request and never answers ends with a
+/// timeout error ([`reqwest::Error::is_timeout`]) instead of holding its caller.
+pub const CREDENTIAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The connect bound of one request of [`credential_http_client`]: name
+/// resolution, TCP and TLS.
+pub const CREDENTIAL_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// HTTP client for server-to-server credential requests (token, refresh,
 /// device-code and credential-exchange endpoints). It follows no redirects,
 /// same-origin included: a credential request goes only to the endpoint it
@@ -532,6 +542,38 @@ mod tests {
             OAuthError::TokenExpiryOutOfRange { expires_in_secs: 1 }
         ));
     }
+
+    /// A credential endpoint that accepts a request and never answers it
+    /// ends the request at the client's bound. Virtual time.
+    #[tokio::test(start_paused = true)]
+    async fn the_credential_client_ends_a_request_its_endpoint_never_answers() {
+        let address = super::redirect_fixture::spawn_slow_endpoint(None).await;
+        let request = credential_http_client()
+            .unwrap()
+            .post(format!("http://{address}/token"))
+            .send();
+        let error = tokio::time::timeout(CREDENTIAL_REQUEST_TIMEOUT * 10, request)
+            .await
+            .expect("the client ends the request itself")
+            .expect_err("a request its endpoint never answers ends");
+        assert!(error.is_timeout(), "{error:?}");
+    }
+
+    /// The MCP transports' default client carries tool calls and event
+    /// streams: no total bound cuts an answer, however slow. Virtual time.
+    #[tokio::test(start_paused = true)]
+    async fn the_same_origin_client_never_cuts_a_long_answer() {
+        let address =
+            super::redirect_fixture::spawn_slow_endpoint(Some(CREDENTIAL_REQUEST_TIMEOUT * 4))
+                .await;
+        let response = same_origin_credential_http_client()
+            .unwrap()
+            .post(format!("http://{address}/mcp"))
+            .send()
+            .await
+            .expect("a slow answer still arrives");
+        assert_eq!(response.text().await.unwrap(), "{}");
+    }
 }
 
 #[cfg(test)]
@@ -583,41 +625,71 @@ pub(crate) mod redirect_fixture {
     pub(crate) const LOCATION_CANARY: &str = "redirect-location-secret-canary";
     pub(crate) const BODY_CANARY: &str = "redirect-body-secret-canary";
 
+    /// Read one whole HTTP/1.1 request (headers and its declared body).
+    async fn read_request(stream: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let Ok(read) = stream.read(&mut chunk).await else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            let text = String::from_utf8_lossy(&buffer);
+            if let Some(end) = text.find("\r\n\r\n") {
+                let length = text[..end]
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if buffer.len() >= end + 4 + length {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// A credential endpoint that reads each request and then answers
+    /// `200 {}` after `delay`, or never when `delay` is `None` (its
+    /// connection stays open).
+    pub(crate) async fn spawn_slow_endpoint(
+        delay: Option<std::time::Duration>,
+    ) -> std::net::SocketAddr {
+        use tokio::io::AsyncWriteExt;
+        let endpoint = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = endpoint.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = endpoint.accept().await {
+                tokio::spawn(async move {
+                    read_request(&mut stream).await;
+                    match delay {
+                        None => std::future::pending::<()>().await,
+                        Some(delay) => tokio::time::sleep(delay).await,
+                    }
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                        )
+                        .await;
+                });
+            }
+        });
+        address
+    }
+
     pub(crate) async fn spawn_redirecting_endpoint()
     -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
-
-        async fn read_request(stream: &mut tokio::net::TcpStream) {
-            let mut buffer = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            loop {
-                let Ok(read) = stream.read(&mut chunk).await else {
-                    return;
-                };
-                if read == 0 {
-                    return;
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-                let text = String::from_utf8_lossy(&buffer);
-                if let Some(end) = text.find("\r\n\r\n") {
-                    let length = text[..end]
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                        .unwrap_or(0);
-                    if buffer.len() >= end + 4 + length {
-                        return;
-                    }
-                }
-            }
-        }
 
         let hits = Arc::new(AtomicUsize::new(0));
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();

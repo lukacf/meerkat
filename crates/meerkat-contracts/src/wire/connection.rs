@@ -364,20 +364,34 @@ pub enum WireAuthErrorReason {
     CredentialStoreUnavailable,
     /// An internal failure; its detail is only in protected diagnostics.
     Infrastructure,
+    /// An MCP login's attempt was consumed by its credential commit, or may
+    /// have been, and the commit did not report in time: whether the
+    /// credential landed is unknown until it settles, so read the status
+    /// later. Neither a success nor a failure.
+    CommitUnsettled,
 }
 
-/// A stable sub-kind of some auth refusals, carried beside their `reason`
+/// A stable sub-kind of some auth errors, carried beside their `reason`
 /// for hosts that must act on it. `remote_custody_required` (reason
 /// `invalid_target`): an attempt started on a registered `https` redirect
 /// was completed without the handle its start returned, with another one,
 /// or through a path that cannot carry it, for example after the host or
 /// the runtime restarted. The attempt stays pending: cancel it by its
-/// reference and start again.
+/// reference and start again. `upstream_timeout` (reason
+/// `upstream_failure`): a network stage of an MCP login got no answer within
+/// its bound before the authorization code was sent; nothing was published
+/// and the attempt is gone, so start again. `upstream_timeout_after_code`
+/// (reason `upstream_failure`): the same after the code was sent, so it may
+/// be spent at the provider; any tokens it issued were never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WireAuthErrorDetail {
     RemoteCustodyRequired,
+    // A stage got no answer before the code was sent.
+    UpstreamTimeout,
+    // A stage got no answer after the code was sent.
+    UpstreamTimeoutAfterCode,
 }
 
 /// `error.data` of an auth RPC error.

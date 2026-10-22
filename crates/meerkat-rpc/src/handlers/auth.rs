@@ -6567,6 +6567,74 @@ mod tests {
         (runtime, mcp)
     }
 
+    /// Over RPC, the token endpoint accepts the exchange and never answers;
+    /// `auth/login/cancel` by the public reference ends the in-flight
+    /// `auth/login/complete` at once (`attempt_missing`), and nothing lands.
+    #[tokio::test]
+    async fn mcp_rpc_cancel_by_reference_ends_an_in_flight_registered_completion() {
+        use meerkat::test_fixtures::mcp_oauth::{CODE_CANARY, McpOAuthFixture};
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (runtime, mcp) = registered_callback_runtime(&fixture, &project, Some(REGISTERED_BASE));
+        let started = rpc_result(
+            handle_auth_login_start(
+                Some(RpcId::Num(1)),
+                Some(
+                    raw_params(serde_json::json!({ "mcp": mcp, "redirect_uri": REGISTERED_BASE }))
+                        .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        fixture.stall_token_exchange(true);
+        let complete = raw_params(serde_json::json!({
+            "mcp": mcp,
+            "code": CODE_CANARY,
+            "state": started["state"],
+            "redirect_uri": started["redirect_uri"],
+            "host_attempt_handle": started["host_attempt_handle"],
+        }));
+        let cancel = raw_params(serde_json::json!({
+            "mcp": mcp,
+            "attempt_ref": started["attempt_ref"],
+        }));
+        let (completed, cancelled) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::join!(
+                    handle_auth_login_complete(
+                        Some(RpcId::Num(2)),
+                        Some(complete.as_ref()),
+                        &runtime
+                    ),
+                    async {
+                        fixture.token_exchange_stalled().await;
+                        handle_auth_login_cancel(
+                            Some(RpcId::Num(3)),
+                            Some(cancel.as_ref()),
+                            &runtime,
+                        )
+                        .await
+                    }
+                )
+            })
+            .await
+            .expect("the cancelled completion answers at once");
+        assert_eq!(rpc_result(cancelled)["cancelled"], true);
+        assert_eq!(auth_error_data(&completed)["reason"], "attempt_missing");
+        let status = rpc_result(
+            handle_auth_status_get(
+                Some(RpcId::Num(4)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(status["phase"], "authorization_required", "{status}");
+        assert!(status.get("attempt").is_none(), "{status}");
+    }
+
     /// #1808 over RPC: a host serving a registered callback base starts on
     /// it and gets the host-only handle and the public reference; the
     /// completion with that handle lands the credential once. Without the

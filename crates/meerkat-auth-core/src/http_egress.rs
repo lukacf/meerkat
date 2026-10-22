@@ -944,6 +944,49 @@ mod tests {
         assert_eq!(arrivals.load(Ordering::SeqCst), 1);
     }
 
+    /// Only a required profile's credential client is bounded: its ordinary
+    /// and protected clients carry MCP traffic and streams, so a slow answer
+    /// still reaches them. Virtual time.
+    #[tokio::test(start_paused = true)]
+    async fn only_the_credential_client_of_a_required_profile_is_bounded() {
+        let never = crate::auth_oauth::redirect_fixture::spawn_slow_endpoint(None).await;
+        let slow = crate::auth_oauth::redirect_fixture::spawn_slow_endpoint(Some(
+            crate::auth_oauth::CREDENTIAL_REQUEST_TIMEOUT * 4,
+        ))
+        .await;
+        let local = |port: u16| {
+            HttpEgressPolicy::new().allow_local(
+                origin(&format!("http://localhost:{port}")),
+                [ip("127.0.0.1"), ip("::1")],
+            )
+        };
+        let bounded = HttpEgressProfile::required(local(never.port()));
+        let request = bounded
+            .credential_client()
+            .unwrap()
+            .unwrap()
+            .post(format!("http://localhost:{}/token", never.port()))
+            .send();
+        let error =
+            tokio::time::timeout(crate::auth_oauth::CREDENTIAL_REQUEST_TIMEOUT * 10, request)
+                .await
+                .expect("the credential client ends the request itself")
+                .expect_err("a credential request its endpoint never answers ends");
+        assert!(error.is_timeout(), "{error:?}");
+
+        let unbounded = HttpEgressProfile::required(local(slow.port()));
+        for client in [unbounded.ordinary_client(), unbounded.protected_client()] {
+            let response = client
+                .unwrap()
+                .unwrap()
+                .post(format!("http://localhost:{}/mcp", slow.port()))
+                .send()
+                .await
+                .expect("a slow MCP answer still arrives");
+            assert!(response.status().is_success());
+        }
+    }
+
     #[tokio::test]
     async fn a_host_outside_the_policy_is_refused_by_the_resolver_without_a_lookup() {
         let profile = HttpEgressProfile::required(

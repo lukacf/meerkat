@@ -34,7 +34,7 @@ pub const MCP_ATTACHMENT_REVISION_BASE: u64 = 1 << 32;
 /// that binding (no key was available) cannot prove the target unchanged, and
 /// restore asks for a fresh explicit attachment request instead of
 /// re-staging it. Environment and header values are not part of the identity.
-/// A stdio server's working directory is, in the clear like its command.
+/// A stdio server's working directory is recorded in the clear, like its command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum McpAttachmentTarget {

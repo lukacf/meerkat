@@ -79,6 +79,7 @@ async fn a_missing_or_non_directory_cwd_refuses_the_launch_and_spawns_nothing() 
 /// `command = "${TOOL}"` with `TOOL=bin/srv`), are refused before staging,
 /// reload staging and connection, with no effect. (Fails-old: they were
 /// staged and launched.)
+#[cfg(unix)]
 #[tokio::test]
 async fn a_relative_cwd_or_an_ambiguous_command_is_refused_before_any_effect() {
     for (command, cwd, reason) in [

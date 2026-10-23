@@ -4254,6 +4254,7 @@ command = "remove-cmd"
     /// A file server that differs from a realm server only in its working
     /// directory is a different definition, never the same server listed
     /// once. (Fails-old: the directory was not part of the definition.)
+    #[cfg(unix)]
     #[test]
     fn a_file_server_differing_from_a_realm_server_only_in_cwd_conflicts() {
         let installed = with_raw_cwd(
@@ -4281,6 +4282,7 @@ command = "remove-cmd"
     /// A server in an untrusted `mcp.toml` is admitted only as the identical
     /// definition a trusted source states; one that differs only in its
     /// working directory is refused, never admitted as the trusted one.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_untrusted_file_server_differing_only_in_cwd_is_refused() {
         let temp = TempDir::new().unwrap();

@@ -262,6 +262,7 @@ export interface AuthGrant {
 export interface McpStdioConfig {
   args?: string[];
   command: string;
+  cwd?: string | null;
   env?: Record<string, string>;
   secret_env?: string[];
 }

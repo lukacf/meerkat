@@ -3821,6 +3821,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    command: Required[str]\n"
     types_content += "    args: NotRequired[list[str]]\n"
     types_content += "    env: NotRequired[dict[str, str]]\n"
+    types_content += "    cwd: NotRequired[str]\n"
     types_content += "    connect_timeout_secs: NotRequired[int]\n"
     types_content += "    tool_names: NotRequired[dict[str, str]]\n\n"
     types_content += "\nclass McpHttpServerConfig(TypedDict, total=False):\n"

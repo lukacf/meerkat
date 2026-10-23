@@ -34,6 +34,7 @@ pub const MCP_ATTACHMENT_REVISION_BASE: u64 = 1 << 32;
 /// that binding (no key was available) cannot prove the target unchanged, and
 /// restore asks for a fresh explicit attachment request instead of
 /// re-staging it. Environment and header values are not part of the identity.
+/// A stdio server's working directory is, in the clear like its command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum McpAttachmentTarget {
@@ -61,6 +62,11 @@ pub enum McpAttachmentTarget {
         /// there are arguments.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binding: Option<McpAttachmentTargetBinding>,
+        /// The configured working directory, in the clear like the command;
+        /// absent when none is configured (and in records written before
+        /// the field existed), so a changed directory is a changed target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     /// A record written before this identity format. It is kept so its name,
     /// disposition and revision still fence callbacks, but it proves nothing
@@ -127,6 +133,7 @@ impl McpAttachmentTarget {
                     secret_env_names: stdio.secret_env.iter().cloned().collect(),
                     withheld,
                     binding,
+                    cwd: stdio.cwd.clone(),
                 }
             }
         }
@@ -734,6 +741,51 @@ mod tests {
         );
         assert!(!with_url(url, None).target.is_exact());
         assert!(with_url("https://a.example/mcp", None).target.is_exact());
+    }
+
+    /// A stdio target records the configured working directory in the
+    /// clear, like its command, so a changed directory is a changed target
+    /// (restore refuses it as rebound). A record written before the field
+    /// existed reads as a target without one, and a target without one
+    /// serializes as before. (Fails-old: the directory was not part of the
+    /// target, so a moved installation restored as unchanged.)
+    #[test]
+    fn descriptor_identity_binds_the_stdio_working_directory() {
+        let at = |cwd: Option<&str>| {
+            let mut config = McpServerConfig::stdio(
+                "github",
+                "/opt/github/bin/github-mcp-server",
+                vec![],
+                std::collections::HashMap::new(),
+            );
+            if let (Some(cwd), McpTransportConfig::Stdio(stdio)) = (cwd, &mut config.transport) {
+                stdio.cwd = Some(cwd.to_owned());
+            }
+            McpAttachmentDescriptorIdentity::of(&config, None)
+        };
+        let none = at(None);
+        let first = at(Some("/opt/github"));
+        assert!(first.target.is_exact());
+        assert_eq!(first, at(Some("/opt/github")));
+        assert_ne!(
+            first.target,
+            at(Some("/srv/moved")).target,
+            "a moved directory"
+        );
+        assert_ne!(first.target, none.target, "a directory set or removed");
+
+        let recorded = serde_json::to_value(&first.target).unwrap();
+        assert_eq!(recorded["cwd"], "/opt/github");
+        let earlier = serde_json::json!({
+            "kind": "stdio",
+            "command": "/opt/github/bin/github-mcp-server",
+            "withheld": false
+        });
+        assert_eq!(serde_json::to_value(&none.target).unwrap(), earlier);
+        assert_eq!(
+            serde_json::from_value::<McpAttachmentTarget>(earlier).unwrap(),
+            none.target
+        );
     }
 
     #[test]

@@ -432,6 +432,7 @@ fn persist_failure(
         ) => Refusal::ConfigConflict { expected, current },
         McpRealmPersistError::EnvReference(error) => Refusal::InvalidReview(error.to_string()),
         McpRealmPersistError::Access(error) => Refusal::InvalidReview(error.to_string()),
+        McpRealmPersistError::Cwd(error) => Refusal::InvalidReview(error.to_string()),
         McpRealmPersistError::ServerNotFound(_) => {
             Refusal::InvalidReview(format!("server '{}' was not added", review.server.name))
         }

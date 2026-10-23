@@ -332,6 +332,11 @@ pub struct FinishResult {
 /// reason: a decision that carries it anyway is parsed, counted as a
 /// `rust_bundle` class in the policy evidence and judged by the member's
 /// build.
+///
+/// So is a stdio MCP server's `cwd`, for the same reason: a decision that
+/// carries it anyway is parsed and judged by the member's build like any
+/// other MCP server definition, and a placed member refuses it (a portable
+/// profile cannot carry a working directory).
 #[cfg(feature = "schema")]
 pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
     let mut schema = serde_json::to_value(schemars::schema_for!(LayerDecision))?;
@@ -357,6 +362,14 @@ pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
         .and_then(serde_json::Value::as_object_mut)
     {
         properties.remove("bundles");
+    }
+    // Nor a stdio MCP server's working directory, which the released schema
+    // does not carry.
+    if let Some(properties) = schema
+        .pointer_mut("/$defs/McpStdioConfig/properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        properties.remove("cwd");
     }
     Ok(schema)
 }
@@ -3735,6 +3748,30 @@ mod tests {
             &serde_json::to_value(schemars::schema_for!(LayerDecision)).expect("derived schema"),
         );
         assert!(derived.iter().any(|name| name == "bundles"), "{derived:?}");
+    }
+
+    /// A stdio MCP server's working directory is left out of the pinned
+    /// schema, which the released schema does not carry. (Fails-old: the
+    /// derived property reached the schema and changed the pin.)
+    #[cfg(feature = "schema")]
+    #[test]
+    fn layer_decision_schema_leaves_the_stdio_working_directory_out() {
+        let properties = |schema: &serde_json::Value| {
+            schema
+                .pointer("/$defs/McpStdioConfig/properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("McpStdioConfig properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let pinned = properties(&layer_decision_schema().expect("canonical schema serializes"));
+        assert!(pinned.iter().any(|name| name == "command"), "{pinned:?}");
+        assert!(!pinned.iter().any(|name| name == "cwd"), "{pinned:?}");
+        let derived = properties(
+            &serde_json::to_value(schemars::schema_for!(LayerDecision)).expect("derived schema"),
+        );
+        assert!(derived.iter().any(|name| name == "cwd"), "{derived:?}");
     }
 
     #[cfg(feature = "schema")]

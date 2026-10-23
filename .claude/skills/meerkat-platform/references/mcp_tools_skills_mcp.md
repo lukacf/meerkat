@@ -71,6 +71,7 @@ Which hosts start configured servers:
 | `name` | all | Unique server name |
 | `command`, `args`, `env` | stdio | Process to spawn (`command` makes it stdio) |
 | `secret_env` | stdio | Env var names whose values come from the realm credential store |
+| `cwd` | stdio | Absolute working directory, used as written; missing at launch refuses it |
 | `url`, `headers` | HTTP | Endpoint and static headers |
 | `transport` | HTTP | `"streamable-http"` (default) or `"sse"` (legacy) |
 | `oauth_account` | streamable HTTP | Expected OAuth provider subject or account id |
@@ -172,7 +173,7 @@ rkat mcp get <NAME> [--scope project|user|local|realm] [--json]
 - `list` and `get` without `--scope` show every scope. `get` text output
   masks env and header values whose name contains key, secret, token or
   password; `--json` (on `list` and `get`) prints stored values unmasked.
-  Neither shows `access`, `tool_names` or `secret_env`.
+  Neither shows `access`, `tool_names`, `secret_env` or `cwd`.
 - `rkat mcp` edits configuration only; sessions read it when they start or
   when a server reloads. There is no `rkat mcp reload`, `rkat mcp logout` or
   `--scope all`.

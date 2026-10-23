@@ -313,6 +313,7 @@ class McpStdioConfig:
     """Stdio transport configuration"""
     command: str
     args: Optional[list[str]] = None
+    cwd: Optional[str] = None
     env: Optional[dict[str, str]] = None
     secret_env: Optional[list[str]] = None
 
@@ -333,6 +334,7 @@ class McpStdioServerConfig(TypedDict, total=False):
     command: Required[str]
     args: NotRequired[list[str]]
     env: NotRequired[dict[str, str]]
+    cwd: NotRequired[str]
     connect_timeout_secs: NotRequired[int]
     tool_names: NotRequired[dict[str, str]]
 

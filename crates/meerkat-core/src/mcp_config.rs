@@ -61,6 +61,12 @@ pub struct McpStdioConfig {
     /// the server is launched, and never from the host environment.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub secret_env: BTreeSet<String>,
+    /// Absolute working directory the server is launched in. Used exactly as
+    /// written: never expanded or resolved. A missing directory refuses the
+    /// launch; it never falls back to another directory. Absent, the server
+    /// starts where a launch without one starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// HTTP transport configuration (streamable HTTP or legacy SSE)
@@ -118,6 +124,7 @@ impl std::fmt::Debug for McpStdioConfig {
             .field("args", &crate::redact::RedactedList(self.args.len()))
             .field("env", &crate::redact::RedactedValues::of(self.env.keys()))
             .field("secret_env", &self.secret_env)
+            .field("cwd", &self.cwd)
             .finish()
     }
 }
@@ -250,6 +257,47 @@ pub struct McpServerAccessError {
 pub struct McpSecretEnvDeclarationError {
     pub server: String,
     pub reason: &'static str,
+}
+
+/// A refused working directory of a stdio MCP server
+/// ([`McpStdioConfig::cwd`]). It names the server, never the path.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("MCP server '{server}' has an unusable working directory: {reason}")]
+pub struct McpStdioCwdError {
+    pub server: String,
+    pub reason: McpStdioCwdRefusal,
+}
+
+/// Why a stdio MCP server's working directory was refused. The first four
+/// are configuration refusals ([`McpServerConfig::validate_cwd`],
+/// [`McpServerConfig::with_cwd`]); the last three are found at launch,
+/// before the process exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum McpStdioCwdRefusal {
+    /// The configured value is not an absolute path on this host (an empty
+    /// value included).
+    #[error("cwd must be an absolute path")]
+    NotAbsolute,
+    /// The configured value contains a NUL byte.
+    #[error("cwd must not contain a NUL byte")]
+    ContainsNul,
+    /// With a working directory set, the command is a relative path with a
+    /// directory separator, whose resolution would then differ by platform.
+    #[error("with cwd set, command must be an absolute path or a bare program name")]
+    AmbiguousCommand,
+    /// Only a stdio server has a working directory.
+    #[error("only a stdio server has a working directory")]
+    NotStdio,
+    /// At launch: nothing exists at the configured path.
+    #[error("cwd does not exist")]
+    Missing,
+    /// At launch: the configured path exists and is not a directory.
+    #[error("cwd is not a directory")]
+    NotADirectory,
+    /// At launch: the configured path could not be inspected.
+    #[error("cwd could not be inspected")]
+    Inaccessible,
 }
 
 /// Longest environment variable name `secret_env` may declare, so the
@@ -524,13 +572,90 @@ impl McpServerConfig {
         }
     }
 
+    /// Refuse a working directory ([`McpStdioConfig::cwd`]) that could not
+    /// be launched exactly: one that is not an absolute path on this host
+    /// (an empty one included) or that holds a NUL byte, and, with one set,
+    /// a command that is a relative path with a directory separator (its
+    /// resolution against the new directory differs by platform). The
+    /// command is checked as it is launched, so a definition from
+    /// `mcp.toml` is checked after its `${VAR}` expansion. A server without
+    /// a working directory, and an HTTP server, always pass. Checked before
+    /// any effect when servers are loaded, persisted, staged and connected;
+    /// the directory's existence is checked when the server is launched.
+    pub fn validate_cwd(&self) -> Result<(), McpStdioCwdError> {
+        self.check_cwd(true)
+    }
+
+    /// [`Self::validate_cwd`] for an `mcp.toml` definition as written,
+    /// before its `${VAR}` expansion: a command that holds a reference is
+    /// checked once it has been expanded.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validate_unexpanded_cwd(&self) -> Result<(), McpStdioCwdError> {
+        let expands = matches!(
+            &self.transport,
+            McpTransportConfig::Stdio(stdio) if stdio.command.contains("${")
+        );
+        self.check_cwd(!expands)
+    }
+
+    fn check_cwd(&self, check_command: bool) -> Result<(), McpStdioCwdError> {
+        let McpTransportConfig::Stdio(stdio) = &self.transport else {
+            return Ok(());
+        };
+        let Some(cwd) = &stdio.cwd else {
+            return Ok(());
+        };
+        let reason = if cwd.contains('\0') {
+            Some(McpStdioCwdRefusal::ContainsNul)
+        } else if !Path::new(cwd).is_absolute() {
+            Some(McpStdioCwdRefusal::NotAbsolute)
+        } else if check_command
+            && !Path::new(&stdio.command).is_absolute()
+            && stdio.command.chars().any(std::path::is_separator)
+        {
+            Some(McpStdioCwdRefusal::AmbiguousCommand)
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => Err(McpStdioCwdError {
+                server: self.name.clone(),
+                reason,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// This stdio server launched in `cwd`, an absolute directory used
+    /// exactly as written ([`McpStdioConfig::cwd`]), checked as
+    /// [`Self::validate_cwd`] checks it. An HTTP server has no working
+    /// directory and is refused ([`McpStdioCwdRefusal::NotStdio`]).
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Result<Self, McpStdioCwdError> {
+        let McpTransportConfig::Stdio(stdio) = &mut self.transport else {
+            return Err(McpStdioCwdError {
+                server: self.name,
+                reason: McpStdioCwdRefusal::NotStdio,
+            });
+        };
+        stdio.cwd = Some(cwd.into());
+        self.validate_cwd()?;
+        Ok(self)
+    }
+
     /// The canonical non-secret meaning of this stdio server's launch:
     /// lowercase hex SHA-256 of a version tag, then the server name, the
     /// command, the ordered arguments, the literal environment (by name),
-    /// the declared secret names and the connector approval
+    /// the declared secret names, the connector approval
     /// ([`McpConnectorApproval::token`], which covers the startup binding
-    /// projection), each string length-prefixed (8-byte little-endian) and
+    /// projection) and, when one is set, the working directory (after a
+    /// `cwd` tag), each string length-prefixed (8-byte little-endian) and
     /// each list prefixed with its length. `None` for an HTTP server.
+    ///
+    /// The working directory is encoded only when set, and the version tag
+    /// stays `v1` on purpose: a definition without a working directory
+    /// keeps the meaning it had before the field existed, so what is stored
+    /// under it stays reachable, while setting or changing the directory
+    /// changes the meaning.
     ///
     /// It is configuration equality only: equal meanings launch the same
     /// configured command, never proving the executable's bytes, the
@@ -568,6 +693,12 @@ impl McpServerConfig {
             put(&mut hasher, name);
         }
         put(&mut hasher, self.connector_approval().token());
+        // Encoded only when set, after everything else: a definition without
+        // a working directory keeps its earlier meaning.
+        if let Some(cwd) = &stdio.cwd {
+            put(&mut hasher, "cwd");
+            put(&mut hasher, cwd);
+        }
         let digest = hasher.finalize();
         let mut meaning = String::with_capacity(digest.len() * 2);
         for byte in digest {
@@ -589,6 +720,7 @@ impl McpServerConfig {
                 args,
                 env,
                 secret_env: BTreeSet::new(),
+                cwd: None,
             }),
             connect_timeout_secs: None,
             tool_names: BTreeMap::new(),
@@ -911,7 +1043,9 @@ pub enum EffectiveMcpServersError {
 /// shadow a server installed in the realm, nor the reverse. Between the
 /// files, project wins over user, which `file_servers` from
 /// [`McpConfig::load_with_scopes_from_roots`] has already resolved and
-/// expanded.
+/// expanded. An invalid access ceiling or working directory
+/// ([`McpServerConfig::validate_cwd`], checked as launched) in either
+/// source refuses the set.
 pub fn compose_effective_mcp_servers(
     realm_servers: &[McpServerConfig],
     file_servers: Vec<McpServerWithScope>,
@@ -922,6 +1056,8 @@ pub fn compose_effective_mcp_servers(
         .chain(file_servers.iter().map(|file| &file.server))
     {
         server.validate_access()?;
+        // Checked as launched: the file servers are already expanded.
+        server.validate_cwd().map_err(McpConfigError::from)?;
     }
     let mut servers: Vec<McpServerWithSource> = realm_servers
         .iter()
@@ -1073,6 +1209,8 @@ pub enum McpConfigError {
     Access(#[from] McpServerAccessError),
     #[error(transparent)]
     SecretEnv(#[from] McpSecretEnvDeclarationError),
+    #[error(transparent)]
+    Cwd(#[from] McpStdioCwdError),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1341,6 +1479,9 @@ impl McpConfig {
     ) -> Result<McpConfigRollback, McpConfigError> {
         server.validate_access()?;
         server.validate_secret_env()?;
+        // Persisted as written: `mcp.toml` expands the command when it is
+        // loaded, and the expanded command is checked then.
+        server.validate_unexpanded_cwd()?;
         let path = authority.resolved_path()?;
         let lock = acquire_mcp_config_lock(&path).await?;
         let previous = read_existing_bytes(&path).await?;
@@ -1661,6 +1802,9 @@ async fn read_mcp_file_raw(path: Option<&Path>) -> Result<McpConfig, McpConfigEr
     })?;
     for server in &parsed.servers {
         server.validate_access()?;
+        // As written: a command holding a `${VAR}` reference is checked
+        // once it has been expanded.
+        server.validate_unexpanded_cwd()?;
     }
     Ok(parsed)
 }
@@ -1781,6 +1925,9 @@ fn server_table(server: &McpServerConfig) -> Table {
             if !stdio.secret_env.is_empty() {
                 let names: Vec<String> = stdio.secret_env.iter().cloned().collect();
                 table["secret_env"] = toml_edit::value(string_array(&names));
+            }
+            if let Some(cwd) = &stdio.cwd {
+                table["cwd"] = toml_edit::value(cwd);
             }
         }
         McpTransportConfig::Http(http) => {
@@ -1986,12 +2133,14 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             let env = expand_env_in_map_with(stdio.env, "servers[].env", env)?;
             // Secret names are never expanded: their values are not
-            // configuration.
+            // configuration. Nor is the working directory: it is used
+            // exactly as written.
             McpTransportConfig::Stdio(McpStdioConfig {
                 command,
                 args,
                 env,
                 secret_env: stdio.secret_env,
+                cwd: stdio.cwd,
             })
         }
         McpTransportConfig::Http(http) => {
@@ -2151,6 +2300,8 @@ pub enum McpRealmPersistError {
     /// may not list the server.
     #[error("the realm config write's outcome is unknown: {0}")]
     OutcomeUnknown(crate::config_runtime::ConfigRuntimeError),
+    #[error(transparent)]
+    Cwd(#[from] McpStdioCwdError),
 }
 
 /// The selected realm's own config document as the target of a persisted
@@ -2225,7 +2376,9 @@ impl<'a> McpRealmPersistTarget<'a> {
 
     /// The realm's own servers with `server` added, and the generation the
     /// write is checked against. A server holding an environment reference
-    /// is refused before anything is read.
+    /// or an invalid access ceiling or working directory is refused before
+    /// anything is read; realm servers are literal, so the working directory
+    /// and command are checked as written.
     async fn with_added(
         &self,
         server: McpServerConfig,
@@ -2233,6 +2386,7 @@ impl<'a> McpRealmPersistTarget<'a> {
     ) -> Result<(Vec<McpServerConfig>, u64), McpRealmPersistError> {
         reject_realm_server_env_references(std::slice::from_ref(&server))?;
         server.validate_access()?;
+        server.validate_cwd()?;
         let (mut servers, generation) = self.current(expected_generation).await?;
         if servers.iter().any(|existing| existing.name == server.name) {
             return Err(McpRealmPersistError::ServerExists(server.name));
@@ -3755,6 +3909,423 @@ command = "remove-cmd"
             written,
             "nothing was written"
         );
+    }
+
+    // ---- stdio working directory (`cwd`) -------------------------------
+
+    fn stdio_cwd(server: &McpServerConfig) -> Option<&str> {
+        match &server.transport {
+            McpTransportConfig::Stdio(stdio) => stdio.cwd.as_deref(),
+            McpTransportConfig::Http(_) => None,
+        }
+    }
+
+    /// `server` with its working directory set as written, bypassing the
+    /// builder's own check.
+    fn with_raw_cwd(mut server: McpServerConfig, cwd: &str) -> McpServerConfig {
+        if let McpTransportConfig::Stdio(stdio) = &mut server.transport {
+            stdio.cwd = Some(cwd.to_owned());
+        }
+        server
+    }
+
+    fn cwd_refusal(server: &str, reason: McpStdioCwdRefusal) -> McpStdioCwdError {
+        McpStdioCwdError {
+            server: server.to_owned(),
+            reason,
+        }
+    }
+
+    /// A stdio server's working directory is optional and kept exactly as
+    /// written through TOML, `${VAR}` expansion and JSON; an unset one is
+    /// absent from the serialized form, so a definition without one
+    /// serializes as before. (Fails-old: `cwd` was an unknown field.)
+    #[test]
+    fn stdio_cwd_is_optional_and_kept_literally_through_toml_expansion_and_json() {
+        let parsed: McpConfig = toml::from_str(
+            "[[servers]]\nname = \"github\"\ncommand = \"/opt/github/bin/github-mcp-server\"\nargs = [\"stdio\"]\ncwd = \"/opt/${INSTALL}/github\"\n\n[[servers]]\nname = \"plain\"\ncommand = \"npx\"\n",
+        )
+        .unwrap();
+        let expanded = expand_env_in_config_with(parsed, &|_| Some("expanded".to_owned())).unwrap();
+        assert_eq!(
+            stdio_cwd(&expanded.servers[0]),
+            Some("/opt/${INSTALL}/github"),
+            "the working directory is never expanded"
+        );
+        assert_eq!(stdio_cwd(&expanded.servers[1]), None);
+        let wire = serde_json::to_value(&expanded.servers[0]).unwrap();
+        assert_eq!(wire["cwd"], "/opt/${INSTALL}/github");
+        assert_eq!(
+            serde_json::from_value::<McpServerConfig>(wire).unwrap(),
+            expanded.servers[0]
+        );
+        assert_eq!(
+            serde_json::to_value(&expanded.servers[1]).unwrap(),
+            serde_json::json!({"name": "plain", "command": "npx", "args": [], "env": {}}),
+            "a definition without a working directory serializes as before"
+        );
+        assert!(format!("{:?}", expanded.servers[0]).contains("/opt/${INSTALL}/github"));
+    }
+
+    /// The builder carries an absolute directory and refuses everything
+    /// `validate_cwd` refuses, and an HTTP server, naming the server and
+    /// never the path. (Fails-old: there was no working directory.)
+    #[cfg(unix)]
+    #[test]
+    fn with_cwd_carries_an_absolute_directory_and_refuses_the_rest() {
+        let server = McpServerConfig::stdio(
+            "github",
+            "/opt/github/bin/github-mcp-server",
+            vec!["stdio".into()],
+            HashMap::new(),
+        )
+        .with_cwd("/opt/github")
+        .unwrap();
+        assert_eq!(stdio_cwd(&server), Some("/opt/github"));
+        assert!(server.validate_cwd().is_ok());
+        // A bare program name is resolved through PATH, as without one.
+        assert!(
+            McpServerConfig::stdio("bare", "npx", vec![], HashMap::new())
+                .with_cwd("/srv/project")
+                .is_ok()
+        );
+        for (command, cwd, reason) in [
+            ("/bin/srv", "relative/dir", McpStdioCwdRefusal::NotAbsolute),
+            ("/bin/srv", "", McpStdioCwdRefusal::NotAbsolute),
+            ("/bin/srv", "/srv/\0nul", McpStdioCwdRefusal::ContainsNul),
+            (
+                "./bin/srv",
+                "/srv/cwd",
+                McpStdioCwdRefusal::AmbiguousCommand,
+            ),
+            ("bin/srv", "/srv/cwd", McpStdioCwdRefusal::AmbiguousCommand),
+        ] {
+            let refused = McpServerConfig::stdio("refused", command, vec![], HashMap::new())
+                .with_cwd(cwd)
+                .unwrap_err();
+            assert_eq!(
+                refused,
+                cwd_refusal("refused", reason),
+                "{command} in {cwd:?}"
+            );
+            assert!(
+                cwd.is_empty() || !refused.to_string().contains(cwd),
+                "{refused}"
+            );
+            let raw = with_raw_cwd(
+                McpServerConfig::stdio("refused", command, vec![], HashMap::new()),
+                cwd,
+            );
+            assert_eq!(raw.validate_cwd(), Err(cwd_refusal("refused", reason)));
+        }
+        let http =
+            McpServerConfig::streamable_http("remote", "https://mcp.example", HashMap::new());
+        assert!(http.validate_cwd().is_ok());
+        assert_eq!(
+            http.with_cwd("/srv").unwrap_err(),
+            cwd_refusal("remote", McpStdioCwdRefusal::NotStdio)
+        );
+    }
+
+    /// `mcp.toml` refuses a relative, empty or NUL working directory, and a
+    /// relative command path with one, when the file is read, before
+    /// anything is expanded or launched. A command holding a `${VAR}`
+    /// reference is checked once expanded, so `${HOME}/bin/srv` is read.
+    /// (Fails-old: the field was refused as unknown, so nothing honoured
+    /// it; once accepted, an unchecked value would reach the launch.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_toml_refuses_an_unlaunchable_cwd_when_read() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("mcp.toml");
+        for (command, cwd, reason) in [
+            ("/bin/srv", "relative/dir", McpStdioCwdRefusal::NotAbsolute),
+            ("/bin/srv", "", McpStdioCwdRefusal::NotAbsolute),
+            (
+                "/bin/srv",
+                "/srv/\\u0000nul",
+                McpStdioCwdRefusal::ContainsNul,
+            ),
+            (
+                "./bin/srv",
+                "/srv/cwd",
+                McpStdioCwdRefusal::AmbiguousCommand,
+            ),
+        ] {
+            tokio::fs::write(
+                &path,
+                format!("[[servers]]\nname = \"s\"\ncommand = \"{command}\"\ncwd = \"{cwd}\"\n"),
+            )
+            .await
+            .unwrap();
+            let refused = McpConfig::load_from_paths(None, Some(&path))
+                .await
+                .expect_err("an unlaunchable working directory is refused");
+            assert!(
+                matches!(&refused, McpConfigError::Cwd(error) if *error == cwd_refusal("s", reason)),
+                "{command} in {cwd:?}: {refused:?}"
+            );
+        }
+        // Checked once expanded, not as written.
+        tokio::fs::write(
+            &path,
+            "[[servers]]\nname = \"s\"\ncommand = \"${HOME}/bin/srv\"\ncwd = \"/srv/cwd\"\n",
+        )
+        .await
+        .unwrap();
+        let read = read_mcp_file_raw(Some(&path)).await.unwrap();
+        assert_eq!(stdio_cwd(&read.servers[0]), Some("/srv/cwd"));
+    }
+
+    /// The `mcp.toml` writer keeps a working directory and refuses an
+    /// unlaunchable one before anything is written; a command holding a
+    /// `${VAR}` reference is persisted as written and checked once
+    /// expanded. (Fails-old: the writer omitted `cwd`, so the reload ran
+    /// the server in the host's directory.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_cwd_survives_the_mcp_toml_writer() {
+        let temp = TempDir::new().unwrap();
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let server = McpServerConfig::stdio(
+            "github",
+            "/opt/github/bin/github-mcp-server",
+            vec!["stdio".into()],
+            HashMap::new(),
+        )
+        .with_cwd("/opt/github")
+        .unwrap();
+        McpConfig::persist_add_with_rollback(&authority, server.clone())
+            .await
+            .unwrap();
+        let path = authority.resolved_path().unwrap();
+        let reloaded = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
+        assert_eq!(reloaded.servers, vec![server]);
+
+        let written = tokio::fs::read(&path).await.unwrap();
+        for (command, cwd, reason) in [
+            ("/bin/true", "relative/dir", McpStdioCwdRefusal::NotAbsolute),
+            (
+                "./bin/srv",
+                "/srv/cwd",
+                McpStdioCwdRefusal::AmbiguousCommand,
+            ),
+        ] {
+            let refused = McpConfig::persist_add_with_rollback(
+                &authority,
+                with_raw_cwd(
+                    McpServerConfig::stdio("refused", command, vec![], HashMap::new()),
+                    cwd,
+                ),
+            )
+            .await
+            .expect_err("an unlaunchable working directory is refused");
+            assert!(
+                matches!(&refused, McpConfigError::Cwd(error) if *error == cwd_refusal("refused", reason)),
+                "{refused:?}"
+            );
+            assert_eq!(
+                tokio::fs::read(&path).await.unwrap(),
+                written,
+                "nothing was written"
+            );
+        }
+        let expands = with_raw_cwd(
+            McpServerConfig::stdio("expands", "${TOOL_HOME}/bin/srv", vec![], HashMap::new()),
+            "/srv/cwd",
+        );
+        McpConfig::persist_add_with_rollback(&authority, expands)
+            .await
+            .expect("checked once expanded");
+    }
+
+    /// The realm config refuses an unlaunchable working directory when a
+    /// server is written to it and when the session's MCP set is composed,
+    /// where `mcp.toml` servers are checked as launched, after expansion:
+    /// `${HOME}/bin/srv` is admitted, `${TOOL}` expanding to `bin/srv` is
+    /// refused. (Fails-old: both were admitted unchecked.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn realm_writes_and_composition_check_the_cwd_as_launched() {
+        let dir = TempDir::new().unwrap();
+        tokio::fs::write(dir.path().join("config.toml"), "")
+            .await
+            .unwrap();
+        let runtime = realm_runtime(dir.path());
+        let relative = with_raw_cwd(
+            McpServerConfig::stdio("relative", "/bin/true", vec![], HashMap::new()),
+            "relative/dir",
+        );
+        let refused = McpRealmPersistTarget::new(&runtime)
+            .add(relative.clone(), None)
+            .await
+            .expect_err("a relative working directory");
+        assert!(
+            matches!(&refused, McpRealmPersistError::Cwd(error) if *error == cwd_refusal("relative", McpStdioCwdRefusal::NotAbsolute)),
+            "{refused:?}"
+        );
+        let refused = compose_effective_mcp_servers(&[relative], vec![])
+            .expect_err("composition refuses it too");
+        assert!(
+            matches!(
+                &refused,
+                EffectiveMcpServersError::Config(McpConfigError::Cwd(error))
+                    if *error == cwd_refusal("relative", McpStdioCwdRefusal::NotAbsolute)
+            ),
+            "{refused:?}"
+        );
+
+        let user = dir.path().join("user").join("mcp.toml");
+        tokio::fs::create_dir_all(user.parent().unwrap())
+            .await
+            .unwrap();
+        let env = |key: &str| match key {
+            "HOME" => Some("/home/tester".to_owned()),
+            "TOOL" => Some("bin/srv".to_owned()),
+            _ => None,
+        };
+        let nothing_untrusted = |_: &Path| false;
+        tokio::fs::write(
+            &user,
+            "[[servers]]\nname = \"home\"\ncommand = \"${HOME}/bin/srv\"\ncwd = \"/srv/home\"\n",
+        )
+        .await
+        .unwrap();
+        let effective =
+            effective_servers_trusting_with_env(&[], None, Some(&user), &nothing_untrusted, &env)
+                .await
+                .expect("an absolute command once expanded");
+        let McpTransportConfig::Stdio(home) = &effective.admitted[0].server.transport else {
+            unreachable!("a stdio server");
+        };
+        assert_eq!(home.command, "/home/tester/bin/srv");
+        assert_eq!(home.cwd.as_deref(), Some("/srv/home"));
+
+        tokio::fs::write(
+            &user,
+            "[[servers]]\nname = \"tool\"\ncommand = \"${TOOL}\"\ncwd = \"/srv/tool\"\n",
+        )
+        .await
+        .unwrap();
+        let refused =
+            effective_servers_trusting_with_env(&[], None, Some(&user), &nothing_untrusted, &env)
+                .await
+                .expect_err("a relative command once expanded");
+        assert!(
+            matches!(
+                &refused,
+                EffectiveMcpServersError::Config(McpConfigError::Cwd(error))
+                    if *error == cwd_refusal("tool", McpStdioCwdRefusal::AmbiguousCommand)
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// The canonical launch meaning binds the working directory when one is
+    /// set, and a definition without one keeps the exact meaning it had
+    /// before the field existed (pinned), so what is stored under it stays
+    /// reachable. (Fails-old: the meaning ignored the directory, so a moved
+    /// installation kept its meaning.)
+    #[test]
+    fn stdio_launch_meaning_binds_the_cwd_and_keeps_cwd_less_meanings() {
+        let mut server = McpServerConfig::stdio(
+            "search",
+            "search-server",
+            vec!["--stdio".into()],
+            HashMap::from([("LOG_LEVEL".into(), "info".into())]),
+        );
+        if let McpTransportConfig::Stdio(stdio) = &mut server.transport {
+            stdio.secret_env.insert("SEARCH_API_KEY".into());
+        }
+        assert_eq!(
+            server.stdio_launch_meaning().as_deref(),
+            Some("9917b85f5f9effb054c209539991492c3039e0f836976100710822b7bbe65230"),
+            "a definition without a working directory keeps its meaning"
+        );
+        let placed = with_raw_cwd(server.clone(), "/srv/search");
+        assert_eq!(
+            placed.stdio_launch_meaning().as_deref(),
+            Some("ab2a66d5962c432fbdbfc86153c1a980a18dcd3d79b9243cdc715f63196f3963")
+        );
+        let moved = with_raw_cwd(server, "/srv/moved");
+        assert_ne!(moved.stdio_launch_meaning(), placed.stdio_launch_meaning());
+    }
+
+    /// A file server that differs from a realm server only in its working
+    /// directory is a different definition, never the same server listed
+    /// once. (Fails-old: the directory was not part of the definition.)
+    #[test]
+    fn a_file_server_differing_from_a_realm_server_only_in_cwd_conflicts() {
+        let installed = with_raw_cwd(
+            McpServerConfig::stdio("github", "/opt/github/bin/server", vec![], HashMap::new()),
+            "/opt/github",
+        );
+        let moved = with_raw_cwd(installed.clone(), "/home/user/checkout");
+        let refused = compose_effective_mcp_servers(
+            std::slice::from_ref(&installed),
+            vec![file_server(moved, McpScope::Project)],
+        )
+        .expect_err("a different definition");
+        assert!(
+            matches!(refused, EffectiveMcpServersError::Conflict(_)),
+            "{refused:?}"
+        );
+        let same = compose_effective_mcp_servers(
+            std::slice::from_ref(&installed),
+            vec![file_server(installed.clone(), McpScope::User)],
+        )
+        .unwrap();
+        assert_eq!(same.len(), 1, "the identical definition is listed once");
+    }
+
+    /// A server in an untrusted `mcp.toml` is admitted only as the identical
+    /// definition a trusted source states; one that differs only in its
+    /// working directory is refused, never admitted as the trusted one.
+    #[tokio::test]
+    async fn an_untrusted_file_server_differing_only_in_cwd_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("project").join("mcp.toml");
+        let user = temp.path().join("user").join("mcp.toml");
+        for path in [&project, &user] {
+            tokio::fs::create_dir_all(path.parent().unwrap())
+                .await
+                .unwrap();
+        }
+        let server = |cwd: &str| {
+            format!(
+                "[[servers]]\nname = \"shared\"\ncommand = \"/usr/bin/shared-mcp\"\ncwd = \"{cwd}\"\n"
+            )
+        };
+        tokio::fs::write(&user, server("/srv/trusted"))
+            .await
+            .unwrap();
+        let untrusted = |path: &Path| path == project.as_path();
+        let env = |_: &str| -> Option<String> { None };
+
+        tokio::fs::write(&project, server("/srv/trusted"))
+            .await
+            .unwrap();
+        let identical =
+            effective_servers_trusting_with_env(&[], Some(&project), Some(&user), &untrusted, &env)
+                .await
+                .unwrap();
+        assert_eq!(identical.admitted.len(), 1, "{identical:?}");
+        assert_eq!(
+            identical.admitted[0].source,
+            McpServerSource::File(McpScope::User)
+        );
+        assert!(identical.refused.is_empty());
+
+        tokio::fs::write(&project, server("/srv/elsewhere"))
+            .await
+            .unwrap();
+        let moved =
+            effective_servers_trusting_with_env(&[], Some(&project), Some(&user), &untrusted, &env)
+                .await
+                .unwrap();
+        assert!(moved.admitted.is_empty(), "{moved:?}");
+        assert_eq!(moved.refused.len(), 1);
+        assert_eq!(stdio_cwd(&moved.refused[0].server), Some("/srv/elsewhere"));
     }
 
     fn realm_runtime(dir: &Path) -> crate::config_runtime::ConfigRuntime {

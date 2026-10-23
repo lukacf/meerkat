@@ -174,6 +174,13 @@ pub enum McpError {
         server: String,
         limit: ToolDiscoveryLimit,
     },
+
+    /// The server's working directory ([`meerkat_core::mcp_config::McpStdioConfig::cwd`])
+    /// was refused: by its configuration, before any lifecycle or transport
+    /// effect, or at launch, before its process existed. Nothing was
+    /// spawned, and the launch never fell back to another directory.
+    #[error(transparent)]
+    WorkingDirectory(#[from] meerkat_core::McpStdioCwdError),
 }
 
 impl McpError {

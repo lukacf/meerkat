@@ -294,7 +294,8 @@ pub enum McpAttemptRefusal {
     Confinement,
     /// The service-secret resolver.
     ServiceSecret,
-    /// The server's configuration.
+    /// The server's configuration (including a configured working directory
+    /// that is not an existing directory when the server is launched).
     InvalidConfig,
     /// A prior begin or finish of the same owner and server was still
     /// running past the settle bound.
@@ -1309,7 +1310,7 @@ pub(crate) fn open_for_error(
         E::AttachmentRefused(_) => refused(McpAttemptRefusal::Control),
         E::Confinement(_) => refused(McpAttemptRefusal::Confinement),
         E::ServiceSecretRefused { .. } => refused(McpAttemptRefusal::ServiceSecret),
-        E::InvalidAccessPolicy(_) | E::InvalidSecretEnv(_) => {
+        E::InvalidAccessPolicy(_) | E::InvalidSecretEnv(_) | E::WorkingDirectory(_) => {
             refused(McpAttemptRefusal::InvalidConfig)
         }
         E::RouterShutDown => McpAttemptOpenOutcome::Cancelled {

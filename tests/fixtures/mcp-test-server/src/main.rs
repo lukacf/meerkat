@@ -8,6 +8,10 @@
 //! - env_digest: with `--env-digest NAME`, the FNV-1a digest of the server's
 //!   own `NAME` environment value (`absent` without one), so a test can
 //!   check what a launch received without the value crossing the protocol
+//! - cwd_report: with `--cwd-report FILE`, the server's working directory,
+//!   its process id and the contents of `FILE` read relative to that
+//!   directory (`null` when it cannot be read), as one JSON text, so a test
+//!   can check where a launch runs and which relative file it sees
 
 use schemars::JsonSchema;
 use serde_json::{Map, Value, json};
@@ -61,6 +65,10 @@ struct EnvDigestArgs {}
 
 #[derive(JsonSchema)]
 #[allow(dead_code)]
+struct CwdReportArgs {}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
 struct FailArgs {
     /// Error message
     message: String,
@@ -78,6 +86,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let env_digest = std::env::args()
         .skip_while(|arg| arg != "--env-digest")
+        .nth(1);
+    let cwd_report = std::env::args()
+        .skip_while(|arg| arg != "--cwd-report")
         .nth(1);
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -127,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // This is a request, send a response
-        let response = handle_request(&request, env_digest.as_deref());
+        let response = handle_request(&request, env_digest.as_deref(), cwd_report.as_deref());
         writeln!(stdout, "{response}")?;
         stdout.flush()?;
     }
@@ -145,7 +156,7 @@ fn fnv1a(value: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn handle_request(request: &Value, env_digest: Option<&str>) -> Value {
+fn handle_request(request: &Value, env_digest: Option<&str>, cwd_report: Option<&str>) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -211,6 +222,15 @@ fn handle_request(request: &Value, env_digest: Option<&str>) -> Value {
                     "inputSchema": schema_for::<EnvDigestArgs>()
                 }));
             }
+            if cwd_report.is_some()
+                && let Some(tools) = listed["result"]["tools"].as_array_mut()
+            {
+                tools.push(json!({
+                    "name": "cwd_report",
+                    "description": "This server's working directory and the file it reads there",
+                    "inputSchema": schema_for::<CwdReportArgs>()
+                }));
+            }
             listed
         }
         "tools/call" => {
@@ -268,6 +288,25 @@ fn handle_request(request: &Value, env_digest: Option<&str>) -> Value {
                         "content": [{
                             "type": "text",
                             "text": digest
+                        }]
+                    })
+                }
+                "cwd_report" if cwd_report.is_some() => {
+                    let cwd = std::env::current_dir()
+                        .map(|dir| dir.display().to_string())
+                        .unwrap_or_default();
+                    // Read relative to the working directory, as a server
+                    // reading a relative configuration file does.
+                    let file = cwd_report.and_then(|name| std::fs::read_to_string(name).ok());
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "cwd": cwd,
+                                "pid": std::process::id(),
+                                "file": file,
+                            })
+                            .to_string()
                         }]
                     })
                 }

@@ -393,7 +393,7 @@ pub use mcp_config::{
     EffectiveMcpServersError, McpAccountDeclaration, McpConfig, McpConfigError,
     McpConnectorApproval, McpScope, McpSecretEnvDeclarationError, McpServerAccess,
     McpServerAccessError, McpServerConfig, McpServerDefinitionConflict, McpServerRefusal,
-    McpServerSource, McpServerWithScope, McpServerWithSource,
+    McpServerSource, McpServerWithScope, McpServerWithSource, McpStdioCwdError, McpStdioCwdRefusal,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use mcp_config::{McpRealmPersistError, McpRealmPersistTarget};

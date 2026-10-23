@@ -4387,6 +4387,7 @@ model = "custom-model"
                     args: Vec::new(),
                     env: std::collections::HashMap::new(),
                     secret_env: std::collections::BTreeSet::new(),
+                    cwd: None,
                 },
             ),
             connect_timeout_secs: None,

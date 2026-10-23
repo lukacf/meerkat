@@ -621,19 +621,33 @@ impl StdioChildCustody {
     }
 
     /// Spawn the server and take custody of it; returns its stdout and stdin
-    /// for the MCP transport.
+    /// for the MCP transport. A configured working directory
+    /// ([`McpStdioConfig::cwd`](meerkat_core::mcp_config::McpStdioConfig::cwd))
+    /// must be an existing directory: otherwise nothing is spawned, and the
+    /// launch never falls back to another directory.
     async fn spawn(
         &self,
+        server: &str,
         stdio: &meerkat_core::mcp_config::McpStdioConfig,
         profile: &McpStdioLaunchProfile,
         entry: &mut PhysicalEntry,
     ) -> Result<(tokio::process::ChildStdout, tokio::process::ChildStdin), McpError> {
+        // Inspected before custody is taken, so a slow filesystem never holds
+        // the custody lock; the refusal is reported after the custody's own.
+        let cwd_refusal = stdio.cwd.as_deref().and_then(working_directory_refusal);
         // Acquire custody before spawning; nothing in this spawn awaits, so
         // nothing separates creating the child from installing its owner.
         let mut slot = lock_slot(&self.slot);
         // A custody closed before any spawn refuses one.
         if matches!(*slot, CustodySlot::Retired) {
             return Err(McpError::RouterShutDown);
+        }
+        if let Some(reason) = cwd_refusal {
+            return Err(meerkat_core::McpStdioCwdError {
+                server: server.to_owned(),
+                reason,
+            }
+            .into());
         }
         // Binding validates the exact launch and retained backend before any
         // process exists. Required isolation has no Command fallback.
@@ -694,6 +708,11 @@ impl StdioChildCustody {
                 cmd.args(&stdio.args);
                 for (key, value) in &stdio.env {
                     cmd.env(key, value);
+                }
+                // The configured working directory, exactly as written; the
+                // child's change into it failing fails the spawn.
+                if let Some(cwd) = &stdio.cwd {
+                    cmd.current_dir(cwd);
                 }
                 cmd.stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
@@ -1740,6 +1759,22 @@ fn launch_configuration<'a>(
     std::borrow::Cow::Owned(launch)
 }
 
+/// Why a configured working directory cannot be launched in now: nothing
+/// at the path, something other than a directory, or a path that could not
+/// be inspected. `None` for an existing directory (symbolic links followed,
+/// as the process's change into it follows them).
+fn working_directory_refusal(cwd: &str) -> Option<meerkat_core::McpStdioCwdRefusal> {
+    use meerkat_core::McpStdioCwdRefusal;
+    match std::fs::metadata(cwd) {
+        Ok(metadata) if metadata.is_dir() => None,
+        Ok(_) => Some(McpStdioCwdRefusal::NotADirectory),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(McpStdioCwdRefusal::Missing)
+        }
+        Err(_) => Some(McpStdioCwdRefusal::Inaccessible),
+    }
+}
+
 /// The connection error of work its caller-held attempt cancelled.
 fn attempt_cancelled() -> McpError {
     McpError::ConnectionFailed {
@@ -1917,10 +1952,11 @@ impl McpConnection {
         mut entry: PhysicalEntry,
         attempt: Option<&crate::McpConnectAttempt>,
     ) -> Result<Self, McpError> {
-        // An invalid access ceiling or secret declaration is refused before
-        // any process or transport effect.
+        // An invalid access ceiling, secret declaration or working directory
+        // is refused before any process or transport effect.
         config.validate_access()?;
         config.validate_secret_env()?;
+        config.validate_cwd()?;
         // So is an attempt its router's close index refused.
         client_custody.admit()?;
         if let McpTransportConfig::Http(http) = &config.transport {
@@ -1959,7 +1995,9 @@ impl McpConnection {
                 // dropped as soon as the process exists; the connection keeps
                 // the nonsecret `config`.
                 let launch = launch_configuration(stdio, config, secrets);
-                let spawned = custody.spawn(&launch, profile, &mut entry).await;
+                let spawned = custody
+                    .spawn(&config.name, &launch, profile, &mut entry)
+                    .await;
                 drop(launch);
                 let (stdout, stdin) = spawned?;
                 match client
@@ -5509,11 +5547,13 @@ sleep 30
         let custody = StdioChildCustody::with_bounds(McpStdioCloseBounds::IMMEDIATE);
         let pipes = custody
             .spawn(
+                "sleeper",
                 &meerkat_core::mcp_config::McpStdioConfig {
                     command: "/bin/sh".to_string(),
                     args: vec!["-c".to_string(), "exec sleep 60".to_string()],
                     env: HashMap::new(),
                     secret_env: std::collections::BTreeSet::new(),
+                    cwd: None,
                 },
                 &McpStdioLaunchProfile::trusted_host(),
                 &mut PhysicalEntry::default(),
@@ -6315,6 +6355,7 @@ sleep 30
         };
         let (stdout, stdin) = custody
             .spawn(
+                &config.name,
                 stdio,
                 &McpStdioLaunchProfile::trusted_host(),
                 &mut PhysicalEntry::default(),
@@ -7165,3 +7206,7 @@ mod process_confinement_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 #[path = "service_secret_tests.rs"]
 mod service_secret_tests;
+
+#[cfg(test)]
+#[path = "stdio_cwd_tests.rs"]
+mod stdio_cwd_tests;

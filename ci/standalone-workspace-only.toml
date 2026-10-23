@@ -844,6 +844,7 @@ modules = [
     "client_service_tests",
     "connection::process_confinement_tests::supported_native",
     "connection::service_secret_tests",
+    "connection::stdio_cwd_tests::fixture",
     "router::apps_tests",
     "router::call_context_tests",
 ]

@@ -339,6 +339,73 @@ exec "$SERVER"
         assert!(!fixture.root.join("outside").exists());
     }
 
+    /// A confined server that configures its own working directory runs
+    /// there instead of in the profile's directory, still inside the
+    /// retained requirement, and reads its relative file from there.
+    /// (Fails-old: the confined launch always ran in the profile directory.)
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+    )]
+    async fn required_mcp_launch_runs_in_the_server_cwd_over_the_profile_directory() {
+        let fixture = Fixture::new();
+        let selected = fixture.work.join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::write(fixture.work.join("report.json"), b"profile directory").unwrap();
+        std::fs::write(selected.join("report.json"), b"selected directory").unwrap();
+        let config = McpServerConfig::stdio(
+            "relocated",
+            fixture.server.display().to_string(),
+            vec!["--cwd-report".into(), "report.json".into()],
+            HashMap::new(),
+        )
+        .with_cwd(selected.display().to_string())
+        .unwrap();
+        let (connection, tools) = tokio::time::timeout(
+            BOUND,
+            McpConnection::connect_and_enumerate_with_stdio_profile(&config, &fixture.profile()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(tools.iter().any(|tool| tool.name == "cwd_report"));
+        let result = connection
+            .call_tool("cwd_report", &serde_json::json!({}))
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let report: serde_json::Value =
+            serde_json::from_str(&meerkat_core::types::text_content(&result)).unwrap();
+        assert_eq!(report["cwd"], selected.display().to_string());
+        assert_eq!(report["file"], "selected directory");
+    }
+
+    /// A working directory outside the retained requirement refuses the
+    /// confined launch before anything runs: a server's own directory never
+    /// widens what it can reach. (macOS binds no directory check; there the
+    /// directory is only where reads under the policy start.)
+    #[cfg(all(feature = "workspace-tests", target_os = "linux"))]
+    #[tokio::test]
+    #[ignore = "Linux positive confinement acceptance lane; requires an eligible host"]
+    async fn required_mcp_cwd_outside_the_requirement_is_refused_not_widened() {
+        let fixture = Fixture::new();
+        let outside = fixture.root.join("outside-directory");
+        std::fs::create_dir(&outside).unwrap();
+        let config = marker_config(&fixture.work)
+            .with_cwd(outside.display().to_string())
+            .unwrap();
+        let result = McpConnection::connect_with_stdio_profile(&config, &fixture.profile()).await;
+        assert!(matches!(
+            result,
+            Err(McpError::Confinement(
+                ConfinementRefusal::UnsupportedRequirement
+            ))
+        ));
+        assert!(!fixture.work.join("entered").exists(), "nothing ran");
+    }
+
     /// Service-secret custody holding one value for `SERVICE_TOKEN`.
     struct ConfinedCustody;
 
@@ -575,9 +642,11 @@ done
             args: vec!["-c".into(), "exec /bin/sleep 60".into()],
             env: HashMap::new(),
             secret_env: std::collections::BTreeSet::new(),
+            cwd: None,
         };
         let pipes = custody
             .spawn(
+                "sleeper",
                 &config,
                 &profile,
                 &mut crate::connection::PhysicalEntry::default(),

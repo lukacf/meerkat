@@ -4102,12 +4102,14 @@ impl McpRouter {
         }
     }
 
-    /// Refuse a server whose exposure map, access policy or secret
-    /// declaration is invalid, before any lifecycle or transport effect.
+    /// Refuse a server whose exposure map, access policy, secret declaration
+    /// or working directory is invalid, before any lifecycle or transport
+    /// effect.
     fn validate_tool_names(config: &McpServerConfig) -> Result<(), McpError> {
         use meerkat_core::tool_catalog::{TOOL_CATALOG_LOAD_NAME, TOOL_CATALOG_SEARCH_NAME};
         config.validate_access()?;
         config.validate_secret_env()?;
+        config.validate_cwd()?;
         for (raw_operation, exposed) in &config.tool_names {
             let reason = if raw_operation.is_empty() {
                 Some("raw operation must not be empty")

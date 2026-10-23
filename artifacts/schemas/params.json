@@ -27728,6 +27728,13 @@
             "description": "Command to spawn the server",
             "type": "string"
           },
+          "cwd": {
+            "description": "Absolute working directory the server is launched in. Used exactly as\nwritten: never expanded or resolved. A missing directory refuses the\nlaunch; it never falls back to another directory. Absent, the server\nstarts where a launch without one starts.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "env": {
             "additionalProperties": {
               "type": "string"

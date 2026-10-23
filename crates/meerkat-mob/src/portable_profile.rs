@@ -76,6 +76,15 @@ pub(crate) fn project_portable_profile(
                         server.name
                     ));
                 }
+                // A working directory is a path on this host: a portable
+                // profile has no exact form for it, and dropping it would
+                // change where the server runs.
+                if stdio.cwd.is_some() {
+                    return Err(format!(
+                        "MCP server '{}' has a working directory that a portable profile cannot carry",
+                        server.name
+                    ));
+                }
                 PortableMcpDecl::Stdio {
                     command: stdio.command.clone(),
                     args: stdio.args.clone(),
@@ -766,6 +775,30 @@ mod tests {
         server.account = Some(meerkat_core::McpAccountDeclaration::NoAccount);
         let error = project(&access_profile(vec![server])).expect_err("declared");
         assert!(error.contains("account declaration"), "{error}");
+    }
+
+    /// A stdio server with a working directory is refused: the directory is
+    /// a path on this host with no portable form, and dropping it would
+    /// change where the server runs. (Fails-old: the projection dropped it.)
+    #[test]
+    fn a_stdio_working_directory_is_refused_in_portable_projection() {
+        let placed = meerkat_core::mcp_config::McpServerConfig::stdio(
+            "placed",
+            "/opt/placed/bin/server",
+            Vec::new(),
+            HashMap::new(),
+        );
+        let mut with_cwd = placed.clone();
+        if let meerkat_core::mcp_config::McpTransportConfig::Stdio(stdio) = &mut with_cwd.transport
+        {
+            stdio.cwd = Some("/opt/placed".to_owned());
+        }
+        let error = project(&access_profile(vec![with_cwd])).expect_err("a working directory");
+        assert!(error.contains("working directory"), "{error}");
+        assert!(
+            project(&access_profile(vec![placed])).is_ok(),
+            "without one the server projects as before"
+        );
     }
 
     /// The declaration rejects fields it does not know, so a reader that

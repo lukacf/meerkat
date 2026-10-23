@@ -177,6 +177,20 @@ them.
   and so does the `PartialOrd` order of `OccurrenceLifecycleEffectVariant::*`
   and `OccurrenceLifecycleInputVariant::*`; match them by variant name, not
   by numeric cast or position.
+- A working directory for stdio MCP servers (see Added). `meerkat-core`:
+  `McpStdioConfig` gains `cwd: Option<String>` (struct literals need the
+  field; `None` is the earlier behaviour, and a configuration without it
+  serializes unchanged), `McpConfigError` and `McpRealmPersistError` gain
+  `Cwd(McpStdioCwdError)`, and `McpAttachmentTarget::Stdio` gains
+  `cwd: Option<String>`. `meerkat-mcp`: `McpError` gains
+  `WorkingDirectory(McpStdioCwdError)`. The semver gate reports a field added
+  to a constructible struct, variants added to exhaustive enums and a field
+  added to an enum struct variant; exhaustive matches need the new arms. A
+  configuration, realm document or persisted profile that sets `cwd` is
+  refused by binaries without the field (`McpStdioConfig` denies unknown
+  fields), never run without it. The Python SDK's generated `McpStdioConfig`
+  dataclass lists its optional fields alphabetically, so `cwd` now comes
+  before `env` and `secret_env`: pass those by keyword.
 
 ### Added
 
@@ -302,6 +316,28 @@ them.
   is seen as gone, never admitted again. The trait default refuses.
   `MeerkatMachine::accept_existing_input_with_completion_for_attachment_and_member_residency`
   is the same for a mob member's attachment.
+- A working directory for stdio MCP servers: `cwd` on a stdio server
+  (`mcp.toml`, the realm's `[[tools.mcp_servers]]`, `mcp/add`, profiles, and
+  `McpServerConfig::with_cwd` for a Rust host) launches its process in that
+  absolute directory, on the trusted-host path and under the host's OS
+  process confinement, where it replaces the confinement profile's directory
+  and is still checked against the policy (on Linux a directory outside its
+  mounts refuses the launch). The value is used exactly as written, never
+  expanded or resolved. A relative, empty or NUL-containing `cwd` is refused
+  with the typed `McpStdioCwdError` (`McpServerConfig::validate_cwd`) when
+  the configuration is loaded, persisted, staged or connected, and so is a
+  relative `command` path with a separator while `cwd` is set (checked after
+  `${VAR}` expansion; a bare program name or an absolute path is accepted).
+  A `cwd` that is missing or not a directory at launch refuses the launch
+  before any process exists, with no fallback to another directory. `cwd` is
+  part of the server's definition: the stdio launch meaning, the session
+  attachment record and every definition comparison include it, so a
+  changed `cwd` is launched anew, a resumed attachment to the old definition
+  is refused as rebound, and realm service secrets stored for the old
+  definition must be stored again. A definition without `cwd` keeps its
+  launch meaning and attachment identity unchanged. Mob portable profiles
+  refuse a stdio `cwd`, and the adaptive layer decision schema leaves it
+  out, so packs built by earlier hosts stay valid.
 
 ### Changed
 

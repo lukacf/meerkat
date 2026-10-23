@@ -63,6 +63,10 @@ impl McpStdioLaunchProfile {
 
     /// Retain the host's complete mechanical requirement and explicit working
     /// directory. No rule is weakened when compilation or path validation fails.
+    /// A server that configures its own working directory
+    /// ([`McpStdioConfig::cwd`]) is launched there instead, still bound by
+    /// the requirement: on Linux a directory outside its mounts refuses the
+    /// launch.
     /// Hosts can inspect [`Self::capabilities`] before admitting a required
     /// deployment; optional unavailable servers instead fail their own launch.
     /// A required stdio launch's stderr is a fresh pipe its custody drains
@@ -121,6 +125,13 @@ impl McpStdioLaunchProfile {
                     .iter()
                     .map(|(key, value)| (key.as_str().into(), value.as_str().into()))
                     .collect();
+                // A server's own working directory replaces the profile's for
+                // its launch. Binding still validates it against the retained
+                // requirement, so it never widens what the process can reach.
+                let directory = stdio
+                    .cwd
+                    .as_deref()
+                    .map_or_else(|| working_directory.clone(), PathBuf::from);
                 let launch = ProcessLaunchSpec::new(
                     stdio.command.as_str().into(),
                     stdio
@@ -128,7 +139,7 @@ impl McpStdioLaunchProfile {
                         .iter()
                         .map(|argument| argument.as_str().into())
                         .collect(),
-                    working_directory.clone(),
+                    directory,
                     environment,
                 )?;
                 compiled.bind_launch(launch).map(Some)

@@ -2412,6 +2412,25 @@ def test_live_mcp_contract_types_exported():
     assert response.applied_at_turn == 5
 
 
+def test_mcp_stdio_config_carries_an_optional_cwd():
+    from meerkat import McpStdioConfig, McpStdioServerConfig
+
+    assert McpStdioConfig(command="npx").cwd is None
+    assert McpStdioConfig(command="srv", cwd="/opt/github").cwd == "/opt/github"
+    assert "cwd" in McpStdioServerConfig.__optional_keys__
+    assert get_type_hints(McpStdioServerConfig)["cwd"] is str
+    add = McpAddParams(
+        session_id="s1",
+        server_config={
+            "name": "github",
+            "command": "/opt/github/bin/github-mcp-server",
+            "args": ["stdio"],
+            "cwd": "/opt/github",
+        },
+    )
+    assert add.server_config["cwd"] == "/opt/github"
+
+
 def test_capability_available():
     cap = Capability(id="sessions", description="Session lifecycle", status="Available")
     assert cap.available is True

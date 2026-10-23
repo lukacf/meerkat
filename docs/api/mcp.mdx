@@ -212,6 +212,13 @@ Project config wins on name collisions.
   args = ["-m", "db_mcp_server"]
   env = { DATABASE_URL = "${DATABASE_URL}" }
 
+  # Stdio server launched in its own working directory
+  [[servers]]
+  name = "github"
+  command = "/opt/github-mcp/bin/github-mcp-server"
+  args = ["stdio"]
+  cwd = "/opt/github-mcp"
+
   # HTTP server (streamable HTTP is default for URLs)
   [[servers]]
   name = "remote-api"
@@ -235,6 +242,25 @@ Project config wins on name collisions.
 <Note>
 Supported transports: **stdio**, **streamable HTTP** (default for URLs), and **SSE**.
 Environment variables in config use `${VAR_NAME}` syntax.
+</Note>
+
+<Note>
+`cwd` sets the working directory a stdio server is launched in; without it
+the server starts where it did before. The value is an absolute path used
+exactly as written: it is never expanded (no `${VAR_NAME}`, no `~`) or
+resolved. A relative, empty or NUL-containing `cwd` refuses the
+configuration when it is loaded, persisted, staged or connected. A `cwd`
+that is missing or not a directory when the server is launched refuses the
+launch before anything runs; there is no fallback to another directory.
+With `cwd` set, `command` must be an absolute path or a bare program name
+(checked after `${VAR_NAME}` expansion), because a relative program path
+would resolve differently by platform. Under the host's OS process
+confinement, `cwd` never widens what the server can reach: on Linux a
+directory outside the confinement's mounts refuses the launch. A changed
+`cwd` is a changed server definition: it is launched anew, a resumed
+session's recorded attachment to the old definition is refused as rebound,
+and realm service secrets (`secret_env`) stored for the old definition must
+be stored again. Mob portable profiles cannot carry `cwd`.
 </Note>
 
 <Note>

@@ -2283,6 +2283,7 @@ export interface MobTurnStartParams {
   provider?: string | null;
   provider_params?: Record<string, unknown> | null;
   self_hosted_server_id?: string | null;
+  session_events?: boolean | null;
   skill_refs?: SkillKey[] | null;
   structured_output_retries?: number | null;
   system_prompt?: string | null;

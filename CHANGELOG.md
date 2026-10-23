@@ -314,6 +314,18 @@ them.
 
 ### Fixed
 
+- An MCP connect under the interactive auth mode no longer waits out the
+  300 s interactive login window when it cannot open a login. Only a remote
+  server with an auth resolver gets the window; a stdio server, and a remote
+  server without a resolver, are bounded by their own
+  `connect_timeout_secs`. A member router built by the factory uses the
+  interactive mode, so a stdio server that never speaks MCP held a member's
+  connect until its process exited, or for about 5 minutes when it hung; it
+  now fails at its connect timeout, then closes under the stdio close
+  bounds. A connect that runs out of time names the deadline it had ("after
+  301s (1s connect timeout and the 300s interactive login window)"). No
+  public API changes.
+
 - An authorization server that accepts a request and never answers no longer
   holds an MCP login, its host or the credential forever. A start that
   stalls ends typed (`upstream_failure`, detail `upstream_timeout`) and

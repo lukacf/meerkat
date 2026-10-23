@@ -2547,16 +2547,10 @@ impl McpConnection {
         control: Option<Arc<dyn McpAttachmentAuthority>>,
         attempt: Option<&crate::McpConnectAttempt>,
     ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
-        let timeout_secs = config
-            .connect_timeout_secs
-            .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_SECS);
-        let mut timeout = Duration::from_secs(timeout_secs as u64);
-        if matches!(auth_mode, McpAuthMode::Interactive) {
-            timeout += meerkat_auth_core::MCP_INTERACTIVE_LOGIN_TIMEOUT;
-        }
+        let deadline = ConnectDeadline::for_connect(config, auth_mode, auth_resolver.is_some());
 
         let server_name = config.name.clone();
-        let connected = tokio::time::timeout(timeout, async {
+        let connected = tokio::time::timeout(deadline.total(), async {
             let conn = Self::connect_with_custody(
                 config,
                 auth_mode,
@@ -2595,12 +2589,7 @@ impl McpConnection {
         .await;
         let timed_out = connected.is_err();
         let attempt = connected
-            .map_err(|_| McpError::ConnectionFailed {
-                reason: format!(
-                    "Timed out connecting to '{}' ({timeout_secs}s)",
-                    config.name
-                ),
-            })
+            .map_err(|_| deadline.timed_out(&config.name))
             .flatten();
         if timed_out
             && let Some(record) = stdio_custody
@@ -4189,11 +4178,195 @@ fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
     }
 }
 
+/// How long one MCP connect attempt may take: the server's configured
+/// connect timeout, plus the interactive login window when the attempt can
+/// open a login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConnectDeadline {
+    connect_timeout: Duration,
+    login_window: Option<Duration>,
+}
+
+impl ConnectDeadline {
+    pub(crate) fn for_connect(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        has_auth_resolver: bool,
+    ) -> Self {
+        let connect_timeout = Duration::from_secs(u64::from(
+            config
+                .connect_timeout_secs
+                .unwrap_or(McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS),
+        ));
+        // Only a remote server with an auth resolver, under the interactive
+        // mode, can open a login during its connect. A stdio server never
+        // can, and a remote server without a resolver has none to open.
+        let can_open_login = matches!(auth_mode, McpAuthMode::Interactive)
+            && has_auth_resolver
+            && matches!(config.transport, McpTransportConfig::Http(_));
+        let login_window =
+            can_open_login.then_some(meerkat_auth_core::MCP_INTERACTIVE_LOGIN_TIMEOUT);
+        Self {
+            connect_timeout,
+            login_window,
+        }
+    }
+
+    pub(crate) fn total(self) -> Duration {
+        self.connect_timeout + self.login_window.unwrap_or_default()
+    }
+
+    /// The error of an attempt that ran out of this deadline. It names the
+    /// deadline the attempt actually had.
+    pub(crate) fn timed_out(self, server: &str) -> McpError {
+        let total = self.total().as_secs();
+        let reason = match self.login_window {
+            None => format!("Timed out connecting to '{server}' after {total}s"),
+            Some(window) => format!(
+                "Timed out connecting to '{server}' after {total}s ({}s connect timeout and the {}s interactive login window)",
+                self.connect_timeout.as_secs(),
+                window.as_secs()
+            ),
+        };
+        McpError::ConnectionFailed { reason }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub mod tests {
     use super::*;
     use crate::protocol::{extract_content_blocks, tool_error_reason};
+
+    fn with_connect_timeout(mut config: McpServerConfig, secs: u32) -> McpServerConfig {
+        config.connect_timeout_secs = Some(secs);
+        config
+    }
+
+    /// A stdio server can never open a login, so an interactive-mode connect
+    /// of one is bounded by its own connect timeout, not by the interactive
+    /// login window: a server that never speaks MCP fails within it.
+    #[tokio::test]
+    async fn a_stdio_connect_under_interactive_auth_is_bounded_by_its_connect_timeout() {
+        let config = with_connect_timeout(
+            McpServerConfig::stdio("idle-stdio", "sleep", vec!["30".into()], HashMap::new()),
+            1,
+        );
+        let started = std::time::Instant::now();
+        let connected = tokio::time::timeout(
+            Duration::from_secs(10),
+            McpConnection::connect_and_enumerate_with_mcp_auth(
+                &config,
+                McpAuthMode::Interactive,
+                None,
+            ),
+        )
+        .await
+        .expect("a stdio connect never waits for an interactive login window");
+        let Err(error) = connected else {
+            panic!("a stdio server that never speaks MCP never connects");
+        };
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(error.to_string().contains("after 1s"), "{error}");
+    }
+
+    /// A remote server without an auth resolver cannot open a login either:
+    /// its connect is bounded by its connect timeout.
+    #[tokio::test]
+    async fn a_remote_connect_without_an_auth_resolver_is_bounded_by_its_connect_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        // Accepts every connection and never answers.
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let config = with_connect_timeout(
+            McpServerConfig::streamable_http("silent-remote", url, HashMap::new()),
+            1,
+        );
+        let connected = tokio::time::timeout(
+            Duration::from_secs(10),
+            McpConnection::connect_and_enumerate_with_mcp_auth(
+                &config,
+                McpAuthMode::Interactive,
+                None,
+            ),
+        )
+        .await
+        .expect("a connect that cannot open a login never waits for its window");
+        silent.abort();
+        let Err(error) = connected else {
+            panic!("a server that never answers never connects");
+        };
+        assert!(error.to_string().contains("after 1s"), "{error}");
+    }
+
+    /// Only a remote connect with an auth resolver, under the interactive
+    /// mode, can open a login and so gets the interactive login window.
+    #[test]
+    fn only_a_remote_connect_with_an_auth_resolver_gets_the_interactive_login_window() {
+        let stdio = with_connect_timeout(
+            McpServerConfig::stdio("local", "/bin/true", vec![], HashMap::new()),
+            1,
+        );
+        let remote = with_connect_timeout(
+            McpServerConfig::streamable_http(
+                "remote",
+                "https://mcp.example/mcp".to_owned(),
+                HashMap::new(),
+            ),
+            1,
+        );
+        let one = Duration::from_secs(1);
+        let window = meerkat_auth_core::MCP_INTERACTIVE_LOGIN_TIMEOUT;
+        for (config, mode, resolver, expected) in [
+            (&stdio, McpAuthMode::Interactive, true, one),
+            (&stdio, McpAuthMode::Interactive, false, one),
+            (&remote, McpAuthMode::Interactive, false, one),
+            (&remote, McpAuthMode::Stored, true, one),
+            (&remote, McpAuthMode::Interactive, true, one + window),
+        ] {
+            assert_eq!(
+                ConnectDeadline::for_connect(config, mode, resolver).total(),
+                expected,
+                "{} {mode:?} resolver={resolver}",
+                config.name
+            );
+        }
+    }
+
+    /// A connect that runs out of time names the deadline it actually had,
+    /// login window included.
+    #[test]
+    fn a_connect_timeout_names_its_effective_deadline() {
+        let stdio = with_connect_timeout(
+            McpServerConfig::stdio("local", "/bin/true", vec![], HashMap::new()),
+            1,
+        );
+        let remote = with_connect_timeout(
+            McpServerConfig::streamable_http(
+                "remote",
+                "https://mcp.example/mcp".to_owned(),
+                HashMap::new(),
+            ),
+            1,
+        );
+        let local = ConnectDeadline::for_connect(&stdio, McpAuthMode::Interactive, true)
+            .timed_out("local")
+            .to_string();
+        assert!(local.contains("after 1s"), "{local}");
+        let windowed = ConnectDeadline::for_connect(&remote, McpAuthMode::Interactive, true)
+            .timed_out("remote")
+            .to_string();
+        assert!(windowed.contains("after 301s"), "{windowed}");
+        assert!(
+            windowed.contains("300s interactive login window"),
+            "{windowed}"
+        );
+    }
 
     /// A connection states only the account its owners state: the host's
     /// `none` declaration, the connector binding's account, or the OAuth

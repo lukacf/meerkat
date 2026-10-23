@@ -321,10 +321,14 @@ them.
   `connect_timeout_secs`. A member router built by the factory uses the
   interactive mode, so a stdio server that never speaks MCP held a member's
   connect until its process exited, or for about 5 minutes when it hung; it
-  now fails at its connect timeout, then closes under the stdio close
-  bounds. A connect that runs out of time names the deadline it had ("after
-  301s (1s connect timeout and the 300s interactive login window)"). No
-  public API changes.
+  now fails at its connect timeout. A failed connect closes a stdio server
+  whose initialize handshake never returned with an EOF grace of at most
+  250 ms (the stdio close bounds' own, if shorter) and its TERM grace, so the
+  connect ends within its connect timeout plus at most 0.25 s, or plus the
+  TERM grace for a server that ignores SIGTERM. A server that did complete
+  initialize keeps its full close grace. A connect that runs out of time
+  names the deadline it had ("after 301s (1s connect timeout and the 300s
+  interactive login window)"). No public API changes.
 
 - An authorization server that accepts a request and never answers no longer
   holds an MCP login, its host or the credential forever. A start that

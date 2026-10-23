@@ -572,6 +572,23 @@ fn response_reads_as_empty_output(
     }
 }
 
+fn llm_response_exhausted_during_thinking(result: &LlmStreamResult) -> bool {
+    // A provider can account for reasoning without exposing a reasoning block.
+    let has_reasoning = result.usage().reasoning_tokens.unwrap_or(0) > 0
+        || result
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, AssistantBlock::Reasoning { .. }));
+    let has_answer_or_action = result.blocks().iter().any(|block| match block {
+        AssistantBlock::Text { text, .. } | AssistantBlock::Transcript { text, .. } => {
+            !text.trim().is_empty()
+        }
+        AssistantBlock::ToolUse { .. } | AssistantBlock::Image { .. } => true,
+        AssistantBlock::Reasoning { .. } | AssistantBlock::ServerToolContent { .. } => false,
+    });
+    result.stop_reason() == StopReason::MaxTokens && has_reasoning && !has_answer_or_action
+}
+
 fn validate_turn_input_failure_reason(input: &TurnExecutionInput) -> Result<(), AgentError> {
     if let Some(failure) = turn_input_failure_source(input)
         && !failure.source_kind.is_known()
@@ -2977,6 +2994,16 @@ where
             // 5. Handle call result
             match call_result {
                 Ok(result) => {
+                    if llm_response_exhausted_during_thinking(&result) {
+                        // Preserve this response for usage accounting and typed
+                        // terminalization; an empty-output retry would discard it.
+                        return Ok(LlmRetryOutcome::Completed(
+                            result,
+                            authorization
+                                .as_ref()
+                                .map(|auth| auth.operation_id().clone()),
+                        ));
+                    }
                     if response_reads_as_empty_output(result.blocks(), result.stop_reason()) {
                         if allow_empty_success {
                             return Ok(LlmRetryOutcome::Completed(
@@ -7609,23 +7636,7 @@ where
             ));
         }
 
-        // The provider's own account of a refusal or filter travels with the
-        // failure as tagged evidence; nothing here reads it.
-        let stop_detail = result.stop_detail().cloned().map(Box::new);
-        let (blocks, stop_reason, _raw_usage) = result.into_parts();
-        let has_reasoning = blocks
-            .iter()
-            .any(|block| matches!(block, AssistantBlock::Reasoning { .. }));
-        let has_answer_or_action = blocks.iter().any(|block| match block {
-            AssistantBlock::Text { text, .. } | AssistantBlock::Transcript { text, .. } => {
-                !text.trim().is_empty()
-            }
-            AssistantBlock::ToolUse { .. } | AssistantBlock::Image { .. } => true,
-            AssistantBlock::Reasoning { .. } | AssistantBlock::ServerToolContent { .. } => false,
-        });
-        let exhausted_during_thinking =
-            stop_reason == StopReason::MaxTokens && has_reasoning && !has_answer_or_action;
-        if exhausted_during_thinking {
+        if llm_response_exhausted_during_thinking(&result) {
             let error = AgentError::MaxTokensReached {
                 turn: ctx.turn_count,
                 partial: "turn exhausted max_tokens during thinking; raise max_tokens or set a thinking budget"
@@ -7638,6 +7649,10 @@ where
                 .await?;
             return Err(error);
         }
+        // The provider's own account of a refusal or filter travels with the
+        // failure as tagged evidence; nothing here reads it.
+        let stop_detail = result.stop_detail().cloned().map(Box::new);
+        let (blocks, stop_reason, _raw_usage) = result.into_parts();
         // Stop reasons that refuse the whole response. It has already
         // streamed, but none of it is committed and none of its tool calls
         // run: a refusal or content filter can cut a tool call mid-input, and
@@ -24158,6 +24173,220 @@ mod tests {
             "{:?}",
             run.events
         );
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn max_token_reasoning_usage_without_blocks_is_a_typed_failure() {
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            super::LlmStreamResult::new(
+                Vec::new(),
+                StopReason::MaxTokens,
+                Usage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    reasoning_tokens: Some(7),
+                    ..Usage::default()
+                },
+            ),
+        ]));
+        let mut agent = build_agent(client.clone()).await;
+        agent.config.max_turns = Some(1);
+
+        let error = agent
+            .run("Use a tool".to_string().into())
+            .await
+            .expect_err("hidden reasoning exhaustion must be a typed failure");
+        assert!(
+            matches!(error, AgentError::MaxTokensReached { .. }),
+            "expected typed max-token exhaustion, got {error}"
+        );
+        assert_eq!(client.calls_made(), 1);
+        assert_eq!(agent.session.total_usage().input_tokens, 11);
+        assert_eq!(agent.session.total_usage().output_tokens, 7);
+        assert_eq!(agent.session.total_usage().reasoning_tokens, Some(7));
+        assert!(
+            !agent
+                .session
+                .messages()
+                .iter()
+                .any(|message| matches!(message, Message::BlockAssistant(_))),
+            "hidden reasoning exhaustion must not commit an empty assistant turn"
+        );
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Failed
+        );
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::FatalFailure)
+        );
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn max_token_reasoning_usage_after_tool_effect_does_not_complete() {
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            super::LlmStreamResult::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "image-call".to_string(),
+                    name: "image_effect".into(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+                Usage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    ..Usage::default()
+                },
+            ),
+            super::LlmStreamResult::new(
+                Vec::new(),
+                StopReason::MaxTokens,
+                Usage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    reasoning_tokens: Some(7),
+                    ..Usage::default()
+                },
+            ),
+        ]));
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut session = crate::Session::new();
+        session
+            .set_build_state(crate::SessionBuildState::default())
+            .expect("test session build state should serialize");
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .with_turn_state_handle(turn_handle.clone())
+            .build_standalone(
+                client.clone(),
+                Arc::new(ImageEffectDispatcher::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let error = agent
+            .run("Create an image, then describe it".to_string().into())
+            .await
+            .expect_err("a prior tool effect must not hide reasoning exhaustion");
+        assert!(
+            matches!(error, AgentError::MaxTokensReached { .. }),
+            "expected typed max-token exhaustion, got {error}"
+        );
+        assert_eq!(client.calls_made(), 2);
+        assert_eq!(agent.session.total_usage().input_tokens, 16);
+        assert_eq!(agent.session.total_usage().output_tokens, 9);
+        assert_eq!(agent.session.total_usage().reasoning_tokens, Some(7));
+        assert!(agent.session.messages().iter().any(|message| matches!(
+            message,
+            Message::BlockAssistant(message)
+                if message.blocks.iter().any(|block| matches!(block, AssistantBlock::Image { .. }))
+        )), "the completed tool effect must remain in the transcript");
+        assert!(
+            agent
+                .session
+                .messages()
+                .iter()
+                .all(|message| match message {
+                    Message::BlockAssistant(message) => !message.blocks.is_empty(),
+                    _ => true,
+                })
+        );
+        assert_eq!(turn_handle.run_completed_effect_count(), 0);
+        assert_eq!(turn_handle.run_failed_effect_count(), 1);
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn max_token_reasoning_usage_with_text_preserves_the_answer() {
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "A partial answer".to_string(),
+                    meta: None,
+                }],
+                StopReason::MaxTokens,
+                Usage {
+                    input_tokens: 11,
+                    output_tokens: 9,
+                    reasoning_tokens: Some(7),
+                    ..Usage::default()
+                },
+            ),
+        ]));
+        let mut agent = build_agent(client).await;
+        agent.config.max_turns = Some(1);
+
+        let result = agent
+            .run("Describe the image".to_string().into())
+            .await
+            .expect("visible output must not become a thinking-only failure");
+        assert_eq!(result.text, "A partial answer");
+        assert_eq!(agent.session.total_usage().output_tokens, 9);
+        assert_eq!(agent.session.total_usage().reasoning_tokens, Some(7));
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn max_token_reasoning_usage_with_tool_preserves_the_action() {
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            super::LlmStreamResult::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "image-call".to_string(),
+                    name: "image_effect".into(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::MaxTokens,
+                Usage {
+                    input_tokens: 11,
+                    output_tokens: 9,
+                    reasoning_tokens: Some(7),
+                    ..Usage::default()
+                },
+            ),
+            super::LlmStreamResult::new(Vec::new(), StopReason::EndTurn, Usage::default()),
+        ]));
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut session = crate::Session::new();
+        session
+            .set_build_state(crate::SessionBuildState::default())
+            .expect("test session build state should serialize");
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .with_turn_state_handle(turn_handle.clone())
+            .build_standalone(
+                client.clone(),
+                Arc::new(ImageEffectDispatcher::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.config.max_turns = Some(2);
+
+        agent
+            .run("Create an image".to_string().into())
+            .await
+            .expect("a tool action must not become a thinking-only failure");
+        assert_eq!(client.calls_made(), 2);
+        assert!(agent.session.messages().iter().any(|message| matches!(
+            message,
+            Message::BlockAssistant(message)
+                if message.blocks.iter().any(|block| matches!(block, AssistantBlock::Image { .. }))
+        )));
+        assert_eq!(agent.session.total_usage().output_tokens, 9);
+        assert_eq!(agent.session.total_usage().reasoning_tokens, Some(7));
+        assert_eq!(turn_handle.run_completed_effect_count(), 1);
+        assert_eq!(turn_handle.run_failed_effect_count(), 0);
     }
 
     #[cfg(feature = "workspace-tests")]

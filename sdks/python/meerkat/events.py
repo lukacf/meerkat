@@ -1773,6 +1773,11 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         elif field_name == "content" and event_type == "tool_execution_completed":
             if not isinstance(raw.get("content"), list):
                 raise ValueError("content must be an array of content blocks")
+        elif field_name == "reason" and event_type == "compaction_failed":
+            reason = raw.get("reason")
+            if not isinstance(reason, dict):
+                raise ValueError("reason must be object")
+            _require_str(reason, "kind")
         elif field_name in _STRING_FIELDS:
             _require_str(raw, field_name)
         elif field_name in _NUMBER_FIELDS:

@@ -253,47 +253,53 @@ assert_range_gate() {
     fi
   )" || status=$?
   local passed=0
+  # Match captured output directly: grep -q can close its pipe before printf
+  # finishes and make a successful match fail with SIGPIPE under pipefail.
   case "$expected" in
     ratchets-quiet)
       # The hook lints nothing: a runtime-only range runs no ratchet, no
       # Clippy and no tests.
-      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq 'ratchets only' \
-        && ! printf '%s' "$output" | grep -Eq 'clippy|test-sdk-web|wasm-check|fast --no-run|nextest run'; then
+      if [[ "$status" -eq 0 && "$output" == *'ratchets only'* \
+        && "$output" != *clippy* && "$output" != *test-sdk-web* \
+        && "$output" != *wasm-check* && "$output" != *'fast --no-run'* \
+        && "$output" != *'nextest run'* ]]; then
         passed=1
       fi
       ;;
     ratchets-web)
-      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq 'DRY-RUN make test-sdk-web' \
-        && ! printf '%s' "$output" | grep -Eq 'clippy|fast --no-run|nextest run'; then
+      if [[ "$status" -eq 0 && "$output" == *'DRY-RUN make test-sdk-web'* \
+        && "$output" != *clippy* && "$output" != *'fast --no-run'* \
+        && "$output" != *'nextest run'* ]]; then
         passed=1
       fi
       ;;
     runtime-only)
-      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq -- 'clippy -p meerkat-runtime' \
-        && ! printf '%s' "$output" | grep -Eq 'test-sdk-web|wasm-check|fast --no-run|nextest run'; then
+      if [[ "$status" -eq 0 && "$output" == *'clippy -p meerkat-runtime'* \
+        && "$output" != *test-sdk-web* && "$output" != *wasm-check* \
+        && "$output" != *'fast --no-run'* && "$output" != *'nextest run'* ]]; then
         passed=1
       fi
       ;;
     full-history)
-      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq 'DRY-RUN make test-sdk-web' \
-        && printf '%s' "$output" | grep -Fq -- 'clippy -p meerkat-runtime'; then
+      if [[ "$status" -eq 0 && "$output" == *'DRY-RUN make test-sdk-web'* \
+        && "$output" == *'clippy -p meerkat-runtime'* ]]; then
         passed=1
       fi
       ;;
     whole-tree)
-      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq 'DRY-RUN make test-sdk-web' \
-        && printf '%s' "$output" | grep -Fq -- 'clippy --workspace'; then
+      if [[ "$status" -eq 0 && "$output" == *'DRY-RUN make test-sdk-web'* \
+        && "$output" == *'clippy --workspace'* ]]; then
         passed=1
       fi
       ;;
     workspace-only)
-      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq -- 'clippy --workspace' \
-        && ! printf '%s' "$output" | grep -Fq 'test-sdk-web'; then
+      if [[ "$status" -eq 0 && "$output" == *'clippy --workspace'* \
+        && "$output" != *test-sdk-web* ]]; then
         passed=1
       fi
       ;;
     reject)
-      if [[ "$status" -ne 0 ]] && ! printf '%s' "$output" | grep -Fq 'DRY-RUN'; then
+      if [[ "$status" -ne 0 && "$output" != *DRY-RUN* ]]; then
         passed=1
       fi
       ;;

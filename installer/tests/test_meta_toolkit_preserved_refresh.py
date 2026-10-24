@@ -150,6 +150,21 @@ def test_actual_archive_product_successor_preserves_policy_viewer_access_and_set
         assert (destination / name).read_bytes() == previous[name][0]
 
 
+def test_actual_product_refresh_preserves_host_adopted_announcement_declarations(tmp_path, products, inputs):
+    name = compiler.DECLARATIONS_PATH
+    source = tmp_path / "selected-announcements.json"
+    source.write_bytes(b'{"revision":7,"sources":[],"subscriptions":[]}\r\n')
+    selected = {**inputs, name: source}
+    value = crossing.__wrapped__(tmp_path, products, selected)
+    _, _, previous, candidate, _, _ = value
+    assert previous[name] == candidate[name] == (source.read_bytes(), 0o644)
+    directory, destination, identity = staged(tmp_path, value)
+    _, _, update = updates.transaction(directory, identity)
+    assert name in update["runtime_dependency_update"]["protected_application_paths"]
+    updates.activate(directory, identity)
+    assert (destination / name).read_bytes() == source.read_bytes()
+
+
 @pytest.mark.parametrize("predecessor", ["compiler-default", "customized"])
 def test_installed_update_to_a_refreshed_connect_product_admits_its_console(
         tmp_path, products, inputs, monkeypatch, predecessor):

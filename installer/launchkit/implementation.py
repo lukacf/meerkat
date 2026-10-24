@@ -343,17 +343,23 @@ replace them with application callback tools or report sender permission as a
 completed receiver turn. Existing setup-result continuation is a separate path.
 
 Incoming sources use Meta's native announcement declarations. When the selected
-host includes announcement_configuration.py, package an optional
-application/announcement-declarations.json containing the native object
+host includes announcement_options in app.py, the host preparation owner can
+adopt optional application/announcement-declarations.json through the existing
+protected application-input route, containing the native object
 {revision, sources, subscriptions}. The host captures that file once and passes
 it unchanged as inline runtime_options.mob_announcements.declarations with
 enabled=true. No file means announcements remain at the existing default. Native
 owns schema validation, monotonic revision/digest checks and managed-record
 reconciliation. Declaration changes are native configuration changes, outside a
-source-only repair of a retained framework. Use a new explicit artifact revision for changed declarations;
+source-only repair of a retained framework. Implementation tools cannot add or
+edit this protected file. Use a new explicit artifact revision for changed declarations;
 never reset revisions to bypass a refusal, mirror a cursor, or replay subscriptions
 from application code. The host checks sources.v1 and the applied native revision
-before starting application adapters. A pending native record remains pending.
+before starting application adapters, waiting at most 30 seconds for startup
+reconciliation and asking native to verify the same revision and exact content.
+A pending native record remains pending. Restoring an earlier application across
+a declarations change is unavailable in Meta 0.9.5; retain native state and use
+forward recovery with the current accepted application.
 
 Meta 0.9.5 announcement sources do not yet deliver on governed Connect-hosted
 gateways. Source capability and an applied declaration revision can coexist with
@@ -369,7 +375,9 @@ or uses members:{mob_id,role} instead of member. Native role means the actual
 profile, not the Blueprint class ID or a display label. For a whole class, cover
 its fixed identities from deployment.json.agents with member subscriptions and
 its future members with a role template using deployment.json.applicationProfiles[class_id].
-This also covers zero-start classes without placeholder members and avoids
+If applicationProfiles is absent, declare fixed identities only; that accepted
+deployment has no reusable class profiles to template. Never guess a profile.
+The role template also covers zero-start classes without placeholder members and avoids
 guessing a setup helper's native profile projection. Use distinct stable IDs for
 these declared records. Native expands role templates at capture; do not enumerate
 the live roster or create per-member subscriptions on each restart. An explicit

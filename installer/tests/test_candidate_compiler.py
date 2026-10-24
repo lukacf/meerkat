@@ -136,18 +136,6 @@ def test_candidate_refresh_preserves_exact_accepted_design_and_other_dependency_
     assert compiler.MOBKIT_VERSION == generator.MOBKIT_VERSION == "0.8.47"
 
 
-def test_runtime_refresh_preserves_optional_announcement_declarations(selected, monkeypatch):
-    _, target = selected
-    spec, snapshot = previous_framework(monkeypatch, "0.8.47")
-    # Even an older unsupported runtime must retain this desired native
-    # configuration when dependencies change, rather than silently drop it.
-    declaration = generator.PackageFile(compiler.DECLARATIONS_PATH,
-        '{"revision":17,"sources":[],"subscriptions":[]}\n')
-    accepted = [*snapshot.files, declaration]
-    refreshed = source_map(compiler.generate_runtime_refresh(spec, accepted, runtime_target=target))
-    assert refreshed[declaration.path] == (declaration.content, declaration.mode)
-
-
 @pytest.mark.parametrize("target", ["linux", "gcp"])
 def test_local_candidate_cannot_be_exported_to_a_different_host_platform(selected, target):
     _, selected_target = selected

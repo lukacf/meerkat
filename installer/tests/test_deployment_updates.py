@@ -170,12 +170,14 @@ def test_retained_current_host_never_bypasses_exact_compiler_fingerprints(field,
     assert updates.compatibility(previous, candidate, {})[1]
 
 
-async def prepared(tmp_path, *, console=None, tool_policy=None):
+async def prepared(tmp_path, *, console=None, tool_policy=None, announcements=None):
     guide = Guide()
     implementation = Implementation(guide)
     implementation.extra_files = {"application/logic.py": "VERSION = 'old'\n"}
     if tool_policy is not None:
         implementation.extra_files["application/tool-policy.json"] = tool_policy
+    if announcements is not None:
+        implementation.extra_files[updates.ANNOUNCEMENT_DECLARATIONS_PATH] = announcements
     if console is not None:
         implementation.extra_files["config/console.toml"] = console
     service = Service(tmp_path / "private-server", guide, implementation)
@@ -198,6 +200,8 @@ async def prepared(tmp_path, *, console=None, tool_policy=None):
     implementation.extra_files = {"application/logic.py": "VERSION = 'new'\n", "application/new.py": "FEATURE = True\n"}
     if tool_policy is not None:
         implementation.extra_files["application/tool-policy.json"] = tool_policy
+    if announcements is not None:
+        implementation.extra_files[updates.ANNOUNCEMENT_DECLARATIONS_PATH] = announcements
     if console is not None:
         implementation.extra_files["config/console.toml"] = console
     return service, directory, destination, previous, private
@@ -1688,3 +1692,66 @@ async def test_current_recovery_refuses_busy_lease_modified_source_and_linked_pr
     with pytest.raises(DraftConflict, match="unowned file or link"):
         updates.retry_candidate(directory, identity)
     assert read_receipt(directory)["update"]["status"] == "recovery-needed"
+
+
+@pytest.mark.parametrize("revision", [1, 0, None])
+async def test_declaration_change_requires_newer_revision_at_real_update_staging(tmp_path, revision):
+    source = json.dumps({"revision": 1, "sources": [], "subscriptions": []})
+    service, directory, destination, previous, private = await prepared(tmp_path, announcements=source)
+    name = updates.ANNOUNCEMENT_DECLARATIONS_PATH
+    if revision is None:
+        del service.implementation.extra_files[name]
+    else:
+        service.implementation.extra_files[name] = json.dumps({"revision": revision,
+            "sources": [], "subscriptions": [], "changed": True})
+    result = await service.stage_update(service.guide.identity, previous["deployment_id"],
+        service.guide.state["version"], service.implementation.identity)
+    update = result["update"]
+    assert update["status"] == "blocked"
+    assert any("strictly newer revision" in item for item in update["blockers"])
+    assert next(item for item in update["changes"] if item["path"] == name)["kind"] == "native-announcement-declarations"
+    assert (destination / name).read_text() == source
+    assert (destination / ".env").read_bytes() == private
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_declaration_update_disables_rollback_and_rejects_direct_restore(tmp_path, started):
+    source = json.dumps({"revision": 1, "sources": [], "subscriptions": []})
+    service, directory, destination, previous, private = await prepared(tmp_path, announcements=source)
+    name = updates.ANNOUNCEMENT_DECLARATIONS_PATH
+    candidate = json.dumps({"revision": 2, "sources": [], "subscriptions": []})
+    service.implementation.extra_files[name] = candidate
+    result = await service.stage_update(service.guide.identity, previous["deployment_id"],
+        service.guide.state["version"], service.implementation.identity)
+    identity = result["update"]["update_id"]
+    assert result["update"]["status"] == "staged"
+    updates.activate(directory, identity)
+    _, root, update = updates.transaction(directory, identity)
+    updates.checkpoint(directory, root, update, runtime_admission_possible=started)
+    updates.committed(directory, identity, started=started)
+    settled = read_receipt(directory)["update"]
+    assert settled["rollback_available"] is False
+    assert "declarations change is not supported" in settled["detail"]
+    before = policy_guard_image(directory)
+    with pytest.raises(DraftConflict, match="declarations change is not supported"):
+        updates.restore(directory, identity, restore_data=False)
+    assert policy_guard_image(directory) == before
+    assert (destination / name).read_text() == candidate
+    assert (destination / ".mobkit/state/native.db").read_bytes() == b"native durable sessions"
+    assert (destination / ".env").read_bytes() == private
+
+
+async def test_declaration_update_failure_before_native_entry_can_restore_untouched_state(tmp_path):
+    service, directory, destination, previous, private = await prepared(tmp_path)
+    name = updates.ANNOUNCEMENT_DECLARATIONS_PATH
+    service.implementation.extra_files[name] = json.dumps({"revision": 1, "sources": [], "subscriptions": []})
+    result = await service.stage_update(service.guide.identity, previous["deployment_id"],
+        service.guide.state["version"], service.implementation.identity)
+    identity = result["update"]["update_id"]
+    assert result["update"]["status"] == "staged"
+    updates.activate(directory, identity)
+    updates.restore(directory, identity, restore_data=True)
+    assert not (destination / name).exists()
+    assert read_receipt(directory)["package_sha256"] == previous["package_sha256"]
+    assert (destination / ".mobkit/state/native.db").read_bytes() == b"native durable sessions"
+    assert (destination / ".env").read_bytes() == private

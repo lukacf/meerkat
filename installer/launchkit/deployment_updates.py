@@ -42,6 +42,10 @@ CANDIDATE_PATHS = frozenset({"runtime-candidate.json", "runtime_candidates.py", 
 _SDK_WHEEL_HELPER = "sdk_wheel_integrity.py"
 _SDK_WHEEL_SUPERVISOR_HELPER = "launchkit/" + _SDK_WHEEL_HELPER
 APPLICATION_TOOL_POLICY_PATH = "application/tool-policy.json"
+ANNOUNCEMENT_DECLARATIONS_PATH = "application/announcement-declarations.json"
+ANNOUNCEMENT_RESTORE_REFUSAL = (
+    "Restoring across an announcement declarations change is not supported in Meta 0.9.5. "
+    "Previous source is retained; preserve native state and recover the current accepted application.")
 # Meta 0.9.4 keeps conversations and agent identities in Meerkat Core's own
 # stores. It refuses native state that an earlier release wrote until a
 # one-time, offline `meta_gateway storage-migrate-native` run has converted it.
@@ -1995,6 +1999,33 @@ def _completed_runtime_dependency_transition(previous, candidate, receipt, updat
         return None
 
 
+def announcement_declarations_changed(previous, candidate):
+    """Derive the native configuration crossing from exact package entries."""
+    return previous.get(ANNOUNCEMENT_DECLARATIONS_PATH) != candidate.get(ANNOUNCEMENT_DECLARATIONS_PATH)
+
+
+def _announcement_update_issue(previous, candidate):
+    """Require a newer explicit revision; native still validates the schema."""
+    def revision(files):
+        row = files.get(ANNOUNCEMENT_DECLARATIONS_PATH)
+        if row is None:
+            return 0
+        if row[1] != 0o644 or len(row[0]) > 16 * 1024 * 1024:
+            raise ValueError("Unbounded or nonordinary declaration source")
+        value = json.loads(row[0])
+        if (type(value) is not dict or not _ordinary_toml(value)
+                or type(value.get("revision")) is not int or value["revision"] <= 0):
+            raise ValueError("Invalid declaration revision")
+        return value["revision"]
+    try:
+        if revision(candidate) > revision(previous):
+            return None
+    except (ValueError, TypeError, IndexError, KeyError, UnicodeError, RecursionError):
+        pass
+    return ("Announcement declarations changes require an ordinary native document with a strictly newer "
+        "revision. To remove declarations, prepare a newer revision with the intended empty records.")
+
+
 def compatibility(previous, candidate, receipt, *, runtime_target=None, reads=None):
     changes, blockers = [], []
     from .application_inventory_source import selects_application_inventory
@@ -2015,6 +2046,12 @@ def compatibility(previous, candidate, receipt, *, runtime_target=None, reads=No
         if previous.get(name) == candidate.get(name):
             continue
         changes.append({"path": name, "change": "added" if name not in previous else "removed" if name not in candidate else "changed"})
+        if name == ANNOUNCEMENT_DECLARATIONS_PATH:
+            changes[-1]["kind"] = "native-announcement-declarations"
+            issue = _announcement_update_issue(previous, candidate)
+            if issue:
+                blockers.append(issue)
+            continue
         if name == APPLICATION_TOOL_POLICY_PATH:
             blockers.append(f"{name}: this update changes the agents' tool access and needs a verified permission-update path. Installed source and private data stay intact.")
             continue
@@ -2785,6 +2822,9 @@ def restore(directory, expected_id, *, restore_data, rollback_kind=None, expecte
         raise DraftConflict("Native startup may have admitted work. Preserve current native and application state; restore verified source only.")
     payload, previous = checked_package(root, "previous.zip", update["previous_package_sha256"])
     _, candidate = checked_package(root, "candidate.zip", update["package_sha256"])
+    if (announcement_declarations_changed(previous, candidate)
+            and not (restore_data and update.get("runtime_admission_possible") is False)):
+        raise DraftConflict(ANNOUNCEMENT_RESTORE_REFUSAL)
     _require_unchanged_application_policy(previous, candidate)
     old_report = json.loads(previous["implementation-report.json"][0])
     bound = {key: old_report[key] for key in ("build_id", "guide_version", "blueprint_hash", "unresolved")}
@@ -2906,6 +2946,12 @@ def committed(directory, expected_id, *, restored=False, started=True, setup=Tru
                    else "The accepted update is installed and passed its application contract check.")
                   + (" The application is stopped. Start restores its completed setup with this source." if setup
                      else " The application is stopped. Its next Start runs this source."))
+    if rollback_available:
+        _, previous = checked_package(root, "previous.zip", update["previous_package_sha256"])
+        _, candidate = checked_package(root, "candidate.zip", update["package_sha256"])
+        if announcement_declarations_changed(previous, candidate):
+            rollback_available = False
+            detail += " " + ANNOUNCEMENT_RESTORE_REFUSAL
     if (root / "application-replacement-attempt.json").exists():
         rollback_available = False
         detail += " The original replacement selection is retained. Native policy acceptance, definition commit and member adoption require their own exact receipts before a restart or rollback."

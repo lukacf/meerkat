@@ -30,7 +30,7 @@ import time
 import uuid
 
 from .blueprint import Blueprint
-from .compiler import continuation_contract, generate_package, generate_runtime_refresh
+from .compiler import DECLARATIONS_PATH, continuation_contract, generate_package, generate_runtime_refresh
 from .projects import DraftConflict
 from .generator import PackageFile
 from .dom_check import is_dom_test, run_dom_tests
@@ -50,7 +50,7 @@ TERMINATION_WAIT_SECONDS = 1
 _STATE_VERSION = 1
 _RESULT_MARKER = "MOBKIT_HOST_TEST_RESULT="
 _COMPLETION_MARKER = "MOBKIT_HOST_COMPLETED="
-PROTECTED_APPLICATION_PATHS = frozenset({"application/tool-policy.json",
+PROTECTED_APPLICATION_PATHS = frozenset({DECLARATIONS_PATH, "application/tool-policy.json",
     "application/configuration.json", "application/console.json", "config/access.toml",
     "application/runtime-selection.json"})
 
@@ -167,6 +167,8 @@ def _regular(path):
 
 
 def _authorable(name, baseline):
+    if name.casefold() == DECLARATIONS_PATH.casefold():
+        raise WorkspaceError("Announcement declarations are protected native configuration. Use the host preparation owner for a new build; a source-only repair cannot change them.")
     if name.casefold() in {path.casefold() for path in baseline}:
         raise WorkspaceError("Compiled deployment files are read-only. Add application code or assets instead.")
     if name.casefold() in ("implementation-report.json", "acceptance-report.json") or name.split("/", 1)[0].casefold() == "acceptance-tests":
@@ -336,6 +338,9 @@ class ImplementationWorkspace:
             before = self._files(state)
             prior_paths = self._protected_application_paths(state)
             baseline = dict(state["baseline"])
+            if (DECLARATIONS_PATH in sources and DECLARATIONS_PATH not in baseline
+                    and state["framework"].get("basis") in {"accepted-baseline", "runtime-refresh"}):
+                raise WorkspaceError("A retained-framework repair cannot add announcement declarations. Prepare a new build with its native configuration.")
             for item in files:
                 if any(entry.path.casefold() == item.path.casefold() and entry.path != item.path for entry in before):
                     raise WorkspaceError("Selected application source aliases an existing project path.")

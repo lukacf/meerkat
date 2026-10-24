@@ -859,10 +859,16 @@ class InputsTests(unittest.TestCase):
 
 
     def test_an_ordinary_gateway_is_the_selected_meta_rpc_gateway_release(self):
-        value = inputs(("linux-x86_64", "macos-arm64"))
-        for entry in value["targets"].values():
-            with_ordinary(entry)
-        forge.validate_inputs(value)
+        for version in ("0.9.4", "0.9.5"):
+            with self.subTest(version=version):
+                value = inputs(("linux-x86_64", "macos-arm64"))
+                for entry in value["targets"].values():
+                    with_ordinary(entry, version=version)
+                    entry["selection"]["meta"]["version"] = version
+                forge.validate_inputs(value)
+                value["targets"]["linux-x86_64"]["selection"]["meta"]["version"] = "0.9.3"
+                with self.assertRaisesRegex(forge.ProtocolError, "ordinary gateway must be the Meta 0.9.3"):
+                    forge.validate_inputs(value)
         message = "ordinary gateway must be the Meta 0.9.4 rpc_gateway release asset for linux-x86_64"
         self.refused(lambda entry, _: with_ordinary(entry, version="0.9.3"), message)
         self.refused(lambda entry, _: with_ordinary(entry, triple="aarch64-apple-darwin"), message)

@@ -22,8 +22,8 @@ MAX_WHEEL_TOTAL = 64 * 1024 * 1024
 MAX_WHEEL_FILES = 4096
 HEX = re.compile(r"[a-f0-9]{64}")
 # Supported byte formats, not source selection or native compatibility evidence.
-SUPPORTED_META_VERSIONS = frozenset({"0.9.0", "0.9.1", "0.9.4"})
-SUPPORTED_TOOLKIT_VERSIONS = frozenset({"0.9.0", "0.9.4"})
+SUPPORTED_META_VERSIONS = frozenset({"0.9.0", "0.9.1", "0.9.4", "0.9.5"})
+SUPPORTED_TOOLKIT_VERSIONS = frozenset({"0.9.0", "0.9.4", "0.9.5"})
 
 
 class WheelIntegrityError(ValueError):

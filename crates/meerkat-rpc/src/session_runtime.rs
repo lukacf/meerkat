@@ -9842,14 +9842,34 @@ impl SessionRuntime {
             return output;
         }
 
-        let stored_session = self
-            .load_persisted_session(session_id)
-            .await?
-            .ok_or_else(|| RpcError {
-                code: error::SESSION_NOT_FOUND,
-                message: format!("session not found: {session_id}"),
-                data: None,
-            })?;
+        // A durable run a killed host left open at a committed round is
+        // continued without a write, so its provisional tail still stands
+        // ahead of the committed boundary and the strict read refuses it.
+        // Only that run, which this rebuild resumes, is read through the
+        // committed snapshot: the snapshot serves the create request as its
+        // locator and metadata, the create seeds its actor from the continued
+        // tail, never from the snapshot, and its own recovery refuses a tail
+        // that is not continued. Any other tail (held for reconciliation, or
+        // refused) keeps the strict read's refusal, so no run starts over it.
+        let continues_open_run = matches!(
+            meerkat_runtime::recovery::observe_resumable_run(
+                self.service.runtime_store().as_ref(),
+                session_id,
+            )
+            .await,
+            Ok(Some(_))
+        );
+        let stored_session = if continues_open_run {
+            self.load_persisted_session_tolerating_tail(session_id)
+                .await?
+        } else {
+            self.load_persisted_session(session_id).await?
+        }
+        .ok_or_else(|| RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: format!("session not found: {session_id}"),
+            data: None,
+        })?;
         // A help session continues only on its live session: refuse the
         // rebuild before the turn is admitted or any tool is composed.
         Self::refuse_help_session_rebuild(&stored_session)?;

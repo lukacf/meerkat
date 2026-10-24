@@ -1853,6 +1853,41 @@ impl StoreCheckpointer {
             == Some(run_id)
     }
 
+    /// Forget the provisional receipt this actor holds, and the run cursor
+    /// held beside it, unless they name `keep`.
+    ///
+    /// A receipt names the run whose checkpoint wrote the store's provisional
+    /// tail. Once the actor's image no longer rests on that tail (it was
+    /// synchronized from a committed boundary, or a different run starts on
+    /// it) the receipt is stale: no run-keyed reader applies it, and a control
+    /// commit refuses to bypass any held receipt
+    /// (`acknowledge_control_commit`), so a stale one would fail a sticky
+    /// model fallback the next run commits before its first checkpoint. A
+    /// resumed run keeps its own receipt: it continues that tail.
+    ///
+    /// Takes the checkpoint gate, then the receipt, the order every user that
+    /// takes both keeps; the run cursor's lock is taken last.
+    async fn forget_run_checkpoint_receipt_unless(&self, keep: Option<&RunId>) {
+        let _gate = self.gate.cancelled.lock().await;
+        let mut receipt_slot = self.latest_run_checkpoint_receipt.lock().await;
+        if receipt_slot
+            .as_ref()
+            .is_some_and(|receipt| keep != Some(receipt.run_id()))
+        {
+            *receipt_slot = None;
+        }
+        let mut held_cursor = self
+            .latest_run_checkpoint_cursor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held_cursor
+            .as_ref()
+            .is_some_and(|(run_id, _)| keep != Some(run_id))
+        {
+            *held_cursor = None;
+        }
+    }
+
     /// Record the run cursor the receipt this checkpointer now holds was
     /// written with (`None` when it holds no receipt).
     fn record_held_checkpoint_cursor(&self, held: Option<(RunId, HeldCheckpointCursor)>) {
@@ -6727,28 +6762,34 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner
             .sync_session_from_durable_snapshot(id, durable)
             .await?;
-        if let Some(authority) = whole_blob_authority
-            && let Some(checkpointer) = self
-                .live_checkpointers
-                .lock()
-                .await
-                .get(id)
-                .cloned()
-                .and_then(|checkpointer| checkpointer.upgrade())
-        {
-            // The exact committed snapshot is now the actor's semantic base.
-            // Rebase its checkpoint fencing state to the authority paired with
-            // those bytes; retaining either the former base or a provisional
-            // receipt descended from it would make the next turn reject the
-            // durable state it just synchronized.
-            *checkpointer.latest_run_checkpoint_receipt.lock().await = None;
-            checkpointer.record_held_checkpoint_cursor(None);
-            self.forget_whole_blob_body_unless_current(id, &authority);
-            *checkpointer.whole_blob_base_authority.lock().map_err(|_| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "WholeBlob actor base authority lock is poisoned for session {id}"
-                )))
-            })? = Some(authority);
+        // Bound first, so the map lock is not held across the receipt lock.
+        let checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade());
+        if let Some(checkpointer) = checkpointer {
+            // The exact committed snapshot is now the actor's semantic base,
+            // on either profile. A provisional receipt (and the run cursor
+            // held beside it) descended from the former base would make the
+            // next turn reject the durable state it just synchronized: a
+            // control commit refuses to bypass any held receipt. On WholeBlob
+            // the checkpoint fencing base is rebased to the authority paired
+            // with those bytes too; on HeadCanonical the base is the store's
+            // head, read at each commit.
+            checkpointer
+                .forget_run_checkpoint_receipt_unless(None)
+                .await;
+            if let Some(authority) = whole_blob_authority {
+                self.forget_whole_blob_body_unless_current(id, &authority);
+                *checkpointer.whole_blob_base_authority.lock().map_err(|_| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "WholeBlob actor base authority lock is poisoned for session {id}"
+                    )))
+                })? = Some(authority);
+            }
         }
         tracing::debug!(
             session_id = %id,
@@ -11635,7 +11676,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
             .map_err(|error| (error, admission.take()))?;
         // A machine-service turn is not dispatched by the runtime loop: it
-        // has no runtime batch and is never a resumed run.
+        // has no runtime batch and is never a resumed run. It is no run
+        // either, so only the run the runtime marks resumable keeps its
+        // checkpoint receipt on the actor.
+        let resumable_run_id = self.runtime_resumable_run_id(id).await;
+        self.forget_other_runs_checkpoint_receipt(id, resumable_run_id.as_ref())
+            .await;
         let execution = match admission.take() {
             Some(admission) => {
                 self.inner
@@ -14723,6 +14769,35 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.live_authority_advanced.notify_waiters();
     }
 
+    /// Forget a provisional receipt, and the run cursor held beside it, that
+    /// the session's live actor holds for a run other than `keep`, as a turn
+    /// starts on that actor.
+    ///
+    /// The receipt of an earlier run outlives its run whenever nothing
+    /// synchronized the actor after that run's tail was settled: a recovery
+    /// that adopted the actor's own completed tail leaves the actor equal to
+    /// the new head, so no sync runs. The starting turn applies no receipt of
+    /// another run, but a control commit refuses to bypass any held receipt,
+    /// so a sticky model fallback in the turn's first model call would commit
+    /// durably and then fail its acknowledgement. `keep` names the run whose
+    /// tail the actor continues: a runtime run keeps its own receipt (a
+    /// resumed run continues that tail), and a machine-service turn, which is
+    /// no run, keeps only the receipt of the run the runtime marks resumable.
+    async fn forget_other_runs_checkpoint_receipt(&self, id: &SessionId, keep: Option<&RunId>) {
+        let checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade());
+        if let Some(checkpointer) = checkpointer {
+            checkpointer
+                .forget_run_checkpoint_receipt_unless(keep)
+                .await;
+        }
+    }
+
     async fn apply_runtime_turn_with_recoverable_reserved_admission_inner(
         &self,
         id: &SessionId,
@@ -14755,6 +14830,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // A new runtime turn owns the live image from here; its boundary
         // commit may be coming again.
         self.clear_live_uncommitted_terminal(id);
+        self.forget_other_runs_checkpoint_receipt(id, Some(&run_id))
+            .await;
         let execution = self
             .inner
             .start_runtime_turn_execution_with_admission_recovering_not_found(
@@ -14948,6 +15025,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // A new runtime turn owns the live image from here; its boundary
         // commit may be coming again.
         self.clear_live_uncommitted_terminal(id);
+        self.forget_other_runs_checkpoint_receipt(id, Some(&run_id))
+            .await;
         let execution = match admission {
             Some(admission) => self
                 .inner

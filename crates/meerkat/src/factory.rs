@@ -14886,6 +14886,7 @@ mod tests {
     const FALLBACK_REALM_CHATGPT_UNBOUND: &str = "fallback_chatgpt_unbound";
     const FALLBACK_REALM_RELOAD: &str = "fallback_reload";
     const FALLBACK_REALM_HEAD_CANONICAL: &str = "fallback_head_canonical";
+    const FALLBACK_REALM_SETTLED_ACTOR: &str = "fallback_settled_actor";
 
     fn inline_realm_section(entries: &[(&str, &str)]) -> RealmConfigSection {
         RealmConfigSection::from_inline_api_keys(entries)
@@ -16209,6 +16210,328 @@ mod tests {
         assert!(
             boundary_authority.head_canonical().is_some(),
             "the durable fallback must be owned by HeadCanonical runtime authority"
+        );
+    }
+
+    /// A primary model whose first call answers with one tool call, whose
+    /// second call holds until the test releases it, and whose later calls
+    /// fail recoverably, so the next run falls back.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    struct RoundThenOverloadedClient {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        tool_name: String,
+        entered: Arc<tokio::sync::Semaphore>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for RoundThenOverloadedClient {
+        fn request_pressure(
+            &self,
+            _request: &meerkat_client::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_client::LlmError>
+        {
+            Ok(Some(meerkat_core::ProviderRequestPressure::new(0, None)))
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            use futures::StreamExt as _;
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let usage = meerkat_client::LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    Provider::Anthropic,
+                    &request.model,
+                    meerkat_core::Usage::default(),
+                ),
+            };
+            match call {
+                0 => Box::pin(futures::stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                        id: "settled-round-call".to_string(),
+                        name: self.tool_name.clone(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    }),
+                    Ok(usage),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(
+                            meerkat_core::StopReason::ToolUse,
+                        ),
+                    }),
+                ])),
+                1 => {
+                    let entered = Arc::clone(&self.entered);
+                    let release = Arc::clone(&self.release);
+                    Box::pin(
+                        futures::stream::once(async move {
+                            entered.add_permits(1);
+                            release
+                                .acquire()
+                                .await
+                                .expect("release the held call")
+                                .forget();
+                            vec![
+                                Ok(meerkat_client::LlmEvent::TextDelta {
+                                    delta: "held answer".to_string(),
+                                    meta: None,
+                                }),
+                                Ok(usage),
+                                Ok(meerkat_client::LlmEvent::Done {
+                                    outcome: meerkat_client::LlmDoneOutcome::success(
+                                        meerkat_core::StopReason::EndTurn,
+                                    ),
+                                }),
+                            ]
+                        })
+                        .flat_map(futures::stream::iter),
+                    )
+                }
+                _ => Box::pin(futures::stream::iter(vec![Err(
+                    meerkat_client::LlmError::ServerOverloaded,
+                )])),
+            }
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// The interrupted run's tail is closed as interrupted at its cancellation
+    /// and the session layer keeps the run's live actor. That actor held the
+    /// provisional receipt of the run's round commit. The next run's first
+    /// model call fails over to the backup, and the sticky fallback's control
+    /// commit must commit and acknowledge on that actor. RED before the
+    /// session layer forgot a settled run's receipt on HeadCanonical: the
+    /// acknowledgement refused to bypass "an actor-carried provisional tail",
+    /// so the committed fallback failed the turn
+    /// (`StickyModelFallbackAuthorityUnknown`).
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_sticky_fallback_after_an_interrupt_settle_acknowledges_on_head_canonical() {
+        use meerkat_core::service::SessionService as _;
+        use meerkat_runtime::RuntimeStore as _;
+        use meerkat_runtime::completion::CompletionOutcome;
+
+        const PRIMARY_MODEL: &str = "claude-sonnet-4-5";
+        const BACKUP_MODEL: &str = "custom-text-only-backup";
+        const EXTERNAL_TOOL: &str = "known_external_tool";
+
+        let backup_binding =
+            configured_auth_binding(FALLBACK_REALM_SETTLED_ACTOR, "default_openai");
+        let config = sticky_fallback_test_config(
+            FALLBACK_REALM_SETTLED_ACTOR,
+            BACKUP_MODEL,
+            backup_binding.clone(),
+        );
+        let temp = tempfile::tempdir().expect("settled-actor fallback tempdir");
+        let sqlite_path = temp.path().join("sessions.sqlite3");
+        let sqlite_store = Arc::new(
+            meerkat_store::SqliteSessionStore::open(sqlite_path.clone())
+                .expect("open sqlite session store"),
+        );
+        let runtime_store = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(sqlite_path)
+                .expect("open head-canonical runtime store"),
+        );
+        let blob_store = Arc::new(meerkat_store::MemoryBlobStore::new());
+
+        let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let primary_client: Arc<dyn LlmClient> = Arc::new(RoundThenOverloadedClient {
+            calls: Arc::clone(&primary_calls),
+            tool_name: EXTERNAL_TOOL.to_string(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let backup_client: Arc<dyn LlmClient> = Arc::new(ScriptedStickyFallbackClient {
+            provider: Provider::OpenAI,
+            fail_recoverably: false,
+            calls: Arc::clone(&backup_calls),
+        });
+        let mut factory = AgentFactory::new(temp.path().join("factory-sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Anthropic,
+                    client: primary_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::OpenAI,
+                    client: backup_client,
+                })),
+        );
+        let builder = crate::FactoryAgentBuilder::new(factory, config);
+        let persistence = crate::PersistenceBundle::new(
+            Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+        )
+        .expect("construct runtime authority");
+        let (service, adapter) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence)
+                .expect("compose the runtime-backed service");
+        let service = Arc::new(service);
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let request = sticky_fallback_runtime_request(
+            FALLBACK_REALM_SETTLED_ACTOR,
+            PRIMARY_MODEL,
+            sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+        );
+        let result = Box::pin(crate::surface::materialize_session(
+            &service,
+            &adapter,
+            session,
+            request,
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| {
+                    crate::surface::default_persistent_executor(service, adapter, session_id)
+                }
+            },
+        ))
+        .await
+        .expect("materialize the head-canonical runtime-backed session");
+        assert_eq!(result.session_id, session_id);
+
+        // Run A: one tool round, whose round commit is the provisional tail,
+        // then a model call held until the interrupt.
+        let (_accept, completion_a) = adapter
+            .accept_input_with_completion(
+                &session_id,
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                    "the interrupted prompt",
+                    None,
+                )),
+            )
+            .await
+            .expect("accept run A's prompt");
+        let completion_a = completion_a.expect("run A's completion");
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.acquire())
+            .await
+            .expect("run A reaches its second model call")
+            .expect("model gate")
+            .forget();
+        assert!(
+            runtime_store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .expect("load the provisional tail")
+                .is_some(),
+            "run A's round commit stands as the provisional tail"
+        );
+        adapter
+            .hard_cancel_current_run(&session_id, "user interrupt")
+            .await
+            .expect("the interrupt reaches run A");
+        let outcome_a =
+            tokio::time::timeout(std::time::Duration::from_secs(10), completion_a.wait())
+                .await
+                .expect("run A ends within its bound");
+        assert!(
+            matches!(outcome_a, Ok(CompletionOutcome::Cancelled)),
+            "run A ends cancelled: {outcome_a:?}"
+        );
+        assert!(
+            runtime_store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .expect("load the provisional tail")
+                .is_none(),
+            "the cancellation's settle closed run A's tail as interrupted"
+        );
+        assert!(
+            service
+                .has_live_session(&session_id)
+                .await
+                .expect("read live presence"),
+            "the session layer kept run A's live actor"
+        );
+
+        // Run B: its first model call fails over to the backup.
+        let (_accept, completion_b) = adapter
+            .accept_input_with_completion(
+                &session_id,
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                    "the prompt after the interrupt",
+                    None,
+                )),
+            )
+            .await
+            .expect("accept run B's prompt");
+        let completion_b = completion_b.expect("run B's completion");
+        let outcome_b =
+            tokio::time::timeout(std::time::Duration::from_secs(10), completion_b.wait())
+                .await
+                .expect("run B ends within its bound");
+        assert!(
+            matches!(
+                outcome_b,
+                Ok(CompletionOutcome::Completed(ref run)) if run.text == "backup success"
+            ),
+            "the next run falls back, commits and acknowledges: {outcome_b:?}"
+        );
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(backup_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let live_identity = service
+            .live_session_llm_identity(&session_id)
+            .await
+            .expect("read live identity watch");
+        assert_eq!(live_identity.model, BACKUP_MODEL);
+        let authoritative = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the committed session")
+            .expect("the session is committed");
+        let identity = authoritative
+            .session_metadata()
+            .expect("the session keeps its metadata")
+            .llm_identity();
+        assert_eq!(identity.model, BACKUP_MODEL);
+        assert_eq!(identity.auth_binding.as_ref(), Some(&backup_binding));
+        let user_texts = authoritative
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            user_texts,
+            vec![
+                "the interrupted prompt".to_string(),
+                "the prompt after the interrupt".to_string()
+            ]
         );
     }
 

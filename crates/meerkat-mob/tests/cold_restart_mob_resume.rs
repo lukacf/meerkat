@@ -7136,6 +7136,346 @@ async fn a_member_retired_while_its_turn_reaches_the_boundary_retires() {
     let _ = handle.shutdown().await;
 }
 
+/// The model every member of a [`StoppedTurnModels::SelfHosted`] fixture
+/// runs on [`ScriptedChatServer`].
+#[cfg(feature = "test-support")]
+const SCRIPTED_PRIMARY_MODEL: &str = "scripted-primary";
+
+/// The model the worker of a [`StoppedTurnModels::SelfHosted`] fixture falls
+/// back to.
+#[cfg(feature = "test-support")]
+const SCRIPTED_BACKUP_MODEL: &str = "scripted-backup";
+
+/// The prompt whose turn [`SCRIPTED_PRIMARY_MODEL`] refuses, so the turn
+/// falls back.
+#[cfg(feature = "test-support")]
+const FALLBACK_TURN_PROMPT: &str = "FALLBACK_TURN token-omega";
+
+/// [`SCRIPTED_BACKUP_MODEL`]'s answer.
+#[cfg(feature = "test-support")]
+const FALLBACK_REPLY: &str = "backup success";
+
+/// What [`ScriptedChatServer`] served, and its held request's signals.
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct ScriptedChatState {
+    held: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    primary_refusals: std::sync::atomic::AtomicUsize,
+    backup_answers: std::sync::atomic::AtomicUsize,
+}
+
+/// An OpenAI-compatible chat-completions server behind the members'
+/// self-hosted models. A member reaches it through its own provider client,
+/// so it keeps its model fallback chain (an injected client turns model
+/// fallback off). Every request answers `done`, except:
+/// - the first that mentions [`HELD_TURN_PROMPT`] waits until the test
+///   releases it, as [`HeldTurnClient`] does;
+/// - a [`SCRIPTED_PRIMARY_MODEL`] request that mentions
+///   [`FALLBACK_TURN_PROMPT`] is refused as overloaded (503);
+/// - a [`SCRIPTED_BACKUP_MODEL`] request answers [`FALLBACK_REPLY`].
+#[cfg(feature = "test-support")]
+struct ScriptedChatServer {
+    port: u16,
+    state: Arc<ScriptedChatState>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for ScriptedChatServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl ScriptedChatServer {
+    async fn start() -> Arc<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the scripted chat server");
+        let port = listener
+            .local_addr()
+            .expect("the scripted chat server's address")
+            .port();
+        let state = Arc::new(ScriptedChatState::default());
+        let served = Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(serve_scripted_chat_connection(socket, Arc::clone(&served)));
+            }
+        });
+        Arc::new(Self { port, state, task })
+    }
+
+    /// Host config: the server's two models, with the known context and
+    /// output limits a fallback target is admitted on; an inline-key global
+    /// binding that reaches them (a mob member's realm chain ends at the
+    /// global realm), so the session's auth lease authorizes the backup's
+    /// credential; a token budget both models hold; and one retry without
+    /// delay.
+    fn config(&self) -> Config {
+        let port = self.port;
+        let mut config: Config = toml::from_str(&format!(
+            r#"
+[self_hosted]
+default_model = "{SCRIPTED_PRIMARY_MODEL}"
+
+[self_hosted.servers.scripted]
+base_url = "http://127.0.0.1:{port}/v1"
+
+[self_hosted.models."{SCRIPTED_PRIMARY_MODEL}"]
+server = "scripted"
+remote_model = "{SCRIPTED_PRIMARY_MODEL}"
+context_window = 32000
+max_output_tokens = 4096
+
+[self_hosted.models."{SCRIPTED_BACKUP_MODEL}"]
+server = "scripted"
+remote_model = "{SCRIPTED_BACKUP_MODEL}"
+context_window = 32000
+max_output_tokens = 4096
+
+[realm.global]
+default_binding = "scripted"
+
+[realm.global.backend.scripted]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+server = "scripted"
+
+[realm.global.auth.scripted]
+provider = "self_hosted"
+auth_method = "api_key"
+source = {{ kind = "inline_secret", secret = "scripted-key" }}
+
+[realm.global.binding.scripted]
+backend_profile = "scripted"
+auth_profile = "scripted"
+"#
+        ))
+        .expect("parse the scripted provider config");
+        config.max_tokens = Some(1024);
+        config.retry.max_retries = 1;
+        config.retry.initial_delay = Duration::ZERO;
+        config.retry.max_delay = Duration::ZERO;
+        config.retry.multiplier = 1.0;
+        config
+    }
+
+    fn primary_refusals(&self) -> usize {
+        self.state
+            .primary_refusals
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn backup_answers(&self) -> usize {
+        self.state
+            .backup_answers
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Serve one request on [`ScriptedChatServer`].
+#[cfg(feature = "test-support")]
+async fn serve_scripted_chat_connection(
+    mut socket: tokio::net::TcpStream,
+    state: Arc<ScriptedChatState>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let header_end = loop {
+        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+        match socket.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+        }
+    };
+    let headers = String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
+    let content_length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    while buffer.len() < header_end + content_length {
+        match socket.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+        }
+    }
+    let request: serde_json::Value =
+        serde_json::from_slice(&buffer[header_end..header_end + content_length])
+            .unwrap_or_default();
+    let mentions = |marker: &str| {
+        request["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["role"].as_str() != Some("system") && message.to_string().contains(marker)
+            })
+        })
+    };
+    let response = match request["model"].as_str() {
+        Some(SCRIPTED_PRIMARY_MODEL) if mentions(FALLBACK_TURN_PROMPT) => {
+            state
+                .primary_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            scripted_http_response(
+                "503 Service Unavailable",
+                "application/json",
+                r#"{"error":{"message":"overloaded","type":"server_error"}}"#,
+            )
+        }
+        Some(SCRIPTED_PRIMARY_MODEL) => {
+            if mentions(HELD_TURN_PROMPT)
+                && !state.held.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                state.entered.notify_one();
+                state.release.notified().await;
+            }
+            scripted_chat_answer("done")
+        }
+        Some(SCRIPTED_BACKUP_MODEL) => {
+            state
+                .backup_answers
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            scripted_chat_answer(FALLBACK_REPLY)
+        }
+        _ => scripted_http_response("404 Not Found", "text/plain", ""),
+    };
+    let _ = socket.write_all(response.as_bytes()).await;
+    let _ = socket.shutdown().await;
+}
+
+/// One complete streamed chat-completions answer of `text`.
+#[cfg(feature = "test-support")]
+fn scripted_chat_answer(text: &str) -> String {
+    let chunks = [
+        serde_json::json!({ "choices": [{ "delta": { "content": text }, "finish_reason": null }] }),
+        serde_json::json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }] }),
+        serde_json::json!({
+            "choices": [],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        }),
+    ];
+    let mut body = String::new();
+    for chunk in chunks {
+        body.push_str("data: ");
+        body.push_str(&chunk.to_string());
+        body.push_str("\n\n");
+    }
+    body.push_str("data: [DONE]\n\n");
+    scripted_http_response("200 OK", "text/event-stream", &body)
+}
+
+/// One HTTP/1.1 response that closes its connection.
+#[cfg(feature = "test-support")]
+fn scripted_http_response(status: &str, content_type: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// How the members of a [`StoppedTurnTail`] fixture reach their model.
+#[cfg(feature = "test-support")]
+enum StoppedTurnModels {
+    /// [`HeldTurnClient`], injected into every member, so no model fallback.
+    Injected(Arc<HeldTurnClient>),
+    /// [`ScriptedChatServer`], behind every member's self-hosted
+    /// [`SCRIPTED_PRIMARY_MODEL`]; the worker falls back to
+    /// [`SCRIPTED_BACKUP_MODEL`].
+    SelfHosted(Arc<ScriptedChatServer>),
+}
+
+#[cfg(feature = "test-support")]
+impl StoppedTurnModels {
+    /// Notified once the held turn's provider call is in flight.
+    fn entered(&self) -> &tokio::sync::Notify {
+        match self {
+            Self::Injected(client) => &client.entered,
+            Self::SelfHosted(server) => &server.state.entered,
+        }
+    }
+
+    /// Releases the held turn's provider call.
+    fn release(&self) -> &tokio::sync::Notify {
+        match self {
+            Self::Injected(client) => &client.release,
+            Self::SelfHosted(server) => &server.state.release,
+        }
+    }
+}
+
+/// The restart room's mob over [`ScriptedChatServer`]: every member runs
+/// [`SCRIPTED_PRIMARY_MODEL`], and the worker falls back to
+/// [`SCRIPTED_BACKUP_MODEL`] at its first recoverable failure.
+#[cfg(feature = "test-support")]
+fn self_hosted_fallback_mob_definition() -> MobDefinition {
+    let mut definition = mob_definition(MobRuntimeMode::TurnDriven);
+    let worker_fallback = meerkat_core::config::ModelFallbackConfig {
+        enabled: Some(true),
+        chain: vec![meerkat_core::config::ModelFallbackTarget {
+            model: SCRIPTED_BACKUP_MODEL.to_string(),
+            provider: Some(meerkat_core::Provider::SelfHosted),
+            auth_binding: None,
+        }],
+        policy: meerkat_core::config::ModelFallbackPolicy {
+            trigger_after_attempts: 1,
+            require_tool_parity: false,
+            ..Default::default()
+        },
+    };
+    for (name, model_fallback) in [("lead", None), ("worker", Some(worker_fallback))] {
+        match definition.profiles.get_mut(&ProfileName::from(name)) {
+            Some(ProfileBinding::Inline(profile)) => {
+                profile.model = SCRIPTED_PRIMARY_MODEL.to_string();
+                profile.provider = Some(meerkat_core::Provider::SelfHosted);
+                profile.self_hosted_server_id = Some("scripted".to_string());
+                profile.model_fallback = model_fallback;
+            }
+            other => panic!("the {name} profile must be inline: {other:?}"),
+        }
+    }
+    definition
+}
+
+/// [`persistent_head_canonical_service`] with an explicit config and no
+/// injected client: members reach the providers `config` names, so a model
+/// fallback chain can engage.
+#[cfg(feature = "test-support")]
+fn persistent_head_canonical_service_over_providers(
+    paths: &Paths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    config: Config,
+) -> (
+    Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    Arc<SqliteSessionStore>,
+) {
+    paths.materialize_project_context();
+    let mut builder = FactoryAgentBuilder::new(factory(paths), config);
+    let store = Arc::new(
+        SqliteSessionStore::open(&paths.realm_db_path)
+            .expect("open co-tenant SQLite session store"),
+    );
+    builder.default_session_store = Some(Arc::new(StoreAdapter::new(store.clone())));
+
+    let store_dyn: Arc<dyn meerkat::SessionStore> = store.clone();
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::default());
+    let service = Arc::new(PersistentSessionService::new(
+        builder,
+        32,
+        store_dyn,
+        runtime_store,
+        blob_store,
+    ));
+    (service, store)
+}
+
 /// Member `w-1` after its turn stopped between its end-of-run checkpoint and
 /// its runtime boundary commit, with its live actor gone (see
 /// [`a_member_whose_turn_stopped_before_its_boundary_commit`]).
@@ -7228,19 +7568,47 @@ async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit(
     paths: &Paths,
     context: &str,
 ) -> StoppedTurnTail {
+    a_hosted_member_whose_turn_stopped_before_its_boundary_commit_served_by(
+        paths,
+        context,
+        &StoppedTurnModels::Injected(Arc::new(HeldTurnClient::default())),
+    )
+    .await
+}
+
+/// [`a_hosted_member_whose_turn_stopped_before_its_boundary_commit`], with
+/// the members reaching their model as `models` says.
+#[cfg(feature = "test-support")]
+async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit_served_by(
+    paths: &Paths,
+    context: &str,
+    models: &StoppedTurnModels,
+) -> StoppedTurnTail {
     let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
-    let (service, store) = persistent_head_canonical_service(paths, runtime_store.clone());
-    let client = Arc::new(HeldTurnClient::default());
-    let handle = MobBuilder::new(
-        mob_definition(MobRuntimeMode::TurnDriven),
+    let (service, store, definition) = match models {
+        StoppedTurnModels::Injected(_) => {
+            let (service, store) = persistent_head_canonical_service(paths, runtime_store.clone());
+            (service, store, mob_definition(MobRuntimeMode::TurnDriven))
+        }
+        StoppedTurnModels::SelfHosted(server) => {
+            let (service, store) = persistent_head_canonical_service_over_providers(
+                paths,
+                runtime_store.clone(),
+                server.config(),
+            );
+            (service, store, self_hosted_fallback_mob_definition())
+        }
+    };
+    let mut builder = MobBuilder::new(
+        definition,
         MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage"),
     )
-    .with_session_service(service.clone())
-    .with_default_llm_client(client.clone())
-    .create()
-    .await
-    .expect("create persistent mob");
+    .with_session_service(service.clone());
+    if let StoppedTurnModels::Injected(client) = models {
+        builder = builder.with_default_llm_client(client.clone());
+    }
+    let handle = builder.create().await.expect("create persistent mob");
     handle
         .spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1")))
         .await
@@ -7279,7 +7647,7 @@ async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit(
         .send(HELD_TURN_PROMPT.to_string(), HandlingMode::Queue)
         .await
         .expect("queue the held turn");
-    tokio::time::timeout(Duration::from_secs(30), client.entered.notified())
+    tokio::time::timeout(Duration::from_secs(30), models.entered().notified())
         .await
         .expect("the held turn's provider call is in flight");
     let runtime = service
@@ -7303,7 +7671,7 @@ async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit(
         dispatched > dispatched_before,
         "[{context}] the boundary cancel reached the turn"
     );
-    client.release.notify_one();
+    models.release().notify_one();
 
     let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&w1_sid);
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -7478,6 +7846,216 @@ async fn a_read_settles_the_tail_a_stopped_turn_left_on_a_hosted_member() {
         1,
         "the settled session keeps the stopped turn exactly once: {history}"
     );
+    let _ = stopped.handle.shutdown().await;
+}
+
+/// Leave member `w-1` of a mob over [`ScriptedChatServer`] as the row above
+/// leaves it: the tail its stopped turn left settled by one read, and its
+/// live actor still hosted. The settle adopts the actor's own completed tail:
+/// the actor already equals the new head, so nothing synchronizes it, and it
+/// still holds the stopped run's checkpoint receipt.
+#[cfg(feature = "test-support")]
+async fn a_hosted_member_after_a_read_settled_its_stopped_turn(
+    paths: &Paths,
+    context: &str,
+    server: &Arc<ScriptedChatServer>,
+) -> StoppedTurnTail {
+    let stopped = a_hosted_member_whose_turn_stopped_before_its_boundary_commit_served_by(
+        paths,
+        context,
+        &StoppedTurnModels::SelfHosted(Arc::clone(server)),
+    )
+    .await;
+    // The store-owned recovery may settle the tail from here on.
+    stopped.power_store.hold_durable_tail_recovery(false);
+    let live = meerkat_core::service::SessionService::has_live_session(
+        stopped.service.as_ref(),
+        &stopped.tail.session_id,
+    )
+    .await
+    .expect("the read answers");
+    assert!(live, "[{context}] the member's live actor is still hosted");
+    stopped.assert_tail_settled(context).await;
+    stopped
+}
+
+/// The member's turn after the settle fell back and committed: the primary
+/// model refused its first call once, the backup answered the retry once, the
+/// session commits the backup as its model, and it keeps the stopped turn and
+/// the next one exactly once each.
+#[cfg(feature = "test-support")]
+async fn assert_the_next_turn_fell_back_and_committed(
+    stopped: &StoppedTurnTail,
+    server: &ScriptedChatServer,
+    context: &str,
+) {
+    assert_eq!(
+        server.primary_refusals(),
+        1,
+        "[{context}] the primary model refused the next turn's first call"
+    );
+    assert_eq!(
+        server.backup_answers(),
+        1,
+        "[{context}] the backup model answered the call's retry"
+    );
+    let session = stopped
+        .service
+        .load_authoritative_session(&stopped.tail.session_id)
+        .await
+        .expect("the session reads strictly")
+        .expect("the member's session is committed");
+    assert_eq!(
+        session
+            .session_metadata()
+            .expect("the session keeps its metadata")
+            .llm_identity()
+            .model,
+        SCRIPTED_BACKUP_MODEL,
+        "[{context}] the session commits the backup as its model"
+    );
+    let history = to_string(session.messages()).expect("serialize the committed transcript");
+    assert_eq!(
+        history.matches(HELD_TURN_PROMPT).count(),
+        1,
+        "[{context}] the session keeps the stopped turn exactly once: {history}"
+    );
+    assert_eq!(
+        history.matches(FALLBACK_TURN_PROMPT).count(),
+        1,
+        "[{context}] the session keeps the next turn exactly once: {history}"
+    );
+}
+
+/// A member's next runtime turn after a read settled the tail its stopped
+/// turn left takes a sticky model fallback at its first model call, and
+/// commits and acknowledges it. The actor the read's settle left still held
+/// the stopped run's checkpoint receipt. The turn's primary model refuses as
+/// overloaded and the turn fails over to the backup, whose control commit is
+/// acknowledged on that actor before the retry: the turn completes on the
+/// backup, which the session commits as its model. RED while only a
+/// synchronization forgot a settled run's receipt: the acknowledgement
+/// refused to bypass "an actor-carried provisional tail", so the committed
+/// fallback failed the turn (`StickyModelFallbackAuthorityUnknown`). The
+/// session layer now forgets any receipt of another run as it admits a run.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sticky_fallback_after_a_read_settled_a_stopped_turn_acknowledges() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "warn,meerkat_runtime::recovery=info,meerkat_session::persistent=info",
+        ))
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let server = ScriptedChatServer::start().await;
+    let stopped =
+        a_hosted_member_after_a_read_settled_its_stopped_turn(&paths, "read-settle-run", &server)
+            .await;
+
+    let runtime = stopped
+        .service
+        .canonical_runtime_adapter()
+        .expect("the session service's runtime owner");
+    let (_accept, completion) = runtime
+        .accept_input_with_completion(
+            &stopped.tail.session_id,
+            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                FALLBACK_TURN_PROMPT,
+                None,
+            )),
+        )
+        .await
+        .expect("accept the next turn's prompt");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        completion.expect("the next turn's completion").wait(),
+    )
+    .await
+    .expect("the next turn ends within its bound");
+    assert!(
+        matches!(
+            outcome,
+            Ok(meerkat_runtime::completion::CompletionOutcome::Completed(ref run))
+                if run.text == FALLBACK_REPLY
+        ),
+        "the next turn falls back, commits and acknowledges: {outcome:?}"
+    );
+    assert_the_next_turn_fell_back_and_committed(&stopped, &server, "read-settle-run").await;
+    let _ = stopped.handle.shutdown().await;
+}
+
+/// As the row above, for a direct turn: the machine-service turn route,
+/// which the runtime loop does not dispatch and which is no run, starts a
+/// turn on the actor the read's settle left, and its first model call takes
+/// the sticky fallback, committed and acknowledged on that actor. RED while
+/// only runtime runs forgot another run's receipt: the acknowledgement
+/// refused to bypass "an actor-carried provisional tail", so the direct turn
+/// failed (`StickyModelFallbackAuthorityUnknown`). The direct turn now
+/// forgets every receipt but that of the run the runtime marks resumable.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_turn_after_a_read_settled_a_stopped_turn_acknowledges_its_fallback() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "warn,meerkat_runtime::recovery=info,meerkat_session::persistent=info",
+        ))
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let server = ScriptedChatServer::start().await;
+    let stopped = a_hosted_member_after_a_read_settled_its_stopped_turn(
+        &paths,
+        "read-settle-direct",
+        &server,
+    )
+    .await;
+
+    let runtime = stopped
+        .service
+        .canonical_runtime_adapter()
+        .expect("the session service's runtime owner");
+    let admission = stopped
+        .service
+        .reserve_runtime_turn_admission(&stopped.tail.session_id)
+        .await
+        .expect("reserve the direct turn's admission");
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        stopped.service.run_machine_committed_live_turn(
+            meerkat_session::MachineServiceTurnCommitProtocol::from_machine(&runtime),
+            &stopped.tail.session_id,
+            meerkat_core::service::StartTurnRequest {
+                prompt: FALLBACK_TURN_PROMPT.to_string().into(),
+                injected_context: Vec::new(),
+                system_prompt: None,
+                event_tx: None,
+                // A host-submitted prompt turn, stamped as a content turn as
+                // the RPC turn surface stamps it.
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                    HandlingMode::Queue,
+                    None,
+                    Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
+                ),
+            },
+            admission,
+        ),
+    )
+    .await
+    .expect("the direct turn ends within its bound");
+    let run = match result {
+        Ok(run) => run,
+        Err((error, _admission)) => {
+            panic!("the direct turn falls back, commits and acknowledges: {error:?}")
+        }
+    };
+    assert_eq!(
+        run.text, FALLBACK_REPLY,
+        "the direct turn ends on the backup"
+    );
+    assert_the_next_turn_fell_back_and_committed(&stopped, &server, "read-settle-direct").await;
     let _ = stopped.handle.shutdown().await;
 }
 

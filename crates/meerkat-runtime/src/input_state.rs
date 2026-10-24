@@ -378,6 +378,30 @@ impl InteractionTerminalCandidate {
     }
 }
 
+/// The most inputs one terminal-completion batch names.
+///
+/// The batch's owner row carries the whole recipient set, every reader
+/// validates this bound at load (a larger batch is corruption to every
+/// released reader), and the batch's finalization and receipt writes are one
+/// input-state batch CAS, which the store contract caps at
+/// [`crate::store::MAX_INPUT_STATE_BATCH_CAS`] rows. Producers keep within
+/// it: a runtime-loop batch stages at most this many inputs and a run takes
+/// a durable Steer join only while its contributors stay within it
+/// (generated `RUNTIME_LOOP_BATCH_MAX_INPUTS` and the
+/// `run_contributor_capacity` guard), and a runless termination splits its
+/// recipients into batches of at most this many.
+pub(crate) const TERMINAL_COMPLETION_BATCH_MAX_INPUTS: usize = 256;
+
+const _: () = assert!(
+    TERMINAL_COMPLETION_BATCH_MAX_INPUTS == crate::store::MAX_INPUT_STATE_BATCH_CAS,
+    "a terminal-completion batch must fit one input-state batch CAS"
+);
+const _: () = assert!(
+    TERMINAL_COMPLETION_BATCH_MAX_INPUTS
+        == crate::meerkat_machine::dsl::command_capabilities::RUNTIME_LOOP_BATCH_MAX_INPUTS,
+    "a runtime-loop batch must fit one terminal-completion batch"
+);
+
 /// Stable identity for one exact terminal-completion batch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
@@ -543,7 +567,7 @@ impl InputTerminalCompletion {
         }
         match (&self.completion_input_ids, owns_payload) {
             (Some(input_ids), true) => {
-                if input_ids.is_empty() || input_ids.len() > 256 {
+                if input_ids.is_empty() || input_ids.len() > TERMINAL_COMPLETION_BATCH_MAX_INPUTS {
                     return Err("terminal completion recipient set has invalid size".into());
                 }
                 if input_ids
@@ -634,7 +658,7 @@ impl InputTerminalCompletion {
 pub(crate) fn validate_input_terminal_completion_batch(
     rows: &[InputTerminalCompletion],
 ) -> Result<&InputTerminalCompletion, String> {
-    if rows.is_empty() || rows.len() > 256 {
+    if rows.is_empty() || rows.len() > TERMINAL_COMPLETION_BATCH_MAX_INPUTS {
         return Err("terminal completion batch has invalid size".into());
     }
     let owner = &rows[0];
@@ -972,7 +996,7 @@ impl InteractionTerminalOutbox {
 pub(crate) fn validate_interaction_terminal_outbox_batch_shape(
     outboxes: &[InteractionTerminalOutbox],
 ) -> Result<(), String> {
-    if outboxes.is_empty() || outboxes.len() > 256 {
+    if outboxes.is_empty() || outboxes.len() > TERMINAL_COMPLETION_BATCH_MAX_INPUTS {
         return Err("interaction terminal batch has invalid directed-row count".into());
     }
     let owner = &outboxes[0];

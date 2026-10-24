@@ -25,6 +25,11 @@
 # kind and AuditLateNeverJoins as an extra invariant, and requires TLC to report
 # it violated: the admission lets every kind join within the bound, so the
 # exactly-once invariants are not vacuous for any of them.
+#
+# Last, it substitutes a small run contributor bound for the generated 256:
+# under a bound of one the late input never joins (the run's batch input
+# fills it) and TLC must reach it waiting for that refused join; under two
+# it must join. Every such run keeps the audited run within the bound.
 set -euo pipefail
 
 max_steps="${1:?usage: durable_in_turn_steer_audit.sh <max-steps> [extra tlc args...]}"
@@ -207,4 +212,47 @@ for kind in "${content_kinds[@]}"; do
     exit 1
   fi
 done
-echo "durable in-turn steer audit passed at model_step_count <= ${max_steps} (safety kinds {${safety_kinds}}; ${#content_kinds[@]} content kinds join)"
+# Run contributor bound. The generated guard caps a run's staged
+# contributors at meerkat_machine_run_contributor_limit (256), which no bounded
+# run reaches, so these runs substitute a small bound for it: under a bound of
+# one the late input must never join and must reach the refused join, and
+# under two it must join once, every run keeping the audited run within the
+# bound in force.
+# capacity_cfg <name> <bound operator> -> ${work_dir}/<name>.cfg
+capacity_cfg() {
+  local name="$1" bound="$2"
+  local cfg="${work_dir}/${name}.cfg"
+  cp "${audit_cfg}" "${cfg}"
+  printf 'CONSTANT\n  meerkat_machine_run_contributor_limit <- %s\nINVARIANT\n  AuditRunContributorsWithinBound\n' \
+    "${bound}" >> "${cfg}"
+}
+
+capacity_cfg capacity-one-safety AuditOneContributor
+printf 'INVARIANT\n  AuditLateNeverJoins\n' >> "${work_dir}/capacity-one-safety.cfg"
+run_tlc capacity-one-safety "${work_dir}/capacity-one-safety.cfg"
+if [[ "${tlc_status}" != "0" ]] \
+  || ! grep -q "Model checking completed. No error has been found." "${work_dir}/capacity-one-safety.log"; then
+  cat "${work_dir}/capacity-one-safety.log" >&2
+  echo "error: durable in-turn steer audit: under a contributor bound of one the late input joined or the run passed the bound (tlc exit ${tlc_status}, bound ${max_steps})" >&2
+  exit 1
+fi
+
+capacity_cfg capacity-one-refusal AuditOneContributor
+printf 'INVARIANT\n  AuditCapacityRefusalNeverReached\n' >> "${work_dir}/capacity-one-refusal.cfg"
+run_tlc capacity-one-refusal "${work_dir}/capacity-one-refusal.cfg"
+if ! grep -q "AuditCapacityRefusalNeverReached is violated" "${work_dir}/capacity-one-refusal.log"; then
+  cat "${work_dir}/capacity-one-refusal.log" >&2
+  echo "error: durable in-turn steer audit: under a contributor bound of one the late input never waits for a refused join within bound ${max_steps}" >&2
+  exit 1
+fi
+
+capacity_cfg capacity-two-join AuditTwoContributors
+printf 'INVARIANT\n  AuditLateNeverJoins\n' >> "${work_dir}/capacity-two-join.cfg"
+run_tlc capacity-two-join "${work_dir}/capacity-two-join.cfg"
+if ! grep -q "AuditLateNeverJoins is violated" "${work_dir}/capacity-two-join.log"; then
+  cat "${work_dir}/capacity-two-join.log" >&2
+  echo "error: durable in-turn steer audit: under a contributor bound of two the late input never joins within bound ${max_steps}" >&2
+  exit 1
+fi
+
+echo "durable in-turn steer audit passed at model_step_count <= ${max_steps} (safety kinds {${safety_kinds}}; ${#content_kinds[@]} content kinds join; a contributor bound of one refuses the join, two takes it)"

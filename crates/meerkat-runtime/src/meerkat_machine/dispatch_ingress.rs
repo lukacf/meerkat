@@ -305,7 +305,9 @@ impl MeerkatMachine {
                     return Err(error);
                 }
             }
-            DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared)
+            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+                DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            )
         };
         Ok(candidate_owner_input_id)
     }

@@ -17768,7 +17768,10 @@ impl MeerkatMachine {
                                     return Err(error);
                                 }
                                 runless_terminal.owe();
-                                let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                                let candidate_owner_input_id =
+                                    crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+                                        crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+                                    );
                                 Action::PublishQueued {
                                     driver: driver.clone(),
                                     completions: completions.clone(),
@@ -18053,7 +18056,10 @@ impl MeerkatMachine {
                             return Err(error);
                         }
                         runless_terminal.owe();
-                        let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                        let candidate_owner_input_id =
+                            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+                                crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+                            );
                         Action::PublishQueued {
                             completions,
                             publication_handle,

@@ -52127,12 +52127,11 @@ async fn reset_from_running_surfaces_dsl_rejection() {
     assert!(
         matches!(
             err,
-            MeerkatMachineCommandError::Control(RuntimeControlPlaneError::Internal(ref reason))
-                if reason.contains("DSL authority (Reset)")
-                    && reason.contains("Running")
-                    && reason.contains("Reset")
+            MeerkatMachineCommandError::Control(RuntimeControlPlaneError::InvalidState {
+                state: RuntimeState::Running
+            })
         ),
-        "expected DSL authority rejection for Reset from Running, got {err:?}"
+        "expected the typed refusal the machine's Reset guard gives from Running, got {err:?}"
     );
 }
 

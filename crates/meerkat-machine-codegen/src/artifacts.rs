@@ -10844,6 +10844,30 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    {{ authority_id \\in authorities : IF authority_id \\in DOMAIN operation_by_authority THEN operation_by_authority[authority_id] # operation_id ELSE TRUE }}"
         );
+        // The inputs staged for one run: its batch and its durable joins.
+        // The parameters are prefixed: TLA+ forbids a parameter named like a
+        // state variable (`input_phases`).
+        writeln!(
+            out,
+            "{}(arg_run_associations, arg_input_phases, arg_run_id) ==",
+            prefix("meerkat_machine_run_staged_contributor_count")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    Cardinality({{ arg_input_id \\in DOMAIN arg_run_associations : IF arg_run_associations[arg_input_id] = arg_run_id /\\ arg_input_id \\in DOMAIN arg_input_phases THEN arg_input_phases[arg_input_id] = \"Staged\" ELSE FALSE }})"
+        );
+        // The most contributors one run's commit names. A defined operator,
+        // not a literal in the guard, so a bounded audit can substitute a
+        // small bound (`meerkat_machine_run_contributor_limit <- ...`) and
+        // explore the refused join.
+        writeln!(
+            out,
+            "{} == {}",
+            prefix("meerkat_machine_run_contributor_limit"),
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::command_capabilities::RUNTIME_LOOP_BATCH_MAX_INPUTS
+        )
+        .expect("write to string");
     }
 
     fn render_mob_machine_native_helpers(&self, out: &mut String) {

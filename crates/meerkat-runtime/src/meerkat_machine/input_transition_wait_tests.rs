@@ -657,7 +657,9 @@ async fn exact_cancellation_after_the_bound_reports_an_unpublished_carrier() {
             .await
             .expect("abandon the queued input");
         assert_eq!(
-            crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+                crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            ),
             Some(input_id.clone()),
             "the abandoned input owns an unpublished carrier"
         );

@@ -13149,6 +13149,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `durable_append_delivery`
   - `not_already_joined`
+  - `run_contributor_capacity`
 - Emits: `RecordRunAssociation`
 - To: `Running`
 

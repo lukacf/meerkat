@@ -22600,6 +22600,10 @@ pub mod command_capabilities {
         Steer,
     }
 
+    /// The most inputs one runtime-loop batch stages into a run: the bound of
+    /// the one terminal-completion batch a run's commit names.
+    pub const RUNTIME_LOOP_BATCH_MAX_INPUTS: usize = 256;
+
     #[must_use = "generated runtime-loop batch plan must be consumed by exact dequeue/stage realization"]
     #[derive(Debug, PartialEq, Eq)]
     pub struct RuntimeLoopBatchPlan {
@@ -22958,6 +22962,7 @@ pub mod command_capabilities {
                         .copied()
                         == target_terminal_intent
             })
+            .take(RUNTIME_LOOP_BATCH_MAX_INPUTS)
             .cloned()
             .collect()
     }
@@ -22976,6 +22981,9 @@ pub mod command_capabilities {
         };
         let mut selected = Vec::new();
         for input_id in ordered {
+            if selected.len() == RUNTIME_LOOP_BATCH_MAX_INPUTS {
+                break;
+            }
             if state.input_runtime_execution_kind.get(input_id).copied()
                 != Some(target_execution_kind)
                 || state

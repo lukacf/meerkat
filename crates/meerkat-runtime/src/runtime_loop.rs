@@ -7063,7 +7063,7 @@ async fn cancel_stopped_live_boundary_joins(
                 std::slice::from_ref(input_id),
                 STOPPED_RUN_JOIN_REASON.to_string(),
             )?;
-            if prepared.candidate_owner_input_id().is_some() {
+            if prepared.has_directed_batch() {
                 driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
                 return Err(crate::RuntimeDriverError::Internal(format!(
                     "stopped durable live-boundary input {input_id} carries a directed interaction terminal"

@@ -1334,6 +1334,19 @@ impl GeneratedMachineKernel {
                     args,
                     transition_name,
                 ),
+            "meerkat_machine_run_staged_contributor_count" => {
+                self.eval_meerkat_machine_run_staged_contributor_count(args, transition_name)
+            }
+            "meerkat_machine_run_contributor_limit" => {
+                if !args.is_empty() {
+                    return Err(self.eval_error(
+                        transition_name,
+                        "meerkat_machine_run_contributor_limit expects no args",
+                    ));
+                }
+                let limit = meerkat_machine_schema::catalog::dsl::meerkat_machine::command_capabilities::RUNTIME_LOOP_BATCH_MAX_INPUTS;
+                Ok(KernelValue::U64(u64::try_from(limit).unwrap_or(u64::MAX)))
+            }
             "mob_machine_external_peer_identity_absent" => {
                 self.eval_mob_machine_external_peer_identity_absent(args, transition_name)
             }
@@ -1437,6 +1450,38 @@ impl GeneratedMachineKernel {
                 })
                 .collect(),
         ))
+    }
+
+    fn eval_meerkat_machine_run_staged_contributor_count(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [run_associations, input_phases, run_id]: [KernelValue; 3] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "meerkat_machine_run_staged_contributor_count expects three args",
+                )
+            })?;
+        let run_associations = run_associations
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let input_phases = input_phases
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let staged = run_associations
+            .iter()
+            .filter(|(input_id, associated)| {
+                **associated == run_id
+                    && matches!(
+                        input_phases.get(*input_id),
+                        Some(KernelValue::NamedVariant { enum_name, variant })
+                            if enum_name.as_str() == "InputPhase" && variant.as_str() == "Staged"
+                    )
+            })
+            .count();
+        Ok(KernelValue::U64(u64::try_from(staged).unwrap_or(u64::MAX)))
     }
 
     fn eval_meerkat_machine_live_bridge_authorities_without_operation(

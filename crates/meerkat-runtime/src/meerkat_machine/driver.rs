@@ -967,15 +967,99 @@ impl TerminalTransitionCheckpoint {
 #[must_use = "prepared runless terminal outboxes must be committed or rolled back"]
 pub(crate) struct PreparedRunlessInteractionTerminalOutboxes {
     checkpoint: Option<TerminalTransitionCheckpoint>,
-    candidate_owner_input_id: Option<InputId>,
+    batches: Vec<RunlessTerminalBatch>,
 }
 
 impl PreparedRunlessInteractionTerminalOutboxes {
-    /// Owner of the directed interaction terminal batch this preparation
-    /// staged, when any recipient carries a directed interaction.
+    /// Whether any batch this preparation staged carries a directed
+    /// interaction terminal.
+    pub(crate) fn has_directed_batch(&self) -> bool {
+        self.batches.iter().any(RunlessTerminalBatch::is_directed)
+    }
+}
+
+/// One terminal-completion batch of a runless runtime termination: its
+/// recipients, in canonical order, and the owner of its directed interaction
+/// terminal outbox batch when any recipient is directed. A termination of
+/// more inputs than one batch names
+/// ([`crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS`]) commits
+/// several, all in the one durable commit that terminalizes the inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunlessTerminalBatch {
+    input_ids: Vec<InputId>,
+    candidate_owner_input_id: Option<InputId>,
+}
+
+impl RunlessTerminalBatch {
+    pub(crate) fn input_ids(&self) -> &[InputId] {
+        &self.input_ids
+    }
+
     pub(crate) fn candidate_owner_input_id(&self) -> Option<&InputId> {
         self.candidate_owner_input_id.as_ref()
     }
+
+    pub(crate) fn is_directed(&self) -> bool {
+        self.candidate_owner_input_id.is_some()
+    }
+
+    /// The directed owner of the only batch of a one-input termination.
+    pub(crate) fn sole_directed_owner(batches: Vec<Self>) -> Option<InputId> {
+        debug_assert!(
+            batches.len() <= 1,
+            "a one-input termination stages one batch"
+        );
+        batches
+            .into_iter()
+            .find_map(|batch| batch.candidate_owner_input_id)
+    }
+}
+
+/// Split one runless termination's recipients into terminal-completion
+/// batches: canonical order, at most
+/// [`crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS`] each. Pure,
+/// so a recipient named twice is refused before any checkpoint.
+fn runless_termination_batches(
+    input_ids: &[InputId],
+) -> Result<Vec<Vec<InputId>>, RuntimeDriverError> {
+    let canonical = canonical_completion_input_ids(input_ids);
+    if canonical.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "runless runtime termination names an input twice".to_string(),
+        });
+    }
+    Ok(canonical
+        .chunks(crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS)
+        .map(<[InputId]>::to_vec)
+        .collect())
+}
+
+/// Refuse a terminal-completion recipient set the batch bound refuses before
+/// the caller's terminal transition takes its checkpoint. Every failure after
+/// a persistent checkpoint fails the session closed, so a set no batch may
+/// carry must be refused here, typed, with nothing changed. `input_ids` is the
+/// batch, or a set every batch the transition stages is drawn from.
+fn validate_terminal_completion_bound(input_ids: &[InputId]) -> Result<(), RuntimeDriverError> {
+    let bound = crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS;
+    if input_ids.len() > bound {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "terminal completion recipient batch names {} inputs; a batch names at most {bound}",
+                input_ids.len()
+            ),
+        });
+    }
+    if input_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != input_ids.len()
+    {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "terminal completion recipient batch contains duplicate inputs".to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) struct PreparedDestroy {
@@ -1085,7 +1169,9 @@ impl DriverEntry {
             InputTerminalCompletion, InputTerminalCompletionBatchKey, InputTerminalCompletionPhase,
             interaction_terminal_payload_digest,
         };
-        if input_ids.is_empty() || input_ids.len() > 256 {
+        if input_ids.is_empty()
+            || input_ids.len() > crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS
+        {
             return Err(RuntimeDriverError::ValidationFailed {
                 reason: "terminal completion recipient batch has invalid size".to_string(),
             });
@@ -1379,10 +1465,15 @@ impl DriverEntry {
         Ok((input_ids, candidate))
     }
 
-    /// Stage one runless runtime-termination batch into the same in-memory
-    /// ledger snapshot that the caller will terminalize and persist. The
-    /// canonical candidate-owner input is the durable group key; no synthetic
-    /// run identity is minted for queued/staged inputs that never ran.
+    /// Stage one runless runtime termination into the same in-memory ledger
+    /// snapshot that the caller will terminalize and persist. The recipients
+    /// split into terminal-completion batches of at most
+    /// [`crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS`], in
+    /// canonical order, before the checkpoint; each batch's canonical owner
+    /// input is its durable group key, and its directed recipients get their
+    /// own outbox batch. No synthetic run identity is minted for
+    /// queued/staged inputs that never ran. Every batch is staged under the
+    /// one checkpoint, and the caller's one durable commit persists them all.
     pub(crate) fn prepare_runless_runtime_terminated_interaction_outboxes(
         &mut self,
         input_ids: &[InputId],
@@ -1391,73 +1482,63 @@ impl DriverEntry {
         if input_ids.is_empty() {
             return Ok(PreparedRunlessInteractionTerminalOutboxes {
                 checkpoint: None,
-                candidate_owner_input_id: None,
+                batches: Vec::new(),
             });
         }
+        let recipient_batches = runless_termination_batches(input_ids)?;
         let checkpoint = self.begin_terminal_transition("runless_terminal_preparation")?;
-        let candidate = crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
-            reason: reason.clone(),
-        };
-        let completion_batch = match self.stage_input_terminal_completion_batch(
-            InteractionTerminalBatchScope::RuntimeTermination,
-            input_ids,
-            candidate,
-            false,
-        ) {
-            Ok(batch) => batch,
-            Err(error) => {
-                return Err(self.fail_terminal_transition(
-                    checkpoint,
-                    "runless_terminal_completion_batch_stage",
-                    error,
-                ));
-            }
-        };
-        let existing =
-            match self.existing_exact_runless_runtime_termination_batch(input_ids, &reason) {
-                Ok(existing) => existing,
-                Err(error) => {
-                    return Err(self.fail_terminal_transition(
-                        checkpoint,
-                        "runless_terminal_batch_validation",
-                        error,
-                    ));
+        let mut batches = Vec::with_capacity(recipient_batches.len());
+        for batch_input_ids in recipient_batches {
+            match self.stage_runless_runtime_termination_batch(&batch_input_ids, &reason) {
+                Ok(candidate_owner_input_id) => batches.push(RunlessTerminalBatch {
+                    input_ids: batch_input_ids,
+                    candidate_owner_input_id,
+                }),
+                Err((operation, error)) => {
+                    return Err(self.fail_terminal_transition(checkpoint, operation, error));
                 }
-            };
-        if let Some(candidate_owner_input_id) = existing {
-            return Ok(PreparedRunlessInteractionTerminalOutboxes {
-                checkpoint: Some(checkpoint),
-                candidate_owner_input_id: Some(candidate_owner_input_id),
-            });
-        }
-        let outboxes = match authorized_staged_directed_terminal_outboxes(
-            self,
-            input_ids,
-            &completion_batch,
-        ) {
-            Ok(outboxes) => outboxes,
-            Err(error) => {
-                return Err(self.fail_terminal_transition(
-                    checkpoint,
-                    "runless_terminal_outbox_authorization",
-                    error,
-                ));
             }
-        };
-        let candidate_owner_input_id = outboxes
-            .first()
-            .map(|outbox| outbox.candidate_owner_input_id.clone());
-        if let Err(error) = self.stage_interaction_terminal_outboxes(outboxes) {
-            return Err(self.fail_terminal_transition(
-                checkpoint,
-                "runless_terminal_outbox_stage",
-                error,
-            ));
         }
         Ok(PreparedRunlessInteractionTerminalOutboxes {
             checkpoint: Some(checkpoint),
-            candidate_owner_input_id,
+            batches,
         })
+    }
+
+    /// Stage one runless terminal-completion batch and, for its directed
+    /// recipients, its outbox batch. Returns the directed outbox owner, or
+    /// the failed step with its error for the caller's checkpoint.
+    fn stage_runless_runtime_termination_batch(
+        &mut self,
+        input_ids: &[InputId],
+        reason: &str,
+    ) -> Result<Option<InputId>, (&'static str, RuntimeDriverError)> {
+        let candidate = crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
+            reason: reason.to_string(),
+        };
+        let completion_batch = self
+            .stage_input_terminal_completion_batch(
+                InteractionTerminalBatchScope::RuntimeTermination,
+                input_ids,
+                candidate,
+                false,
+            )
+            .map_err(|error| ("runless_terminal_completion_batch_stage", error))?;
+        if let Some(candidate_owner_input_id) = self
+            .existing_exact_runless_runtime_termination_batch(input_ids, reason)
+            .map_err(|error| ("runless_terminal_batch_validation", error))?
+        {
+            return Ok(Some(candidate_owner_input_id));
+        }
+        let outboxes =
+            authorized_staged_directed_terminal_outboxes(self, input_ids, &completion_batch)
+                .map_err(|error| ("runless_terminal_outbox_authorization", error))?;
+        let candidate_owner_input_id = outboxes
+            .first()
+            .map(|outbox| outbox.candidate_owner_input_id.clone());
+        self.stage_interaction_terminal_outboxes(outboxes)
+            .map_err(|error| ("runless_terminal_outbox_stage", error))?;
+        Ok(candidate_owner_input_id)
     }
 
     /// Whether any currently non-terminal input requires an Interaction
@@ -1623,7 +1704,9 @@ impl DriverEntry {
             &owner_outbox.candidate_digest,
             &owner_outbox.completion_input_ids_digest,
         )?;
-        if completion_input_ids.is_empty() || completion_input_ids.len() > 256 {
+        if completion_input_ids.is_empty()
+            || completion_input_ids.len() > crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS
+        {
             return Err(RuntimeDriverError::RecoveryCorruption {
                 reason: "interaction terminal owner carries an invalid recipient batch size"
                     .to_string(),
@@ -1648,7 +1731,9 @@ impl DriverEntry {
                 directed.push(stored);
             }
         }
-        if directed.is_empty() || directed.len() > 256 {
+        if directed.is_empty()
+            || directed.len() > crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS
+        {
             return Err(RuntimeDriverError::RecoveryCorruption {
                 reason: "interaction terminal batch has an invalid directed recipient count"
                     .to_string(),
@@ -1665,17 +1750,19 @@ impl DriverEntry {
         Ok(directed)
     }
 
+    /// Complete a preparation whose durable commit landed, and hand back
+    /// every batch it staged for publication.
     pub(crate) fn commit_prepared_runless_interaction_terminal_outboxes(
         prepared: PreparedRunlessInteractionTerminalOutboxes,
-    ) -> Option<InputId> {
+    ) -> Vec<RunlessTerminalBatch> {
         let PreparedRunlessInteractionTerminalOutboxes {
             checkpoint,
-            candidate_owner_input_id,
+            batches,
         } = prepared;
         if let Some(checkpoint) = checkpoint {
             checkpoint.complete();
         }
-        candidate_owner_input_id
+        batches
     }
 
     pub(crate) fn rollback_prepared_runless_interaction_terminal_outboxes(
@@ -1712,7 +1799,9 @@ impl DriverEntry {
             .filter_map(|stored| stored.state.interaction_terminal_outbox)
             .filter(|outbox| &outbox.candidate_owner_input_id == candidate_owner_input_id)
             .collect::<Vec<_>>();
-        if outboxes.is_empty() || outboxes.len() > 256 {
+        if outboxes.is_empty()
+            || outboxes.len() > crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS
+        {
             return Err(RuntimeDriverError::ValidationFailed {
                 reason: format!(
                     "interaction terminal owner {candidate_owner_input_id} names invalid batch size {}",
@@ -5364,6 +5453,7 @@ impl DriverEntry {
             contributor_disposition,
             applied_commit,
         } = realization;
+        validate_terminal_completion_bound(&contributing_input_ids)?;
         let checkpoint = self.begin_terminal_transition("failed_run_terminal_realization")?;
 
         if let Err(error) = self.shell_driver_mut().machine_realize_run_failed(
@@ -5649,6 +5739,7 @@ impl DriverEntry {
         session: Option<meerkat_core::lifecycle::core_executor::BoundSessionCommit>,
         owner_session_id: &SessionId,
     ) -> Result<Option<crate::store::PreparedRuntimeSessionCommitResult>, RuntimeDriverError> {
+        validate_terminal_completion_bound(input_ids)?;
         let terminal_checkpoint =
             self.begin_terminal_transition("live_boundary_terminal_realization")?;
         if let Err(error) = self.stage_input_terminal_completion_batch(
@@ -5765,6 +5856,11 @@ impl DriverEntry {
         input_ids: &[InputId],
         refusal_reason: &str,
     ) -> Result<Vec<InputId>, crate::traits::RuntimeDriverError> {
+        // The inputs the machine terminalizes here, a subset of this batch,
+        // take one terminal-completion batch.
+        if let Err(error) = validate_terminal_completion_bound(input_ids) {
+            return Err(self.rollback_refused_run_after_error(run_id, error));
+        }
         match self {
             DriverEntry::Ephemeral(d) => {
                 let checkpoint = d.rollback_snapshot();
@@ -6086,7 +6182,7 @@ fn authorized_directed_terminal_outboxes(
     let mut directed_interaction_ids = directed_interaction_ids.to_vec();
     directed_interaction_ids.sort_by_key(|interaction_id| interaction_id.0);
     let mut declared = std::collections::BTreeSet::new();
-    if directed_interaction_ids.len() > 256 {
+    if directed_interaction_ids.len() > crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS {
         return Err(RuntimeDriverError::ValidationFailed {
             reason: "directed interaction terminal batch exceeds the 256-input pending bound"
                 .to_string(),
@@ -6221,7 +6317,7 @@ fn authorized_staged_directed_terminal_outboxes(
             directed.push((input_id.clone(), interaction_id));
         }
     }
-    if directed.len() > 256 {
+    if directed.len() > crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS {
         return Err(RuntimeDriverError::ValidationFailed {
             reason: "directed interaction terminal batch exceeds the 256-input pending bound"
                 .to_string(),
@@ -6230,7 +6326,7 @@ fn authorized_staged_directed_terminal_outboxes(
     if directed.is_empty() {
         return Ok(Vec::new());
     }
-    if input_ids.len() > 256 {
+    if input_ids.len() > crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS {
         return Err(RuntimeDriverError::ValidationFailed {
             reason: "staged completion recipient batch exceeds the 256-input pending bound"
                 .to_string(),
@@ -7745,7 +7841,7 @@ pub(crate) fn machine_staged_directed_interaction_ids(
         directed.push(interaction_id);
     }
     directed.sort_by_key(|interaction_id| interaction_id.0);
-    if directed.len() > 256 {
+    if directed.len() > crate::input_state::TERMINAL_COMPLETION_BATCH_MAX_INPUTS {
         return Err(RuntimeDriverError::ValidationFailed {
             reason: "staged directed interaction batch exceeds the 256-input pending bound"
                 .to_string(),
@@ -10034,6 +10130,8 @@ pub(crate) async fn commit_runtime_loop_run(
     let completion_candidate =
         crate::input_state::InteractionTerminalCandidate::from_core_apply_terminal(terminal);
 
+    validate_terminal_completion_bound(&consumed_input_ids)
+        .map_err(RuntimeLoopRunCommitError::Rejected)?;
     let terminal_checkpoint = driver
         .begin_terminal_transition("completed_run_terminal_commit")
         .map_err(RuntimeLoopRunCommitError::Rejected)?;
@@ -11023,6 +11121,8 @@ pub(crate) async fn cancel_runtime_loop_run(
         machine_ended_run_contributors(&driver, &cancelled_run_id, &staged_input_ids);
     machine_validate_run_cancelled(&driver, &cancelled_run_id, &contributing_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
+    validate_terminal_completion_bound(&contributing_input_ids)
+        .map_err(RuntimeLoopRunFailError::Rejected)?;
     let terminal_checkpoint = driver
         .begin_terminal_transition("cancelled_run_terminal_commit")
         .map_err(RuntimeLoopRunFailError::Rejected)?;
@@ -11345,6 +11445,8 @@ async fn fail_runtime_loop_run_inner(
         }
         (None, None) => None,
     };
+    validate_terminal_completion_bound(&contributing_input_ids)
+        .map_err(RuntimeLoopRunFailError::Rejected)?;
     let terminal_checkpoint = driver
         .begin_terminal_transition("failed_run_terminal_commit")
         .map_err(RuntimeLoopRunFailError::Rejected)?;
@@ -13189,7 +13291,9 @@ mod recovery_tests {
             )
             .expect("stage one mixed runless terminal batch");
         assert_eq!(
-            DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            RunlessTerminalBatch::sole_directed_owner(
+                DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            ),
             Some(directed_id.clone()),
             "the directed subset has its own outbox owner"
         );

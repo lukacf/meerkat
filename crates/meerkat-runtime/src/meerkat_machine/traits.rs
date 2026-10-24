@@ -2755,58 +2755,63 @@ impl MeerkatMachine {
                 .await?;
         }
 
-        if let Some((result_rx, start_tx)) = dispatch {
+        // The dispatch publishes every committed directed batch with its
+        // nondirected siblings; its start permit is sent before anything is
+        // awaited. A batch with no directed recipient has no outbox, so
+        // neither the dispatch nor the convergence ever resolves it: it is
+        // resolved before either is awaited, so a directed publication that
+        // fails or outlives the deadline still leaves its waiters answered.
+        // The first error is returned once both are done.
+        let dispatch = dispatch.map(|(result_rx, start_tx)| {
             if let Some(start_tx) = start_tx {
                 let _ = start_tx.send(());
             }
-            self.await_runless_terminal_publication_dispatch(&runtime_id, result_rx, deadline)
-                .await
-                .map_err(|error| match error {
-                    RuntimeDriverError::RuntimeTerminalPublicationInProgress { .. } => {
-                        RuntimeControlPlaneError::RetirementInProgress {
-                            runtime_id: runtime_id.clone(),
-                            stage: "terminal_publication".to_string(),
-                        }
-                    }
-                    other => RuntimeControlPlaneError::Internal(other.to_string()),
-                })?;
-        } else {
-            crate::control_plane::converge_known_committed_runless_runtime_terminations_before(
-                &driver,
-                Some(&completions),
-                None,
-                deadline,
-            )
-            .await
-            .map_err(|error| match error {
-                RuntimeDriverError::RuntimeTerminalPublicationInProgress { .. } => {
-                    RuntimeControlPlaneError::RetirementInProgress {
-                        runtime_id: runtime_id.clone(),
-                        stage: "terminal_publication".to_string(),
-                    }
-                }
-                other => RuntimeControlPlaneError::Internal(other.to_string()),
-            })?;
-        }
-
-        // The directed batches published above, each with its nondirected
-        // siblings; a batch with no directed recipient resolves here.
+            result_rx
+        });
+        let mut nondirected_result: Result<(), RuntimeDriverError> = Ok(());
         for (terminal_batches, reason) in [ended_run_batch, abandoned_batch].into_iter().flatten() {
             let nondirected = terminal_batches
                 .into_iter()
                 .filter(|batch| !batch.is_directed())
                 .collect::<Vec<_>>();
-            crate::control_plane::publish_and_resolve_runless_runtime_terminations_before(
-                &driver,
-                Some(&completions),
-                None,
-                &nondirected,
-                reason,
-                deadline,
-            )
-            .await
-            .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+            let published =
+                crate::control_plane::publish_and_resolve_runless_runtime_terminations_before(
+                    &driver,
+                    Some(&completions),
+                    None,
+                    &nondirected,
+                    reason,
+                    deadline,
+                )
+                .await;
+            nondirected_result = nondirected_result.and(published);
         }
+        let directed_result = match dispatch {
+            Some(result_rx) => {
+                self.await_runless_terminal_publication_dispatch(&runtime_id, result_rx, deadline)
+                    .await
+            }
+            None => {
+                crate::control_plane::converge_known_committed_runless_runtime_terminations_before(
+                    &driver,
+                    Some(&completions),
+                    None,
+                    deadline,
+                )
+                .await
+            }
+        };
+        directed_result.map_err(|error| match error {
+            RuntimeDriverError::RuntimeTerminalPublicationInProgress { .. } => {
+                RuntimeControlPlaneError::RetirementInProgress {
+                    runtime_id: runtime_id.clone(),
+                    stage: "terminal_publication".to_string(),
+                }
+            }
+            other => RuntimeControlPlaneError::Internal(other.to_string()),
+        })?;
+        nondirected_result
+            .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
         Ok((report, archived_model_routing_handoffs))
     }
 }

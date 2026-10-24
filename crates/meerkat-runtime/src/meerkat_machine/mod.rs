@@ -4148,6 +4148,11 @@ impl PendingRuntimeExecutorAttachment {
                             // The run committed the tool's result normally.
                             silently_moot.push(call.entry_id);
                         } else {
+                            // Owed unless the transcript already answers the
+                            // call (a resumed run's round answered it before
+                            // the run ended): recording the notice leaves
+                            // such a call out, so its evidence is acknowledged
+                            // without telling the model twice.
                             owed.push(OwedInterruptedToolNotice {
                                 call: call.clone(),
                                 disposition: InterruptedToolRunDisposition::RunCompleted,

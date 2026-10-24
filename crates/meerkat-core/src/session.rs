@@ -6793,11 +6793,28 @@ impl Session {
     /// transcript is a duplicate (the blocks carry the notice's typed
     /// identity): nothing is appended, requests included, so retried delivery
     /// converges. No turn is started.
+    ///
+    /// An interrupted-call block whose foreground shell call the transcript
+    /// already answers owes the model nothing: the call's own result told it
+    /// (a resumed run's round answers such a call as interrupted, with an
+    /// outcome-uncertain result). The block is left out, and a notice left
+    /// with no block appends nothing, requests included, and reads as a
+    /// duplicate, so its delivery converges the same way.
     pub fn append_system_notice_once(
         &mut self,
         record: crate::types::SystemNoticeRecord,
     ) -> crate::service::AppendSystemContextStatus {
-        let crate::types::SystemNoticeRecord { requests, notice } = record;
+        let crate::types::SystemNoticeRecord {
+            requests,
+            mut notice,
+        } = record;
+        let owed_blocks = notice.blocks.len();
+        notice
+            .blocks
+            .retain(|block| !self.answers_interrupted_shell_call(block));
+        if owed_blocks > 0 && notice.blocks.is_empty() {
+            return crate::service::AppendSystemContextStatus::Duplicate;
+        }
         let duplicate = self.messages().iter().any(|message| {
             matches!(
                 message,
@@ -6813,6 +6830,47 @@ impl Session {
         }
         self.push(Message::SystemNotice(notice));
         crate::service::AppendSystemContextStatus::Applied
+    }
+
+    /// Whether `block` reports an interrupted foreground shell call that the
+    /// transcript already answers: an assistant message of the block's run
+    /// asked for the call, and the tool results that follow that message
+    /// hold the call's result. Tool call ids can repeat across runs, so the
+    /// call is matched within its run. A background job, a monitor or a
+    /// command hook outlives the call that started it (that call's result
+    /// says nothing about how its process ended), so their blocks are never
+    /// answered here.
+    fn answers_interrupted_shell_call(&self, block: &crate::types::SystemNoticeBlock) -> bool {
+        let crate::types::SystemNoticeBlock::ToolProcessInterrupted {
+            run_id,
+            tool_call_id: Some(tool_call_id),
+            spawner: crate::tool_process::ToolProcessSpawner::ShellCall,
+            ..
+        } = block
+        else {
+            return false;
+        };
+        let mut asked = false;
+        for message in self.messages().iter() {
+            match message {
+                Message::BlockAssistant(answer) => {
+                    asked = answer.identity.run_id.as_ref() == Some(run_id)
+                        && answer
+                            .tool_calls()
+                            .any(|call| call.id == tool_call_id.as_str());
+                }
+                Message::ToolResults { results, .. } if asked => {
+                    if results
+                        .iter()
+                        .any(|result| result.tool_use_id == *tool_call_id)
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Clone the active ordered transcript for a model request.
@@ -10287,6 +10345,101 @@ mod tests {
         assert!(matches!(&messages[0], Message::User(user)
             if user.text_content() == "create the effect file"));
         assert!(matches!(&messages[1], Message::SystemNotice(_)));
+    }
+
+    /// A resumed run's round answers its interrupted foreground shell call
+    /// with an outcome-uncertain result. The call's custody evidence, settled
+    /// once the run has ended, then owes the model no notice: its block is
+    /// left out, and a notice left with no block appends nothing. A call of
+    /// another run with the same id, a call the transcript does not answer,
+    /// and a background job started by the answered call still get their
+    /// blocks.
+    #[test]
+    fn an_interrupted_shell_call_the_transcript_answers_owes_no_notice() {
+        use crate::tool_process::{
+            InterruptedToolRunDisposition, ToolProcessCessation, ToolProcessSpawner,
+        };
+        use crate::types::{SystemNoticeBlock, SystemNoticeMessage, SystemNoticeRecord};
+
+        let run_id = crate::lifecycle::RunId::new();
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text(
+            "create the effect file".to_string(),
+        )));
+        let mut asked = BlockAssistantMessage::new(
+            vec![AssistantBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "shell".to_string(),
+                args: serde_json::value::RawValue::from_string("{}".to_string())
+                    .expect("valid tool args"),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        );
+        asked.identity = asked.identity.with_run_id(run_id.clone());
+        session.push(Message::BlockAssistant(asked));
+        session.push(Message::tool_results(vec![ToolResult::new(
+            "call-1".to_string(),
+            "the outcome of this call is uncertain; it was not run again".to_string(),
+            true,
+        )]));
+        let block = |run_id: &crate::lifecycle::RunId, tool_call_id: &str, spawner| {
+            SystemNoticeBlock::ToolProcessInterrupted {
+                run_id: run_id.clone(),
+                tool_call_id: Some(tool_call_id.to_string()),
+                spawner,
+                cessation: ToolProcessCessation::KilledByRecovery { members: 1 },
+                disposition: InterruptedToolRunDisposition::RunCompleted,
+            }
+        };
+        let notice = |blocks| SystemNoticeRecord {
+            requests: Vec::new(),
+            notice: SystemNoticeMessage::tool_process_interrupted(blocks),
+        };
+        let answered = block(&run_id, "call-1", ToolProcessSpawner::ShellCall);
+        let transcript = session.messages().len();
+
+        assert_eq!(
+            session.append_system_notice_once(notice(vec![answered.clone()])),
+            crate::service::AppendSystemContextStatus::Duplicate
+        );
+        assert_eq!(
+            session.messages().len(),
+            transcript,
+            "a call the transcript answers owes no notice"
+        );
+
+        let other_run = block(
+            &crate::lifecycle::RunId::new(),
+            "call-1",
+            ToolProcessSpawner::ShellCall,
+        );
+        let unanswered = block(&run_id, "call-2", ToolProcessSpawner::ShellCall);
+        let job = block(
+            &run_id,
+            "call-1",
+            ToolProcessSpawner::BackgroundJob {
+                job_id: "job-1".to_string(),
+            },
+        );
+        assert_eq!(
+            session.append_system_notice_once(notice(vec![
+                answered,
+                other_run.clone(),
+                unanswered.clone(),
+                job.clone(),
+            ])),
+            crate::service::AppendSystemContextStatus::Applied
+        );
+        let expected = vec![other_run, unanswered, job];
+        let messages = session.messages();
+        assert_eq!(messages.len(), transcript + 1, "one notice");
+        assert!(
+            matches!(&messages[transcript], Message::SystemNotice(recorded)
+                if recorded.blocks == expected),
+            "only the answered call's block is left out: {:?}",
+            messages[transcript]
+        );
     }
 
     fn test_turn_usage(usage: Usage) -> crate::types::TurnUsage {

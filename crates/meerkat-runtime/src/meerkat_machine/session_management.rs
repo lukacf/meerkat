@@ -8389,6 +8389,7 @@ impl MeerkatMachine {
             preinstalled_stop_coordinator,
             reload_required,
             driver,
+            completions,
         ) = {
             let sessions = self.sessions.read().await;
             let Some(entry) = sessions.get(session_id) else {
@@ -8414,9 +8415,22 @@ impl MeerkatMachine {
                 entry.runtime_stop_cleanup_coordinator.is_some(),
                 entry.require_durability_ready().err(),
                 Arc::clone(&entry.driver),
+                Arc::clone(&entry.completions),
             )
         };
         if let Some(reload_required) = reload_required {
+            // The registration must reload, so its exited loop is not torn
+            // down here: the registration stays, detached, until a reload or
+            // an explicit resume settles it, and nothing serves the inputs it
+            // admitted before then. A caller still waiting on one of them is
+            // answered now, typed, instead of waiting on a registration that
+            // detached. The inputs stay durably admitted and run once the
+            // session's runtime reloads.
+            completions.lock().await.fail_all_waiters(
+                crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                    "the runtime of session {session_id} stopped serving before this input completed and must reload ({reload_required}); the input stays durably admitted and runs once the runtime reloads, so do not resubmit it"
+                )),
+            );
             return Err(RuntimeDriverError::RecoveryRepairBlocked {
                 evidence_digest: None,
                 reason: reload_required.to_string(),

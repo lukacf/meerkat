@@ -40525,3 +40525,8 @@ mod governed_host_original_tests {
         assert_eq!(delivering.binder.unresolved.load(Ordering::SeqCst), 0);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[path = "session_runtime/resumed_run_tests.rs"]
+mod resumed_run_tests;

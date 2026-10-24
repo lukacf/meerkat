@@ -2144,6 +2144,14 @@ them.
   `run_contributor_capacity` guard. A recipient set past the bound is refused,
   typed, before any checkpoint.
 
+- `meerkat-runtime`: a retire no longer hangs when its runtime loop has many
+  wakes pending. Retire held the session mutation gate while it waited for
+  room on the loop's bounded wake channel, and the loop takes that gate to
+  process each wake, so a burst of admissions behind a held loop (a mob stop
+  holds run starts) could leave both waiting forever. A full wake channel
+  already guarantees the loop wakes, so retire now counts it as woken; only a
+  closed channel means there is no loop.
+
 - `meerkat-runtime`: a Reset the machine refuses, on a running or a stopped
   runtime, answers `RuntimeControlPlaneError::InvalidState { state }`
   (`RuntimeDriverError::NotReady { state }` through

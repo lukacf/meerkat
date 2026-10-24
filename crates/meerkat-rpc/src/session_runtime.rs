@@ -8521,8 +8521,13 @@ impl SessionRuntime {
             return Ok(());
         }
 
-        let persisted_session = self.load_persisted_session(session_id).await?;
-        let persisted_session_exists = persisted_session.is_some();
+        // Existence is committed metadata: a session whose durable run is
+        // open at a committed round exists, and the attach below, not this
+        // read, decides that run's provisional tail.
+        let persisted_session_exists = self
+            .load_persisted_session_tolerating_tail(session_id)
+            .await?
+            .is_some();
         let adapter_registration_exists = adapter.contains_session(session_id).await;
         let live_session_exists = match self.service.has_live_session(session_id).await {
             Ok(exists) => exists,

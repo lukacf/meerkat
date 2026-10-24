@@ -3689,8 +3689,12 @@ enum LiveSessionAuthority {
     LiveAuthoritative {
         snapshot: LiveSessionTranscriptAuthoritySnapshot,
     },
+    /// Durable authority outranks the live actor, for `reason`. The verdict
+    /// carries no body: it is classified from bounded facts, so a provisional
+    /// tail standing ahead of the committed boundary never fails it. A
+    /// consumer that synchronizes the live actor reads the committed body
+    /// itself, strictly; a reader serves the committed snapshot.
     DurableAuthoritative {
-        session: Box<Session>,
         reason: LiveSessionAuthorityReason,
     },
 }
@@ -6005,16 +6009,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     Some(RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Running)
                 );
                 let store_authority = self.observe_persisted_session_authority(id).await?;
-                if active_lifecycle
-                    && let Some(RuntimeSessionAuthority::HeadCanonical(store_authority)) =
-                        store_authority
+                if let Some(RuntimeSessionAuthority::HeadCanonical(store_authority)) =
+                    store_authority
                     && store_authority.session_id() == id
                 {
                     let head = store_authority.boundary_head();
                     let stored_message_count = usize::try_from(head.message_count).ok();
                     let revisions_match =
                         head.head_revision.as_str() == live_authority.transcript_revision();
-                    if stored_message_count == Some(live_authority.message_count())
+                    if active_lifecycle
+                        && stored_message_count == Some(live_authority.message_count())
                         && revisions_match
                     {
                         let (kind, _) = Self::classify_live_session_authority_observations(
@@ -6034,13 +6038,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         };
                     }
                     // Unequal boundaries (typically an actor one committed turn
-                    // ahead of the store) classify from the same bounded facts
-                    // the full-body compare derived: the head row's digest and
-                    // row count against the actor's, plus the store-owned
-                    // archive terminal. Neither document is materialized or
-                    // exported; only a DurableAuthoritative verdict loads the
-                    // committed body, because only its consumers synchronize
-                    // the live actor from it.
+                    // ahead of the store), or a lifecycle that is not active (a
+                    // stopped runtime keeps its actor), classify from the same
+                    // bounded facts the full-body compare derived: the head
+                    // row's digest and row count against the actor's, plus the
+                    // store-owned archive terminal. Neither document is
+                    // materialized or exported, so a provisional tail standing
+                    // ahead of the boundary never fails the verdict.
                     let stored_is_archived =
                         self.session_archived_by_runtime_store_authority(id).await?;
                     let live_has_uncommitted_transcript = stored_message_count
@@ -6058,29 +6062,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             });
                         }
                         LiveSessionAuthorityKind::DurableAuthoritative => {
-                            let Some(stored) = self
-                                .load_committed_runtime_session_for_body(
-                                    id,
-                                    "live session authority classification",
-                                )
-                                .await?
-                            else {
-                                return Ok(LiveSessionAuthority::LiveAuthoritative {
-                                    snapshot: live_authority,
-                                });
-                            };
                             tracing::debug!(
                                 session_id = %id,
                                 ?reason,
                                 live_message_count = live_authority.message_count(),
                                 stored_message_count = head.message_count,
                                 revisions_match,
+                                active_lifecycle,
                                 "live session authority classified durable from bounded head-canonical facts"
                             );
-                            return Ok(LiveSessionAuthority::DurableAuthoritative {
-                                session: Box::new(stored),
-                                reason,
-                            });
+                            return Ok(LiveSessionAuthority::DurableAuthoritative { reason });
                         }
                     }
                 }
@@ -6092,8 +6083,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // current authority, or when this service holds the verified body
             // for exactly that authority. They are then the same inputs the
             // full-body comparison below derives, so the verdict is identical,
-            // and neither document is exported or decoded. Only a
-            // DurableAuthoritative verdict loads the committed body.
+            // and neither document is exported or decoded.
             if self.runtime_store.session_persistence_profile()
                 == RuntimeSessionPersistenceProfile::WholeBlobV1
                 && let Some((stored_revision, stored_message_count)) =
@@ -6118,17 +6108,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         });
                     }
                     LiveSessionAuthorityKind::DurableAuthoritative => {
-                        let Some(stored) = self
-                            .load_committed_runtime_session_for_body(
-                                id,
-                                "live session authority classification",
-                            )
-                            .await?
-                        else {
-                            return Ok(LiveSessionAuthority::LiveAuthoritative {
-                                snapshot: live_authority,
-                            });
-                        };
                         tracing::debug!(
                             session_id = %id,
                             ?reason,
@@ -6137,17 +6116,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             stored_transcript_diverged,
                             "live session authority classified durable from bounded WholeBlob facts"
                         );
-                        return Ok(LiveSessionAuthority::DurableAuthoritative {
-                            session: Box::new(stored),
-                            reason,
-                        });
+                        return Ok(LiveSessionAuthority::DurableAuthoritative { reason });
                     }
                 }
             }
 
-            // Exceptional mismatch/non-active classification still compares
-            // full bodies, but the live export must be the exact generation
-            // observed above. A concurrent mutation retries from a fresh
+            // A WholeBlob session without bounded facts, or a session the store
+            // holds no HeadCanonical authority for, still compares full bodies,
+            // but the live export must be the exact generation observed above. A concurrent mutation retries from a fresh
             // authority observation rather than exporting unchecked state.
             let live = match self
                 .export_session_with_labels_if_transcript_authority(id, live_authority.clone())
@@ -6214,10 +6190,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         stored_transcript_diverged,
                         "live session authority classified durable from full-body comparison"
                     );
-                    Ok(LiveSessionAuthority::DurableAuthoritative {
-                        session: Box::new(stored),
-                        reason,
-                    })
+                    Ok(LiveSessionAuthority::DurableAuthoritative { reason })
                 }
             };
         }
@@ -6243,7 +6216,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .live_session_authority_with(id, LiveAuthorityObservation::Published)
                 .await;
         }
-        if Self::is_transcript_revision_conflict(&result)
+        // A hosted live session whose turn ended without its boundary commit
+        // leaves its provisional tail standing, and nothing in this process
+        // commits it any more. The verdict reads no committed body, so that
+        // tail no longer shows as a conflict: the settle is keyed on the
+        // facts themselves (see `settle_ended_live_turn_durable_tail`).
+        if (Self::is_transcript_revision_conflict(&result)
+            || matches!(
+                result,
+                Ok(LiveSessionAuthority::DurableAuthoritative { .. })
+            ))
             && self.settle_ended_live_turn_durable_tail(id).await
         {
             result = self
@@ -6264,13 +6246,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// that tail any more: every committed read of the session fails closed
     /// with the typed `TranscriptRevisionConflict`, and resume recovery
     /// answers `Busy` for the live actor, so only a restart would settle it.
-    /// An observation that still conflicts after its retries runs the same
-    /// store-owned, machine-authorized durable-tail recovery a restart runs,
-    /// and only when all of these hold:
+    /// An observation whose durable authority outranks the live actor (or
+    /// that still conflicts after its retries) runs the same store-owned,
+    /// machine-authorized durable-tail recovery a restart runs, and only when
+    /// all of these hold:
     /// - the profile is HeadCanonical;
     /// - this service hosts the session's live actor, so no other process
     ///   commits it;
-    /// - the store records a provisional tail for the session;
+    /// - the store records a provisional tail for the session, of a run the
+    ///   runtime holds open neither as its current run nor as the run its
+    ///   registration keeps resumable (an open run commits its own tail);
     /// - the per-session recovery gate is free (a holder owns the tail).
     ///
     /// The recovery machine refuses a runtime that is not quiescent, and a
@@ -6290,7 +6275,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .load_head_canonical_provisional_tail(&Self::runtime_id_for_session(id))
             .await
         {
-            Ok(Some(_)) => {}
+            Ok(Some(tail)) => {
+                if self.runtime_holds_run_open(id, tail.run_id()).await {
+                    return false;
+                }
+            }
             Ok(None) => return false,
             Err(error) => {
                 tracing::warn!(
@@ -6687,11 +6676,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         position: LiveStalenessPosition,
     ) -> Result<bool, SessionError> {
-        let LiveSessionAuthority::DurableAuthoritative { session, reason } =
+        let LiveSessionAuthority::DurableAuthoritative { reason } =
             self.live_session_authority(id).await?
         else {
             return Ok(false);
         };
+        // A live actor that continues the store's standing provisional tail
+        // of a run the runtime holds open is ahead of the committed boundary
+        // by construction, never behind it, wherever the caller stands: kept.
+        // An actor whose run compacted can trail the boundary's row count and
+        // classify as diverged rather than uncommitted, so the proof is asked
+        // for either; an archived session is never kept.
+        if reason != LiveSessionAuthorityReason::StoredArchived
+            && self.live_actor_continues_open_run_tail(id).await?
+        {
+            return Ok(false);
+        }
         match reason {
             // A run may be between its apply and its boundary commit: its
             // actor and checkpoint receipt are what that commit promotes.
@@ -6706,7 +6706,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
 
         if self
-            .synchronize_runtime_backed_live_from_durable_authority(id, session.as_ref(), reason)
+            .synchronize_runtime_backed_live_from_durable_authority(id, reason)
             .await?
         {
             return Ok(false);
@@ -6721,9 +6721,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         tracing::debug!(
             session_id = %id,
             live_updated_at = ?live.updated_at(),
-            stored_updated_at = ?session.updated_at(),
             live_message_count = live.messages().len(),
-            stored_message_count = session.messages().len(),
             reason = ?reason,
             "discarding stale live session in favor of newer RuntimeStore authority"
         );
@@ -6787,20 +6785,44 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    /// Synchronize the live actor to the committed body after a durable
+    /// verdict. Returns whether it was synchronized.
+    ///
+    /// The committed body is read strictly. A revision conflict there means
+    /// a provisional tail stands that this actor does not continue (the
+    /// staleness callers ask for that proof first), and the snapshot under a
+    /// tail is never a synchronization source: the actor is left as it is,
+    /// for its caller to discard, and the next materialization's recovery
+    /// decides the tail.
     async fn synchronize_runtime_backed_live_from_durable_authority(
         &self,
         id: &SessionId,
-        durable: &Session,
         reason: LiveSessionAuthorityReason,
     ) -> Result<bool, SessionError> {
-        if self.session_archived_by_authority(id, durable).await? {
+        if self.session_archived_by_runtime_store_authority(id).await? {
             return Ok(false);
         }
+        let durable = match self
+            .load_committed_runtime_session_for_body(id, "live session synchronization")
+            .await
+        {
+            Ok(Some(durable)) => durable,
+            Ok(None) => return Ok(false),
+            Err(error) if Self::is_transcript_revision_conflict_error(&error) => {
+                tracing::info!(
+                    session_id = %id,
+                    ?reason,
+                    "a provisional tail the live actor does not continue stands ahead of the committed body; the actor is not synchronized"
+                );
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
 
         match self
             .synchronize_live_session_from_durable(
                 id,
-                durable,
+                &durable,
                 LiveSessionSyncCause::Authority(reason),
             )
             .await
@@ -6859,13 +6881,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 );
                 Ok(false)
             }
-            LiveSessionAuthority::DurableAuthoritative { session, reason } => {
-                self.synchronize_runtime_backed_live_from_durable_authority(
-                    id,
-                    session.as_ref(),
-                    reason,
-                )
-                .await
+            LiveSessionAuthority::DurableAuthoritative { reason } => {
+                self.synchronize_runtime_backed_live_from_durable_authority(id, reason)
+                    .await
             }
             LiveSessionAuthority::NoLive | LiveSessionAuthority::LiveAuthoritative { .. } => {
                 Ok(false)
@@ -8753,16 +8771,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Session, SessionError> {
         loop {
             match self.live_session_authority(id).await? {
-                LiveSessionAuthority::DurableAuthoritative { session, reason } => {
-                    if self
-                        .session_archived_by_authority(id, session.as_ref())
-                        .await?
-                    {
+                LiveSessionAuthority::DurableAuthoritative { reason } => {
+                    if self.session_archived_by_runtime_store_authority(id).await? {
                         return Err(SessionError::NotFound { id: id.clone() });
                     }
+                    let Some(session) = self
+                        .load_committed_runtime_session_for_body(id, "realtime open snapshot")
+                        .await?
+                    else {
+                        return Err(SessionError::NotFound { id: id.clone() });
+                    };
                     self.synchronize_live_session_from_durable(
                         id,
-                        session.as_ref(),
+                        &session,
                         LiveSessionSyncCause::Authority(reason),
                     )
                     .await?;
@@ -8771,7 +8792,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         reason = ?reason,
                         "using durable session authority for realtime open snapshot"
                     );
-                    return Ok(*session);
+                    return Ok(session);
                 }
                 LiveSessionAuthority::NoLive => {
                     return Err(SessionError::NotFound { id: id.clone() });
@@ -9000,11 +9021,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match self.live_session_authority(id).await? {
             LiveSessionAuthority::NoLive => Ok(false),
             LiveSessionAuthority::LiveAuthoritative { .. } => Ok(true),
-            LiveSessionAuthority::DurableAuthoritative { session, .. } => {
-                if self
-                    .session_archived_by_authority(id, session.as_ref())
-                    .await?
-                {
+            LiveSessionAuthority::DurableAuthoritative { .. } => {
+                if self.session_archived_by_runtime_store_authority(id).await? {
                     self.discard_live_session_under_runtime_turn_boundary(id)
                         .await?;
                     Ok(false)
@@ -13240,6 +13258,90 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .contains(id)
     }
 
+    /// Whether this service's live actor of `id` continues the store's
+    /// standing provisional tail of a run the runtime holds open.
+    ///
+    /// Every fact is exact and read body-free:
+    /// - the store's tail authority (the HeadCanonical provisional tail, or
+    ///   the WholeBlob tail's authority);
+    /// - the actor's latest run checkpoint receipt, compared by its exact
+    ///   [`RunCheckpointAuthority`] (run, revisions and head tokens), never by
+    ///   run id alone: the slot can still hold an earlier run's receipt;
+    /// - the tail's run is the runtime's current run, or the run its
+    ///   registration keeps resumable.
+    ///
+    /// Such an actor is not stale, wherever the caller stands relative to the
+    /// turn-finalization boundary. While that tail stands the committed
+    /// boundary cannot move: the session has one provisional-tail slot, round
+    /// commits compare-and-swap on the committed base, ordinary writes are
+    /// refused or queued under a tail, and only recovery or the run's own
+    /// boundary commit consume it. So the actor cannot be behind durable
+    /// truth. A resumed dispatch skips the staleness judgement for the same
+    /// reason. The verdict is advisory: the next turn entry judges again.
+    pub async fn live_actor_continues_open_run_tail(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        let runtime_id = Self::runtime_id_for_session(id);
+        let tail = match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => self
+                .runtime_store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .map(|tail| tail.map(RunCheckpointAuthority::HeadCanonical)),
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => self
+                .runtime_store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .map(|tail| {
+                    tail.map(|tail| RunCheckpointAuthority::WholeBlob(tail.authority().clone()))
+                }),
+            _ => Ok(None),
+        }
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to observe the provisional tail of session {id}: {error}"
+            )))
+        })?;
+        let Some(tail) = tail else {
+            return Ok(false);
+        };
+        let checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade());
+        let Some(checkpointer) = checkpointer else {
+            return Ok(false);
+        };
+        let continues = checkpointer
+            .latest_run_checkpoint_receipt
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|receipt| receipt.authority() == &tail);
+        Ok(continues && self.runtime_holds_run_open(id, tail.run_id()).await)
+    }
+
+    /// Whether `run_id` is the runtime's current run of `id`, or the run its
+    /// registration keeps resumable.
+    async fn runtime_holds_run_open(&self, id: &SessionId, run_id: &RunId) -> bool {
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(adapter) = adapter else {
+            return false;
+        };
+        if adapter.current_run(id).await.as_ref() == Some(run_id) {
+            return true;
+        }
+        adapter.resumable_run_id(id).await.as_ref() == Some(run_id)
+    }
+
     /// Whether a live transcript held ahead of the store is stale to a
     /// caller at `position`. Holding the turn-finalization boundary no
     /// boundary commit can be pending, so it is. Outside it, it is stale
@@ -13461,11 +13563,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let recovery_guard = recovery_gate.lock_owned().await;
         match self.live_session_authority(id).await? {
-            LiveSessionAuthority::DurableAuthoritative { session, reason } => {
-                if self
-                    .session_archived_by_authority(id, session.as_ref())
-                    .await?
-                {
+            LiveSessionAuthority::DurableAuthoritative { reason } => {
+                if self.session_archived_by_runtime_store_authority(id).await? {
                     return Err(SessionError::NotFound { id: id.clone() });
                 }
                 if sync_policy == LiveDurableSyncPolicy::RefuseUncommittedTranscript
@@ -13477,9 +13576,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     );
                     return Err(SessionError::Busy { id: id.clone() });
                 }
+                let Some(durable) = self
+                    .load_committed_runtime_session_for_body(id, "realtime transcript mutation")
+                    .await?
+                else {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                };
                 self.synchronize_live_session_from_durable(
                     id,
-                    session.as_ref(),
+                    &durable,
                     LiveSessionSyncCause::Authority(reason),
                 )
                 .await?;
@@ -17455,7 +17560,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             // the authority read and the head materialization re-reads within
             // the counted budget instead of failing (issue #1104).
             match self.live_session_authority_for_observation(id).await? {
-                LiveSessionAuthority::DurableAuthoritative { session, .. } => {
+                LiveSessionAuthority::DurableAuthoritative { .. } => {
+                    // The committed view outranks the live actor. A public
+                    // read serves the committed snapshot while a run's
+                    // provisional tail stands.
+                    let Some(session) = self.load_committed_session_tolerating_tail(id).await?
+                    else {
+                        return Err(SessionError::NotFound { id: id.clone() });
+                    };
                     self.reject_if_archived_session(id, &session)
                         .await
                         .map_err(crate::control_error_into_session_error)?;
@@ -17577,11 +17689,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         match self.live_session_authority_for_observation(id).await? {
             LiveSessionAuthority::NoLive => Ok(false),
             LiveSessionAuthority::LiveAuthoritative { .. } => Ok(true),
-            LiveSessionAuthority::DurableAuthoritative { session, .. } => {
-                if self
-                    .session_archived_by_authority(id, session.as_ref())
-                    .await?
-                {
+            LiveSessionAuthority::DurableAuthoritative { .. } => {
+                if self.session_archived_by_runtime_store_authority(id).await? {
                     self.discard_live_session(id).await?;
                     Ok(false)
                 } else {
@@ -52764,30 +52873,42 @@ mod tests {
         );
     }
 
+    /// Live presence classifies live authority from bounded facts and reads
+    /// no committed body, so an authority read a writer's commit superseded
+    /// meets no head conflict: the presence answer needs no re-read.
     #[tokio::test]
-    async fn live_presence_observation_retries_a_head_advance_under_turn_boundary() {
+    async fn live_presence_observation_reads_no_body_under_a_head_advance() {
         let (runtime_store, service, session_id, superseded, _storage_dir) =
             stale_authority_observation_fixture().await;
         runtime_store.serve_stale_authority(superseded, 2);
         assert!(
-            service
-                .has_live_session(&session_id)
-                .await
-                .expect("live presence must re-observe a concurrently advanced head")
+            service.has_live_session(&session_id).await.expect(
+                "live presence reads no body, so a concurrently advanced head is no conflict"
+            )
         );
-        assert_eq!(runtime_store.stale_reads_served(), 2);
+        assert!(
+            runtime_store.stale_reads_served() >= 1,
+            "instrument honesty: the presence read met the superseded authority"
+        );
     }
 
+    /// However long a run of superseded authority reads lasts, live presence
+    /// answers without spending an observation budget on conflicts.
     #[tokio::test]
-    async fn live_presence_observation_preserves_the_finite_conflict_budget() {
+    async fn live_presence_observation_answers_through_superseded_authority_reads() {
         let (runtime_store, service, session_id, superseded, _storage_dir) =
             stale_authority_observation_fixture().await;
         runtime_store.serve_stale_authority(superseded, 2 * OBSERVATION_LOAD_ATTEMPTS + 4);
-        let result = service.has_live_session(&session_id).await;
-        assert!(PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result));
-        assert_eq!(
-            runtime_store.stale_reads_served(),
-            2 * OBSERVATION_LOAD_ATTEMPTS
+        assert!(
+            service
+                .has_live_session(&session_id)
+                .await
+                .expect("live presence reads no body")
+        );
+        assert!(
+            runtime_store.stale_reads_served() < OBSERVATION_LOAD_ATTEMPTS,
+            "no conflict retries were spent: {}",
+            runtime_store.stale_reads_served()
         );
     }
 
@@ -52805,8 +52926,14 @@ mod tests {
         )
         .await
         .expect("the boundary-owned read must not wait on itself");
-        assert!(PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result));
-        assert_eq!(runtime_store.stale_reads_served(), 2);
+        assert!(
+            result.expect("the boundary-owned presence read reads no body"),
+            "the live actor is present"
+        );
+        assert!(
+            runtime_store.stale_reads_served() >= 1,
+            "instrument honesty: the presence read met the superseded authority"
+        );
     }
 
     /// #1104: the budget is counted, not timed, and it is finite: once spent,

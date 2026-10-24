@@ -320,7 +320,7 @@ mod ops {
     use meerkat_runtime::MeerkatMachine;
 
     use meerkat_core::session_document::LiveSessionAuthorityReason;
-    use meerkat_session::LiveSessionExport;
+    use meerkat_session::{LiveDurableSourceObservation, LiveSessionExport};
 
     use meerkat_session::LiveStalenessPosition;
 
@@ -518,23 +518,50 @@ mod ops {
         /// `Ok(false)` once the synchronization shortcut has fired or
         /// the live snapshot already mirrors the durable record.
         ///
-        /// A live actor holding transcript rows the store has not committed
-        /// (`LiveUncommittedTranscript`) is stale per
-        /// `PersistentSessionService::uncommitted_live_transcript_is_stale`:
-        /// always to a caller holding the turn-finalization boundary, and
-        /// outside it only when its run ended without a commit, so a run
-        /// between its apply and its boundary commit keeps its actor.
+        /// Every fact is read body-free, so a provisional tail standing ahead
+        /// of the committed boundary never fails the judgement:
+        /// - an archived session is never stale, and a session with no
+        ///   committed source has nothing to be stale against;
+        /// - a live actor that continues the store's standing tail of a run
+        ///   the runtime holds open is not stale
+        ///   (`PersistentSessionService::live_actor_continues_open_run_tail`);
+        /// - a live actor holding transcript rows the store has not committed
+        ///   (`LiveUncommittedTranscript`) is stale per
+        ///   `PersistentSessionService::uncommitted_live_transcript_is_stale`:
+        ///   always to a caller holding the turn-finalization boundary, and
+        ///   outside it only when its run ended without a commit, so a run
+        ///   between its apply and its boundary commit keeps its actor;
+        /// - an authoritative live actor already matches the committed
+        ///   revision and row count.
         ///
-        /// `recovery_ctx` provides the
-        /// [`RecoveryContext::load_persisted_session`] flow used to
-        /// cross-check the durable snapshot — surfaces pass their own
-        /// recovery wiring so this observer does not embed the lookup.
+        /// `_recovery_ctx` is the surface's recovery wiring; the judgement no
+        /// longer reads the persisted session through it.
         pub async fn live_session_is_stale(
             &self,
             session_id: &SessionId,
-            recovery_ctx: &RecoveryContext<'_>,
+            _recovery_ctx: &RecoveryContext<'_>,
             position: LiveStalenessPosition,
         ) -> Result<bool, SessionError> {
+            let durable_present = match self.service.observe_live_durable_source(session_id).await?
+            {
+                LiveDurableSourceObservation::Archived => return Ok(false),
+                LiveDurableSourceObservation::Absent => false,
+                LiveDurableSourceObservation::Committed { .. } => true,
+                other => {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "session {session_id} has a durable source observation this build does not know: {other:?}"
+                        )),
+                    ));
+                }
+            };
+            if self
+                .service
+                .live_actor_continues_open_run_tail(session_id)
+                .await?
+            {
+                return Ok(false);
+            }
             if self
                 .service
                 .synchronize_live_session_from_durable_authority_if_needed(session_id)
@@ -543,35 +570,22 @@ mod ops {
                 return Ok(false);
             }
 
-            let live = match self.service.live_session_export(session_id).await? {
-                LiveSessionExport::Live(session) => session,
+            Ok(match self.service.live_session_export(session_id).await? {
+                LiveSessionExport::Live(_) => false,
                 LiveSessionExport::DurableAuthoritative {
                     reason: LiveSessionAuthorityReason::LiveUncommittedTranscript,
                 } => {
-                    return Ok(self
-                        .service
+                    self.service
                         .uncommitted_live_transcript_is_stale(session_id, position)
-                        && recovery_ctx
-                            .load_persisted_session(session_id)
-                            .await?
-                            .is_some());
+                        && durable_present
                 }
                 LiveSessionExport::NoLive
                 | LiveSessionExport::DurableAuthoritative {
                     reason:
                         LiveSessionAuthorityReason::StoredArchived
                         | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged,
-                } => {
-                    return Ok(recovery_ctx
-                        .load_persisted_session(session_id)
-                        .await?
-                        .is_some());
-                }
-            };
-            let Some(stored) = recovery_ctx.load_persisted_session(session_id).await? else {
-                return Ok(false);
-            };
-            Ok(stored.messages().len() > live.messages().len())
+                } => durable_present,
+            })
         }
     }
 }

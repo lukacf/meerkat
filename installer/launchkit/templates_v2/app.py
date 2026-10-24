@@ -646,7 +646,7 @@ class Application:
             self.integration = await await_value(factory(self.context))
             if self.integration is None:
                 raise ValueError("application.build(context) must return an integration object.")
-            for name in ("tools_for_agent", "select_host_tools", "schedule_runnables", "start", "stop", "on_console_input", "desired_roster", "admission_roster", "desired_edges", "retain_member_mcp", "lookup_member_mcp", "frontend_management", "controller_review_factory", "console_login_factory"):
+            for name in ("tools_for_agent", "select_host_tools", "schedule_runnables", "start", "stop", "on_console_input", "desired_roster", "admission_roster", "desired_edges", "retain_member_mcp", "lookup_member_mcp", "observe_member_mcp_requirement", "frontend_management", "controller_review_factory", "console_login_factory"):
                 hook = getattr(self.integration, name, None)
                 if hook is not None and not callable(hook):
                     raise ValueError(f"Application {name} must be callable.")
@@ -1130,13 +1130,16 @@ class Application:
     def _member_mcp_hooks(self):
         retain = getattr(self.integration, "retain_member_mcp", None)
         lookup = getattr(self.integration, "lookup_member_mcp", None)
-        if retain is None and lookup is None:
+        observe = getattr(self.integration, "observe_member_mcp_requirement", None)
+        if retain is None and lookup is None and observe is None:
             return None
         if not callable(retain) or not callable(lookup):
             raise ValueError("Application retain_member_mcp and lookup_member_mcp must be provided together.")
+        if observe is not None and not callable(observe):
+            raise ValueError("Application observe_member_mcp_requirement must be callable.")
         if not self.dynamic or not callable(getattr(self.integration, "admission_roster", None)):
             raise ValueError("Member MCP retention requires the application's existing admission_roster store.")
-        return retain, lookup
+        return retain, lookup, observe
 
     def member_mcp_runtime_options(self):
         """Bind private callbacks over the loaded store, before native restore.
@@ -1151,7 +1154,7 @@ class Application:
             from meerkat_toolkit.member_classes import (
                 MemberMcpApplication, MemberMcpAdmissionSelection, RetainedMemberMcpBindings,
             )
-            retain, lookup = hooks
+            retain, lookup, observe = hooks
 
             async def retain_bindings(value):
                 # Reparse even typed values: constructed dataclasses can be invalid.
@@ -1168,7 +1171,25 @@ class Application:
                     raise ValueError("Member MCP lookup returned a different admission.")
                 return retained
 
-            self._member_mcp = MemberMcpApplication(retain_bindings, lookup_bindings)
+            options = {}
+            if observe is not None:
+                from dataclasses import asdict
+                from meerkat_toolkit.host_control import PrivateSourceEvidence
+                from meerkat_toolkit.member_classes import ObservedMemberMcpRequirement
+
+                async def observe_requirement(selection, source):
+                    exact = MemberMcpAdmissionSelection.from_wire(selection.wire())
+                    evidence = PrivateSourceEvidence(**asdict(source))
+                    value = await await_value(observe(exact.wire(), asdict(evidence)))
+                    if value is None:
+                        return None
+                    requirement = ObservedMemberMcpRequirement.from_wire(value)
+                    if requirement.selection != exact or requirement.source != evidence:
+                        raise ValueError("Member MCP observation returned a different admission or source.")
+                    return requirement
+
+                options["observed_requirement"] = observe_requirement
+            self._member_mcp = MemberMcpApplication(retain_bindings, lookup_bindings, **options)
         return {"member_mcp": self._member_mcp}
 
     async def stop(self):

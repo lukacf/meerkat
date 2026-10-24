@@ -299,6 +299,25 @@ unreadable, voided, retired or mismatched rows must raise, never return implicit
 An explicitly committed empty bindings list means no MCP. Neither hook publishes
 the identity or grants access. Connect owns approval, mandate and current binding
 resolution; the normal native admission/finalizer owns publication readiness.
+With the selected remote observed-requirement SDK, the optional
+observe_member_mcp_requirement(selection, source) hook reads that SAME actual row
+and returns None when it is missing or voided, or the native JSON
+{contract:"observed_requirement", selection, source, services}.
+source={resource_id, revision, sha256} is the full accepted source; services is the
+exact ordered native service intent list, including operations and lifetimes.
+Never reconstruct this from roster labels or report synchronous currentness.
+Connect observes before and after issue and still requires protected approval.
+For this contract retain_member_mcp receives accepted_requirement in addition to
+selection and bindings. In the existing row transaction, compare the complete
+nonvoided requirement/source/ordered services and atomically retain that full
+association with the pending locators before returning. Preserve the exact retained
+value after void/retirement for cleanup-only lookup; it cannot authorize listing.
+Publication must still compare the actual nonvoided row and accepted requirement
+inside the existing held-Add finalizer transaction. Native startup retries owed
+grant cleanup. Neither Forge nor the application fabricates a native grant/result.
+Without the observation hook, existing operator-self callbacks and SDK behavior
+are unchanged. The ordinary context.begin_member_class_add mapper still accepts
+no MCP intent; explicit accepted-requirement Add uses the selected native SDK.
 The host joins entered retention callbacks before stop() closes the store, including
 failed startup and cancellation. Do not swallow a failed write or claim rollback
 from loss of its acknowledgement. Verify restart reads and void/successor races

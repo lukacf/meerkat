@@ -10979,7 +10979,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let _ = self
             .discard_stale_live_session_if_needed(id, LiveStalenessPosition::OutsideTurnBoundary)
             .await?;
-        if let Some(session) = self.load_authoritative_session_base(id).await? {
+        // Archived state and existence are committed metadata, which a run's
+        // provisional tail does not change: a session whose durable run is
+        // open at a committed round is read through its committed snapshot
+        // here, and the attach or resume that follows decides the tail.
+        if let Some(session) = self.load_committed_session_tolerating_tail(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
                 .map_err(crate::control_error_into_session_error)?;
@@ -10987,7 +10991,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match self.inner.acquire_runtime_context_admission(id).await {
             Ok(admission) => Ok(admission),
             Err(SessionError::NotFound { .. }) => {
-                if self.load_authoritative_session_base(id).await?.is_some() {
+                if self
+                    .load_committed_session_tolerating_tail(id)
+                    .await?
+                    .is_some()
+                {
                     self.inner.acquire_runtime_capacity_admission().await
                 } else {
                     Err(SessionError::NotFound { id: id.clone() })

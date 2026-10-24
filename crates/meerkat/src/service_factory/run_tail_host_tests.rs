@@ -449,3 +449,171 @@ async fn a_mutation_issued_mid_run_lands_after_the_run_head_canonical() {
 async fn a_mutation_issued_mid_run_lands_after_the_run_whole_blob() {
     a_mutation_issued_mid_run_lands_after_the_run(false).await;
 }
+
+// ---------------------------------------------------------------------------
+// A resumed run whose tool-process custody evidence cannot be read.
+// ---------------------------------------------------------------------------
+
+/// Custody evidence the attachment reads when it settles the session, and
+/// that then cannot be read any more: the resumed dispatch meets a store
+/// that fails.
+struct EvidenceReadableOnce {
+    reads: std::sync::atomic::AtomicUsize,
+    acknowledged: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl meerkat_core::tool_process::InterruptedToolEvidence for EvidenceReadableOnce {
+    async fn interrupted_calls(
+        &self,
+    ) -> Result<
+        Vec<meerkat_core::tool_process::InterruptedToolCall>,
+        meerkat_core::tool_process::InterruptedToolEvidenceError,
+    > {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(Vec::new())
+        } else {
+            Err(meerkat_core::tool_process::InterruptedToolEvidenceError {
+                reason: "the custody store cannot be read".to_string(),
+            })
+        }
+    }
+
+    async fn mark_inputs_settled(
+        &self,
+        _entry_ids: &[uuid::Uuid],
+        _inputs: &meerkat_core::tool_process::InterruptedRunInputs,
+    ) -> Result<(), meerkat_core::tool_process::InterruptedToolEvidenceError> {
+        Ok(())
+    }
+
+    async fn acknowledge(
+        &self,
+        _entry_ids: &[uuid::Uuid],
+    ) -> Result<(), meerkat_core::tool_process::InterruptedToolEvidenceError> {
+        self.acknowledged.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn run_ended(
+        &self,
+        _run_id: &RunId,
+    ) -> Result<(), meerkat_core::tool_process::InterruptedToolEvidenceError> {
+        Ok(())
+    }
+}
+
+struct EvidenceReadableOnceSource(Arc<EvidenceReadableOnce>);
+
+#[async_trait]
+impl meerkat_core::tool_process::InterruptedToolEvidenceSource for EvidenceReadableOnceSource {
+    async fn settle_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<
+        Option<Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>>,
+        meerkat_core::tool_process::InterruptedToolEvidenceError,
+    > {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+/// A restart resumes run A, whose round may have run tool calls, but the
+/// session's tool-process custody evidence cannot be read when the resumed
+/// round asks for it. The run is held, never replayed: the executor stops,
+/// run A's provisional tail stands, its input stays with run A (the stop
+/// ends it, nothing requeues it), and the model is not asked again, so
+/// nothing the round did is repeated. The next start resumes or repairs the
+/// run from its tail.
+async fn an_unreadable_custody_store_holds_the_resumed_run(head_canonical: bool) {
+    let root = TempDir::new().expect("temp");
+    let stores = DiskStores::new(head_canonical, &root);
+    let client = Arc::new(ScriptedModel::new());
+    let first = stores.open(&root, &client);
+    let id = materialize_session(&first, meerkat_core::Session::new()).await;
+    let (_turn_a, run_a) = run_a_held_after_a_round_commit(&first, &client, &id).await;
+    // The power goes out while run A waits on the model.
+    let after_the_cut = TempDir::new().expect("temp");
+    let restarted = stores.power_cut_copy(&after_the_cut);
+
+    let resumed_client = Arc::new(ScriptedModel::new());
+    // A replay of run A's input would reach this model.
+    resumed_client.push(Step::Text("replayed"));
+    let start = restarted.open(&after_the_cut, &resumed_client);
+    let evidence = Arc::new(EvidenceReadableOnce {
+        reads: std::sync::atomic::AtomicUsize::new(0),
+        acknowledged: std::sync::atomic::AtomicUsize::new(0),
+    });
+    start
+        .machine
+        .set_interrupted_tool_evidence_source(Arc::new(EvidenceReadableOnceSource(
+            evidence.clone(),
+        )));
+    materialize_session(&start, restarted.stored_session(&start, &id).await).await;
+
+    // The resumed dispatch reads the evidence after the attachment did, fails
+    // to, and stops the executor.
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    while start
+        .machine
+        .session_has_live_executor_attachment(&id)
+        .await
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the resumed run is held: its executor stops"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        evidence.reads.load(Ordering::SeqCst) >= 2,
+        "the resumed dispatch asked for the evidence after the attachment"
+    );
+    assert_eq!(
+        tail_run(&start, &id).await,
+        Some(run_a.clone()),
+        "run A's provisional tail is held, not discarded"
+    );
+    let rows = start
+        .runtime_store
+        .load_input_states(&LogicalRuntimeId::for_session(&id))
+        .await
+        .expect("read the input rows");
+    assert!(!rows.is_empty(), "run A's input has a row");
+    for row in &rows {
+        let InputStateRow::Decoded(stored) = row else {
+            panic!("an input row decodes: {row:?}");
+        };
+        assert!(
+            matches!(
+                stored.seed.phase,
+                InputLifecycleState::Staged
+                    | InputLifecycleState::Applied
+                    | InputLifecycleState::AppliedPendingConsumption
+                    | InputLifecycleState::Abandoned
+            ) && stored.seed.last_run_id.as_ref() == Some(&run_a),
+            "run A's input stays with run A: not requeued, and consumed by no replay: {:?}",
+            stored.seed
+        );
+    }
+    assert_eq!(
+        resumed_client.requests.load(Ordering::SeqCst),
+        0,
+        "nothing replays run A's input: the model is not asked again"
+    );
+    assert_eq!(
+        evidence.acknowledged.load(Ordering::SeqCst),
+        0,
+        "no evidence is acknowledged for a run that did not end"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_custody_store_holds_the_resumed_run_head_canonical() {
+    an_unreadable_custody_store_holds_the_resumed_run(true).await;
+}
+
+#[tokio::test]
+async fn an_unreadable_custody_store_holds_the_resumed_run_whole_blob() {
+    an_unreadable_custody_store_holds_the_resumed_run(false).await;
+}

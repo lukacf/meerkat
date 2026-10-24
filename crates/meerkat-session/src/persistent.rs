@@ -14696,17 +14696,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let failed_run_id = run_id.clone();
         let outcome = match result.map_err(SessionError::Agent) {
             Ok(run_result) => {
-                self.acknowledge_resumed_run_interrupted_calls(id, &resumed_interrupted_calls)
+                let output = self
+                    .build_runtime_output_after_live_mutation(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
+                    )
                     .await;
-                self.build_runtime_output_after_live_mutation(
-                    id,
-                    run_id,
-                    boundary,
-                    contributing_input_ids,
-                    Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
-                )
-                .await
-                .map_err(|error| (error, None))
+                if output.is_ok() {
+                    self.acknowledge_resumed_run_interrupted_calls(id, &resumed_interrupted_calls)
+                        .await;
+                }
+                output.map_err(|error| (error, None))
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => self
                 .build_runtime_output_after_live_mutation(
@@ -14892,16 +14895,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let failed_run_id = run_id.clone();
         let outcome = match result.map_err(SessionError::Agent) {
             Ok(run_result) => {
-                self.acknowledge_resumed_run_interrupted_calls(id, &resumed_interrupted_calls)
+                let output = self
+                    .build_runtime_output_after_live_mutation(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
+                    )
                     .await;
-                self.build_runtime_output_after_live_mutation(
-                    id,
-                    run_id,
-                    boundary,
-                    contributing_input_ids,
-                    Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
-                )
-                .await
+                if output.is_ok() {
+                    self.acknowledge_resumed_run_interrupted_calls(id, &resumed_interrupted_calls)
+                        .await;
+                }
+                output
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
                 self.build_runtime_output_after_live_mutation(
@@ -15013,15 +15020,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .clone();
             // Only this run's calls, from the session's process-custody
             // evidence: an earlier run's interrupted calls were never this
-            // run's to answer.
+            // run's to answer. Evidence that cannot be read holds the run: the
+            // executor stops with the run's provisional tail kept, and nothing
+            // requeues or replays the run's inputs, so the round whose calls
+            // may have run is not planned again. The next start resumes or
+            // repairs the run from its tail.
             let interrupted_calls = match adapter {
                 Some(adapter) => adapter
                     .resumed_run_interrupted_tool_calls(id, run_id)
                     .await
                     .map_err(|error| {
-                        SessionError::Agent(AgentError::InternalError(format!(
-                            "resumed run {run_id} of session {id} is not dispatched: {error}"
-                        )))
+                        SessionError::runtime_executor_stopped(format!(
+                            "resumed run {run_id} of session {id} is held: its tool-process custody evidence cannot be read: {error}; the run resumes or is repaired at the next start"
+                        ))
                     })?,
                 None => Vec::new(),
             };
@@ -15039,8 +15050,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Acknowledge the process-custody evidence of the interrupted calls a
     /// resumed run's round answered, once the run has ended with that round's
-    /// results committed: they told the model, so the evidence owes it no
-    /// notice of its own.
+    /// results committed and its output built: they told the model, so the
+    /// evidence owes it no notice of its own.
     async fn acknowledge_resumed_run_interrupted_calls(
         &self,
         id: &SessionId,

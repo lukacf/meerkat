@@ -196,6 +196,16 @@ def _atomic_write(path, content, mode=0o600):
             os.unlink(temporary)
 
 
+def _make_project_parents(project, name):
+    # Callers validate the relative source path before creating directories.
+    # pathlib's parents=True applies mode only to the final directory; each
+    # intermediate parent must also remain safe for saved-source recovery.
+    directory = project
+    for part in PurePosixPath(name).parts[:-1]:
+        directory = directory / part
+        directory.mkdir(mode=0o700, exist_ok=True)
+
+
 class ImplementationWorkspace:
     """One frozen Blueprint and an additive implementation project.
 
@@ -528,7 +538,7 @@ class ImplementationWorkspace:
             for item in files:
                 name = _safe_name(item.path)
                 destination = self.project / name
-                destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                _make_project_parents(self.project, name)
                 _atomic_write(destination, item.content, item.mode)
                 baseline[name] = {"sha256": _sha(item.content), "mode": item.mode}
             _atomic_write(self._key_path, os.urandom(32).hex() + "\n")
@@ -925,7 +935,7 @@ class ImplementationWorkspace:
                 raise WorkspaceError("The project changed while staging the batch. Read it before retrying.")
             for item in changes:
                 target = staged / item.path
-                target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                _make_project_parents(staged, item.path)
                 _atomic_write(target, item.content, item.mode)
             if self._digest(self._files(next_state, staged)) != after_digest:
                 raise WorkspaceError("The staged batch source does not match its validated changes.")
@@ -1055,7 +1065,7 @@ class ImplementationWorkspace:
         new_size = sum(_regular(self._target(item.path)).st_size for item in before if item.path != path) + size
         if new_size > MAX_PROJECT_BYTES or (previous is None and len(before) >= MAX_PROJECT_FILES):
             raise WorkspaceError("The project exceeds its file or total size limit.")
-        target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        _make_project_parents(self.project, path)
         mode = previous.mode if previous else (0o755 if path.endswith(".sh") else 0o644)
         _atomic_write(target, content, mode)
         state["changes"].append({"path": path, "before": _sha(previous.content) if previous else None,

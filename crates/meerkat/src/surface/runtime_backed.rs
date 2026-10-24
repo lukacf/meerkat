@@ -2401,7 +2401,7 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                     .await
                 {
                     Err(teardown) => Err(teardown),
-                    Ok(_) => Err(CoreExecutorError::session_unavailable_requires_teardown(
+                    Ok(()) => Err(CoreExecutorError::session_unavailable_requires_teardown(
                         error.to_string(),
                     )),
                 }

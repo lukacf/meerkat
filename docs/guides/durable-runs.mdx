@@ -200,6 +200,7 @@ that is killed leaves its runs as any crash does.
 |-----------|--------------------|
 | A bound input was already settled, for example by a stop | Closes the run as interrupted, with its content kept |
 | The run failed and its inputs were queued for another attempt | Its round commits were discarded first, so its inputs run again as a new run; a tail left behind with requeued inputs is closed as interrupted, and the inputs its run cursor binds are consumed with it, so they do not run twice |
+| A resumed run failed before it could run again (the restart's actor cannot be proved to continue the run) | A resumed run's inputs are never queued for another attempt, because a call of its rounds may already have run: the runtime stops with the run's round commits kept, and the next start closes the run as interrupted, with its content kept |
 | The runtime was retired | Closes the run as interrupted, with its content kept |
 | The run has no bound inputs (a direct or machine-service turn) | Closes the run as interrupted, with its content kept |
 | The saved transcript and the run cursor disagree | Holds the session for reconciliation; an operator can resolve the hold, unless the cursor cannot be read or its saved response has calls without a message id (see [Storage Operations](/guides/storage-operations#resolve-a-durable-tail-held-for-recovery)) |

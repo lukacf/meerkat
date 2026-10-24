@@ -355,6 +355,15 @@ never reset revisions to bypass a refusal, mirror a cursor, or replay subscripti
 from application code. The host checks sources.v1 and the applied native revision
 before starting application adapters. A pending native record remains pending.
 
+Meta 0.9.5 announcement sources do not yet deliver on governed Connect-hosted
+gateways. Source capability and an applied declaration revision can coexist with
+a governed-runtime refusal. Inspect native governed-admission and local-delivery
+status before presenting incoming work as available; keep a required recipient
+turn unmet until the selected runtime supports it. Preserve the native refusal
+and pending records. Do not switch to plain submit, a second gateway or an
+application callback to bypass missing governed admission. A future runtime must
+demonstrate support through its native contract and actual handling evidence.
+
 A subscription is {subscription_id, member:{mob_id,identity}, topics, start:{kind:"now"}}
 or uses members:{mob_id,role} instead of member. Native role means the actual
 profile, not the Blueprint class ID or a display label. For a whole class, cover
@@ -377,6 +386,12 @@ the proposed intent. Do not emit a fake source or silently use new-only collecti
 for requested history. Query context.runtime.mob_handle().announcement_declarations_get()
 and the native source/member methods for current status; configuration and
 capability support do not establish collection, delivery or useful handling.
+
+The current Gmail INBOX observation adapter supports new changes from its initial
+checkpoint, without historical replay. Keep requested bounded history unmet until
+the selected collector supports it. A zero-item page marked complete does not
+prove a requested backfill: require the collector's supported history contract and
+coverage evidence before treating that requirement as satisfied.
 
 Read the frozen config/mob.toml and selected native host before relying on memory.
 A requested Blueprint memory grant or enabled host storage does not establish

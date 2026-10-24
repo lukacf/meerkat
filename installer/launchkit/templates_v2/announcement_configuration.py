@@ -55,6 +55,8 @@ async def require_announcement_sources(runtime, config):
 
     Capability and successful declaration reconciliation do not prove that a
     collector is running, a pending subscription is ready, or an item arrived.
+    Meta 0.9.5 can apply declarations while refusing governed local delivery;
+    this check does not establish governed admission or fulfill that requirement.
     Applications observe those states through the native announcement methods.
     """
     options = getattr(config, "mob_announcements", None)

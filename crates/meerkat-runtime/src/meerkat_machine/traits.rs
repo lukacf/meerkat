@@ -2617,11 +2617,16 @@ impl MeerkatMachine {
 
         let mut abandoned_batch = None;
         if report.inputs_pending_drain > 0 {
-            let woke_runtime = if let Some(ref tx) = wake_tx {
-                tx.send(()).await.is_ok()
-            } else {
-                false
-            };
+            // Retire holds M here, and the runtime loop takes M to process
+            // each wake, so it never waits for room on the loop's bounded
+            // wake channel: a full channel already holds a wake the loop will
+            // run the drain on. Only a closed channel means no loop.
+            let woke_runtime = wake_tx.as_ref().is_some_and(|tx| {
+                matches!(
+                    tx.try_send(()),
+                    Ok(()) | Err(mpsc::error::TrySendError::Full(()))
+                )
+            });
             if !woke_runtime {
                 let reason = "retired without runtime loop";
                 let (abandoned, terminal_batches) = {

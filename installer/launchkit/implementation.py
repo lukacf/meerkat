@@ -309,18 +309,24 @@ lifecycle. Construction and offline trials have runtime=None; native reconcile
 and dynamic native callback availability remain explicitly unavailable until a
 trusted trial host implements them. Do not replace missing lifecycle support with
 raw ensure_member, edited protected config, reused seed context or fake success.
-When the selected host supplies context.prepare_original_native_operations, a trusted application
-can prepare one new authenticated original for Connect's finite native operations.
+The current host always exposes context.prepare_original_native_operations.
+It refuses until a selected Fresh or Restore owner binds a supported private SDK;
+method presence alone does not establish availability. A trusted application can
+then prepare one new authenticated original for Connect's finite native operations.
 First retain its actual event through runtime.host_control.retain_authenticated_event;
 preserve the exact original ref, text and transport evidence in PrivateOriginalSubmit.
 Then await context.prepare_original_native_operations(submission, request,
 retain_request=save_exact_request, timeout=60.0) before the first
-runtime.host_control.submit_authenticated_original call. save_exact_request receives
-immutable JSON {submission,request}; durably compare and save those exact bytes in
-the SAME private application event row before returning. Restore that request for
+runtime.host_control.submit_authenticated_original call. save_exact_request must
+be an async callable. The selected SDK validates the request before retention;
+SDKs without the public validation entrypoint refuse before saving it. The callback
+receives immutable JSON {submission,request}; durably compare and save those exact
+bytes in the SAME private application event row before returning. Restore that request for
 an exact retry; never select new issuance IDs, target routes or lifetimes after a
 timeout or attach new selections to an admitted original. Native owns replay and
-currentness. The host joins entered callbacks/calls before stop closes the store.
+currentness. A retained request and its issuance IDs belong to this original
+only; never reuse them as a template for another original. The host joins entered
+callbacks/calls before stop closes the store.
 
 The request is {not_before_ms,expires_at_ms,targets:[{issuance_id,target}]} with
 1-32 finite targets. Select actual installed routes, including completed Active

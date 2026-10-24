@@ -61,6 +61,7 @@ class NativeOriginalOperations:
 
         A returned original is a preparation receipt, not admission or delivery.
         Unknown settlement preserves the same original, request and issuance IDs.
+        retain_request is async; its bytes belong only to this original.
         """
         from meerkat_toolkit.host_control import (
             PrivateOriginalRef, PrivateOriginalSubmit, PrivateSourceEvidence,
@@ -78,9 +79,14 @@ class NativeOriginalOperations:
             raise ValueError("Native preparation timeout must be positive and finite.")
         # Preserve exact values without sharing mutable request aliases with
         # application callbacks. The public SDK validates the native vocabulary.
+        try:
+            from meerkat_toolkit.host_control import validate_native_original_operations_request as validate
+        except ImportError as error:
+            raise CustodyError("The selected Connect SDK does not support native operation request validation.") from error
         submission = deepcopy(submission)
+        request = validate(deepcopy(request))
         serialized = json.dumps({"submission": asdict(submission), "request": request},
-            ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+            ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
         selected = json.loads(serialized)["request"]
         client = self.runtime.host_control
         prepare = getattr(client, "prepare_original_native_operations", None)

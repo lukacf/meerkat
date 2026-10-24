@@ -39,8 +39,11 @@ def sdk(monkeypatch):
     module.PrivateOriginalRef = Ref
     module.PrivateOriginalSubmit = Submission
     module.PrivateSourceEvidence = Evidence
+    # The real finite schema belongs to Connect. This fake exposes only its
+    # pure boundary, allowing tests to prove refusal precedes app retention.
+    module.validate_native_original_operations_request = deepcopy
     monkeypatch.setitem(sys.modules, "meerkat_toolkit.host_control", module)
-    return SimpleNamespace(Ref=Ref, Evidence=Evidence, Submission=Submission)
+    return SimpleNamespace(Ref=Ref, Evidence=Evidence, Submission=Submission, module=module)
 
 
 def fixture(sdk, *, dynamic=False):
@@ -247,3 +250,46 @@ def test_export_includes_native_operations_adapter():
     assert "launchkit/connect_native_operations.py" not in files
     from launchkit.deployment_sources import _NATIVE_PATHS
     assert set(files) <= _NATIVE_PATHS
+    from launchkit.deployment_updates import _RUNTIME_FRAMEWORK_V6_PATHS
+    assert set(files) <= _RUNTIME_FRAMEWORK_V6_PATHS
+
+
+@pytest.mark.asyncio
+async def test_equal_request_key_order_retains_identical_bytes_for_its_same_original(sdk):
+    f = fixture(sdk)
+    def reorder(value):
+        if isinstance(value, dict):
+            return {key: reorder(value[key]) for key in reversed(value)}
+        if isinstance(value, list):
+            return [reorder(item) for item in value]
+        return value
+    await f.adapter.prepare(f.submission, f.request, retain_request=f.retain)
+    await f.adapter.prepare(f.submission, reorder(f.request), retain_request=f.retain)
+    assert f.retained[0] == f.retained[1]
+    assert f.calls[0] == f.calls[1]
+
+
+@pytest.mark.asyncio
+async def test_sdk_shape_refusal_precedes_retention_and_native_preparation(sdk):
+    f = fixture(sdk)
+    f.request["targets"][0]["target"]["kind"] = "unsupported_scope"
+    refusal = ValueError("selected SDK rejected the target")
+    observed = []
+    def validate(request):
+        observed.append(deepcopy(request))
+        raise refusal
+    sdk.module.validate_native_original_operations_request = validate
+    with pytest.raises(ValueError) as caught:
+        await f.adapter.prepare(f.submission, f.request, retain_request=f.retain)
+    assert caught.value is refusal
+    assert observed == [f.request]
+    assert not f.retained and not f.calls and not f.adapter._pending
+
+
+@pytest.mark.asyncio
+async def test_sdk_without_public_validation_refuses_before_retaining(sdk):
+    f = fixture(sdk)
+    del sdk.module.validate_native_original_operations_request
+    with pytest.raises(CustodyError, match="request validation"):
+        await f.adapter.prepare(f.submission, f.request, retain_request=f.retain)
+    assert not f.retained and not f.calls

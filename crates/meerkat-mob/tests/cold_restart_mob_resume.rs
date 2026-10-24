@@ -3845,11 +3845,18 @@ fn persistent_head_canonical_service_with(
 }
 
 /// A long run compacts more often than the history retention keeps, so it
-/// saves an intra-run checkpoint after its own tool results; the host then
-/// dies in the middle of the run, before its end and its boundary commit.
-/// The cold restart recovers the run as interrupted: the content up to the
-/// checkpoint stays, the recovery notice closes it, and its input is not run
-/// again. The worker then runs a new turn.
+/// commits rounds whose rewrites the committed boundary does not cover; the
+/// host then dies in the middle of the run, after a round commit and before
+/// its end and its boundary commit (process loss). The cold restart restores
+/// the member through its reload, and recovery continues the open run: the
+/// run resumes under its own id from its last round commit, asks the model
+/// once more and completes once, its input is not run again from scratch, and
+/// no recovery notice closes it. The worker then runs a new turn.
+///
+/// The killed host writes nothing after the kill: its runtime store handle
+/// stays cut for good, and the restarted host opens its own. A host that
+/// survives the kill in-process (its runtime loop cancels the held run) must
+/// not commit that cancellation behind the restart's back.
 ///
 /// Needs the test-support feature for the crash-stop command.
 #[cfg(feature = "test-support")]
@@ -3969,6 +3976,18 @@ async fn mob_cold_restart_after_a_kill_following_a_mid_run_checkpoint_does_not_r
         "the checkpointed tail ends with the run's tool results: {:?}",
         physical_row.messages().last()
     );
+    let cursor = physical_row
+        .try_run_cursor()
+        .expect("the run cursor decodes")
+        .expect("the round commit carries the open run's cursor");
+    let open_run = cursor.run_id.clone();
+    let [run_input] = cursor.bound_input_ids.as_slice() else {
+        panic!(
+            "the run binds exactly its one input: {:?}",
+            cursor.bound_input_ids
+        );
+    };
+    let run_input = run_input.clone();
     let committed = runtime_store
         .load_session_boundary_authority(&runtime_id)
         .await
@@ -4012,9 +4031,14 @@ async fn mob_cold_restart_after_a_kill_following_a_mid_run_checkpoint_does_not_r
     .await
     .expect("process-loss fixture waits for every old session runtime to be released");
 
-    // ---------------- Lifetime 2 (power restored) ----------------
-    power_store.set_cut(false);
-    let client_2 = Arc::new(HoldingToolLoopClient::new(usize::MAX));
+    // ---------------- Lifetime 2 ----------------
+    // The killed host's handle stays cut: anything its surviving tasks still
+    // try to write is lost, as with a real kill. The restarted host opens the
+    // same database through its own handle.
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    // The resumed run's next model request answers and ends the loop.
+    let client_2 = Arc::new(HoldingToolLoopClient::new(0));
     let (service_2, store_2) = persistent_head_canonical_service_with(
         &paths,
         runtime_store.clone(),
@@ -4038,62 +4062,88 @@ async fn mob_cold_restart_after_a_kill_following_a_mid_run_checkpoint_does_not_r
         "mid-run-kill-post-resume",
     );
 
-    // Recovery closed the run as interrupted: the committed boundary is the
-    // checkpointed head plus the typed recovery notice.
+    // The run resumes from its round commit and completes: its input ends
+    // consumed and its boundary commit consumes the run's tail. Wait for that
+    // durable answer before any committed read, so the row tests the cold
+    // open, not read timing.
     let deadline = Instant::now() + Duration::from_secs(20);
-    let recovered = loop {
-        let session = store_2
-            .load(&w1_sid)
+    let settled_input = loop {
+        let input = runtime_store
+            .load_input_state(&runtime_id, &run_input)
             .await
-            .expect("load the recovered row")
-            .expect("recovered row");
-        if matches!(
-            session.messages().last(),
-            Some(meerkat_core::Message::SystemNotice(_))
-        ) {
-            break session;
+            .expect("read the run's input")
+            .expect("the run's input is known");
+        let tail = runtime_store
+            .load_head_canonical_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail");
+        if input.seed.terminal_outcome.is_some() && tail.is_none() {
+            break input;
         }
         assert!(
             Instant::now() < deadline,
-            "[mid-run-kill] the run was not closed with the recovery notice: {:?}",
-            session.messages().last()
+            "[mid-run-kill] the resumed run did not end: input {:?}, tail {}",
+            input.seed.phase,
+            if tail.is_some() { "stands" } else { "consumed" }
         );
         sleep(Duration::from_millis(100)).await;
     };
     assert_eq!(
-        recovered.messages().len(),
-        physical_row.messages().len() + 1,
-        "every checkpointed row plus the recovery notice"
+        settled_input.seed.phase,
+        meerkat_runtime::InputLifecycleState::Consumed,
+        "[mid-run-kill] the resumed run consumed its input: {:?}",
+        settled_input.seed.terminal_outcome
     );
-    let recovered_authority = runtime_store
-        .load_session_boundary_authority(&runtime_id)
+    assert_eq!(
+        settled_input.seed.last_run_id.as_ref(),
+        Some(&open_run),
+        "[mid-run-kill] the run that consumed the input is the one the kill left open: it resumed under its own id, not a new run from scratch"
+    );
+    let resumed = store_2
+        .load(&w1_sid)
         .await
-        .expect("load the recovered boundary")
-        .expect("recovered boundary");
-    assert_eq!(
-        recovered_authority
-            .head_canonical()
-            .expect("HeadCanonical")
-            .boundary_head()
-            .rewrite_count,
-        physical.rewrite_count,
-        "the recovered boundary carries the checkpointed rewrites"
+        .expect("load the committed row")
+        .expect("committed row");
+    assert!(
+        matches!(
+            resumed.messages().last(),
+            Some(meerkat_core::Message::BlockAssistant(answer))
+                if answer.text_blocks().collect::<String>() == "loop done"
+        ),
+        "[mid-run-kill] the resumed run's answer ends the committed transcript: {:?}",
+        resumed.messages().last()
     );
-
-    // The input is terminalized, not run again: no model request reaches
-    // the new host until the worker gets a new prompt.
-    sleep(Duration::from_secs(2)).await;
+    assert!(
+        !resumed
+            .messages()
+            .iter()
+            .any(|message| matches!(message, meerkat_core::Message::SystemNotice(_))),
+        "[mid-run-kill] no recovery notice closed the run: it resumed"
+    );
     assert_eq!(
-        client_2.other_requests(),
-        0,
-        "[mid-run-kill] the restarted host ran the killed run's input again"
+        resumed
+            .messages()
+            .iter()
+            .filter(|message| matches!(
+                message,
+                meerkat_core::Message::User(user)
+                    if user.text_content().contains(HoldingToolLoopClient::LOOP_MARKER)
+            ))
+            .count(),
+        1,
+        "[mid-run-kill] the run's input was not appended again"
     );
     assert_eq!(
         client_2
             .loop_requests
             .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "[mid-run-kill] the resumed run asked the model exactly once"
+    );
+    assert_eq!(
+        client_2.other_requests(),
         0,
-        "[mid-run-kill] the restarted host resumed the killed run's tool loop"
+        "[mid-run-kill] the restarted host made no other model request"
     );
 
     send_and_wait(
@@ -7115,20 +7165,66 @@ impl StoppedTurnTail {
 
 /// Leave a [`StoppedTurnTail`] on member `w-1` of a mob led by `lead-1`.
 ///
+/// As [`a_hosted_member_whose_turn_stopped_before_its_boundary_commit`],
+/// and the live actor is then discarded, as a runtime loop discards it when
+/// a run's boundary does not commit, so no observation in this process
+/// settles the tail.
+#[cfg(feature = "test-support")]
+async fn a_member_whose_turn_stopped_before_its_boundary_commit(
+    paths: &Paths,
+    context: &str,
+) -> StoppedTurnTail {
+    let stopped =
+        a_hosted_member_whose_turn_stopped_before_its_boundary_commit(paths, context).await;
+    let w1_sid = stopped.tail.session_id.clone();
+    let sessions: &dyn MobSessionService = stopped.service.as_ref();
+    sessions
+        .discard_live_session(&w1_sid)
+        .await
+        .expect("discard the member's live actor");
+    assert!(
+        !sessions
+            .has_live_session(&w1_sid)
+            .await
+            .expect("read whether the member's session is live"),
+        "[{context}] the member's live actor is gone"
+    );
+    match sessions.load_persisted_session(&w1_sid).await {
+        Err(meerkat_core::service::SessionError::Store(error))
+            if error
+                .downcast_ref::<meerkat_core::SessionStoreError>()
+                .is_some_and(|error| {
+                    matches!(
+                        error,
+                        meerkat_core::SessionStoreError::TranscriptRevisionConflict { id, .. }
+                            if *id == w1_sid
+                    )
+                }) => {}
+        other => panic!(
+            "[{context}] a committed read of the member's session must refuse its durable \
+             tail as a transcript revision conflict: {:?}",
+            other.map(|session| session.is_some())
+        ),
+    }
+    stopped
+}
+
+/// Leave a [`StoppedTurnTail`] on member `w-1` of a mob led by `lead-1`,
+/// with the member's live actor still hosted.
+///
 /// The member's turn waits inside its provider call. The runtime is asked to
 /// stop that turn at its next boundary, and the provider call is released
 /// only once that cancel has reached the turn's boundary handle (a positive
 /// event, never a sleep). The turn then finishes its reply, its end-of-run
 /// checkpoint applies the provisional tail to the canonical head, and the
 /// turn stops at the boundary, so no boundary commit follows: the canonical
-/// head is ahead of the runtime boundary authority, and every committed read
-/// of the session refuses as a transcript revision conflict. The live actor
-/// is then discarded, as a runtime loop discards it when a run's boundary
-/// does not commit, so no observation in this process settles the tail. The
-/// store holds every durable-tail recovery from before the turn until the
-/// row decides otherwise, so nothing settles the tail before the row starts.
+/// head is ahead of the runtime boundary authority, and a strict committed
+/// read of the session refuses as a transcript revision conflict. The store
+/// holds every durable-tail recovery from before the turn until the row
+/// decides otherwise, so nothing settles the tail before the row starts,
+/// the stopped run's own settle included.
 #[cfg(feature = "test-support")]
-async fn a_member_whose_turn_stopped_before_its_boundary_commit(
+async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit(
     paths: &Paths,
     context: &str,
 ) -> StoppedTurnTail {
@@ -7235,35 +7331,6 @@ async fn a_member_whose_turn_stopped_before_its_boundary_commit(
         sleep(Duration::from_millis(20)).await;
     }
 
-    let sessions: &dyn MobSessionService = service.as_ref();
-    sessions
-        .discard_live_session(&w1_sid)
-        .await
-        .expect("discard the member's live actor");
-    assert!(
-        !sessions
-            .has_live_session(&w1_sid)
-            .await
-            .expect("read whether the member's session is live"),
-        "[{context}] the member's live actor is gone"
-    );
-    match sessions.load_persisted_session(&w1_sid).await {
-        Err(meerkat_core::service::SessionError::Store(error))
-            if error
-                .downcast_ref::<meerkat_core::SessionStoreError>()
-                .is_some_and(|error| {
-                    matches!(
-                        error,
-                        meerkat_core::SessionStoreError::TranscriptRevisionConflict { id, .. }
-                            if *id == w1_sid
-                    )
-                }) => {}
-        other => panic!(
-            "[{context}] a committed read of the member's session must refuse its durable \
-             tail as a transcript revision conflict: {:?}",
-            other.map(|session| session.is_some())
-        ),
-    }
     let committed_token = committed_head_token(runtime_store.as_ref(), &w1_sid).await;
     let ahead_token = physical_head_token(&store, &w1_sid).await;
     assert_ne!(
@@ -7361,6 +7428,55 @@ async fn a_member_retired_after_its_turn_stopped_before_its_boundary_commit_reti
         history.matches(HELD_TURN_PROMPT).count(),
         1,
         "the retired session keeps the stopped turn exactly once: {history}"
+    );
+    let _ = stopped.handle.shutdown().await;
+}
+
+/// A hosted member's turn stopped between its end-of-run checkpoint and its
+/// runtime boundary commit while the store held every durable-tail recovery,
+/// so the stopped run's own settle left its tail standing, and the live actor
+/// stays hosted with the run's rows. Once recovery may run again, one read of
+/// the session settles the tail with the store-owned recovery a restart
+/// runs. The read's live-authority verdict reads no committed body, so no
+/// revision conflict triggers that settle: the facts do (a hosted actor, and
+/// a tail whose run the runtime no longer holds open). The runtime authority
+/// then names the physical head again, and the session keeps the stopped
+/// turn exactly once.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_settles_the_tail_a_stopped_turn_left_on_a_hosted_member() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "warn,meerkat_runtime::recovery=info,meerkat_session::persistent=info",
+        ))
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let stopped =
+        a_hosted_member_whose_turn_stopped_before_its_boundary_commit(&paths, "read-settles").await;
+    // The store-owned recovery may settle the tail from here on.
+    stopped.power_store.hold_durable_tail_recovery(false);
+
+    let live = meerkat_core::service::SessionService::has_live_session(
+        stopped.service.as_ref(),
+        &stopped.tail.session_id,
+    )
+    .await
+    .expect("the read answers");
+    assert!(live, "the member's live actor is still hosted");
+    stopped.assert_tail_settled("read-settles").await;
+    let session = stopped
+        .service
+        .load_authoritative_session(&stopped.tail.session_id)
+        .await
+        .expect("the settled session reads strictly")
+        .expect("the member's session is committed");
+    let history = to_string(session.messages()).expect("serialize the committed transcript");
+    assert_eq!(
+        history.matches(HELD_TURN_PROMPT).count(),
+        1,
+        "the settled session keeps the stopped turn exactly once: {history}"
     );
     let _ = stopped.handle.shutdown().await;
 }

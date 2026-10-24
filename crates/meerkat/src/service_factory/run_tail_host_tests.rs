@@ -623,3 +623,70 @@ async fn an_unreadable_custody_store_holds_the_resumed_run_head_canonical() {
 async fn an_unreadable_custody_store_holds_the_resumed_run_whole_blob() {
     an_unreadable_custody_store_holds_the_resumed_run(false).await;
 }
+
+// ---------------------------------------------------------------------------
+// A presence probe of a session whose resumed run waits on the model.
+// ---------------------------------------------------------------------------
+
+/// A host's presence probe meets a live actor that continues its open run's
+/// provisional tail (a restart resumed run A, which now waits on the model).
+/// The probe classifies live authority from bounded facts and reads no
+/// committed body, so it answers at once: the session is live. It neither
+/// waits out the run nor settles the tail of a run the runtime holds open.
+async fn a_presence_probe_answers_while_a_resumed_run_waits_on_the_model(head_canonical: bool) {
+    let root = TempDir::new().expect("temp");
+    let stores = DiskStores::new(head_canonical, &root);
+    let client = Arc::new(ScriptedModel::new());
+    let first = stores.open(&root, &client);
+    let id = materialize_session(&first, meerkat_core::Session::new()).await;
+    let (_turn_a, run_a) = run_a_held_after_a_round_commit(&first, &client, &id).await;
+    // The power goes out while run A waits on the model.
+    let after_the_cut = TempDir::new().expect("temp");
+    let restarted = stores.power_cut_copy(&after_the_cut);
+
+    let resumed_client = Arc::new(ScriptedModel::new());
+    resumed_client.push(Step::Held);
+    let start = restarted.open(&after_the_cut, &resumed_client);
+    materialize_session(&start, restarted.stored_session(&start, &id).await).await;
+    tokio::time::timeout(DEADLINE, resumed_client.entered.acquire())
+        .await
+        .expect("the resumed run reaches the model")
+        .expect("model gate")
+        .forget();
+
+    let live = tokio::time::timeout(Duration::from_secs(5), start.service.has_live_session(&id))
+        .await
+        .expect("the presence probe answers while the resumed run waits on the model")
+        .expect("the presence probe reads no committed body");
+    assert!(live, "the session's live actor runs its resumed run");
+    assert_eq!(
+        tail_run(&start, &id).await,
+        Some(run_a.clone()),
+        "the probe leaves the open run's tail to the run"
+    );
+
+    resumed_client.release.add_permits(1);
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    while tail_run(&start, &id).await.is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the resumed run commits its boundary"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        resumed_client.requests.load(Ordering::SeqCst),
+        1,
+        "the resumed run asked the model once"
+    );
+}
+
+#[tokio::test]
+async fn a_presence_probe_answers_while_a_resumed_run_waits_on_the_model_head_canonical() {
+    a_presence_probe_answers_while_a_resumed_run_waits_on_the_model(true).await;
+}
+
+#[tokio::test]
+async fn a_presence_probe_answers_while_a_resumed_run_waits_on_the_model_whole_blob() {
+    a_presence_probe_answers_while_a_resumed_run_waits_on_the_model(false).await;
+}

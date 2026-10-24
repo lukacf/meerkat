@@ -296,9 +296,11 @@ Serde reads an omitted `durable` as `false` and writes it only when `true`,
 so stored and sent ordinary profiles keep their bytes, and the adaptive
 `LayerDecision` schema leaves it out. The wire forms refuse unknown fields,
 so a host older than 0.9.5 refuses a profile that sets `durable`. A spawn of
-a durable profile on a mob whose session service keeps no persistent sessions
-is refused with the new `MobError::NonDurableService { member_id, profile }`
-(wire code `CAPABILITY_UNAVAILABLE`, data kind `mob_non_durable_service`).
+a durable profile on a mob whose member sessions do not outlive the process
+(`MobSessionService::keeps_durable_member_sessions`) is refused with the new
+`MobError::NonDurableService { member_id, profile }` (wire code
+`CAPABILITY_UNAVAILABLE`, data kind `mob_non_durable_service`). A
+session-service wrapper should forward `keeps_durable_member_sessions`.
 
 **Do:** pass `durable: false` where you build these with struct literals, and
 set `durable = true` only on mobs over persistent sessions, once every host

@@ -1846,12 +1846,13 @@ pub enum MobError {
     },
 
     /// A spawn of member `member_id` from profile `profile`, which declares
-    /// `durable = true`, on a mob whose session service keeps no persistent
-    /// sessions. A durable member must survive a restart on its session, so
-    /// the spawn is refused before anything is created. Run the mob on a
-    /// persistent realm, or drop `durable` from the profile.
+    /// `durable = true`, on a mob whose member sessions do not outlive the
+    /// process ([`crate::MobSessionService::keeps_durable_member_sessions`]).
+    /// A durable member must survive a restart on its session, so the spawn
+    /// is refused before anything is created. Run the mob on a persistent
+    /// realm, or drop `durable` from the profile.
     #[error(
-        "member {member_id} uses durable profile '{profile}', but the mob's session service keeps no persistent sessions"
+        "member {member_id} uses durable profile '{profile}', but the mob's member sessions do not outlive the process: run the mob on a persistent realm, or drop `durable` from the profile"
     )]
     NonDurableService {
         member_id: AgentIdentity,

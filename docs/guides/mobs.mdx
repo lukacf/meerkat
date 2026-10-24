@@ -1234,8 +1234,11 @@ A spawn of a durable profile records the member with a durable identity
 (`SpawnContinuityIntent::DurableIdentity`, keyed by its `AgentIdentity`), so
 after a restart a host finds the worker with `durable_identity_members` (see
 the next section) and re-attaches it. A durable worker needs a mob whose
-session service keeps persistent sessions. On any other mob the spawn is
-refused with `NonDurableService` (error code `CAPABILITY_UNAVAILABLE`,
+member sessions outlive the process. The session service says so through
+`keeps_durable_member_sessions`, which defaults to
+`supports_persistent_sessions`; a host that runs the persistent session
+service over in-memory stores answers it `false`. On any other mob the spawn
+is refused with `NonDurableService` (error code `CAPABILITY_UNAVAILABLE`,
 structured data kind `mob_non_durable_service`) before anything is created,
 instead of spawning a worker that would not survive a restart. `durable` lives
 on the profile only, with no separate spawn flag, and an explicit continuity

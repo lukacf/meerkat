@@ -22,6 +22,7 @@ import tomllib
 from connectors import ConnectorTools, load_environment
 from mcp_connections import MCPPool, configuration_value
 from application_configuration import application_fields, configuration_issue, validate_application_fields, validate_configuration_values
+from announcement_configuration import announcement_options, require_announcement_sources
 from console_configuration import console_authentication, console_credential_issue, validate_console_configuration_values
 from console_auth import (ConsoleFront, ConsoleConnectLogin, FrontendManagementRequest,
     FrontendSubmissionDisposition, FrontendSubmissionResult, _frontend_json, console_configuration)
@@ -1234,6 +1235,7 @@ async def connect_public_meta_runtime(config, application):
     try:
         application.bind_schedule_runnables(runtime)
         await runtime.connect()
+        await require_announcement_sources(runtime, config)
         await application.require_tool_policy_current()
         if native_path.read_bytes() != native_bytes:
             raise RuntimeError("Native configuration changed during connection. No application adapter was started.")
@@ -1255,6 +1257,7 @@ async def connect_application_runtime(config, application, *, application_startu
         runtime = None
         try:
             runtime = await application_startup.connect(config, application)
+            await require_announcement_sources(runtime, config)
             await application.require_tool_policy_current()
             return runtime
         except BaseException:
@@ -1404,6 +1407,7 @@ async def run(spec, args, *, application_startup=None):
     # the public Meta release from 0.9 on. A selected startup is always Meta.
     shell_meta = application_startup is None and public_meta_package(spec)
     meta = application_startup is not None or shell_meta
+    announcements = announcement_options(ROOT, meta=meta)
     if shell_meta and args.activate_revision is not None:
         raise ValueError(ACTIVATION_UNAVAILABLE)
     if application_startup is None:
@@ -1486,6 +1490,7 @@ async def run(spec, args, *, application_startup=None):
         builder = ShellBuilderConfig if application_startup is None else application_startup.builder_config
         definition = {"mob_config_path": str(ROOT / "config/mob.toml")} if application_startup is None else {}
         config = builder(
+            **copy.deepcopy(announcements),
             **definition, gateway_bin=str(selected_gateway),
             persistent_state=str(state), roster_provider=application, topology_provider=application,
             session_builder=SessionBuilder(),

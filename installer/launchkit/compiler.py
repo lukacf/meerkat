@@ -16,6 +16,7 @@ from .generator import MOBKIT_VERSION, PROVIDERS, PackageFile, TEMPLATES
 from .design_knowledge import COMMS_PROTOCOL
 from .native_models import model_registry_lines
 from .deployment_deadlines import render_destination_shutdown_budget
+from .templates_v2.announcement_configuration import DECLARATIONS_PATH
 
 TEMPLATES_V2 = Path(__file__).parent / "templates_v2"
 _PRODUCT_SETUP_BUNDLE = "meerkat_toolkit.setup"
@@ -776,7 +777,7 @@ def generate_package(value, *, runtime_target=None, verified_artifacts=None, pub
             for item in sorted(spec.agent_classes, key=lambda row: row.id) if item.instances == 0]
         files.append(PackageFile("native-inventory.example.json",
             application_inventory_input(spec, member_classes=declarations).decode("utf-8")))
-    for name in ("app.py", "mcp_connections.py", "setup.py", "application_configuration.py", "console_configuration.py",
+    for name in ("app.py", "mcp_connections.py", "setup.py", "application_configuration.py", "announcement_configuration.py", "console_configuration.py",
                  "console_auth.py", "console_connect.py", "console_binding.py", "console_presentation.py", "console_shell.py", "native_controller_review.py", "native_console_login.py", "remote_operations.py"):
         text = (TEMPLATES_V2 / name).read_text()
         if name == "remote_operations.py":
@@ -934,7 +935,7 @@ _RUNTIME_REFRESH_PREDECESSORS = {
     "0.8.47": {"0.8.42", "0.8.46"},
     "0.8.48": {"0.8.42", "0.8.46", "0.8.47"},
 }
-MAINTAINED_HOST_PATHS = ("app.py", "console_auth.py", "console_connect.py",
+MAINTAINED_HOST_PATHS = ("app.py", "announcement_configuration.py", "console_auth.py", "console_connect.py",
     "console_presentation.py", "console_shell.py", "console_shell.mjs", "console_shell.css")
 
 
@@ -997,6 +998,7 @@ def generate_runtime_refresh(value, accepted_files, *, runtime_target=None, veri
         generated = {item.path: item for item in generate_package(spec, runtime_target=runtime_target,
             verified_artifacts=verified_artifacts, legacy_ordinary=legacy_ordinary) if item.path != "SHA256SUMS"}
         for name in (_RUNTIME_DESIGN_PATHS | set(protected)
+                     | ({DECLARATIONS_PATH} & accepted.keys())
                      | {name for name in accepted if name.startswith("knowledge/")}):
             generated[name] = accepted[name]
         # The accepted Console design stays as accepted. Only this compiler's
@@ -1080,7 +1082,8 @@ def generate_runtime_refresh(value, accepted_files, *, runtime_target=None, veri
         binding = {"source": "signed-candidate", "selection": "runtime-candidate.json",
             "tuple_sha256": selection["accepted"]["tuple_sha256"]}
         deployment = end[:-1].rstrip() + ',\n  "runtimeCandidate": ' + json.dumps(binding, ensure_ascii=True) + "\n}\n"
-    preserved = _RUNTIME_DESIGN_PATHS | {name for name in accepted if name.startswith("knowledge/")}
+    preserved = (_RUNTIME_DESIGN_PATHS | ({DECLARATIONS_PATH} & accepted.keys())
+        | {name for name in accepted if name.startswith("knowledge/")})
     files = {item.path: item for item in generate_package(spec, runtime_target=runtime_target,
         verified_artifacts=verified_artifacts) if item.path != "SHA256SUMS"}
     for name in preserved:
@@ -1105,7 +1108,7 @@ def continuation_contract(files):
     the freshly compiled framework and a separately verified migration.
     """
     return {item.path: {"sha256": hashlib.sha256(item.content.encode()).hexdigest(), "mode": item.mode}
-            for item in files if item.path in {"blueprint.json", "deployment.json", ".env.example"}
+            for item in files if item.path in {"blueprint.json", "deployment.json", ".env.example", DECLARATIONS_PATH}
             or item.path.startswith("config/")
             or Path(item.path).name.startswith("requirements")}
 

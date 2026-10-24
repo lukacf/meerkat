@@ -309,6 +309,42 @@ lifecycle. Construction and offline trials have runtime=None; native reconcile
 and dynamic native callback availability remain explicitly unavailable until a
 trusted trial host implements them. Do not replace missing lifecycle support with
 raw ensure_member, edited protected config, reused seed context or fake success.
+Incoming sources use Meta's native announcement declarations. When the selected
+host includes announcement_configuration.py, package an optional
+application/announcement-declarations.json containing the native object
+{revision, sources, subscriptions}. The host captures that file once and passes
+it unchanged as inline runtime_options.mob_announcements.declarations with
+enabled=true. No file means announcements remain at the existing default. Native
+owns schema validation, monotonic revision/digest checks and managed-record
+reconciliation. Declaration changes are native configuration changes, outside a
+source-only repair of a retained framework. Use a new explicit artifact revision for changed declarations;
+never reset revisions to bypass a refusal, mirror a cursor, or replay subscriptions
+from application code. The host checks sources.v1 and the applied native revision
+before starting application adapters. A pending native record remains pending.
+
+A subscription is {subscription_id, member:{mob_id,identity}, topics, start:{kind:"now"}}
+or uses members:{mob_id,role} instead of member. Native role means the actual
+profile, not the Blueprint class ID or a display label. For a whole class, cover
+its fixed identities from deployment.json.agents with member subscriptions and
+its future members with a role template using deployment.json.applicationProfiles[class_id].
+This also covers zero-start classes without placeholder members and avoids
+guessing a setup helper's native profile projection. Use distinct stable IDs for
+these declared records. Native expands role templates at capture; do not enumerate
+the live roster or create per-member subscriptions on each restart. An explicit
+identity route needs only that member. Preserve triage and conversation exclusions,
+source-owned audience checks, and the user's bounded-history requirement.
+
+Source rows must come from the actual selected native connection/collector
+binding and its supported observation, topics, audience, routes, history and
+runner. A guide description is not such a binding. Give organization documents
+intact to Connect's agent; do not parse a tool catalog or fabricate principals,
+provider scope, account evidence, host-runnable names or provider cursors. If the
+collector binding is unavailable, keep the incoming requirement unmet and retain
+the proposed intent. Do not emit a fake source or silently use new-only collection
+for requested history. Query context.runtime.mob_handle().announcement_declarations_get()
+and the native source/member methods for current status; configuration and
+capability support do not establish collection, delivery or useful handling.
+
 Read the frozen config/mob.toml and selected native host before relying on memory.
 A requested Blueprint memory grant or enabled host storage does not establish
 an available Recorder tool. Some selected Connect routes disable it because the

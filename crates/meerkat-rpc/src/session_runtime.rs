@@ -3421,7 +3421,7 @@ impl SessionRuntime {
 
     async fn persisted_keep_alive(&self, session_id: &SessionId) -> Result<bool, RpcError> {
         let session = self
-            .load_persisted_session(session_id)
+            .load_persisted_session_tolerating_tail(session_id)
             .await?
             .ok_or_else(|| Self::session_not_found_rpc(session_id))?;
         let metadata = session.session_metadata().ok_or_else(|| RpcError {
@@ -5987,7 +5987,10 @@ impl SessionRuntime {
         if live || self.staged_sessions.contains(session_id).await {
             return Ok(());
         }
-        match self.load_persisted_session(session_id).await? {
+        match self
+            .load_persisted_session_tolerating_tail(session_id)
+            .await?
+        {
             Some(session) => Self::refuse_help_session_rebuild(&session),
             None => Ok(()),
         }
@@ -6673,7 +6676,7 @@ impl SessionRuntime {
             Ok(identity) => Ok(identity),
             Err(SessionError::NotFound { .. }) => {
                 let session = self
-                    .load_persisted_session(session_id)
+                    .load_persisted_session_tolerating_tail(session_id)
                     .await?
                     .ok_or_else(|| RpcError {
                         code: error::SESSION_NOT_FOUND,
@@ -11929,6 +11932,37 @@ impl SessionRuntime {
             .load_persisted_session(session_id)
             .await
             .map_err(session_error_to_rpc)
+    }
+
+    /// The persisted session for a read of its metadata (LLM identity, help
+    /// flag, keep-alive) taken before the attach or resume that decides an
+    /// open run: the committed snapshot under the session's own run's
+    /// provisional tail, with the archived-as-absent rule of
+    /// [`Self::load_persisted_session`]. Metadata a run changes lands at the
+    /// run's boundary, so the committed snapshot holds the session's
+    /// metadata until that run ends; the attach or resume that follows still
+    /// decides the tail strictly. A read failure stays an error.
+    async fn load_persisted_session_tolerating_tail(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, RpcError> {
+        let Some(session) = self
+            .service
+            .load_committed_session_tolerating_tail(session_id)
+            .await
+            .map_err(session_error_to_rpc)?
+        else {
+            return Ok(None);
+        };
+        if self
+            .service
+            .session_archived_by_authority(session_id, &session)
+            .await
+            .map_err(session_error_to_rpc)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(session))
     }
 
     /// Whether the RuntimeStore holds an absorbing archive terminal for the

@@ -87,7 +87,7 @@ class ApplicationContext:
         self._begin_member_class_add = None
 
     async def begin_member_class_add(self, *, admission_id, class_id, spec, retain_request, publish,
-                                     hold_timeout_ms=60_000, expected_predecessor=None):
+                                     hold_timeout_ms=60_000, expected_predecessor=None, timeout=60.0):
         """Retain and submit an ordinary Add through this selected installation.
 
         The application checks domain policy and durably saves the immutable
@@ -98,7 +98,7 @@ class ApplicationContext:
         if self._begin_member_class_add is None:
             raise RuntimeError("Member Add mapping requires a connected selected Fresh or Restore application host.")
         return await self._begin_member_class_add(admission_id=admission_id, class_id=class_id, spec=spec,
-            retain_request=retain_request, publish=publish,
+            retain_request=retain_request, publish=publish, timeout=timeout,
             hold_timeout_ms=hold_timeout_ms, expected_predecessor=expected_predecessor)
 
     async def reconcile_agents(self):

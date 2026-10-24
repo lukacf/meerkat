@@ -44,7 +44,7 @@ def test_legacy_generated_startup_refuses_changed_retained_script_or_source_map(
         retained["start.sh"] = (content.replace(b"interpreter is unavailable", b"interpreter is available"), mode)
     else:
         bound["required_supervisor_sources"]["launchkit/templates/start.sh"] = "0" * 64
-    assert updates._archived_supervisor_sources(retained, bound, 4) is None
+    assert updates._archived_supervisor_sources(retained, bound, 6) is None
 
 
 def catalog_target(product, model="gpt-6-astra"):
@@ -120,7 +120,7 @@ def test_product_descriptor_requires_selected_current_framework_and_offline_byte
     descriptor = updates.runtime_dependency_transition(old, candidate, {}, runtime_target=target)
     assert descriptor is not None
     assert descriptor["kind"] == "selected-meta-toolkit-runtime-dependency-update"
-    assert descriptor["version"] == 4 and not descriptor["native_registry_update"]
+    assert descriptor["version"] == 6 and not descriptor["native_registry_update"]
     assert descriptor["runtime_candidate"] == selection.candidate_selection(target)
     assert descriptor["runtime_candidate_artifacts"]["sdk"] == selection._json_paths({"meta": asdict(target.meta), "toolkit": asdict(target.toolkit)})
     assert updates.runtime_dependency_transition(old, candidate, {"execution_mode": "background"}, runtime_target=target) is None

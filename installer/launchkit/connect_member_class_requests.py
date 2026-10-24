@@ -140,12 +140,13 @@ def bind_member_class_requests(owner, application, runtime):
 
     def current():
         owner._require_current()
+        callbacks._current()
         if (owner.runtime is not runtime or context.runtime is not runtime
                 or owner.application is not application or application._application_callbacks is not callbacks
                 or owner._shutdown_task is not None or context.stop_event.is_set()):
             raise CustodyError("Member Add request mapping needs its current connected application owner.")
 
-    async def begin(*, retain_request, publish, **intent):
+    async def begin(*, retain_request, publish, timeout=60.0, **intent):
         current()
         if not callable(retain_request) or not callable(publish):
             raise TypeError("Member Add requires application retention and publication callbacks.")
@@ -157,6 +158,6 @@ def bind_member_class_requests(owner, application, runtime):
         current()
         # This synchronous SDK method writes once and returns its correlation.
         # Do not lose that handle through a post-submission currentness check.
-        return runtime.member_classes.begin_add(request, publish=publish)
+        return runtime.member_classes.begin_add(request, publish=publish, timeout=timeout)
 
     context._begin_member_class_add = begin

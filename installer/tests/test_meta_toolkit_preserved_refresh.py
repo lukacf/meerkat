@@ -130,7 +130,8 @@ def test_actual_archive_product_successor_preserves_policy_viewer_access_and_set
     archive = deployment.package_files(packed(candidate))
     assert archive == candidate
     descriptor = updates.runtime_dependency_transition(previous, archive, original_receipt(previous), runtime_target=target)
-    assert descriptor is not None and descriptor["version"] == 5
+    assert descriptor is not None and descriptor["version"] == 7
+    assert descriptor["previous_framework_version"] == 6
     assert descriptor["previous_runtime_candidate"] == selection.candidate_selection(old_product.target)
     assert descriptor["runtime_candidate"] == selection.candidate_selection(target)
     assert descriptor["previous_runtime_candidate"] != descriptor["runtime_candidate"]
@@ -270,7 +271,37 @@ def test_closed_product_history_uses_archived_source_and_original_both_product_p
     assert historical["runtime_dependency_update"] == descriptor
 
 
-@pytest.mark.parametrize("defect", ["relabel", "protected-hash", "protected-path", "prior-sdk", "prior-native", "new-sdk", "prior-receipt", "source-map", "old-build", "admission"])
+@pytest.mark.parametrize("successor", [False, True])
+def test_fixed_v5_product_history_and_v7_successor_preserve_original_inventory(
+        tmp_path, products, inputs, monkeypatch, successor):
+    # Synthetic old fixed-inventory package, not a historical native result.
+    export = compiler.connect_application_finalizer_export
+    generate = compiler.generate_package
+    def old_generation(*args, **kwargs):
+        if successor and kwargs.get("runtime_target") is not products[0].target:
+            return generate(*args, **kwargs)
+        with monkeypatch.context() as historical:
+            historical.setattr(compiler, "connect_application_finalizer_export", lambda: [item
+                for item in export() if item.path != "launchkit/connect_member_class_requests.py"])
+            return generate(*args, **kwargs)
+    with monkeypatch.context() as old:
+        old.setattr(compiler, "generate_package", old_generation)
+        selected = crossing.__wrapped__(tmp_path, products, inputs)
+        directory, _, _, identity, descriptor = completed(tmp_path, selected)
+    assert descriptor["version"] == (7 if successor else 5)
+    assert descriptor.get("previous_framework_version", 4) == 4
+    assert ("launchkit/connect_member_class_requests.py" in descriptor["protected_paths"]) is successor
+    def forbidden(*args, **kwargs):
+        pytest.fail("Historical product read attempted current compilation or artifact admission")
+    for name in ("generate_package", "generate_runtime_refresh"):
+        monkeypatch.setattr(compiler, name, forbidden)
+    for name in ("selected_runtime_artifacts", "candidate_selection"):
+        monkeypatch.setattr(selection, name, forbidden)
+    _, _, historical = updates.transaction(directory, identity)
+    assert historical["runtime_dependency_update"] == descriptor
+
+
+@pytest.mark.parametrize("defect", ["relabel", "v5-relabel", "previous-framework", "protected-hash", "protected-path", "prior-sdk", "prior-native", "new-sdk", "prior-receipt", "source-map", "old-build", "admission"])
 def test_completed_product_history_refuses_changed_frozen_bindings(crossing, tmp_path, defect):
     _, _, previous, candidate, _, _ = crossing
     directory, _, root, identity, _ = completed(tmp_path, crossing)
@@ -278,6 +309,8 @@ def test_completed_product_history_refuses_changed_frozen_bindings(crossing, tmp
     corrupted = deepcopy(current)
     descriptor = corrupted["runtime_dependency_update"]
     if defect == "relabel": descriptor["version"] = 4
+    elif defect == "v5-relabel": descriptor["version"] = 5
+    elif defect == "previous-framework": descriptor["previous_framework_version"] = 4
     elif defect == "protected-hash": descriptor["protected_application_inventory"]["config/access.toml"]["sha256"] = "f" * 64
     elif defect == "protected-path": descriptor["protected_application_paths"].remove("config/access.toml")
     elif defect == "prior-sdk": corrupted["runtime_files_retained"]["previous_native"]["sdk"]["meta"]["source_payload"][0][1] = "f" * 64

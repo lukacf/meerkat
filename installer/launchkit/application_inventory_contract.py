@@ -94,7 +94,8 @@ This host entry refuses MCP intent and Console enrollment, including a stored
 operator_self enrollment ID. A connector trigger cannot borrow the operator's
 live Console login. The entry accepts hold_timeout_ms and an explicitly observed
 expected_predecessor, with the selected SDK validating them. No checkpoint lookup
-or retry is implicit.
+or retry is implicit. Observation uses timeout=60.0 seconds by default, forwarded
+to the SDK; an observation timeout does not prove that native Add failed.
 
 Keep admitting rows separate from listed owners until native held completion calls
 the application's durable publication callback. Implement the class's real scoped

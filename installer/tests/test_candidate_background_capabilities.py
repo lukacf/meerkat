@@ -299,7 +299,7 @@ async def test_official_047_with_full_source_without_candidate_metadata_reaches_
     before = snapshot(destination), snapshot(directory / "service-host"), Path(frozen["unit_path"]).read_bytes()
     descriptor = deployment.read_receipt(directory)["update"]["runtime_dependency_update"]
     assert descriptor["to_version"] == "0.8.47" and descriptor.get("runtime_candidate") is None
-    assert descriptor["version"] == 4
+    assert descriptor["version"] == 6
     assert set(descriptor["required_supervisor_sources"]) == set(updates._runtime_supervisor_paths(4))
     assert all(frozen["host_files"][name] == expected
         for name, expected in descriptor["required_supervisor_sources"].items())

@@ -858,10 +858,10 @@ def _product_protected_paths(files):
     return paths
 
 
-def _product_framework_paths(files, protected):
-    # The product successor has its own explicit contract. Historical v1-v4
-    # inventories remain fixed and never acquire adopted application inputs.
-    compiler_paths = _runtime_framework_paths(files, 4)
+def _product_framework_paths(files, protected, version=4):
+    # Product v5 uses framework v4; product v7 uses framework v6. Historical
+    # inventories remain fixed and never acquire later helper modules.
+    compiler_paths = _runtime_framework_paths(files, version)
     if set(compiler_paths) & set(protected):
         raise ValueError("Protected product inputs collide with the compiler.")
     return sorted(set(compiler_paths) | set(protected))
@@ -879,7 +879,7 @@ def _product_framework_inventory(files, names):
     return inventory
 
 
-def _product_framework_provenance(files, protected):
+def _product_framework_provenance(files, protected, version=4):
     if not _framework_provenance(files) or _product_protected_paths(files) != protected:
         return False
     framework = _parsed_config(files, "implementation-report.json")["framework"]
@@ -892,8 +892,8 @@ def _product_framework_provenance(files, protected):
                 and framework.get("reason") == "unchanged-specification" or basis == "runtime-refresh"
                 and framework.get("reason") == "explicit-runtime-refresh")):
         return False
-    compiler_paths = _runtime_framework_paths(files, 4)
-    full = _product_framework_inventory(files, _product_framework_paths(files, protected))
+    compiler_paths = _runtime_framework_paths(files, version)
+    full = _product_framework_inventory(files, _product_framework_paths(files, protected, version))
     if framework.get("baseline_digest") != digest(json.dumps(full, sort_keys=True, separators=(",", ":")).encode()):
         return False
     retained = framework.get("retained_template_paths")
@@ -908,6 +908,18 @@ def _product_framework_provenance(files, protected):
     return True
 
 
+def _product_framework_version(files, protected):
+    # Authenticate the entire recorded baseline against each supported fixed
+    # inventory. One extra filename cannot select a newer history contract.
+    for version in (6, 4):
+        try:
+            if _product_framework_provenance(files, protected, version):
+                return version
+        except (KeyError, ValueError, TypeError):
+            continue
+    raise ValueError("The product framework has no recognized archived baseline.")
+
+
 def _product_refresh_authority(previous, candidate, receipt, old, new, prior, selected):
     from .runtime_selection import parse_candidate_selection, selected_runtime_marker
     before, after = parse_candidate_selection(prior), parse_candidate_selection(selected)
@@ -917,14 +929,18 @@ def _product_refresh_authority(previous, candidate, receipt, old, new, prior, se
             or not any(_same_toml(receipt.get("runtime_candidate"), value) for value in (prior, selected))):
         return None
     protected = _product_protected_paths(previous)
-    if (_product_protected_paths(candidate) != protected
-            or not _product_framework_provenance(previous, protected)):
+    if _product_protected_paths(candidate) != protected:
+        return None
+    previous_version = _product_framework_version(previous, protected)
+    version = _product_framework_version(candidate, protected)
+    if previous_version == 6 and version != 6:
         return None
     old, new = dict(old), dict(new)
     for value in (old, new):
         value.pop("mobkitVersion")
         value.pop("runtimeCandidate")
-    framework_paths = set(_product_framework_paths(previous, protected))
+    framework_paths = (set(_product_framework_paths(previous, protected, previous_version)) |
+        set(_product_framework_paths(candidate, protected, version)))
     ordinary = lambda files: {name: value for name, value in files.items()
         if name not in framework_paths | {"SHA256SUMS", "implementation-report.json", "acceptance-report.json"}}
     if (not _same_toml(old, new) or old.get("target") not in {"mac", "linux"}
@@ -935,7 +951,8 @@ def _product_refresh_authority(previous, candidate, receipt, old, new, prior, se
             or ordinary(previous) != ordinary(candidate)
             or any(previous[name] != candidate[name] for name in protected)):
         return None
-    return {"kind": "selected-meta-toolkit-runtime-dependency-update", "version": 5,
+    return {"kind": "selected-meta-toolkit-runtime-dependency-update", "version": 7 if version == 6 else 5,
+        **({"previous_framework_version": previous_version} if version == 6 else {}),
         "from_version": before.meta.version, "to_version": after.meta.version, "core_version": None,
         "definition_unchanged": True, "native_registry_update": False,
         "recovery": "forward-only-after-runtime-admission", "runtime_candidate": selected,
@@ -946,7 +963,8 @@ def _product_refresh_descriptor(previous, candidate, authority, *, sources, expe
     old = _parsed_config(previous, "implementation-report.json")["framework"]
     new = _parsed_config(candidate, "implementation-report.json")["framework"]
     protected = _product_protected_paths(previous)
-    return {**authority, "protected_paths": _product_framework_paths(candidate, protected),
+    version = 6 if authority["version"] == 7 else 4
+    return {**authority, "protected_paths": _product_framework_paths(candidate, protected, version),
         "protected_application_paths": protected,
         "protected_application_inventory": {name: {"sha256": digest(previous[name][0]), "mode": previous[name][1]}
             for name in protected},
@@ -970,10 +988,12 @@ def _product_runtime_transition(previous, candidate, receipt, authority, runtime
     prior_expected = _candidate_artifact_expectation(prior_target, verified_artifacts=prior_verified)
     expected = _candidate_artifact_expectation(runtime_target, verified_artifacts=verified)
     protected = _product_protected_paths(previous)
+    version = 6 if authority["version"] == 7 else 4
+    previous_version = authority.get("previous_framework_version", 4)
     old_report = _parsed_config(previous, "implementation-report.json")
     framework = _parsed_config(candidate, "implementation-report.json")["framework"]
     source = [PackageFile(name, previous[name][0].decode(), 0o600 if name == ".env.example" else previous[name][1])
-        for name in _product_framework_paths(previous, protected)]
+        for name in _product_framework_paths(previous, protected, previous_version)]
     generated = generate_runtime_refresh(_parsed_config(candidate, "blueprint.json"), source,
         runtime_target=runtime_target, verified_artifacts=verified, protected_application_paths=tuple(protected),
         predecessor_artifacts=prior_verified)
@@ -990,13 +1010,13 @@ def _product_runtime_transition(previous, candidate, receipt, authority, runtime
             or framework.get("baseline_digest") != digest(json.dumps(baseline, sort_keys=True, separators=(",", ":")).encode())
             or framework.get("current_compiler_baseline_digest") != digest(json.dumps(compiler, sort_keys=True, separators=(",", ":")).encode())
             or framework.get("retained_template_paths") != retained
-            or not _product_framework_provenance(candidate, protected)
-            or set(baseline) - {"SHA256SUMS"} != set(_product_framework_paths(candidate, protected))
+            or not _product_framework_provenance(candidate, protected, version)
+            or set(baseline) - {"SHA256SUMS"} != set(_product_framework_paths(candidate, protected, version))
             or any(candidate.get(item.path) != (item.as_bytes(), 0o755 if item.mode & 0o111 else 0o644)
                 for item in generated if item.path != "SHA256SUMS")):
         return None
-    sources = _runtime_history_supervisor_sources(4)
-    if _archived_supervisor_sources(candidate, {"required_supervisor_sources": sources}, 4) is None:
+    sources = _runtime_history_supervisor_sources(version)
+    if _archived_supervisor_sources(candidate, {"required_supervisor_sources": sources}, version) is None:
         return None
     selected_runtime_artifacts(runtime_target, verified_artifacts=verified)
     _candidate_artifact_expectation(prior_target, verified_artifacts=prior_verified)
@@ -1116,7 +1136,7 @@ def runtime_dependency_transition(previous, candidate, receipt, *, runtime_targe
     if authority is None:
         return None
     try:
-        if authority.get("version") == 5:
+        if authority.get("version") in {5, 7}:
             return _product_runtime_transition(previous, candidate, receipt, authority, runtime_target, reads=reads)
         from .compiler import generate_package, generate_runtime_refresh
         from .generator import MOBKIT_VERSION, PackageFile
@@ -1192,16 +1212,16 @@ def runtime_dependency_transition(previous, candidate, receipt, *, runtime_targe
         # Admission and closed history must use the same separately fixed
         # inventory. A current export relabeled as historical v1 is refused.
         product = authority["kind"] == "selected-meta-toolkit-runtime-dependency-update"
-        version = 4 if product or authority["to_version"] in {"0.8.47", "0.8.48"} else 1
+        version = 6 if product or authority["to_version"] in {"0.8.47", "0.8.48"} else 1
         names = _runtime_framework_paths(candidate, version)
         if set(protected) != set(names) or not _archived_framework_provenance(candidate, names):
             return None
-        sources = _runtime_history_supervisor_sources(version) if version in {2, 3, 4} else None
-        if version in {2, 3, 4} and _archived_supervisor_sources(candidate,
+        sources = _runtime_history_supervisor_sources(version) if version in {2, 3, 4, 6} else None
+        if version in {2, 3, 4, 6} and _archived_supervisor_sources(candidate,
                 {"required_supervisor_sources": sources}, version) is None:
             return None
         return {**authority, "version": version, "protected_paths": names,
-            **({"required_supervisor_sources": sources} if version in {2, 3, 4} else {}),
+            **({"required_supervisor_sources": sources} if version in {2, 3, 4, 6} else {}),
             **({"runtime_candidate_artifacts": expected_artifacts} if selection is not None else {}),
             **({"previous_runtime_candidate_artifacts": previous_artifacts} if previous_artifacts is not None else {}),
             **({"accepted_baseline_digest": framework["baseline_digest"],
@@ -1547,15 +1567,26 @@ _RUNTIME_FRAMEWORK_V4_COPIED_SOURCES = {
     **{name: name for name in _RUNTIME_FRAMEWORK_V4_HELPER_PATHS},
 }
 
+# V5 is the product-refresh descriptor over V4. V6 adds the host-owned member
+# Add helper; V7 records product refreshes over this explicit new inventory.
+_RUNTIME_FRAMEWORK_V6_HELPER_PATHS = frozenset({"launchkit/connect_member_class_requests.py"})
+_RUNTIME_FRAMEWORK_V6_PATHS = _RUNTIME_FRAMEWORK_V4_PATHS | _RUNTIME_FRAMEWORK_V6_HELPER_PATHS
+_RUNTIME_FRAMEWORK_V6_SUPERVISOR_PATHS = (*_RUNTIME_FRAMEWORK_V4_SUPERVISOR_PATHS,
+    *sorted(_RUNTIME_FRAMEWORK_V6_HELPER_PATHS))
+_RUNTIME_FRAMEWORK_V6_COPIED_SOURCES = {
+    **_RUNTIME_FRAMEWORK_V4_COPIED_SOURCES,
+    **{name: name for name in _RUNTIME_FRAMEWORK_V6_HELPER_PATHS},
+}
+
 
 def _runtime_framework_paths(candidate, version):
     """Dispatch fixed archived contracts, never infer a generation from files."""
-    if type(version) is not int or version not in {1, 2, 3, 4}:
+    if type(version) is not int or version not in {1, 2, 3, 4, 6}:
         raise ValueError("Unknown runtime framework history contract.")
     if version == 1:
         return _archived_framework_paths(candidate)
     names = set({2: _RUNTIME_FRAMEWORK_V2_PATHS, 3: _RUNTIME_FRAMEWORK_V3_PATHS,
-        4: _RUNTIME_FRAMEWORK_V4_PATHS}[version])
+        4: _RUNTIME_FRAMEWORK_V4_PATHS, 6: _RUNTIME_FRAMEWORK_V6_PATHS}[version])
     if _candidate_source_selection(candidate) is not None:
         names.update(CANDIDATE_PATHS)
         names.update(_candidate_reader_helper_paths(candidate))
@@ -1570,11 +1601,11 @@ def _runtime_framework_paths(candidate, version):
 
 
 def _runtime_supervisor_paths(version, *, sources=None):
-    if type(version) is not int or version not in {2, 3, 4}:
+    if type(version) is not int or version not in {2, 3, 4, 6}:
         raise ValueError("Unknown runtime supervisor history contract.")
     names = {2: _RUNTIME_FRAMEWORK_V2_SUPERVISOR_PATHS,
         3: _RUNTIME_FRAMEWORK_V3_SUPERVISOR_PATHS,
-        4: _RUNTIME_FRAMEWORK_V4_SUPERVISOR_PATHS}[version]
+        4: _RUNTIME_FRAMEWORK_V4_SUPERVISOR_PATHS, 6: _RUNTIME_FRAMEWORK_V6_SUPERVISOR_PATHS}[version]
     if sources is None or _SDK_WHEEL_SUPERVISOR_HELPER in sources:
         return (*names, _SDK_WHEEL_SUPERVISOR_HELPER)
     return names
@@ -1601,10 +1632,11 @@ def _archived_supervisor_sources(candidate, descriptor, version):
             or not all(_sha256(value) for value in sources.values())):
         return None
     copied = dict({2: _RUNTIME_FRAMEWORK_V2_COPIED_SOURCES,
-        3: _RUNTIME_FRAMEWORK_V3_COPIED_SOURCES, 4: _RUNTIME_FRAMEWORK_V4_COPIED_SOURCES}[version])
+        3: _RUNTIME_FRAMEWORK_V3_COPIED_SOURCES, 4: _RUNTIME_FRAMEWORK_V4_COPIED_SOURCES,
+        6: _RUNTIME_FRAMEWORK_V6_COPIED_SOURCES}[version])
     # The exported package initializer is generated empty. The real supervisor
     # initializer has its separate source hash and must not replace these bytes.
-    if version == 4 and candidate.get("launchkit/__init__.py") != (b"", 0o644):
+    if version in {4, 6} and candidate.get("launchkit/__init__.py") != (b"", 0o644):
         return None
     selection = _candidate_source_selection(candidate)
     if selection is not None:
@@ -1653,7 +1685,7 @@ def _archived_v2_supervisor_sources(candidate, descriptor):
 def _require_runtime_framework_configuration(receipt, update):
     descriptor = update.get("runtime_dependency_update")
     if (type(descriptor) is dict and type(descriptor.get("version")) is int
-            and descriptor["version"] in {2, 3, 4, 5}):
+            and descriptor["version"] in {2, 3, 4, 5, 6, 7}):
         from .deployment import private_configuration_snapshot
         values, _ = private_configuration_snapshot(owned_destination(receipt["destination"]))
         if values.get("MOBKIT_CONNECT_BIN"):
@@ -1764,17 +1796,20 @@ def _retained_product_proof(proof, sdk, selection, expected, destination):
 
 
 def _completed_product_runtime_transition(previous, candidate, receipt, update, root):
-    """Read product v5 history solely from the original archived source/proofs."""
+    """Read product v5/v7 history from the original archived source/proofs."""
     authority = _runtime_dependency_authority(previous, candidate, receipt)
     descriptor = update["runtime_dependency_update"]
-    if (authority is None or authority.get("version") != 5 or descriptor.get("version") != 5
+    if (authority is None or authority.get("version") not in {5, 7}
+            or type(descriptor.get("version")) is not int
+            or descriptor.get("version") != authority["version"]
             or update.get("status") != "completed" or update.get("blockers") != []
             or update.get("rollback_available") is not False or update.get("runtime_admission_possible") is not True):
         return None
     protected = _product_protected_paths(previous)
-    if not _product_framework_provenance(candidate, protected):
+    version = 6 if authority["version"] == 7 else 4
+    if not _product_framework_provenance(candidate, protected, version):
         return None
-    sources = _archived_supervisor_sources(candidate, descriptor, 4)
+    sources = _archived_supervisor_sources(candidate, descriptor, version)
     if sources is None:
         return None
     old = _parsed_config(previous, "implementation-report.json")
@@ -1823,23 +1858,23 @@ def _completed_runtime_dependency_transition(previous, candidate, receipt, updat
     a worker, requalify old host source or infer current runtime readiness.
     """
     try:
-        if (update.get("runtime_dependency_update") or {}).get("version") == 5:
+        if (update.get("runtime_dependency_update") or {}).get("version") in {5, 7}:
             return _completed_product_runtime_transition(previous, candidate, receipt, update, root)
         authority = _runtime_dependency_authority(previous, candidate, receipt)
         if (authority is None or update.get("status") != "completed" or update.get("blockers") != []
                 or update.get("rollback_available") is not False
-                or update.get("runtime_admission_possible") is not True or authority.get("version") == 5):
+                or update.get("runtime_admission_possible") is not True or authority.get("version") in {5, 7}):
             return None
         descriptor = update["runtime_dependency_update"]
         history_version = descriptor["version"]
         product = authority["kind"] == "selected-meta-toolkit-runtime-dependency-update"
         names = _runtime_framework_paths(candidate, history_version)
-        if (history_version in {2, 3, 4} and not product and authority["to_version"] not in {"0.8.47", "0.8.48"}
+        if (history_version in {2, 3, 4, 6} and not product and authority["to_version"] not in {"0.8.47", "0.8.48"}
                 or not _archived_framework_provenance(candidate, names)):
             return None
         sources = (_archived_supervisor_sources(candidate, descriptor, history_version)
-                   if history_version in {2, 3, 4} else None)
-        if history_version in {2, 3, 4} and sources is None:
+                   if history_version in {2, 3, 4, 6} else None)
+        if history_version in {2, 3, 4, 6} and sources is None:
             return None
         old_report = _parsed_config(previous, "implementation-report.json")
         report = _parsed_config(candidate, "implementation-report.json")
@@ -1950,7 +1985,7 @@ def _completed_runtime_dependency_transition(previous, candidate, receipt, updat
                         or observed.get("candidate_tuple_sha256") != selection["accepted"]["tuple_sha256"])):
                 return None
         return {**authority, "version": history_version, "protected_paths": names,
-            **({"required_supervisor_sources": sources} if history_version in {2, 3, 4} else {}),
+            **({"required_supervisor_sources": sources} if history_version in {2, 3, 4, 6} else {}),
             **({"runtime_candidate_artifacts": expected_artifacts} if selection is not None else {}),
             **({"previous_runtime_candidate_artifacts": prior_artifacts} if prior_selection is not None else {}),
             **({"accepted_baseline_digest": report["framework"]["baseline_digest"],

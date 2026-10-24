@@ -54,6 +54,7 @@ def closed_inputs(directory, root, update):
 
 V3_ADDITIONS = frozenset({"native_controller_review.py", "native_console_login.py",
     "controller_review.mjs", "controller_review.css"})
+V6_ADDITIONS = frozenset({"launchkit/connect_member_class_requests.py"})
 V4_ADDITIONS = frozenset({"launchkit/__init__.py", "launchkit/connect_application_finalizer.py",
     "launchkit/connect_application_policy.py", "launchkit/connect_installer_caller.py",
     "launchkit/connect_policy_input.py", "launchkit/connect_application_startup.py",
@@ -83,13 +84,13 @@ async def ordinary_closed(tmp_path, monkeypatch, canonical_fixture_packages):
     return directory, destination, root, update
 
 
-def test_current_ordinary_and_explicit_candidate_use_distinct_v4_closures(current_packages, crossing):
+def test_current_ordinary_and_explicit_candidate_use_distinct_v6_closures(current_packages, crossing):
     previous, candidate = current_packages
     ordinary = updates.runtime_dependency_transition(previous, candidate, {})
     _, target, old, selected, _, _ = crossing
     explicit = updates.runtime_dependency_transition(old, selected, {}, runtime_target=target)
     assert ordinary is not None and explicit is not None
-    assert ordinary["version"] == explicit["version"] == 4
+    assert ordinary["version"] == explicit["version"] == 6
     assert ordinary["to_version"] == "0.8.47"
     assert explicit["to_version"] == "0.8.48"
     assert ordinary["definition_unchanged"] is explicit["definition_unchanged"] is True
@@ -97,14 +98,14 @@ def test_current_ordinary_and_explicit_candidate_use_distinct_v4_closures(curren
     assert all(old[name] == selected[name] for name in compiler._RUNTIME_DESIGN_PATHS)
     assert len(updates._RUNTIME_FRAMEWORK_V2_PATHS) == 64
     assert len(updates._RUNTIME_FRAMEWORK_V3_PATHS) == 68
-    assert set(ordinary["protected_paths"]) == set(updates._RUNTIME_FRAMEWORK_V3_PATHS) | V4_ADDITIONS
+    assert set(ordinary["protected_paths"]) == set(updates._RUNTIME_FRAMEWORK_V3_PATHS) | V4_ADDITIONS | V6_ADDITIONS
     assert set(explicit["protected_paths"]) == (
         set(ordinary["protected_paths"]) | updates.CANDIDATE_PATHS | {"sdk_wheel_integrity.py"})
     assert selected["sdk_wheel_integrity.py"] == (
         Path(updates.__file__).with_name("sdk_wheel_integrity.py").read_bytes(), 0o644)
     assert "runtime_candidate" not in ordinary
     assert explicit["runtime_candidate"] == runtime_selection.candidate_selection(target)
-    assert ordinary["required_supervisor_sources"] == updates._runtime_history_supervisor_sources(4)
+    assert ordinary["required_supervisor_sources"] == updates._runtime_history_supervisor_sources(6)
     assert explicit["required_supervisor_sources"] == ordinary["required_supervisor_sources"]
     copied = {name: "launchkit/templates_v2/" + name for name in V3_ADDITIONS}
     assert len(updates._RUNTIME_FRAMEWORK_V2_SUPERVISOR_PATHS) == 105
@@ -121,7 +122,7 @@ def test_current_ordinary_and_explicit_candidate_use_distinct_v4_closures(curren
             assert files[name] == ((compiler.TEMPLATES_V2 / name).read_bytes(), 0o644)
             assert descriptor["required_supervisor_sources"][source] == hashlib.sha256(files[name][0]).hexdigest()
         assert files["launchkit/__init__.py"] == (b"", 0o644)
-        helpers = V4_ADDITIONS - {"launchkit/__init__.py"}
+        helpers = (V4_ADDITIONS | V6_ADDITIONS) - {"launchkit/__init__.py"}
         for name in helpers:
             source = Path(updates.__file__).parent / Path(name).name
             assert files[name] == (source.read_bytes(), 0o644)
@@ -130,7 +131,7 @@ def test_current_ordinary_and_explicit_candidate_use_distinct_v4_closures(curren
             set(updates._RUNTIME_FRAMEWORK_V3_SUPERVISOR_PATHS) | helpers | {"launchkit/sdk_wheel_integrity.py"})
         assert descriptor["required_supervisor_sources"]["launchkit/sdk_wheel_integrity.py"] == (
             hashlib.sha256(Path(updates.__file__).with_name("sdk_wheel_integrity.py").read_bytes()).hexdigest())
-        assert updates._archived_supervisor_sources(files, descriptor, 4) == descriptor["required_supervisor_sources"]
+        assert updates._archived_supervisor_sources(files, descriptor, 6) == descriptor["required_supervisor_sources"]
         assert updates._archived_supervisor_sources(files, descriptor, 3) is None
     assert updates._runtime_history_supervisor_sources() == updates._runtime_history_supervisor_sources(3)
     assert len(compiler.MAINTAINED_HOST_PATHS) == 7
@@ -138,7 +139,7 @@ def test_current_ordinary_and_explicit_candidate_use_distinct_v4_closures(curren
     assert "toolkit-ui/index.js" not in updates._RETAINED_FRAMEWORK_PATHS
 
 
-@pytest.mark.parametrize("version", [True, False, 0, 5, -1, "4", 4.0, None])
+@pytest.mark.parametrize("version", [True, False, 0, 5, 7, -1, "6", 6.0, None])
 def test_framework_reader_version_is_strict_and_closed(current_packages, version):
     _, candidate = current_packages
     with pytest.raises(ValueError):
@@ -162,12 +163,12 @@ def test_v1_inventory_stays_historical_without_admitting_current_export(current_
     ("local", {"knowledge/settings.json", "knowledge/manage.py", "knowledge/README.md", "knowledge/.gitignore",
         "knowledge/compose.json", "knowledge/Dockerfile", "knowledge/Dockerfile.dockerignore"}),
 ])
-@pytest.mark.parametrize("version", [2, 3, 4])
+@pytest.mark.parametrize("version", [2, 3, 4, 6])
 def test_versioned_knowledge_inventory_is_fixed_by_recorded_mode(current_packages, mode, additions, version):
     _, candidate = copy.deepcopy(current_packages)
     document(candidate, "deployment.json", lambda value: value["knowledge"].update(mode=mode))
     base = {2: updates._RUNTIME_FRAMEWORK_V2_PATHS, 3: updates._RUNTIME_FRAMEWORK_V3_PATHS,
-        4: updates._RUNTIME_FRAMEWORK_V4_PATHS}[version]
+        4: updates._RUNTIME_FRAMEWORK_V4_PATHS, 6: updates._RUNTIME_FRAMEWORK_V6_PATHS}[version]
     assert set(updates._runtime_framework_paths(candidate, version)) == set(base) | additions
     # A public application addition is never a new protected framework member.
     candidate["application/extra.py"] = (b"VERSION = 'accepted'\n", 0o644)
@@ -184,7 +185,7 @@ def test_framework_reader_refuses_unknown_knowledge_mode(current_packages, mode)
 
 @pytest.mark.parametrize("name", sorted(V3_ADDITIONS))
 @pytest.mark.parametrize("mutation", ["missing", "bytes", "mode"])
-def test_current_v4_refuses_missing_or_changed_review_member(current_packages, name, mutation):
+def test_current_v6_refuses_missing_or_changed_review_member(current_packages, name, mutation):
     previous, candidate = copy.deepcopy(current_packages)
     if mutation == "missing":
         candidate.pop(name)
@@ -197,17 +198,17 @@ def test_current_v4_refuses_missing_or_changed_review_member(current_packages, n
 
 
 @pytest.mark.parametrize("name", sorted(V3_ADDITIONS))
-def test_archived_v4_refuses_changed_copied_review_source(current_packages, name):
+def test_archived_v6_refuses_changed_copied_review_source(current_packages, name):
     previous, candidate = current_packages
     descriptor = updates.runtime_dependency_transition(previous, candidate, {})
-    assert descriptor is not None and descriptor["version"] == 4
+    assert descriptor is not None and descriptor["version"] == 6
     descriptor["required_supervisor_sources"]["launchkit/templates_v2/" + name] = "f" * 64
-    assert updates._archived_supervisor_sources(candidate, descriptor, 4) is None
+    assert updates._archived_supervisor_sources(candidate, descriptor, 6) is None
 
 
-@pytest.mark.parametrize("name", sorted(V4_ADDITIONS))
+@pytest.mark.parametrize("name", sorted(V4_ADDITIONS | V6_ADDITIONS))
 @pytest.mark.parametrize("mutation", ["missing", "bytes", "mode"])
-def test_current_v4_requires_exact_exported_startup_helpers(current_packages, name, mutation):
+def test_current_v6_requires_exact_exported_startup_helpers(current_packages, name, mutation):
     previous, candidate = copy.deepcopy(current_packages)
     assert updates.runtime_dependency_transition(previous, candidate, {}) is not None
     if mutation == "missing":
@@ -219,27 +220,27 @@ def test_current_v4_requires_exact_exported_startup_helpers(current_packages, na
     assert updates.compatibility(previous, candidate, {})[1]
 
 
-@pytest.mark.parametrize("name", sorted(V4_ADDITIONS - {"launchkit/__init__.py"}))
-def test_archived_v4_requires_each_exported_helper_source_pin(current_packages, name):
+@pytest.mark.parametrize("name", sorted((V4_ADDITIONS | V6_ADDITIONS) - {"launchkit/__init__.py"}))
+def test_archived_v6_requires_each_exported_helper_source_pin(current_packages, name):
     previous, candidate = current_packages
     descriptor = updates.runtime_dependency_transition(previous, candidate, {})
-    assert descriptor is not None and descriptor["version"] == 4
+    assert descriptor is not None and descriptor["version"] == 6
     descriptor["required_supervisor_sources"][name] = "f" * 64
-    assert updates._archived_supervisor_sources(candidate, descriptor, 4) is None
+    assert updates._archived_supervisor_sources(candidate, descriptor, 6) is None
 
 
 @pytest.mark.parametrize("mutation", ["missing", "bytes", "mode"])
-def test_archived_v4_requires_generated_empty_init_without_copying_supervisor_init(current_packages, mutation):
+def test_archived_v6_requires_generated_empty_init_without_copying_supervisor_init(current_packages, mutation):
     previous, candidate = copy.deepcopy(current_packages)
     descriptor = updates.runtime_dependency_transition(previous, candidate, {})
-    assert descriptor is not None and descriptor["version"] == 4
+    assert descriptor is not None and descriptor["version"] == 6
     assert Path(updates.__file__).with_name("__init__.py").read_bytes() != b""
     assert descriptor["required_supervisor_sources"]["launchkit/__init__.py"] != hashlib.sha256(b"").hexdigest()
     if mutation == "missing":
         candidate.pop("launchkit/__init__.py")
     else:
         candidate["launchkit/__init__.py"] = (b"# Different initializer\n", 0o644) if mutation == "bytes" else (b"", 0o755)
-    assert updates._archived_supervisor_sources(candidate, descriptor, 4) is None
+    assert updates._archived_supervisor_sources(candidate, descriptor, 6) is None
 
 
 def test_unknown_future_compiler_export_needs_its_own_history_contract(current_packages, monkeypatch):
@@ -351,9 +352,9 @@ def test_retained_original_v2_closed_history_survives_v3_compiler(
     assert {name: (root / name).read_bytes() for name in before} == before
 
 
-async def test_ordinary_v4_closed_readback_uses_only_retained_bytes(ordinary_closed, monkeypatch):
+async def test_ordinary_v6_closed_readback_uses_only_retained_bytes(ordinary_closed, monkeypatch):
     directory, destination, root, saved = ordinary_closed
-    assert saved["runtime_dependency_update"]["version"] == 4
+    assert saved["runtime_dependency_update"]["version"] == 6
     before = {name: (root / name).read_bytes()
         for name in ("previous.zip", "candidate.zip", "previous-receipt.json", "update.json")}
     # Private settings can select a later Connect while historical readback
@@ -367,16 +368,17 @@ async def test_ordinary_v4_closed_readback_uses_only_retained_bytes(ordinary_clo
     assert {name: (root / name).read_bytes() for name in before} == before
 
 
+@pytest.mark.parametrize("version", [3, 4])
 @pytest.mark.parametrize("mutation", [None, "copied-source", "new-helper-inventory", "new-helper-source"])
-async def test_fixed_v3_closed_contract_remains_readable_without_successor_helpers(
-        ordinary_closed, monkeypatch, mutation):
-    # This is an inert fixed-v3 history fixture, not historical native admission.
+async def test_fixed_older_closed_contract_remains_readable_without_successor_helpers(
+        ordinary_closed, monkeypatch, mutation, version):
+    # This is an inert fixed historical contract fixture, not native admission.
     directory, _, root, saved = ordinary_closed
     receipt, previous, candidate = copy.deepcopy(closed_inputs(directory, root, saved))
     update = copy.deepcopy(saved)
     descriptor = update["runtime_dependency_update"]
-    names = updates._runtime_framework_paths(candidate, 3)
-    for name in V4_ADDITIONS:
+    names = updates._runtime_framework_paths(candidate, version)
+    for name in V6_ADDITIONS | (V4_ADDITIONS if version == 3 else set()):
         candidate.pop(name)
     inventory = {name: {"sha256": updates.digest(candidate[name][0]),
         "mode": 0o600 if name == ".env.example" else candidate[name][1]} for name in names}
@@ -387,18 +389,19 @@ async def test_fixed_v3_closed_contract_remains_readable_without_successor_helpe
         separators=(",", ":")).encode())
     document(candidate, "implementation-report.json", lambda report: report["framework"].update(
         baseline_digest=baseline, current_compiler_baseline_digest=baseline))
-    descriptor.update(version=3, protected_paths=names, accepted_baseline_digest=baseline,
+    descriptor.update(version=version, protected_paths=names, accepted_baseline_digest=baseline,
         compiler_baseline_digest=baseline, required_supervisor_sources={name: value
             for name, value in descriptor["required_supervisor_sources"].items()
-            if name in updates._RUNTIME_FRAMEWORK_V3_SUPERVISOR_PATHS})
+            if name in updates._runtime_supervisor_paths(version)})
     update["package_sha256"] = receipt["package_sha256"] = updates.digest(packed(candidate))
     expected = copy.deepcopy(descriptor)
+    added = "launchkit/connect_application_startup.py" if version == 3 else "launchkit/connect_member_class_requests.py"
     if mutation == "copied-source":
         descriptor["required_supervisor_sources"]["launchkit/templates_v2/app.py"] = "f" * 64
     elif mutation == "new-helper-inventory":
-        descriptor["protected_paths"].append("launchkit/connect_application_startup.py")
+        descriptor["protected_paths"].append(added)
     elif mutation == "new-helper-source":
-        descriptor["required_supervisor_sources"]["launchkit/connect_application_startup.py"] = "f" * 64
+        descriptor["required_supervisor_sources"][added] = "f" * 64
     frozen = copy.deepcopy((previous, candidate, receipt, update))
     forbid_fresh_admission(monkeypatch)
     result = updates._completed_runtime_dependency_transition(previous, candidate, receipt, update, root)
@@ -406,15 +409,15 @@ async def test_fixed_v3_closed_contract_remains_readable_without_successor_helpe
     assert (previous, candidate, receipt, update) == frozen
 
 
-@pytest.mark.parametrize("name", sorted(V4_ADDITIONS))
-async def test_closed_v4_rebaselining_cannot_substitute_exported_startup_source(
+@pytest.mark.parametrize("name", sorted(V4_ADDITIONS | V6_ADDITIONS))
+async def test_closed_v6_rebaselining_cannot_substitute_exported_startup_source(
         ordinary_closed, monkeypatch, name):
     directory, _, root, saved = ordinary_closed
     receipt, previous, candidate = copy.deepcopy(closed_inputs(directory, root, saved))
     update = copy.deepcopy(saved)
     content, mode = candidate[name]
     candidate[name] = (content + b"\n# Different retained helper\n", mode)
-    names = updates._runtime_framework_paths(candidate, 4)
+    names = updates._runtime_framework_paths(candidate, 6)
     inventory = {item: {"sha256": updates.digest(candidate[item][0]),
         "mode": 0o600 if item == ".env.example" else candidate[item][1]} for item in names}
     sums = "".join(f"{inventory[item]['sha256']}  {item}\n" for item in names).encode()
@@ -432,10 +435,10 @@ async def test_closed_v4_rebaselining_cannot_substitute_exported_startup_source(
     assert updates._completed_runtime_dependency_transition(previous, candidate, receipt, update, root) is None
 
 
-def test_explicit_candidate_v4_closes_after_retained_proof_without_live_bundle(crossing, tmp_path, monkeypatch):
+def test_explicit_candidate_v6_closes_after_retained_proof_without_live_bundle(crossing, tmp_path, monkeypatch):
     bundle, _, _, _, _, _ = crossing
     directory, _, root, saved = completed(tmp_path, crossing)
-    assert saved["runtime_dependency_update"]["version"] == 4
+    assert saved["runtime_dependency_update"]["version"] == 6
     assert saved["runtime_dependency_update"]["to_version"] == "0.8.48"
     before = {name: (root / name).read_bytes()
         for name in ("previous.zip", "candidate.zip", "previous-receipt.json", "update.json")}
@@ -479,7 +482,7 @@ HISTORY_MUTATIONS = ["version-bool", "version-unknown", "version-v3", "accepted-
 
 
 @pytest.mark.parametrize("mutation", HISTORY_MUTATIONS)
-async def test_closed_ordinary_v4_refuses_changed_source_or_descriptor(ordinary_closed, mutation):
+async def test_closed_ordinary_v6_refuses_changed_source_or_descriptor(ordinary_closed, mutation):
     directory, _, root, saved = ordinary_closed
     receipt, previous, candidate = closed_inputs(directory, root, saved)
     changed, candidate = changed_history(saved, candidate, mutation)
@@ -488,7 +491,7 @@ async def test_closed_ordinary_v4_refuses_changed_source_or_descriptor(ordinary_
 
 
 @pytest.mark.parametrize("mutation", HISTORY_MUTATIONS)
-def test_closed_candidate_v4_refuses_changed_source_or_descriptor(crossing, tmp_path, mutation):
+def test_closed_candidate_v6_refuses_changed_source_or_descriptor(crossing, tmp_path, mutation):
     directory, _, root, saved = completed(tmp_path, crossing)
     receipt, previous, candidate = closed_inputs(directory, root, saved)
     changed, candidate = changed_history(saved, candidate, mutation)
@@ -496,7 +499,7 @@ def test_closed_candidate_v4_refuses_changed_source_or_descriptor(crossing, tmp_
     assert not updates._same_toml(changed["runtime_dependency_update"], result)
 
 
-async def test_connect_selection_refuses_ordinary_v4_stage_before_journal_or_copy(
+async def test_connect_selection_refuses_ordinary_v6_stage_before_journal_or_copy(
         tmp_path, canonical_fixture_packages):
     host, directory, destination, previous, _ = await prepared(tmp_path)
     payload, _ = await host.implementation.package(host.guide.identity, host.implementation.identity)
@@ -587,7 +590,7 @@ async def test_connect_cannot_enter_worker_install_or_start_and_retry_has_no_sec
 
 @pytest.mark.parametrize("mutation", ["missing-reader", "stale-reader", "stale-worker", "extra-source",
     "missing-login-adapter", "stale-review-asset", "missing-startup-helper", "stale-startup-helper"])
-def test_ordinary_v4_requires_exact_frozen_supervisor_even_without_candidate(current_packages, mutation):
+def test_ordinary_v6_requires_exact_frozen_supervisor_even_without_candidate(current_packages, mutation):
     previous, candidate = current_packages
     descriptor = updates.runtime_dependency_transition(previous, candidate, {})
     frozen = service.supervisor_metadata({}, service.supervisor_source_files())
@@ -616,7 +619,7 @@ def test_ordinary_v4_requires_exact_frozen_supervisor_even_without_candidate(cur
         service.require_candidate_update_protocol(frozen, update)
 
 
-@pytest.mark.parametrize("version", [True, False, 0, 5, -1, "4", 4.0, None])
+@pytest.mark.parametrize("version", [True, False, 0, 5, 7, -1, "6", 6.0, None])
 def test_background_source_protocol_refuses_unknown_or_noninteger_history(current_packages, version):
     previous, candidate = current_packages
     descriptor = updates.runtime_dependency_transition(previous, candidate, {})
@@ -668,7 +671,7 @@ async def test_selected_connect_refuses_before_cold_native_registry_observation(
         tmp_path, monkeypatch, registry_fixture_packages):
     _, directory, destination, _, _, identity = await dependency_staged(tmp_path)
     descriptor = read_receipt(directory)["update"]["runtime_dependency_update"]
-    assert descriptor["version"] == 4
+    assert descriptor["version"] == 6
     assert descriptor["native_registry_update"] is True
     with (destination / ".env").open("a") as stream:
         stream.write('MOBKIT_CONNECT_BIN="/selected/connect"\n')
@@ -683,7 +686,7 @@ async def test_late_selected_connect_refuses_before_new_registry_activation(
         tmp_path, monkeypatch, registry_fixture_packages):
     _, directory, destination, _, _, identity = await dependency_staged(tmp_path)
     descriptor = read_receipt(directory)["update"]["runtime_dependency_update"]
-    assert descriptor["version"] == 4
+    assert descriptor["version"] == 6
     assert descriptor["native_registry_update"] is True
     runtime, events = mock_dependency_runtime(monkeypatch, directory, destination,
         registry_epoch={"revision": 1}, target_version="0.8.47")

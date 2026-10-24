@@ -171,7 +171,8 @@ def test_current_candidate_pins_wheel_helper_in_package_and_worker(crossing):
     assert updates.CANDIDATE_PATHS == {"runtime-candidate.json", "runtime_candidates.py", "install_candidate.py"}
     for paths in (updates._RUNTIME_FRAMEWORK_V2_SUPERVISOR_PATHS,
                   updates._RUNTIME_FRAMEWORK_V3_SUPERVISOR_PATHS,
-                  updates._RUNTIME_FRAMEWORK_V4_SUPERVISOR_PATHS):
+                  updates._RUNTIME_FRAMEWORK_V4_SUPERVISOR_PATHS,
+                  updates._RUNTIME_FRAMEWORK_V6_SUPERVISOR_PATHS):
         assert "launchkit/sdk_wheel_integrity.py" not in paths
 
 
@@ -184,18 +185,18 @@ def test_dependent_candidate_reader_refuses_missing_or_changed_wheel_helper(cros
     if defect == "missing-package-helper":
         selected.pop("sdk_wheel_integrity.py")
         with pytest.raises(ValueError, match="lost its SDK wheel dependency"):
-            updates._runtime_framework_paths(selected, 4)
+            updates._runtime_framework_paths(selected, 6)
         with pytest.raises(ValueError, match="lost its SDK wheel dependency"):
-            updates._archived_supervisor_sources(selected, {"required_supervisor_sources": sources}, 4)
+            updates._archived_supervisor_sources(selected, {"required_supervisor_sources": sources}, 6)
     else:
         if defect == "missing-worker-helper":
             sources.pop("launchkit/sdk_wheel_integrity.py")
         else:
             sources["launchkit/sdk_wheel_integrity.py"] = "f" * 64
-        assert updates._archived_supervisor_sources(selected, {"required_supervisor_sources": sources}, 4) is None
+        assert updates._archived_supervisor_sources(selected, {"required_supervisor_sources": sources}, 6) is None
 
 
-@pytest.mark.parametrize("version", [2, 3, 4])
+@pytest.mark.parametrize("version", [2, 3, 4, 6])
 def test_retained_self_contained_reader_keeps_original_worker_inventory(crossing, version):
     _, _, _, candidate, _, _ = crossing
     selected = copy.deepcopy(candidate)

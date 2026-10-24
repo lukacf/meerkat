@@ -215,7 +215,7 @@ async def test_context_has_no_mapping_before_connected_host(tmp_path, monkeypatc
     bind_member_class_requests(object(), SimpleNamespace(dynamic=False), object())
 
 
-@pytest.mark.parametrize("failure", ["stop", "changed-plan", "retention-error", "cancelled"])
+@pytest.mark.parametrize("failure", ["stop", "changed-plan", "invalidated", "retention-error", "cancelled"])
 async def test_no_native_submission_when_retention_or_currentness_fails(tmp_path, monkeypatch, failure):
     f = RequestFixture(tmp_path)
     runtime = SimpleNamespace(member_classes=SimpleNamespace(
@@ -230,10 +230,10 @@ async def test_no_native_submission_when_retention_or_currentness_fails(tmp_path
         assert isinstance(value, str)
         if failure == "stop": context.stop_event.set()
         elif failure == "changed-plan": f.path.write_bytes(f.path.read_bytes() + b" ")
+        elif failure == "invalidated": f.callbacks._invalidated = True
         elif failure == "retention-error": raise OSError("durable write failed")
         else: raise asyncio.CancelledError()
     async def publish(): pytest.fail("No listing may occur")
-    owner._require_current = f.callbacks._current
     monkeypatch.setattr("launchkit.connect_member_class_requests._member_class_add_request", prepare)
     bind_member_class_requests(owner, app, runtime)
     error = {"retention-error": OSError, "cancelled": asyncio.CancelledError}.get(failure, CustodyError)
@@ -241,17 +241,19 @@ async def test_no_native_submission_when_retention_or_currentness_fails(tmp_path
         await context._begin_member_class_add(admission_id="one", retain_request=retain, publish=publish)
 
 
-async def test_host_retains_immutable_original_then_submits_private_request_once(tmp_path, sdk):
+@pytest.mark.parametrize("timeout", [60.0, 17.5])
+async def test_host_retains_immutable_original_then_submits_private_request_once(tmp_path, sdk, timeout):
     f = RequestFixture(tmp_path)
     spec = sdk.Spec(identity="reader:one", profile="reusable-reader", context={"records": ["original"]})
     events = []
     saved = tmp_path / "app-admitting-request.json"
     attempt = object()
-    def begin(request, *, publish):
+    def begin(request, *, publish, timeout):
         assert isinstance(request, sdk.Request)
         assert request.wire() == json.loads(saved.read_text())
         assert request.spec.context == {"records": ["original"]}
         assert publish is publish_listed
+        assert timeout == selected_timeout
         events.append("native-submit")
         # A native write has an exact correlation. Do not lose it by checking
         # currentness again after the synchronous SDK submission has happened.
@@ -270,9 +272,10 @@ async def test_host_retains_immutable_original_then_submits_private_request_once
         spec.context["records"].append("changed-after-retention")
         events.append("app-retained")
     async def publish_listed(): pytest.fail("The host cannot invoke listing itself")
+    selected_timeout = timeout
     bind_member_class_requests(owner, app, runtime)
     result = await context._begin_member_class_add(admission_id="saved-add", class_id="reader", spec=spec,
-        retain_request=retain, publish=publish_listed)
+        retain_request=retain, publish=publish_listed, **({"timeout": timeout} if timeout != 60.0 else {}))
     assert result is attempt
     assert events == ["app-retained", "native-submit"]
 
@@ -289,6 +292,6 @@ async def test_host_entry_refuses_mcp_and_enrollment_before_retention(tmp_path, 
     async def retain(value): pytest.fail("MCP entry must not retain")
     async def publish(): pytest.fail("MCP entry must not list")
     bind_member_class_requests(owner, app, runtime)
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
         await context._begin_member_class_add(admission_id="saved-add", class_id="reader", spec=object(),
             retain_request=retain, publish=publish, **extra)

@@ -59196,6 +59196,78 @@ mod terminal_completion_batch_bound {
         );
     }
 
+    /// A retire of a session whose held runtime loop has a burst of wakes
+    /// pending returns. Retire holds the session mutation gate while it wakes
+    /// the loop, and the loop takes that gate to process each wake, so retire
+    /// must never wait for room on the loop's bounded wake channel: a pending
+    /// wake already makes the loop run the drain.
+    async fn retire_after_a_wake_burst_returns(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        let runs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        fixture
+            .machine
+            .register_session_with_executor(
+                fixture.session_id.clone(),
+                Box::new(RecordingCompletingExecutor {
+                    runs: Arc::clone(&runs),
+                }),
+            )
+            .await
+            .expect("register the session with a loop");
+        fixture
+            .machine
+            .hold_run_starts(&fixture.session_id, crate::RunStartHoldReason::MobStop)
+            .await
+            .expect("hold run starts");
+        let mut parks = fixture.machine.run_start_held_parks();
+        // Every admission wakes the held loop.
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+        tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+            .await
+            .expect("the runtime loop parks on the hold")
+            .expect("park signal");
+        let report = tokio::time::timeout(
+            Duration::from_secs(60),
+            crate::traits::RuntimeControlPlane::retire(
+                fixture.machine.as_ref(),
+                &fixture.runtime_id(),
+            ),
+        )
+        .await
+        .expect("the retire returns within 60 s")
+        .expect("retire while the held loop owns the drain");
+        assert_eq!(
+            report.inputs_abandoned, 0,
+            "the held loop owns the drain: retire abandons nothing"
+        );
+        let abandoned_count = tokio::time::timeout(
+            Duration::from_secs(120),
+            fixture
+                .machine
+                .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
+        )
+        .await
+        .expect("the retirement cleanup finishes")
+        .expect("retirement cleanup");
+        assert_eq!(abandoned_count, BACKLOG);
+        let outcomes = fixture.settle(waiters, "retirement cleanup").await;
+        assert_every_runtime_terminated(&outcomes, "retired cleanup", "retirement cleanup");
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Retired),
+                "retirement cleanup",
+            )
+            .await;
+        fixture.assert_ready("after the retirement cleanup").await;
+        assert!(
+            runs.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "nothing ran"
+        );
+    }
+
     /// A replacement attachment published over a 300-input backlog cancels
     /// every predecessor input and fails each waiter as replaced.
     async fn attachment_replacement_completes_every_input(store: BoundStore) {
@@ -59537,6 +59609,7 @@ mod terminal_completion_batch_bound {
         destroy_completes_every_input,
         loopless_retire_completes_every_input,
         retired_pending_cleanup_completes_every_input,
+        retire_after_a_wake_burst_returns,
         attachment_replacement_completes_every_input,
         reset_refused_while_running_keeps_the_session_usable,
         reset_refused_while_stopped_keeps_the_session_usable,

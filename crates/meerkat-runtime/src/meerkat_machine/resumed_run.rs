@@ -50,25 +50,77 @@ impl MeerkatMachine {
         }
     }
 
-    /// The interrupted tool calls whose notices `session_id`'s registration
-    /// still owes the model, unacknowledged. A resumed round reads them so a
-    /// call whose process had started is answered with its custody facts
-    /// instead of being dispatched again; the notices stay owed.
-    pub async fn owed_interrupted_tool_calls(
+    /// The interrupted tool calls of `run_id`, the run `session_id`'s
+    /// registration resumes, as the session's process-custody evidence
+    /// records them.
+    ///
+    /// The attachment that serves the registration leaves a run with a
+    /// provisional tail out of its settlement: the run keeps its inputs and
+    /// resumes. So its calls owe the model no notice; the resumed round reads
+    /// them here and answers each call whose process may have run before the
+    /// restart as interrupted, with an outcome-uncertain result, instead of
+    /// dispatching it again. They are read from the durable evidence, not
+    /// handed over by the attachment, so a resumed round that the loop starts
+    /// before that hand-off still finds them.
+    ///
+    /// The evidence is the one the attachment installed on the session's
+    /// bindings when it settled the session's earlier-incarnation processes;
+    /// this read never settles them a second time. Empty when the host keeps
+    /// no process custody. An evidence store that cannot be read, or a host
+    /// that keeps custody but whose evidence the attachment did not install,
+    /// fails the call, so the round is not dispatched without it.
+    pub async fn resumed_run_interrupted_tool_calls(
         &self,
         session_id: &meerkat_core::types::SessionId,
-    ) -> Vec<meerkat_core::tool_process::InterruptedToolCall> {
-        let sessions = self.sessions.read().await;
-        let Some(entry) = sessions.get(session_id) else {
-            return Vec::new();
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<Vec<meerkat_core::tool_process::InterruptedToolCall>, RuntimeDriverError> {
+        let Some(evidence) = self.bound_interrupted_tool_evidence(session_id).await else {
+            if self.interrupted_tool_evidence_source().is_some() {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "the tool-process custody evidence of session {session_id} is not installed, so the interrupted tool calls of run {run_id}, which resumes, cannot be read"
+                )));
+            }
+            return Ok(Vec::new());
         };
-        entry
-            .interrupted_tool_notices
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(|notices| notices.calls.iter().map(|owed| owed.call.clone()).collect())
-            .unwrap_or_default()
+        let calls = evidence.interrupted_calls().await.map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "failed to read the interrupted tool calls of run {run_id} of session {session_id}, which resumes: {error}"
+            ))
+        })?;
+        Ok(calls
+            .into_iter()
+            .filter(|call| &call.run_id == run_id)
+            .collect())
+    }
+
+    /// Acknowledge the process-custody evidence of `calls`, which a resumed
+    /// run's round answered as interrupted before the run ended: the round's
+    /// results told the model, so the evidence owes it nothing more. Best
+    /// effort: evidence left behind is settled at the next materialization,
+    /// where the run has ended.
+    pub async fn acknowledge_resumed_run_interrupted_tool_calls(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        calls: &[meerkat_core::tool_process::InterruptedToolCall],
+    ) {
+        if calls.is_empty() {
+            return;
+        }
+        let Some(evidence) = self.bound_interrupted_tool_evidence(session_id).await else {
+            tracing::warn!(
+                %session_id,
+                "the resumed run's interrupted-call evidence is not installed; it stays for the next materialization"
+            );
+            return;
+        };
+        let entries: Vec<uuid::Uuid> = calls.iter().map(|call| call.entry_id).collect();
+        if let Err(error) = evidence.acknowledge(&entries).await {
+            tracing::warn!(
+                %session_id,
+                %error,
+                "the resumed run's interrupted-call evidence stays for the next materialization"
+            );
+        }
     }
 
     /// The run `session_id`'s current registration keeps resumable, if any.

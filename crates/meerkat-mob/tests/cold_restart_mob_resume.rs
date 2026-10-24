@@ -3845,11 +3845,18 @@ fn persistent_head_canonical_service_with(
 }
 
 /// A long run compacts more often than the history retention keeps, so it
-/// saves an intra-run checkpoint after its own tool results; the host then
-/// dies in the middle of the run, before its end and its boundary commit.
-/// The cold restart recovers the run as interrupted: the content up to the
-/// checkpoint stays, the recovery notice closes it, and its input is not run
-/// again. The worker then runs a new turn.
+/// commits rounds whose rewrites the committed boundary does not cover; the
+/// host then dies in the middle of the run, after a round commit and before
+/// its end and its boundary commit (process loss). The cold restart restores
+/// the member through its reload, and recovery continues the open run: the
+/// run resumes under its own id from its last round commit, asks the model
+/// once more and completes once, its input is not run again from scratch, and
+/// no recovery notice closes it. The worker then runs a new turn.
+///
+/// The killed host writes nothing after the kill: its runtime store handle
+/// stays cut for good, and the restarted host opens its own. A host that
+/// survives the kill in-process (its runtime loop cancels the held run) must
+/// not commit that cancellation behind the restart's back.
 ///
 /// Needs the test-support feature for the crash-stop command.
 #[cfg(feature = "test-support")]
@@ -3969,6 +3976,18 @@ async fn mob_cold_restart_after_a_kill_following_a_mid_run_checkpoint_does_not_r
         "the checkpointed tail ends with the run's tool results: {:?}",
         physical_row.messages().last()
     );
+    let cursor = physical_row
+        .try_run_cursor()
+        .expect("the run cursor decodes")
+        .expect("the round commit carries the open run's cursor");
+    let open_run = cursor.run_id.clone();
+    let [run_input] = cursor.bound_input_ids.as_slice() else {
+        panic!(
+            "the run binds exactly its one input: {:?}",
+            cursor.bound_input_ids
+        );
+    };
+    let run_input = run_input.clone();
     let committed = runtime_store
         .load_session_boundary_authority(&runtime_id)
         .await
@@ -4012,9 +4031,14 @@ async fn mob_cold_restart_after_a_kill_following_a_mid_run_checkpoint_does_not_r
     .await
     .expect("process-loss fixture waits for every old session runtime to be released");
 
-    // ---------------- Lifetime 2 (power restored) ----------------
-    power_store.set_cut(false);
-    let client_2 = Arc::new(HoldingToolLoopClient::new(usize::MAX));
+    // ---------------- Lifetime 2 ----------------
+    // The killed host's handle stays cut: anything its surviving tasks still
+    // try to write is lost, as with a real kill. The restarted host opens the
+    // same database through its own handle.
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    // The resumed run's next model request answers and ends the loop.
+    let client_2 = Arc::new(HoldingToolLoopClient::new(0));
     let (service_2, store_2) = persistent_head_canonical_service_with(
         &paths,
         runtime_store.clone(),
@@ -4038,62 +4062,88 @@ async fn mob_cold_restart_after_a_kill_following_a_mid_run_checkpoint_does_not_r
         "mid-run-kill-post-resume",
     );
 
-    // Recovery closed the run as interrupted: the committed boundary is the
-    // checkpointed head plus the typed recovery notice.
+    // The run resumes from its round commit and completes: its input ends
+    // consumed and its boundary commit consumes the run's tail. Wait for that
+    // durable answer before any committed read, so the row tests the cold
+    // open, not read timing.
     let deadline = Instant::now() + Duration::from_secs(20);
-    let recovered = loop {
-        let session = store_2
-            .load(&w1_sid)
+    let settled_input = loop {
+        let input = runtime_store
+            .load_input_state(&runtime_id, &run_input)
             .await
-            .expect("load the recovered row")
-            .expect("recovered row");
-        if matches!(
-            session.messages().last(),
-            Some(meerkat_core::Message::SystemNotice(_))
-        ) {
-            break session;
+            .expect("read the run's input")
+            .expect("the run's input is known");
+        let tail = runtime_store
+            .load_head_canonical_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail");
+        if input.seed.terminal_outcome.is_some() && tail.is_none() {
+            break input;
         }
         assert!(
             Instant::now() < deadline,
-            "[mid-run-kill] the run was not closed with the recovery notice: {:?}",
-            session.messages().last()
+            "[mid-run-kill] the resumed run did not end: input {:?}, tail {}",
+            input.seed.phase,
+            if tail.is_some() { "stands" } else { "consumed" }
         );
         sleep(Duration::from_millis(100)).await;
     };
     assert_eq!(
-        recovered.messages().len(),
-        physical_row.messages().len() + 1,
-        "every checkpointed row plus the recovery notice"
+        settled_input.seed.phase,
+        meerkat_runtime::InputLifecycleState::Consumed,
+        "[mid-run-kill] the resumed run consumed its input: {:?}",
+        settled_input.seed.terminal_outcome
     );
-    let recovered_authority = runtime_store
-        .load_session_boundary_authority(&runtime_id)
+    assert_eq!(
+        settled_input.seed.last_run_id.as_ref(),
+        Some(&open_run),
+        "[mid-run-kill] the run that consumed the input is the one the kill left open: it resumed under its own id, not a new run from scratch"
+    );
+    let resumed = store_2
+        .load(&w1_sid)
         .await
-        .expect("load the recovered boundary")
-        .expect("recovered boundary");
-    assert_eq!(
-        recovered_authority
-            .head_canonical()
-            .expect("HeadCanonical")
-            .boundary_head()
-            .rewrite_count,
-        physical.rewrite_count,
-        "the recovered boundary carries the checkpointed rewrites"
+        .expect("load the committed row")
+        .expect("committed row");
+    assert!(
+        matches!(
+            resumed.messages().last(),
+            Some(meerkat_core::Message::BlockAssistant(answer))
+                if answer.text_blocks().collect::<String>() == "loop done"
+        ),
+        "[mid-run-kill] the resumed run's answer ends the committed transcript: {:?}",
+        resumed.messages().last()
     );
-
-    // The input is terminalized, not run again: no model request reaches
-    // the new host until the worker gets a new prompt.
-    sleep(Duration::from_secs(2)).await;
+    assert!(
+        !resumed
+            .messages()
+            .iter()
+            .any(|message| matches!(message, meerkat_core::Message::SystemNotice(_))),
+        "[mid-run-kill] no recovery notice closed the run: it resumed"
+    );
     assert_eq!(
-        client_2.other_requests(),
-        0,
-        "[mid-run-kill] the restarted host ran the killed run's input again"
+        resumed
+            .messages()
+            .iter()
+            .filter(|message| matches!(
+                message,
+                meerkat_core::Message::User(user)
+                    if user.text_content().contains(HoldingToolLoopClient::LOOP_MARKER)
+            ))
+            .count(),
+        1,
+        "[mid-run-kill] the run's input was not appended again"
     );
     assert_eq!(
         client_2
             .loop_requests
             .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "[mid-run-kill] the resumed run asked the model exactly once"
+    );
+    assert_eq!(
+        client_2.other_requests(),
         0,
-        "[mid-run-kill] the restarted host resumed the killed run's tool loop"
+        "[mid-run-kill] the restarted host made no other model request"
     );
 
     send_and_wait(

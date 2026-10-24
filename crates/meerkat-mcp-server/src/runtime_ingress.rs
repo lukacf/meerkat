@@ -4,8 +4,8 @@ use meerkat::session_runtime::admission::{
     RuntimeRegistrationLockLease,
 };
 #[cfg(test)]
-use meerkat::{CreateSessionRequest, RunResult};
-use meerkat::{FactoryAgentBuilder, PersistentSessionService, Session, SessionServiceControlExt};
+use meerkat::{CreateSessionRequest, RunResult, Session};
+use meerkat::{FactoryAgentBuilder, PersistentSessionService, SessionServiceControlExt};
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::error::AgentError;
 use meerkat_core::event::AgentEvent;
@@ -1417,25 +1417,15 @@ impl McpRuntimeIngressContext {
         .await;
     }
 
-    async fn session_archived_by_authority(
-        &self,
-        session_id: &SessionId,
-        session: &Session,
-    ) -> Result<bool, SessionError> {
-        self.service
-            .session_archived_by_authority(session_id, session)
-            .await
-    }
-
+    /// Whether the RuntimeStore holds an absorbing archive terminal for the
+    /// session. It reads no body, so an ingress into a running session, a
+    /// live MCP change and a run resumed over its open provisional tail are
+    /// not refused by the tail's revision conflict.
     async fn authoritative_session_archived(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, SessionError> {
-        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
-            return Ok(false);
-        };
-        self.session_archived_by_authority(session_id, &session)
-            .await
+        Ok(committed_source_archived(&self.service, session_id).await? == Some(true))
     }
 
     /// Resolve completion cleanup from one exact attachment observation.
@@ -1919,6 +1909,31 @@ pub(crate) fn resume_required_tool_error(
             "reason": reason,
         })),
     )
+}
+
+/// Body-free archive and presence answer for `session_id`'s committed
+/// source: `None` when no committed session exists, otherwise whether the
+/// RuntimeStore holds an absorbing archive terminal for it.
+///
+/// It reads [`PersistentSessionService::observe_live_durable_source`], which
+/// applies the archive rule of `session_archived_by_authority` (a rule that
+/// never reads the body) and never materializes the session body. A body read
+/// of the committed boundary refuses with `TranscriptRevisionConflict` from a
+/// durable run's first HeadCanonical round commit until its boundary commit,
+/// so a precheck that needs only presence and archive state reads no body. A
+/// classification this build does not know is a fault, never presence.
+pub(crate) async fn committed_source_archived(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) -> Result<Option<bool>, SessionError> {
+    match service.observe_live_durable_source(session_id).await? {
+        meerkat::LiveDurableSourceObservation::Absent => Ok(None),
+        meerkat::LiveDurableSourceObservation::Archived => Ok(Some(true)),
+        meerkat::LiveDurableSourceObservation::Committed { .. } => Ok(Some(false)),
+        other => Err(SessionError::Agent(AgentError::InternalError(format!(
+            "the durable source of session {session_id} answered a classification this build does not know: {other:?}"
+        )))),
+    }
 }
 
 pub(crate) fn session_error_to_tool_error(

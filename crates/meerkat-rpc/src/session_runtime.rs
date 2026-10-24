@@ -17,6 +17,16 @@ mod schedule_host;
 #[path = "session_runtime/governed.rs"]
 mod governed;
 
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::large_futures
+)]
+#[path = "session_runtime/committed_reads_tests.rs"]
+mod committed_reads_tests;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -532,6 +542,33 @@ pub(crate) use meerkat::session_runtime::staged_promotion::{
     PendingPromotionCleanup, PendingPromotionCleanupMode,
 };
 
+/// Body-free archive and presence answer for `session_id`'s committed
+/// source: `None` when no committed session exists, otherwise whether the
+/// RuntimeStore holds an absorbing archive terminal for it.
+///
+/// It reads [`PersistentSessionService::observe_live_durable_source`], which
+/// applies the archive rule of `session_archived_by_authority` (a rule that
+/// never reads the body) and never materializes the session body. A body read
+/// of the committed boundary refuses with `TranscriptRevisionConflict` from a
+/// durable run's first HeadCanonical round commit until its boundary commit,
+/// so a precheck that needs only presence and archive state reads no body. A
+/// classification this build does not know is a fault, never presence.
+async fn committed_source_archived(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) -> Result<Option<bool>, SessionError> {
+    match service.observe_live_durable_source(session_id).await? {
+        meerkat::LiveDurableSourceObservation::Absent => Ok(None),
+        meerkat::LiveDurableSourceObservation::Archived => Ok(Some(true)),
+        meerkat::LiveDurableSourceObservation::Committed { .. } => Ok(Some(false)),
+        other => Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(format!(
+                "the durable source of session {session_id} answered a classification this build does not know: {other:?}"
+            )),
+        )),
+    }
+}
+
 #[cfg(feature = "mob")]
 type RpcMobCallbackRouteSlots = Arc<
     StdMutex<
@@ -757,14 +794,7 @@ impl RpcMobSessionService {
         session_id: &SessionId,
         turn_boundary_already_held: bool,
     ) -> Result<(), SessionError> {
-        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
-            return Ok(());
-        };
-        if self
-            .service
-            .session_archived_by_authority(session_id, &session)
-            .await?
-        {
+        if committed_source_archived(&self.service, session_id).await? == Some(true) {
             if self.staged_sessions.contains(session_id).await {
                 return Ok(());
             }
@@ -1757,6 +1787,21 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
             return Ok(None);
         }
         Ok(Some(session))
+    }
+
+    /// The persistent service's tolerant committed read, with the same
+    /// archived-as-absent rule: a reader of a member whose durable run holds
+    /// a provisional tail gets the committed snapshot. Deciders keep the
+    /// strict [`Self::load_persisted_session`].
+    async fn load_persisted_session_tolerating_tail(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        meerkat_mob::MobSessionService::load_persisted_session_tolerating_tail(
+            self.service.as_ref(),
+            session_id,
+        )
+        .await
     }
 
     async fn load_retained_session_metadata(
@@ -3448,21 +3493,18 @@ impl SessionRuntime {
     /// Pure archive authority query used by runtime-owned executors. Cleanup
     /// cannot run until the runtime loop publishes its exact executor back to
     /// the machine-owned unregister saga.
+    ///
+    /// It reads no session body, so a run resumed over its open provisional
+    /// tail, and an ingress into a running session, are not refused by the
+    /// tail's revision conflict.
     pub(crate) async fn archived_persisted_session_without_live_by_authority(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, RpcError> {
-        let Some(stored) = self
-            .service
-            .load_authoritative_session(session_id)
+        if committed_source_archived(&self.service, session_id)
             .await
             .map_err(session_error_to_rpc)?
-        else {
-            return Ok(false);
-        };
-        if !self
-            .session_archived_by_authority(session_id, &stored)
-            .await?
+            != Some(true)
         {
             return Ok(false);
         }
@@ -11227,21 +11269,16 @@ impl SessionRuntime {
             })?
             .is_some();
         // A staged (deferred) session has no run yet: the machine reports the
-        // stop as `NotCurrent`. Any other session must exist and be live.
+        // stop as `NotCurrent`. Any other session must exist and be live. The
+        // check reads no body: the run it stops may hold a provisional tail.
         if !staged {
-            let Some(session) = self
-                .service
-                .load_authoritative_session(session_id)
+            match committed_source_archived(&self.service, session_id)
                 .await
                 .map_err(session_error_to_rpc)?
-            else {
-                return Err(Self::session_not_found_rpc(session_id));
-            };
-            if self
-                .session_archived_by_authority(session_id, &session)
-                .await?
             {
-                return Err(Self::archived_session_not_found_rpc(session_id));
+                None => return Err(Self::session_not_found_rpc(session_id)),
+                Some(true) => return Err(Self::archived_session_not_found_rpc(session_id)),
+                Some(false) => {}
             }
         }
         self.runtime_adapter
@@ -11894,31 +11931,17 @@ impl SessionRuntime {
             .map_err(session_error_to_rpc)
     }
 
-    async fn session_archived_by_authority(
-        &self,
-        session_id: &SessionId,
-        session: &Session,
-    ) -> Result<bool, RpcError> {
-        self.service
-            .session_archived_by_authority(session_id, session)
-            .await
-            .map_err(session_error_to_rpc)
-    }
-
+    /// Whether the RuntimeStore holds an absorbing archive terminal for the
+    /// session. It reads no body, so an interrupt or a stop of a running
+    /// durable run is not refused by the run's provisional tail.
     pub(crate) async fn authoritative_session_archived(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, RpcError> {
-        let Some(session) = self
-            .service
-            .load_authoritative_session(session_id)
+        committed_source_archived(&self.service, session_id)
             .await
-            .map_err(session_error_to_rpc)?
-        else {
-            return Ok(false);
-        };
-        self.session_archived_by_authority(session_id, &session)
-            .await
+            .map(|archived| archived == Some(true))
+            .map_err(session_error_to_rpc)
     }
 
     /// Archive (remove) a session.
@@ -14255,12 +14278,19 @@ impl SessionRuntime {
     }
 
     /// [`Self::durable_mcp_attachment_intents`] through `service`.
+    ///
+    /// The intents are build state, which a run's rounds never change, so
+    /// while the session's durable run holds a provisional tail they are read
+    /// from the committed snapshot.
     #[cfg(feature = "mcp")]
     async fn read_durable_mcp_attachment_intents(
         service: &PersistentSessionService<FactoryAgentBuilder>,
         session_id: &SessionId,
     ) -> Option<Vec<meerkat_core::McpSessionAttachmentIntent>> {
-        match service.load_authoritative_session(session_id).await {
+        match service
+            .load_committed_session_tolerating_tail(session_id)
+            .await
+        {
             Ok(Some(session)) => Some(
                 session
                     .build_state()

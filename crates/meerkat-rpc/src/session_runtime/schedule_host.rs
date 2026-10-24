@@ -117,13 +117,15 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
             });
         }
 
-        let persisted = runtime
-            .load_persisted_session(session_id)
+        // Presence and archive state, read body-free: a session another
+        // process runs holds a provisional tail from its first round commit,
+        // and a body read refuses throughout it.
+        match super::committed_source_archived(&runtime.service, session_id)
             .await
-            .map_err(rpc_to_schedule)?;
-        match persisted {
-            Some(_) => Ok(TargetProbeOutcome::Ready),
-            _ => Ok(TargetProbeOutcome::Missing {
+            .map_err(|error| rpc_to_schedule(super::session_error_to_rpc(error)))?
+        {
+            Some(false) => Ok(TargetProbeOutcome::Ready),
+            Some(true) | None => Ok(TargetProbeOutcome::Missing {
                 detail: Some(format!("session not found: {session_id}")),
             }),
         }
@@ -137,10 +139,25 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
         let Some(session_id) = binding.resolved_session_id() else {
             return Ok(None);
         };
+        // The owner identity is committed metadata, which a running durable
+        // run's provisional tail does not change: it reads the committed
+        // snapshot, and an archived session has none.
         let session = runtime
-            .load_persisted_session(session_id)
+            .service
+            .load_committed_session_tolerating_tail(session_id)
             .await
-            .map_err(rpc_to_schedule)?;
+            .map_err(|error| rpc_to_schedule(super::session_error_to_rpc(error)))?;
+        let session = match session {
+            Some(session) => {
+                let archived = runtime
+                    .service
+                    .session_archived_by_authority(session_id, &session)
+                    .await
+                    .map_err(|error| rpc_to_schedule(super::session_error_to_rpc(error)))?;
+                (!archived).then_some(session)
+            }
+            None => None,
+        };
         Ok(recover_mob_member_identity_from_session_target(
             binding,
             session.as_ref(),
@@ -270,21 +287,20 @@ impl SessionRuntime {
         {
             return Ok(session_id.clone());
         }
-        if let Some(persisted) = self
-            .load_persisted_session(session_id)
+        // Presence and archive state, read body-free: the session may be
+        // running in another process, its provisional tail ahead of the
+        // committed snapshot.
+        match super::committed_source_archived(&self.service, session_id)
             .await
-            .map_err(rpc_to_schedule)?
+            .map_err(|error| rpc_to_schedule(super::session_error_to_rpc(error)))?
         {
-            if self
-                .session_archived_by_authority(session_id, &persisted)
-                .await
-                .map_err(rpc_to_schedule)?
-            {
+            Some(true) => {
                 return Err(ScheduleDomainError::InvalidSchedule(format!(
                     "materialized session is archived: {session_id}"
                 )));
             }
-            return Ok(session_id.clone());
+            Some(false) => return Ok(session_id.clone()),
+            None => {}
         }
 
         let mut build_config = scheduled_build_config(create)?;
@@ -986,5 +1002,51 @@ mod tests {
         );
 
         runtime.try_shutdown().await.expect("shutdown");
+    }
+
+    /// A scheduled fire into a session that another runtime over the same
+    /// SQLite realm is running, its durable run held after a round commit:
+    /// the probe and the materialized-session reuse read presence and archive
+    /// state, and the owner identity reads committed metadata. Each read the
+    /// committed body before, which refuses while the run's provisional tail
+    /// stands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rpc_schedule_fire_into_a_session_running_elsewhere() {
+        use super::super::committed_reads_tests::{HeldRun, mid_run, sqlite_runtime};
+
+        let held = HeldRun::start(true).await;
+        let reader = sqlite_runtime(held.root.path()).await;
+        let adapter = RpcScheduleTargetAdapter::new(&reader);
+        let binding = SessionTargetBinding::ResumableSession {
+            session_id: held.session_id.clone(),
+            action: meerkat::ScheduledSessionAction::Prompt {
+                prompt: meerkat_core::ContentInput::Text("scheduled".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        };
+        let probe = mid_run(adapter.probe_session_target(&binding)).await;
+        assert!(
+            matches!(probe, Ok(TargetProbeOutcome::Ready)),
+            "the session running elsewhere probes present: {probe:?}"
+        );
+        let identity = mid_run(adapter.recover_session_target_identity(&binding)).await;
+        assert!(
+            matches!(identity, Ok(None)),
+            "an ordinary session's owner identity reads from its committed metadata: {identity:?}"
+        );
+        let materialized = mid_run(
+            reader.materialize_scheduled_session(&held.session_id, &materialization_spec()),
+        )
+        .await;
+        assert_eq!(
+            materialized.as_ref().ok(),
+            Some(&held.session_id),
+            "the occurrence reuses the running session: {materialized:?}"
+        );
+        let (result, _held) = held.release_and_finish().await;
+        assert_eq!(result.expect("the held run completes").text, "held answer");
     }
 }

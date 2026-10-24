@@ -574,7 +574,7 @@ pub use meerkat_session::{
 };
 #[cfg(feature = "session-store")]
 pub use meerkat_session::{
-    LiveSessionActorTurnBoundaryLease, LiveSessionActorWitnessSlot,
+    LiveDurableSourceObservation, LiveSessionActorTurnBoundaryLease, LiveSessionActorWitnessSlot,
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
 // Maintenance compositions (offline `rkat storage migrate`): a builder that

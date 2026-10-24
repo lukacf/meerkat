@@ -128,25 +128,19 @@ impl RestScheduleContext {
                 )));
             }
         }
-        if let Some(persisted) = self
-            .runtime
-            .session_service
-            .load_authoritative_session(&session_id)
+        // Body-free: a session another owner runs, or one whose run left a
+        // provisional tail, still answers presence and archive state.
+        match crate::committed_source_archived(&self.runtime.session_service, &session_id)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
         {
-            if self
-                .runtime
-                .session_service
-                .session_archived_by_authority(&session_id, &persisted)
-                .await
-                .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
-            {
+            Some(true) => {
                 return Err(ScheduleDomainError::InvalidSchedule(format!(
                     "materialized session is archived: {session_id}"
                 )));
             }
-            return Ok(session_id);
+            Some(false) => return Ok(session_id),
+            None => {}
         }
 
         let create_admission = self
@@ -293,11 +287,13 @@ impl SurfaceScheduleSessionHost for RestScheduleTargetAdapter {
         let Some(session_id) = binding.resolved_session_id() else {
             return Ok(None);
         };
+        // The owner identity is committed metadata, which a running durable
+        // run's provisional tail does not change.
         let session = self
             .context
             .runtime
             .session_service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         Ok(recover_mob_member_identity_from_session_target(
@@ -549,10 +545,12 @@ async fn update_peer_ingress_context(
     context: &RestScheduleContext,
     session_id: &SessionId,
 ) -> Result<(), ScheduleDomainError> {
+    // The keep-alive is committed metadata, read from the committed snapshot
+    // while the session's durable run holds a provisional tail.
     let session = context
         .runtime
         .session_service
-        .load_authoritative_session(session_id)
+        .load_committed_session_tolerating_tail(session_id)
         .await
         .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
         .ok_or_else(|| {
@@ -717,5 +715,56 @@ mod tests {
         let preload_skills: Vec<SkillKey> = Vec::new();
 
         assert_eq!(materialized_preload_skills(&preload_skills), None);
+    }
+
+    /// A scheduled fire into a session whose durable run holds after a round
+    /// commit reads the session's committed metadata (its owner identity and
+    /// its keep-alive), not the run's provisional tail. The WholeBlob twin is
+    /// the oracle.
+    async fn rest_schedule_fire_into_a_running_session(head_canonical: bool) {
+        use crate::tests::committed_reads_tests::{RestHeldRun, mid_run};
+
+        let held = RestHeldRun::start(head_canonical).await;
+        let adapter = RestScheduleTargetAdapter::new(RestScheduleContext::from_state(&held.state));
+        let binding = SessionTargetBinding::ResumableSession {
+            session_id: held.session_id.clone(),
+            action: meerkat::ScheduledSessionAction::Prompt {
+                prompt: ContentInput::Text("scheduled".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        };
+        let probe = mid_run(adapter.probe_session_target(&binding)).await;
+        assert!(
+            matches!(probe, Ok(TargetProbeOutcome::Busy { .. })),
+            "the running session probes busy: {probe:?}"
+        );
+        let identity = mid_run(adapter.recover_session_target_identity(&binding)).await;
+        assert!(
+            matches!(identity, Ok(None)),
+            "an ordinary session's owner identity reads from its committed metadata: {identity:?}"
+        );
+        let ingress = mid_run(update_peer_ingress_context(
+            &adapter.context,
+            &held.session_id,
+        ))
+        .await;
+        assert!(
+            ingress.is_ok(),
+            "the peer ingress reads the committed keep-alive: {ingress:?}"
+        );
+        held.release_and_complete().await;
+    }
+
+    #[tokio::test]
+    async fn rest_schedule_fire_into_a_running_session_head_canonical() {
+        rest_schedule_fire_into_a_running_session(true).await;
+    }
+
+    #[tokio::test]
+    async fn rest_schedule_fire_into_a_running_session_whole_blob() {
+        rest_schedule_fire_into_a_running_session(false).await;
     }
 }

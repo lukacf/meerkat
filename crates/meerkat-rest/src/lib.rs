@@ -1130,14 +1130,38 @@ async fn prepare_rest_session_runtime_executor_locked(
             .prepare_cold_attach(session_id, claim)
             .await
             .map_err(runtime_driver_error_from_session_error)?;
-        let session = state
-            .session_service
-            .load_authoritative_session(session_id)
-            .await
-            .map_err(runtime_driver_error_from_session_error)?
-            .ok_or(meerkat_runtime::RuntimeDriverError::NotReady {
-                state: meerkat_runtime::RuntimeState::Destroyed,
-            })?;
+        // A crash-window tail is settled above. A durable run's open tail at
+        // a committed round is continued without a write, so it still stands
+        // ahead of the committed boundary and the committed read refuses it.
+        // Only that run, which this attach resumes, is read through the
+        // committed snapshot: the create below seeds its actor from the
+        // continued tail, never from the snapshot, and its own recovery
+        // refuses a tail that is not continued. Any other tail (held for
+        // reconciliation, or refused) keeps the strict read's refusal, so no
+        // run starts over it.
+        let continues_open_run = matches!(
+            meerkat_runtime::recovery::observe_resumable_run(
+                state.session_service.runtime_store().as_ref(),
+                session_id,
+            )
+            .await,
+            Ok(Some(_))
+        );
+        let session = if continues_open_run {
+            state
+                .session_service
+                .load_committed_session_tolerating_tail(session_id)
+                .await
+        } else {
+            state
+                .session_service
+                .load_authoritative_session(session_id)
+                .await
+        }
+        .map_err(runtime_driver_error_from_session_error)?
+        .ok_or(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        })?;
         if state
             .session_service
             .session_archived_by_authority(session_id, &session)
@@ -1650,14 +1674,11 @@ async fn cleanup_rest_runtime_after_completion_outcome(
 ) -> Result<bool, SessionError> {
     let runtime_registration_lock = rest_runtime_registration_lock(state, session_id);
     let _runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-    let archived_now = match state
-        .session_service
-        .load_authoritative_session(session_id)
-        .await?
-    {
-        Some(session) => session_archived_by_authority(state, session_id, &session).await?,
-        None => false,
-    };
+    // Body-free: a failed run that keeps its provisional tail leaves the
+    // physical head past the committed boundary, and a body read would mask
+    // the run's own error with the tail's revision conflict.
+    let archived_now =
+        committed_source_archived(&state.session_service, session_id).await? == Some(true);
     let live_session = if archived_now {
         meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::NotObserved
     } else if state.session_service.has_live_session(session_id).await? {
@@ -2014,20 +2035,9 @@ async fn apply_runtime_turn_under_runtime_turn_boundary(
         ));
     }
 
-    let archived_now = match context
-        .session_service
-        .load_authoritative_session(session_id)
-        .await?
-    {
-        Some(session) => {
-            context
-                .session_service
-                .session_archived_by_authority(session_id, &session)
-                .await?
-        }
-        None => false,
-    };
-    if archived_now {
+    // Body-free: a run resumed over its open provisional tail is applied
+    // while the tail moves the physical head past the committed boundary.
+    if committed_source_archived(&context.session_service, session_id).await? == Some(true) {
         return Err(SessionError::NotFound {
             id: session_id.clone(),
         });
@@ -2071,12 +2081,14 @@ async fn apply_runtime_turn_under_runtime_turn_boundary(
         SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
     })?;
 
+    // The session's identity is the committed snapshot's: a run resumed over
+    // its open provisional tail is applied while that tail stands, and a run's
+    // rounds never change the identity. A read failure is the apply's error,
+    // never a skipped validation.
     let session_identity = context
         .session_service
-        .load_authoritative_session(session_id)
-        .await
-        .ok()
-        .flatten()
+        .load_committed_session_tolerating_tail(session_id)
+        .await?
         .and_then(|session| {
             session
                 .session_metadata()
@@ -2251,25 +2263,11 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
         {
             Ok(output) => Ok(output),
             Err(error @ SessionError::NotFound { .. }) => {
-                let archived = match self
-                    .context
-                    .session_service
-                    .load_authoritative_session(&self.session_id)
-                    .await
-                {
-                    Ok(Some(session)) => self
-                        .context
-                        .session_service
-                        .session_archived_by_authority(&self.session_id, &session)
+                let archived =
+                    committed_source_archived(&self.context.session_service, &self.session_id)
                         .await
-                        .map_err(CoreExecutorError::apply_failed_from_session_error)?,
-                    Ok(None) => false,
-                    Err(authority_error) => {
-                        return Err(CoreExecutorError::apply_failed_from_session_error(
-                            authority_error,
-                        ));
-                    }
-                };
+                        .map_err(CoreExecutorError::apply_failed_from_session_error)?
+                        == Some(true);
                 if archived {
                     Err(CoreExecutorError::archived_session_requires_teardown(
                         error.to_string(),
@@ -2848,26 +2846,43 @@ async fn session_archived_by_authority(
         .await
 }
 
+/// Body-free archive and presence answer for `session_id`'s committed
+/// source: `None` when no committed session exists, otherwise whether the
+/// RuntimeStore holds an absorbing archive terminal for it.
+///
+/// It reads [`PersistentSessionService::observe_live_durable_source`], which
+/// applies the archive rule of `session_archived_by_authority` (a rule that
+/// never reads the body) and never materializes the session body. A body read
+/// of the committed boundary refuses with `TranscriptRevisionConflict` from a
+/// durable run's first HeadCanonical round commit until its boundary commit,
+/// so a precheck that needs only presence and archive state reads no body. A
+/// classification this build does not know is a fault, never presence.
+pub(crate) async fn committed_source_archived(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) -> Result<Option<bool>, SessionError> {
+    match service.observe_live_durable_source(session_id).await? {
+        meerkat::LiveDurableSourceObservation::Absent => Ok(None),
+        meerkat::LiveDurableSourceObservation::Archived => Ok(Some(true)),
+        meerkat::LiveDurableSourceObservation::Committed { .. } => Ok(Some(false)),
+        other => Err(SessionError::Agent(
+            meerkat_core::AgentError::InternalError(format!(
+                "the durable source of session {session_id} answered a classification this build does not know: {other:?}"
+            )),
+        )),
+    }
+}
+
+/// Whether the RuntimeStore holds an absorbing archive terminal for the
+/// session, read body-free: an ingress into a running session is not refused
+/// by the run's provisional tail.
 async fn authoritative_session_archived_response(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<bool, Response> {
-    let session = state
-        .session_service
-        .load_authoritative_session(session_id)
+    committed_source_archived(&state.session_service, session_id)
         .await
-        .map_err(|err| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to load session: {err}")})),
-            )
-                .into_response()
-        })?;
-    let Some(session) = session else {
-        return Ok(false);
-    };
-    session_archived_by_authority(state, session_id, &session)
-        .await
+        .map(|archived| archived == Some(true))
         .map_err(|err| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -5292,9 +5307,11 @@ async fn interrupt_noop_target(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<InterruptNoopTarget, ApiError> {
+    // The committed snapshot answers presence and the mob-member marker while
+    // the session's durable run holds a provisional tail.
     match state
         .session_service
-        .load_authoritative_session(session_id)
+        .load_committed_session_tolerating_tail(session_id)
         .await
     {
         Ok(Some(session)) => {
@@ -6890,9 +6907,12 @@ async fn continue_session_inner(
         req.verbose,
     );
 
+    // A continue may queue behind the session's running durable run, whose
+    // provisional tail stands ahead of the committed snapshot: the archive and
+    // help-session checks read that snapshot.
     let loaded_session = match state
         .session_service
-        .load_authoritative_session(&session_id)
+        .load_committed_session_tolerating_tail(&session_id)
         .await
     {
         Ok(v) => v,
@@ -6961,9 +6981,11 @@ async fn continue_session_inner(
         let runtime_registration_lock = rest_runtime_registration_lock(state, &session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
+        // The session defaults come from the committed snapshot, which a
+        // running durable run's provisional tail does not change.
         let session = match state
             .session_service
-            .load_authoritative_session(&session_id)
+            .load_committed_session_tolerating_tail(&session_id)
             .await
         {
             Ok(Some(session)) => {
@@ -7524,9 +7546,11 @@ async fn continue_session_inner(
         let runtime_registration_lock = rest_runtime_registration_lock(state, &session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
+        // The session defaults come from the committed snapshot, which a
+        // running durable run's provisional tail does not change.
         let session = match state
             .session_service
-            .load_authoritative_session(&session_id)
+            .load_committed_session_tolerating_tail(&session_id)
             .await
         {
             Ok(Some(session)) => {
@@ -8076,28 +8100,18 @@ async fn continue_session_inner(
             RequestTerminal::Publish(Ok(Json(run_result_to_response(run_result, &state.realm))))
         }
         Err(err) => {
-            let archived_now = match state
-                .session_service
-                .load_authoritative_session(&session_id)
-                .await
-            {
-                Ok(Some(session)) => {
-                    match session_archived_by_authority(state, &session_id, &session).await {
-                        Ok(archived) => archived,
-                        Err(error) => {
-                            return RequestTerminal::Publish(Err(ApiError::Internal(format!(
-                                "Failed to load session archive state: {error}"
-                            ))));
-                        }
+            // Body-free: a failed run may keep its provisional tail, and a
+            // body read would replace the run's error with the tail's
+            // revision conflict.
+            let archived_now =
+                match committed_source_archived(&state.session_service, &session_id).await {
+                    Ok(archived) => archived == Some(true),
+                    Err(error) => {
+                        return RequestTerminal::Publish(Err(ApiError::Internal(format!(
+                            "Failed to load session archive state: {error}"
+                        ))));
                     }
-                }
-                Ok(None) => false,
-                Err(error) => {
-                    return RequestTerminal::Publish(Err(ApiError::Internal(format!(
-                        "Failed to load session: {error}"
-                    ))));
-                }
-            };
+                };
             if archived_now {
                 let cleanup_result =
                     discard_and_cleanup_archived_session_runtime(state, &session_id).await;
@@ -8152,9 +8166,12 @@ async fn session_events(
     // in-progress turn (not yet persisted) will return 404. Future improvement:
     // try read() first for message_count (works for live sessions), fall back
     // to load_persisted() for inactive sessions.
+    //
+    // A stream opened during a run reports the committed snapshot's message
+    // count: the run's provisional tail is not the session's history yet.
     let session = state
         .session_service
-        .load_authoritative_session(&session_id)
+        .load_committed_session_tolerating_tail(&session_id)
         .await
         .map_err(|e| ApiError::Internal(format!("{e}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Session not found: {id}")))?;
@@ -8355,29 +8372,22 @@ async fn resolve_mcp_adapter(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<Arc<McpRouterAdapter>, ApiError> {
-    // Step 1: session must exist.
-    match state
-        .session_service
-        .load_authoritative_session(session_id)
-        .await
-    {
-        Ok(Some(session)) => {
-            if session_archived_by_authority(state, session_id, &session)
+    // Step 1: session must exist. Presence and archive state are read
+    // body-free, so a running session's provisional tail does not refuse it.
+    match committed_source_archived(&state.session_service, session_id).await {
+        Ok(Some(true)) => {
+            cleanup_archived_session_runtime(state, session_id)
                 .await
-                .map_err(|err| ApiError::Internal(err.to_string()))?
-            {
-                cleanup_archived_session_runtime(state, session_id)
-                    .await
-                    .map_err(|error| {
-                        ApiError::Internal(format!(
-                            "failed to clean up archived session runtime: {error}"
-                        ))
-                    })?;
-                return Err(ApiError::NotFound(format!(
-                    "Session not found: {session_id}"
-                )));
-            }
+                .map_err(|error| {
+                    ApiError::Internal(format!(
+                        "failed to clean up archived session runtime: {error}"
+                    ))
+                })?;
+            return Err(ApiError::NotFound(format!(
+                "Session not found: {session_id}"
+            )));
         }
+        Ok(Some(false)) => {}
         Ok(None) => {
             return Err(ApiError::NotFound(format!(
                 "Session not found: {session_id}"
@@ -9113,6 +9123,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
+
+    pub(crate) mod committed_reads_tests;
     use futures::stream;
     use meerkat::{OccurrenceFailureClass, OccurrencePhase, ScheduleId};
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};

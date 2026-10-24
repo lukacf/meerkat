@@ -13339,6 +13339,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn load_persisted_session_tolerating_tail(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session_tolerating_tail(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn load_retained_session_metadata(
         &self,
         session_id: &SessionId,
@@ -16189,10 +16200,12 @@ impl CliScheduleSessionHost {
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat::ScheduleDomainError> {
+        // A session another process is running holds a provisional tail
+        // ahead of its committed snapshot; presence reads that snapshot.
         let session_exists = self.service.read(session_id).await.is_ok()
             || self
                 .service
-                .load_authoritative_session(session_id)
+                .load_committed_session_tolerating_tail(session_id)
                 .await
                 .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?
                 .is_some();
@@ -16217,12 +16230,14 @@ impl CliScheduleSessionHost {
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat::ScheduleDomainError> {
+        // The keep-alive is committed metadata, read from the committed
+        // snapshot while the session's durable run holds a provisional tail.
+        // A read failure is an error, never a keep-alive turned off.
         let keep_alive = self
             .service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
-            .ok()
-            .flatten()
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?
             .and_then(|session| {
                 session
                     .session_metadata()
@@ -16325,19 +16340,24 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             });
         }
 
-        let persisted = self
+        // Presence and archive state, read body-free: a session another
+        // process runs holds a provisional tail from its first round commit,
+        // and a body read refuses throughout it.
+        match self
             .service
-            .load_authoritative_session(session_id)
+            .observe_live_durable_source(session_id)
             .await
-            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        if let Some(session) = persisted {
-            let archived = self
-                .service
-                .session_archived_by_authority(session_id, &session)
-                .await
-                .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-            if !archived {
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?
+        {
+            meerkat::LiveDurableSourceObservation::Committed { .. } => {
                 return Ok(meerkat::TargetProbeOutcome::Ready);
+            }
+            meerkat::LiveDurableSourceObservation::Archived
+            | meerkat::LiveDurableSourceObservation::Absent => {}
+            other => {
+                return Err(meerkat::ScheduleDomainError::Internal(format!(
+                    "the durable source of session {session_id} answered a classification this rkat does not know: {other:?}"
+                )));
             }
         }
         Ok(meerkat::TargetProbeOutcome::Missing {
@@ -16352,9 +16372,11 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         let Some(session_id) = binding.resolved_session_id() else {
             return Ok(None);
         };
+        // The owner identity is committed metadata, which a running durable
+        // run's provisional tail does not change.
         let session = self
             .service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         Ok(recover_mob_member_identity_from_session_target(
@@ -17268,6 +17290,20 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         session_id: &SessionId,
     ) -> Result<Option<Session>, meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    /// The wrapped persistent service's tolerant committed read: a reader of
+    /// a member whose durable run holds a provisional tail gets the committed
+    /// snapshot.
+    async fn load_persisted_session_tolerating_tail(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session_tolerating_tail(
             &self.inner,
             session_id,
         )
@@ -18353,8 +18389,10 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
 
         let (config, _) = load_config(scope).await?;
         let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+        // A session another process is running shows its committed snapshot:
+        // the run's provisional tail is not the session's history yet.
         let session = service
-            .load_authoritative_session(&session_id)
+            .load_committed_session_tolerating_tail(&session_id)
             .await
             .map_err(|e| exit_status::typed_failure(e, |e| format!("Failed to load session: {e}")))?
             .ok_or_else(|| exit_status::session_not_found(&session_id))?;
@@ -23015,6 +23053,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use tokio::sync::RwLock;
+
+    mod committed_reads_tests;
 
     /// Only a revocation is reported as one; every other attempt says what
     /// it did, never that the grant is live.

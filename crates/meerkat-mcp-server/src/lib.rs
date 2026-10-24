@@ -1979,9 +1979,9 @@ impl MeerkatMcpState {
         &self,
         session_id: &meerkat::SessionId,
     ) -> Result<runtime_ingress::McpLiveRouterLease, ToolCallError> {
-        if self
-            .service
-            .load_authoritative_session(session_id)
+        // Presence only, read body-free: a running session's provisional
+        // tail must not refuse a live MCP change.
+        if runtime_ingress::committed_source_archived(&self.service, session_id)
             .await
             .map_err(|error| {
                 runtime_ingress::session_error_to_tool_error(
@@ -4811,9 +4811,12 @@ async fn handle_meerkat_resume(
         .prepare_cold_attach(&session_id, claim)
         .await
         .map_err(prepare_session_tool_error)?;
+    // A resume of a running session queues behind its durable run, whose
+    // provisional tail stands ahead of the committed snapshot: the archive and
+    // help checks and the stored settings read that snapshot.
     let session = state
         .service
-        .load_authoritative_session(&session_id)
+        .load_committed_session_tolerating_tail(&session_id)
         .await
         .map_err(|e| ToolCallError::internal(format!("Failed to load session: {e}")))?
         .ok_or_else(|| {
@@ -5400,40 +5403,31 @@ async fn handle_meerkat_resume(
             Err((other, _admission)) => Err(other),
         }
     };
-    let session_exists = match state.service.load_authoritative_session(&session_id).await {
-        Ok(Some(session)) => match state
-            .service
-            .session_archived_by_authority(&session_id, &session)
-            .await
-        {
-            Ok(true) => {
-                state
-                    .cleanup_archived_session_runtime(&session_id)
-                    .await
-                    .map_err(archive_session_error_to_tool_error)?;
-                false
-            }
-            Ok(false) => true,
-            Err(err) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %err,
-                    "failed to load machine archive state during MCP session existence check"
-                );
-                return Err(ToolCallError::internal(format!(
-                    "failed to load machine archive state during MCP session existence check for {session_id}: {err}"
-                )));
-            }
-        },
+    // Presence and archive state, read body-free: a run still going on the
+    // session (this resume queued behind it) holds a provisional tail.
+    let session_exists = match runtime_ingress::committed_source_archived(
+        &state.service,
+        &session_id,
+    )
+    .await
+    {
+        Ok(Some(true)) => {
+            state
+                .cleanup_archived_session_runtime(&session_id)
+                .await
+                .map_err(archive_session_error_to_tool_error)?;
+            false
+        }
+        Ok(Some(false)) => true,
         Ok(None) => false,
         Err(err) => {
             tracing::warn!(
                 session_id = %session_id,
                 error = %err,
-                "failed to load authoritative session after MCP resume attempt"
+                "failed to load machine archive state during MCP session existence check"
             );
             return Err(ToolCallError::internal(format!(
-                "failed to load authoritative session after MCP resume attempt for {session_id}: {err}"
+                "failed to load machine archive state during MCP session existence check for {session_id}: {err}"
             )));
         }
     };
@@ -5682,6 +5676,8 @@ mod tests {
     use super::*;
     use futures::stream;
     use meerkat::Session;
+
+    pub(crate) mod committed_reads_tests;
     use meerkat::surface::{
         CancelActionInstallOutcome, SurfaceRequestExecutor, noop_request_action,
     };

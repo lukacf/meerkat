@@ -215,7 +215,7 @@ mod tests {
     type Driver = Arc<crate::tokio::sync::Mutex<DriverEntry>>;
 
     struct Governed {
-        machine: MeerkatMachine,
+        machine: Arc<MeerkatMachine>,
         session_id: SessionId,
         host: Arc<TestIngress>,
         driver: Driver,
@@ -253,7 +253,7 @@ mod tests {
             driver.set_executor_work_authorization_support(true);
         }
         Governed {
-            machine,
+            machine: Arc::new(machine),
             session_id,
             host: test_host,
             driver,
@@ -423,7 +423,7 @@ mod tests {
             driver.set_executor_work_authorization_support(true);
         }
         Governed {
-            machine,
+            machine: Arc::new(machine),
             session_id,
             host,
             driver,
@@ -1080,5 +1080,177 @@ mod tests {
             .await
             .expect("the committed head row");
         assert_eq!(request.delivery().delivery_sequence, 1);
+    }
+
+    /// Admit, as the governed ingress does, an original from `requester`
+    /// whose input id and raw key are both `id`: a supervisor delivery's
+    /// shape (it keeps its payload input id, its event key).
+    async fn admit_original_as(
+        fixture: &Governed,
+        requester: &str,
+        id: &uuid::Uuid,
+    ) -> RetainedInputAuthority {
+        let mut prompt = fixture.host.input(requester);
+        let ingress = Arc::clone(prompt.header().ingress_context.as_ref().expect("ingress"));
+        let mut candidate = prompt
+            .header()
+            .authority_association
+            .as_ref()
+            .expect("claims")
+            .candidate()
+            .clone();
+        candidate.target.logical_runtime =
+            EvidenceId::new(fixture.runtime_id.to_string()).expect("runtime id");
+        let selection = candidate.controller_model.clone().expect("selection");
+        prompt.header_mut().authority_association =
+            Some(InputAuthorityAssociation::new(candidate).expect("claims"));
+        prompt.header_mut().id = InputId::from_uuid(*id);
+        prompt.header_mut().idempotency_key =
+            Some(crate::identifiers::IdempotencyKey::new(id.to_string()));
+        let actual = NativeIngressContext::from_trusted_ingress(
+            &prompt,
+            ingress.requester().clone(),
+            ingress.ingress_actor().clone(),
+            ingress.realm().clone(),
+            ingress.authentication().clone(),
+        )
+        .expect("bound submission")
+        .with_controller_client(
+            &prompt,
+            meerkat_core::ControllerModelClient::new(
+                selection.clone(),
+                Arc::new(Client(selection)),
+            ),
+        )
+        .expect("same controller");
+        let prompt = prompt.with_ingress_context(actual).expect("context");
+        let mut driver = fixture.driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *driver else {
+            panic!("storeless")
+        };
+        let AcceptOutcome::Accepted { state, .. } = driver
+            .accept_input(prompt)
+            .await
+            .expect("original admitted")
+        else {
+            panic!("original admitted")
+        };
+        state
+            .authority_contributors
+            .iter()
+            .find(|retained| retained.input_id() == &state.input_id)
+            .cloned()
+            .expect("retained authority")
+    }
+
+    /// A tracked delivery is named by its payload input id, never by another
+    /// input that carries that id as its key. On a governed member a governed
+    /// row whose input id and raw key are K (a supervisor delivery's shape,
+    /// admitted under K's qualification) sits beside a retained resume keyed
+    /// K: a resume has no association of its own, so the machine binds K to
+    /// it. The tracked cancel addressed by K ends the governed row and leaves
+    /// the resume queued, and the tracked read of K is the governed row. RED
+    /// while the cancel resolved K through the binding first: it cancelled
+    /// the resume, and the delivery kept running.
+    #[tokio::test]
+    async fn a_tracked_cancel_ends_its_delivery_and_never_an_input_carrying_its_id() {
+        let fixture = governed_staging().await;
+        let original = admit_original(&fixture, "caller-a").await;
+        let run = stage_run(&fixture, std::slice::from_ref(original.input_id())).await;
+        finish_run(&fixture, run.run_id()).await;
+
+        let key = uuid::Uuid::new_v4();
+        let key_text = key.to_string();
+        let delivery = admit_original_as(&fixture, "caller-b", &key).await;
+        let request = request_from_delivery(
+            &fixture.runtime_id,
+            run,
+            "continuation:collision",
+            &key_text,
+        )
+        .await;
+        let (outcome, _) = fixture
+            .machine
+            .accept_retained_resume(
+                &fixture.session_id,
+                keyed_continuation(&key_text, "the fork finished"),
+                request,
+            )
+            .await
+            .expect("the resume is admitted under its raw key");
+        let AcceptOutcome::Accepted { state: resume, .. } = outcome else {
+            panic!("accepted, got {outcome:?}")
+        };
+        assert_ne!(&resume.input_id, delivery.input_id());
+        let bound = crate::service_ext::SessionServiceRuntimeExt::input_state_by_idempotency_key(
+            fixture.machine.as_ref(),
+            &fixture.session_id,
+            &key_text,
+        )
+        .await
+        .expect("key read")
+        .expect("the machine binds the key");
+        assert_eq!(
+            bound.state.input_id, resume.input_id,
+            "the machine binds K to the resume"
+        );
+
+        let member = meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation {
+            mob_id: "tracked-collision".to_string(),
+            agent_identity: "worker".to_string(),
+            host_id: "host-a".to_string(),
+            binding_generation: 1,
+            member_session_id: fixture.session_id.to_string(),
+            generation: 0,
+            fence_token: 1,
+        };
+        drop(
+            fixture
+                .machine
+                .begin_member_residency_update(fixture.session_id.clone())
+                .await
+                .commit(member.clone(), None)
+                .await
+                .expect("publish the member residency"),
+        );
+        fixture
+            .machine
+            .cancel_tracked_input_for_member_incarnation(&fixture.session_id, &key_text, &member)
+            .await
+            .expect("the tracked cancel converges");
+
+        let read = |input_id: InputId| {
+            let machine = fixture.machine.as_ref();
+            let session_id = &fixture.session_id;
+            async move {
+                crate::service_ext::SessionServiceRuntimeExt::input_state(
+                    machine, session_id, &input_id,
+                )
+                .await
+                .expect("row read")
+                .expect("the row")
+            }
+        };
+        let delivery_row = read(delivery.input_id().clone()).await;
+        assert_eq!(
+            delivery_row.seed.terminal_outcome,
+            Some(crate::input_state::InputTerminalOutcome::Abandoned {
+                reason: crate::input_state::InputAbandonReason::Cancelled,
+            }),
+            "the tracked cancel ends the delivery"
+        );
+        let resume_row = read(resume.input_id.clone()).await;
+        assert_eq!(
+            (resume_row.seed.phase, resume_row.seed.terminal_outcome),
+            (crate::input_state::InputLifecycleState::Queued, None),
+            "the resume carrying the delivery's id as its key stays queued"
+        );
+        let tracked = fixture
+            .machine
+            .tracked_delivery_input_state(&fixture.session_id, &key_text)
+            .await
+            .expect("tracked read")
+            .expect("the tracked read of K");
+        assert_eq!(&tracked.state.input_id, delivery.input_id());
     }
 }

@@ -1146,20 +1146,22 @@ async fn a_pending_supervisor_binding_is_rejected_typed_not_ready() {
     assert!(reason.contains("not ready"), "{reason}");
 }
 
-/// A governed supervisor delivery is admitted under its key's qualification,
-/// and its payload input id still names it by key: the by-key reads find the
-/// governed row whose own retained association qualifies that key to its
-/// admission key, live and from the store after a restart. A key the row was
-/// not admitted under, and another session, name nothing.
+/// A governed supervisor delivery is admitted under its key's qualification
+/// and keeps its payload input id as its input id. Its tracked read
+/// (`tracked_delivery_input_state`) finds it by that id, live and from the
+/// store after a restart, because the row's own retained association
+/// qualifies the payload id to its admission key. Another id, and another
+/// session, name nothing. The by-key reads keep only the machine binding, as
+/// on every runtime: the payload id is no binding of a governed row.
 #[tokio::test]
-async fn a_governed_supervisor_delivery_is_named_by_its_payload_key() {
+async fn a_governed_supervisor_delivery_is_read_by_its_payload_id() {
     use crate::service_ext::SessionServiceRuntimeExt as _;
 
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let custody = Arc::<Custody>::default();
     let session_id = SessionId::new();
     let supervisor = PeerId::parse(PEER_ID_SUPERVISOR).expect("supervisor peer id");
-    let other_key = Uuid::new_v4().to_string();
+    let other_id = Uuid::new_v4().to_string();
     let (selection, payload_input_id) = {
         let first = Governed::persistent(Arc::clone(&store), None, Arc::clone(&custody));
         first.register(&session_id).await;
@@ -1189,76 +1191,86 @@ async fn a_governed_supervisor_delivery_is_named_by_its_payload_key() {
             )
             .await
             .expect("the bound delivery is admitted");
-        let key = payload_input_id.to_string();
+        let id = payload_input_id.to_string();
         let live = first
             .adapter
-            .input_state_by_idempotency_key(&session_id, &key)
+            .tracked_delivery_input_state(&session_id, &id)
             .await
-            .expect("live key read")
-            .expect("the payload key names the live governed row");
+            .expect("live tracked read")
+            .expect("the payload id reads the live governed row");
         assert_eq!(live.state.input_id, payload_input_id);
         assert!(
             live.state
                 .idempotency_key
                 .as_ref()
-                .is_some_and(|admitted| admitted.0 != key),
+                .is_some_and(|admitted| admitted.0 != id),
             "admitted under the key's qualification"
         );
-        assert!(live.admitted_under_idempotency_key(&key));
-        assert!(!live.admitted_under_idempotency_key(&other_key));
+        assert!(live.admitted_under_idempotency_key(&id));
+        assert!(!live.admitted_under_idempotency_key(&other_id));
         assert!(
             first
                 .adapter
-                .input_state_by_idempotency_key(&session_id, &other_key)
+                .tracked_delivery_input_state(&session_id, &other_id)
+                .await
+                .expect("live tracked read")
+                .is_none(),
+            "another id names nothing"
+        );
+        assert!(
+            first
+                .adapter
+                .input_state_by_idempotency_key(&session_id, &id)
                 .await
                 .expect("live key read")
                 .is_none(),
-            "a key the row was not admitted under names nothing"
+            "the payload id is no binding of the governed row"
         );
+        assert!(matches!(
+            first
+                .adapter
+                .tracked_delivery_input_state(&session_id, "not-an-input-id")
+                .await,
+            Err(crate::RuntimeDriverError::ValidationFailed { .. })
+        ));
         (first.binder.selection.clone(), payload_input_id)
     };
 
     let restarted = Governed::persistent(Arc::clone(&store), Some(selection), custody);
-    let key = payload_input_id.to_string();
+    let id = payload_input_id.to_string();
     let durable = restarted
         .adapter
-        .input_state_by_idempotency_key(&session_id, &key)
+        .tracked_delivery_input_state(&session_id, &id)
         .await
-        .expect("durable key read")
-        .expect("the payload key names the stored governed row");
+        .expect("durable tracked read")
+        .expect("the payload id reads the stored governed row");
     assert_eq!(durable.state.input_id, payload_input_id);
-    assert!(durable.admitted_under_idempotency_key(&key));
-    let durable_only = restarted
-        .adapter
-        .durable_input_state_by_idempotency_key(&session_id, &key)
-        .await
-        .expect("durable-only key read")
-        .expect("the durable-only read finds it as well");
-    assert_eq!(durable_only.state.input_id, payload_input_id);
+    assert!(durable.admitted_under_idempotency_key(&id));
     assert!(
         restarted
             .adapter
-            .durable_input_state_by_idempotency_key(&session_id, &other_key)
-            .await
-            .expect("durable-only key read")
-            .is_none()
-    );
-    assert!(
-        restarted
-            .adapter
-            .durable_input_state_by_idempotency_key(&SessionId::new(), &key)
+            .durable_input_state_by_idempotency_key(&session_id, &id)
             .await
             .expect("durable-only key read")
             .is_none(),
-        "another session names nothing"
+        "the payload id is no indexed key of the governed row"
+    );
+    assert!(
+        restarted
+            .adapter
+            .tracked_delivery_input_state(&session_id, &other_id)
+            .await
+            .expect("durable tracked read")
+            .is_none(),
+        "another id names nothing"
     );
 }
 
-/// A row admitted without an association never takes the governed
-/// resolution: whatever its key, its by-key reads stay the machine binding
-/// alone, as before.
+/// A row admitted without an association is admitted only under its own
+/// key: never under the qualification a governed row's association would
+/// give the same key.
 #[test]
-fn an_ungoverned_row_is_never_named_through_the_governed_resolution() {
+fn an_ungoverned_row_is_admitted_only_under_its_own_key() {
     let input_id = meerkat_core::lifecycle::InputId::new();
     let key = input_id.to_string();
     let mut stored = crate::input_state::StoredInputState::new_accepted(input_id.clone());

@@ -63,10 +63,10 @@ impl MeerkatMachine {
             };
             let mut admissions = {
                 let guard = driver.lock().await;
-                if let Some(input_id) = crate::input_authority::live_input_id_for_submitter_key(
-                    guard.as_driver(),
-                    idempotency_key,
-                ) {
+                if let Some(input_id) = guard
+                    .as_driver()
+                    .input_id_for_idempotency_key(idempotency_key)
+                {
                     return Ok(Some(input_id));
                 }
                 // Subscribed under the driver: an admission after the check
@@ -120,7 +120,7 @@ impl MeerkatMachine {
             let input_id = match &selector {
                 InteractionSelector::InputId(input_id) => Some(input_id.clone()),
                 InteractionSelector::IdempotencyKey(key) => {
-                    crate::input_authority::live_input_id_for_submitter_key(guard.as_driver(), key)
+                    guard.as_driver().input_id_for_idempotency_key(key)
                 }
             };
             let live = match &input_id {

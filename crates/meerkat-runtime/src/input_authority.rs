@@ -803,28 +803,31 @@ pub(crate) fn governed_row_admitted_under(
         .is_some_and(|qualified| &qualified == admitted)
 }
 
-/// The governed row the key `key` names by its own input id, when there is
-/// one: a supervisor delivery keeps its payload input id, which is also the
-/// key it was submitted under, while a governed admission binds that key's
-/// qualification. Every other key names no row here.
-pub(crate) fn governed_input_id_named_by_key(key: &str) -> Option<InputId> {
-    let uuid = uuid::Uuid::parse_str(key).ok()?;
-    (uuid.to_string() == key).then(|| InputId::from_uuid(uuid))
+/// The input id a tracked delivery's payload input id names: a
+/// supervisor-bridge delivery keeps its payload input id, a canonical UUID,
+/// as its input id. `None` for any other text.
+pub(crate) fn tracked_delivery_input_id(payload_input_id: &str) -> Option<InputId> {
+    let uuid = uuid::Uuid::parse_str(payload_input_id).ok()?;
+    (uuid.to_string() == payload_input_id).then(|| InputId::from_uuid(uuid))
 }
 
-/// The input its submitter's own key `key` names in `driver`'s live state:
-/// the machine-owned binding of `key`, or else the governed row whose input
-/// id is `key` and which was admitted under it (see
-/// [`governed_row_admitted_under`]).
-pub(crate) fn live_input_id_for_submitter_key(
+/// The input a tracked cancel addressed by `key` names in `driver`'s live
+/// state. A canonical input id names the tracked delivery with that id, and
+/// only when that row was admitted under it as its key (the id itself, or a
+/// governed row's qualification of it): never another input that merely
+/// carries the id as its key. Any other key names the input its machine
+/// binding names.
+pub(crate) fn tracked_input_id_for_key(
     driver: &dyn crate::traits::RuntimeDriver,
     key: &str,
 ) -> Option<InputId> {
-    driver.input_id_for_idempotency_key(key).or_else(|| {
-        let input_id = governed_input_id_named_by_key(key)?;
-        let stored = driver.stored_input_state(&input_id)?;
-        governed_row_admitted_under(&stored.state, key).then_some(input_id)
-    })
+    match tracked_delivery_input_id(key) {
+        Some(input_id) => driver
+            .stored_input_state(&input_id)
+            .filter(|stored| stored.admitted_under_idempotency_key(key))
+            .map(|_| input_id),
+        None => driver.input_id_for_idempotency_key(key),
+    }
 }
 
 pub(crate) fn replay_digest(input: &Input) -> Result<[u8; 32], RuntimeDriverError> {

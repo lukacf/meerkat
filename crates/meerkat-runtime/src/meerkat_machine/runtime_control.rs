@@ -17746,6 +17746,37 @@ impl MeerkatMachine {
         }
     }
 
+    /// The runtime row of the tracked delivery its payload input id names, as
+    /// [`crate::service_ext::SessionServiceRuntimeExt::input_state`] reads it,
+    /// live or from the store. A supervisor-bridge delivery keeps its payload
+    /// input id as its input id and as the key it is submitted under, so the
+    /// row is read by that id and is the delivery's only when it was admitted
+    /// under that key
+    /// ([`crate::input_state::StoredInputState::admitted_under_idempotency_key`]:
+    /// the id itself, or a governed delivery's qualification of it). Another
+    /// input that merely carries the id as its key is never it. `Ok(None)`
+    /// when no such delivery was admitted.
+    ///
+    /// # Errors
+    /// `ValidationFailed` when `payload_input_id` is not a canonical input
+    /// id; otherwise the read's own errors.
+    pub async fn tracked_delivery_input_state(
+        &self,
+        session_id: &SessionId,
+        payload_input_id: &str,
+    ) -> Result<Option<crate::input_state::StoredInputState>, RuntimeDriverError> {
+        let input_id = crate::input_authority::tracked_delivery_input_id(payload_input_id)
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "tracked delivery input id '{payload_input_id}' is not a canonical input id"
+                ),
+            })?;
+        let stored =
+            crate::service_ext::SessionServiceRuntimeExt::input_state(self, session_id, &input_id)
+                .await?;
+        Ok(stored.filter(|stored| stored.admitted_under_idempotency_key(payload_input_id)))
+    }
+
     /// Converge one exact durable tracked input to a runtime terminal under a
     /// full member-residency fence. Queued work is abandoned directly and
     /// persisted; staged/applied work is cancelled only through its exact run
@@ -17754,6 +17785,13 @@ impl MeerkatMachine {
     /// The host installs its durable `Cancelling` receipt before calling this
     /// method. Consequently a transient error is safe to retry and no delayed
     /// delivery can re-enter while runtime quiescence is incomplete.
+    ///
+    /// A tracked delivery is named by its payload input id, which is its input
+    /// id: `idempotency_key` in canonical input id form names the delivery
+    /// with that id, only when it was admitted under that key (a governed
+    /// delivery under the key's qualification), and never another input that
+    /// merely carries the id as its key. Any other key names the input its
+    /// machine binding names.
     pub async fn cancel_tracked_input_for_member_incarnation(
         &self,
         session_id: &SessionId,
@@ -17815,7 +17853,7 @@ impl MeerkatMachine {
                 // Subscribed under the driver before the read: a lifecycle
                 // step committed after it is a change on this receiver.
                 let input_transitions = driver_guard.subscribe_input_transitions();
-                let input_id = crate::input_authority::live_input_id_for_submitter_key(
+                let input_id = crate::input_authority::tracked_input_id_for_key(
                     driver_guard.as_driver(),
                     idempotency_key,
                 );

@@ -2482,15 +2482,13 @@ async fn a_placed_turn_driven_member_resumed_on_its_host_delivers_its_first_turn
 /// A placed member on a governed host takes the controlling mob's deliveries
 /// through the host's peer ingress binder, end to end:
 /// - an untracked delivery passes the supervisor's own response check: the
-///   member admits it under its payload input id, which also names the
-///   governed row by key;
+///   member admits it under its payload input id, and the tracked read of
+///   that id finds the governed row;
 /// - a tracked delivery's completion reaches the supervisor;
 /// - the tracked cancel a stop sends ends a held tracked turn on the member
 ///   (a `Cancelled` host receipt, never `NoEffect`).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_governed_placed_member_takes_supervisor_deliveries_end_to_end() {
-    use meerkat_runtime::SessionServiceRuntimeExt as _;
-
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let governed = governed_peer_support::GovernedMember::new();
     let client = governed.client();
@@ -2547,10 +2545,10 @@ async fn a_governed_placed_member_takes_supervisor_deliveries_end_to_end() {
         "a supervisor delivery keeps its payload input id"
     );
     let stored = machine
-        .input_state_by_idempotency_key(&session_id, &untracked.event_key)
+        .tracked_delivery_input_state(&session_id, &untracked.event_key)
         .await
-        .expect("key read")
-        .expect("the payload input id names the governed row by key");
+        .expect("tracked read")
+        .expect("the payload input id reads the governed row");
     assert_eq!(stored.state.input_id.to_string(), untracked.event_key);
     assert!(
         stored
@@ -2618,7 +2616,7 @@ async fn a_governed_placed_member_takes_supervisor_deliveries_end_to_end() {
         let key = held.event_key.clone();
         async move {
             machine
-                .input_state_by_idempotency_key(&session_id, &key)
+                .tracked_delivery_input_state(&session_id, &key)
                 .await
                 .ok()
                 .flatten()

@@ -1089,8 +1089,9 @@ impl HostMemberObservation {
     }
 
     /// Reattach watchers for one snapshot of durable Pending rows. The
-    /// runtime's restart-safe idempotency ledger distinguishes pre-accept
-    /// Pending (`None`, retain) from accepted work (`Some`). Nonterminal work
+    /// runtime's restart-safe input ledger, read by the delivery's payload
+    /// input id, distinguishes pre-accept Pending (`None`, retain) from
+    /// accepted work (`Some`). Nonterminal work
     /// is re-submitted only to obtain a Deduplicated completion handle;
     /// terminal work is reconstructed from its original durable window.
     #[cfg(feature = "runtime-adapter")]
@@ -1166,7 +1167,7 @@ impl HostMemberObservation {
                     continue;
                 }
                 let stored = match adapter
-                    .input_state_by_idempotency_key(&session, &pending.input_id)
+                    .tracked_delivery_input_state(&session, &pending.input_id)
                     .await
                 {
                     Ok(stored) => stored,
@@ -2380,7 +2381,7 @@ impl MemberObservationHost for HostMemberObservation {
                         .to_string(),
                 })?;
             let runtime_input = adapter
-                .input_state_by_idempotency_key(session, input_id)
+                .tracked_delivery_input_state(session, input_id)
                 .await
                 .map_err(|error| MemberObservationError::Unavailable {
                     reason: format!(
@@ -2532,7 +2533,7 @@ impl MemberObservationHost for HostMemberObservation {
                     )
                 })?;
             let stored = adapter
-                .input_state_by_idempotency_key(session, &admission.input_id)
+                .tracked_delivery_input_state(session, &admission.input_id)
                 .await
                 .map_err(|error| {
                     DirectedTurnReject::unsupported(format!(
@@ -2541,7 +2542,7 @@ impl MemberObservationHost for HostMemberObservation {
                 })?
                 .ok_or_else(|| {
                     DirectedTurnReject::unsupported(
-                        "accepted directed turn is absent from the runtime idempotency ledger",
+                        "accepted directed turn is absent from the runtime input ledger",
                     )
                 })?;
             let attribution =
@@ -2601,8 +2602,8 @@ enum DirectedTurnTrackingKind {
 }
 
 impl DirectedTurnRuntimeAttribution {
-    /// Prove that the idempotency lookup and runtime-owned compact attribution
-    /// name the exact Pending obligation. Nonterminal rows additionally bind
+    /// Prove that the tracked delivery read (by its payload input id) and the
+    /// runtime-owned compact attribution name the exact Pending obligation. Nonterminal rows additionally bind
     /// the retained replay payload; terminal rows remain recoverable after
     /// that payload is deliberately retired.
     fn from_stored(
@@ -3243,7 +3244,7 @@ async fn refresh_terminal_attribution(
     let mut retry_delay = CAUSAL_RETRY_MIN;
     loop {
         match adapter
-            .input_state_by_idempotency_key(session, pending_input_id)
+            .tracked_delivery_input_state(session, pending_input_id)
             .await
         {
             Ok(Some(stored)) => {
@@ -3273,7 +3274,7 @@ async fn refresh_terminal_attribution(
                 tracing::error!(
                     session_id = %session,
                     input_id = %pending_input_id,
-                    "accepted directed turn disappeared from the runtime idempotency ledger; retaining Pending"
+                    "accepted directed turn disappeared from the runtime input ledger; retaining Pending"
                 );
                 return None;
             }

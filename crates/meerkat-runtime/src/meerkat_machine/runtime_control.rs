@@ -17751,26 +17751,21 @@ impl MeerkatMachine {
                             None => Action::Done,
                             Some(stored) if stored.seed.terminal_outcome.is_some() => Action::Done,
                             Some(stored) if stored.seed.phase == InputLifecycleState::Queued => {
-                                let input_ids = vec![input_id.clone()];
                                 let reason = "tracked input cancelled before run".to_string();
                                 let prepared = driver_guard
-                                    .prepare_runless_runtime_terminated_interaction_outboxes(
-                                        &input_ids, reason,
-                                    )?;
+                                    .prepare_sole_runless_runtime_termination(&input_id, reason)?;
                                 if let Err(error) = driver_guard
                                     .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
                                     .await
                                 {
                                     driver_guard
-                                        .rollback_prepared_runless_interaction_terminal_outboxes(
-                                            prepared,
-                                        );
+                                        .rollback_prepared_sole_runless_termination(prepared);
                                     return Err(error);
                                 }
                                 runless_terminal.owe();
                                 let candidate_owner_input_id =
-                                    crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
-                                        crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+                                    crate::meerkat_machine::driver::DriverEntry::commit_prepared_sole_runless_termination(
+                                        prepared,
                                     );
                                 Action::PublishQueued {
                                     driver: driver.clone(),
@@ -18043,22 +18038,18 @@ impl MeerkatMachine {
                     }
                     Some(stored) if stored.seed.phase == InputLifecycleState::Queued => {
                         let prepared = driver_guard
-                            .prepare_runless_runtime_terminated_interaction_outboxes(
-                                std::slice::from_ref(input_id),
-                                reason.clone(),
-                            )?;
+                            .prepare_sole_runless_runtime_termination(input_id, reason.clone())?;
                         if let Err(error) = driver_guard
                             .abandon_queued_input(input_id, InputAbandonReason::Cancelled)
                             .await
                         {
-                            driver_guard
-                                .rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                            driver_guard.rollback_prepared_sole_runless_termination(prepared);
                             return Err(error);
                         }
                         runless_terminal.owe();
                         let candidate_owner_input_id =
-                            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
-                                crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+                            crate::meerkat_machine::driver::DriverEntry::commit_prepared_sole_runless_termination(
+                                prepared,
                             );
                         Action::PublishQueued {
                             completions,

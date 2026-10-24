@@ -1834,15 +1834,13 @@ mod tests {
         );
         let mut driver_entry = DriverEntry::Ephemeral(raw_driver);
         let prepared = driver_entry
-            .prepare_runless_runtime_terminated_interaction_outboxes(
-                std::slice::from_ref(&directed_input_id),
+            .prepare_sole_runless_runtime_termination(
+                &directed_input_id,
                 "runtime stopped".to_string(),
             )
             .expect("stage runless outbox before lifecycle commit");
-        crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
-            DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
-        )
-        .expect("directed staging should mint a carrier owner");
+        DriverEntry::commit_prepared_sole_runless_termination(prepared)
+            .expect("directed staging should mint a carrier owner");
         assert_eq!(driver_entry.runtime_state(), crate::RuntimeState::Attached);
         let driver = Arc::new(crate::tokio::sync::Mutex::new(driver_entry));
         let error = crate::tokio::time::timeout(
@@ -2242,7 +2240,7 @@ mod tests {
                 .prepare_runless_runtime_terminated_interaction_outboxes(input_ids, reason.clone())
                 .expect("unrelated runless batch should stage independently");
             owners.push(
-                crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+                crate::meerkat_machine::driver::RunlessTerminalBatch::only_batch_owner_for_test(
                     DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
                 )
                 .expect("directed batch has a candidate owner"),
@@ -2257,7 +2255,7 @@ mod tests {
             )
             .expect("exact retry should select its existing batch");
         assert_eq!(
-            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+            crate::meerkat_machine::driver::RunlessTerminalBatch::only_batch_owner_for_test(
                 DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(exact_retry),
             ),
             Some(owners[0].clone())

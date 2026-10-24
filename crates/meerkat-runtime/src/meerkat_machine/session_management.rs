@@ -13864,10 +13864,8 @@ Ok::<(), RuntimeDriverError>(())
                 }
             };
             let prepared = match driver_guard
-                .prepare_runless_runtime_terminated_interaction_outboxes(
-                    std::slice::from_ref(&input_id),
-                    reason.clone(),
-                ) {
+                .prepare_sole_runless_runtime_termination(&input_id, reason.clone())
+            {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     failure = Some(error);
@@ -13880,8 +13878,8 @@ Ok::<(), RuntimeDriverError>(())
             {
                 Ok(true) => {
                     let candidate_owner_input_id =
-                        crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
-                            crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+                        crate::meerkat_machine::driver::DriverEntry::commit_prepared_sole_runless_termination(
+                            prepared,
                         );
                     runless_terminal.owe();
                     abandoned.push((input_id, candidate_owner_input_id));
@@ -13890,10 +13888,10 @@ Ok::<(), RuntimeDriverError>(())
                 // lane while the gate is held; an input that is not queued has
                 // no queued work to abandon.
                 Ok(false) => {
-                    driver_guard.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                    driver_guard.rollback_prepared_sole_runless_termination(prepared);
                 }
                 Err(error) => {
-                    driver_guard.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                    driver_guard.rollback_prepared_sole_runless_termination(prepared);
                     // The abandonment may have committed before a later step
                     // (its archival) failed, or left its commit uncertain:
                     // when the input left the active set, a conservative

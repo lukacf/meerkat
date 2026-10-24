@@ -283,17 +283,15 @@ impl MeerkatMachine {
                     ),
                 });
             }
-            let prepared = driver.prepare_runless_runtime_terminated_interaction_outboxes(
-                std::slice::from_ref(input_id),
-                reason.to_string(),
-            )?;
+            let prepared =
+                driver.prepare_sole_runless_runtime_termination(input_id, reason.to_string())?;
             match driver
                 .abandon_queued_input(input_id, InputAbandonReason::Cancelled)
                 .await
             {
                 Ok(true) => {}
                 Ok(false) => {
-                    driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                    driver.rollback_prepared_sole_runless_termination(prepared);
                     return Err(RuntimeDriverError::StaleAuthority {
                         reason: format!(
                             "accepted input {input_id} was no longer queued at failure commit"
@@ -301,13 +299,11 @@ impl MeerkatMachine {
                     });
                 }
                 Err(error) => {
-                    driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                    driver.rollback_prepared_sole_runless_termination(prepared);
                     return Err(error);
                 }
             }
-            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
-                DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
-            )
+            DriverEntry::commit_prepared_sole_runless_termination(prepared)
         };
         Ok(candidate_owner_input_id)
     }

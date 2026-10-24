@@ -2223,21 +2223,18 @@ impl MeerkatMachine {
                     continue;
                 }
                 let prepared = driver
-                    .prepare_runless_runtime_terminated_interaction_outboxes(
-                        std::slice::from_ref(&input_id),
-                        reason.to_string(),
-                    )
+                    .prepare_sole_runless_runtime_termination(&input_id, reason.to_string())
                     .map_err(internal)?;
                 if let Err(error) = driver
                     .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
                     .await
                 {
-                    driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                    driver.rollback_prepared_sole_runless_termination(prepared);
                     return Err(internal(error));
                 }
                 runless_terminal.owe();
-                crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
-                    crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+                crate::meerkat_machine::driver::DriverEntry::commit_prepared_sole_runless_termination(
+                    prepared,
                 )
             };
             if candidate_owner_input_id.is_none() {
@@ -3232,10 +3229,7 @@ mod tests {
     ) {
         let mut driver = driver.lock().await;
         let prepared = driver
-            .prepare_runless_runtime_terminated_interaction_outboxes(
-                std::slice::from_ref(input_id),
-                reason.to_string(),
-            )
+            .prepare_sole_runless_runtime_termination(input_id, reason.to_string())
             .expect("prepare exact dispatch outbox");
         if abandon_active_inputs {
             driver
@@ -3244,9 +3238,7 @@ mod tests {
                 .expect("abandon dispatch inputs before committing terminal outbox");
         }
         assert_eq!(
-            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
-                DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
-            ),
+            DriverEntry::commit_prepared_sole_runless_termination(prepared),
             Some(input_id.clone())
         );
     }

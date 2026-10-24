@@ -7059,12 +7059,12 @@ async fn cancel_stopped_live_boundary_joins(
     for input_id in stopped {
         {
             let mut driver = driver.lock().await;
-            let prepared = driver.prepare_runless_runtime_terminated_interaction_outboxes(
-                std::slice::from_ref(input_id),
+            let prepared = driver.prepare_sole_runless_runtime_termination(
+                input_id,
                 STOPPED_RUN_JOIN_REASON.to_string(),
             )?;
-            if prepared.has_directed_batch() {
-                driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+            if prepared.is_directed() {
+                driver.rollback_prepared_sole_runless_termination(prepared);
                 return Err(crate::RuntimeDriverError::Internal(format!(
                     "stopped durable live-boundary input {input_id} carries a directed interaction terminal"
                 )));
@@ -7073,10 +7073,10 @@ async fn cancel_stopped_live_boundary_joins(
                 .machine_realize_stopped_live_boundary_join_cancelled(run_id, input_id)
                 .await
             {
-                driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                driver.rollback_prepared_sole_runless_termination(prepared);
                 return Err(error);
             }
-            let _ = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+            let _ = crate::meerkat_machine::driver::DriverEntry::commit_prepared_sole_runless_termination(prepared);
         }
         crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
             driver,

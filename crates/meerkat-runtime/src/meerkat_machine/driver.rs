@@ -970,11 +970,25 @@ pub(crate) struct PreparedRunlessInteractionTerminalOutboxes {
     batches: Vec<RunlessTerminalBatch>,
 }
 
-impl PreparedRunlessInteractionTerminalOutboxes {
-    /// Whether any batch this preparation staged carries a directed
-    /// interaction terminal.
-    pub(crate) fn has_directed_batch(&self) -> bool {
-        self.batches.iter().any(RunlessTerminalBatch::is_directed)
+/// One input's runless termination, prepared. A termination of one input
+/// stages exactly one terminal-completion batch, so its directed owner is
+/// that batch's, if any: [`DriverEntry::prepare_sole_runless_runtime_termination`]
+/// checks the split before its checkpoint, and nothing else builds one. A
+/// termination of several inputs may stage several batches, each with its
+/// own directed owner, and publishes them all
+/// ([`crate::control_plane::publish_and_resolve_runless_runtime_terminations`]).
+#[must_use = "a prepared runless termination must be committed or rolled back"]
+pub(crate) struct PreparedSoleRunlessTermination {
+    prepared: PreparedRunlessInteractionTerminalOutboxes,
+}
+
+impl PreparedSoleRunlessTermination {
+    /// Whether the input's terminal is a directed interaction terminal.
+    pub(crate) fn is_directed(&self) -> bool {
+        self.prepared
+            .batches
+            .iter()
+            .any(RunlessTerminalBatch::is_directed)
     }
 }
 
@@ -1003,15 +1017,17 @@ impl RunlessTerminalBatch {
         self.candidate_owner_input_id.is_some()
     }
 
-    /// The directed owner of the only batch of a one-input termination.
-    pub(crate) fn sole_directed_owner(batches: Vec<Self>) -> Option<InputId> {
-        debug_assert!(
-            batches.len() <= 1,
-            "a one-input termination stages one batch"
-        );
-        batches
-            .into_iter()
-            .find_map(|batch| batch.candidate_owner_input_id)
+    /// The directed owner of the one batch of a termination the test staged
+    /// as one batch.
+    #[cfg(test)]
+    pub(crate) fn only_batch_owner_for_test(batches: Vec<Self>) -> Option<InputId> {
+        let [batch]: [Self; 1] = batches.try_into().unwrap_or_else(|batches: Vec<Self>| {
+            panic!(
+                "expected one terminal-completion batch, got {}",
+                batches.len()
+            )
+        });
+        batch.candidate_owner_input_id
     }
 }
 
@@ -1752,6 +1768,46 @@ impl DriverEntry {
 
     /// Complete a preparation whose durable commit landed, and hand back
     /// every batch it staged for publication.
+    /// Prepare the runless termination of one input: its one
+    /// terminal-completion batch and, when the input is directed, that
+    /// batch's interaction terminal outbox. A split into any other number of
+    /// batches is refused, typed, before the checkpoint.
+    pub(crate) fn prepare_sole_runless_runtime_termination(
+        &mut self,
+        input_id: &InputId,
+        reason: String,
+    ) -> Result<PreparedSoleRunlessTermination, RuntimeDriverError> {
+        let input_ids = std::slice::from_ref(input_id);
+        let batches = runless_termination_batches(input_ids)?.len();
+        if batches != 1 {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "the runless termination of input {input_id} split into {batches} terminal-completion batches"
+                ),
+            });
+        }
+        let prepared =
+            self.prepare_runless_runtime_terminated_interaction_outboxes(input_ids, reason)?;
+        Ok(PreparedSoleRunlessTermination { prepared })
+    }
+
+    /// Commit one input's prepared termination; its directed owner, when the
+    /// input is directed.
+    pub(crate) fn commit_prepared_sole_runless_termination(
+        prepared: PreparedSoleRunlessTermination,
+    ) -> Option<InputId> {
+        Self::commit_prepared_runless_interaction_terminal_outboxes(prepared.prepared)
+            .into_iter()
+            .find_map(|batch| batch.candidate_owner_input_id)
+    }
+
+    pub(crate) fn rollback_prepared_sole_runless_termination(
+        &mut self,
+        prepared: PreparedSoleRunlessTermination,
+    ) {
+        self.rollback_prepared_runless_interaction_terminal_outboxes(prepared.prepared);
+    }
+
     pub(crate) fn commit_prepared_runless_interaction_terminal_outboxes(
         prepared: PreparedRunlessInteractionTerminalOutboxes,
     ) -> Vec<RunlessTerminalBatch> {
@@ -13315,7 +13371,7 @@ mod recovery_tests {
             )
             .expect("stage one mixed runless terminal batch");
         assert_eq!(
-            RunlessTerminalBatch::sole_directed_owner(
+            RunlessTerminalBatch::only_batch_owner_for_test(
                 DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
             ),
             Some(directed_id.clone()),
@@ -13388,6 +13444,99 @@ mod recovery_tests {
                 },
             )
             .collect()
+    }
+
+    /// A termination of one input stages its one terminal-completion batch:
+    /// its directed owner is the input itself when the input is directed,
+    /// and none otherwise. A termination of more inputs than one batch names
+    /// stages a batch per 256 in canonical order, and each directed batch has
+    /// its own owner, the first of its recipients; publication handles every
+    /// one of them.
+    #[tokio::test]
+    async fn a_sole_termination_owns_its_one_batch_and_a_larger_one_owns_each_directed_batch() {
+        let (_runtime_id, _session_id, _store, mut persistent) =
+            registered_persistent_driver_for_test("runless-sole-and-several-directed").await;
+        let mut directed_ids = Vec::with_capacity(300);
+        for ordinal in 0..300 {
+            let directed = crate::mob_adapter::create_tracked_flow_step_input(
+                &format!("several-directed-step-{ordinal}"),
+                meerkat_core::types::ContentInput::Text(format!("directed step {ordinal}")),
+                "runless-several-directed-flow",
+                None,
+                &InputId::new().to_string(),
+            )
+            .expect("build a directed input");
+            directed_ids.push(directed.id().clone());
+            assert!(
+                persistent
+                    .accept_input(directed)
+                    .await
+                    .expect("accept a directed input")
+                    .is_accepted()
+            );
+        }
+        let nondirected =
+            Input::Prompt(crate::input::PromptInput::new("a nondirected input", None));
+        let nondirected_id = nondirected.id().clone();
+        assert!(
+            persistent
+                .accept_input(nondirected)
+                .await
+                .expect("accept a nondirected input")
+                .is_accepted()
+        );
+        let mut driver = DriverEntry::Persistent(persistent);
+
+        let sole = driver
+            .prepare_sole_runless_runtime_termination(
+                &nondirected_id,
+                "runtime stopped".to_string(),
+            )
+            .expect("prepare the nondirected input's termination");
+        assert!(!sole.is_directed());
+        assert_eq!(
+            DriverEntry::commit_prepared_sole_runless_termination(sole),
+            None
+        );
+
+        let sole = driver
+            .prepare_sole_runless_runtime_termination(
+                &directed_ids[0],
+                "runtime stopped".to_string(),
+            )
+            .expect("prepare one directed input's termination");
+        assert!(sole.is_directed());
+        assert_eq!(
+            DriverEntry::commit_prepared_sole_runless_termination(sole),
+            Some(directed_ids[0].clone())
+        );
+
+        let rest = &directed_ids[1..];
+        let prepared = driver
+            .prepare_runless_runtime_terminated_interaction_outboxes(
+                rest,
+                "runtime stopped".to_string(),
+            )
+            .expect("prepare the termination of 299 directed inputs");
+        let batches = DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+        let mut canonical = rest.to_vec();
+        canonical.sort_by_key(|input_id| input_id.0);
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch.input_ids().to_vec())
+                .collect::<Vec<_>>(),
+            vec![canonical[..256].to_vec(), canonical[256..].to_vec()],
+            "a batch per 256 recipients, in canonical order"
+        );
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch.candidate_owner_input_id().cloned())
+                .collect::<Vec<_>>(),
+            vec![Some(canonical[0].clone()), Some(canonical[256].clone())],
+            "each directed batch has its own owner"
+        );
     }
 
     #[tokio::test]

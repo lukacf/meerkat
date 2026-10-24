@@ -647,8 +647,8 @@ async fn exact_cancellation_after_the_bound_reports_an_unpublished_carrier() {
                 .is_accepted()
         );
         let prepared = driver
-            .prepare_runless_runtime_terminated_interaction_outboxes(
-                std::slice::from_ref(&input_id),
+            .prepare_sole_runless_runtime_termination(
+                &input_id,
                 "abandoned before it runs".to_string(),
             )
             .expect("stage the runless terminal carrier");
@@ -657,8 +657,8 @@ async fn exact_cancellation_after_the_bound_reports_an_unpublished_carrier() {
             .await
             .expect("abandon the queued input");
         assert_eq!(
-            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
-                crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            crate::meerkat_machine::driver::DriverEntry::commit_prepared_sole_runless_termination(
+                prepared
             ),
             Some(input_id.clone()),
             "the abandoned input owns an unpublished carrier"

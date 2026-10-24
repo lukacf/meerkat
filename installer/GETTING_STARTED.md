@@ -143,9 +143,10 @@ or install an organization plugin to attach it to your own conversation.
 
 Attach up to four files per message, at most 8 MiB each and 16 MiB together.
 Text, Markdown, CSV and JSON files must use UTF-8. PNG, JPEG, WebP and GIF images
-can also be attached; the guide shows whether its current model can interpret
-their pixels. When PDF is offered, use an unencrypted document with extractable
-text, at most 100 pages and one million extracted text characters. PDF reading
+can also be attached; the guide notes when pixel reading is unavailable or has
+not been verified for its current model. When PDF is offered, use an unencrypted
+document with extractable text, at most 100 pages and one million extracted text
+characters. PDF reading
 does not perform OCR or analyze embedded images. For a scan or image-based table,
 paste the relevant text or attach page images and check the guide's image notice.
 

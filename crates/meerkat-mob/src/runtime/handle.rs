@@ -17017,9 +17017,13 @@ impl MobHandle {
         // its current build ran with (the factory persists it at every build).
         // A source with no loadable durable session has no persisted context;
         // whether such a source can be forked at all is the fork owner's call.
+        // Rounds never change the build state, so a source whose run holds a
+        // round commit is read through the tolerant read: the committed
+        // snapshot carries the context its build ran with. A read its own
+        // running turn's tail still refuses falls back to the committed child.
         let (source_session, app_context_from_fork_child) = match self
             .session_service
-            .load_persisted_session(source_session_id)
+            .load_persisted_session_tolerating_tail(source_session_id)
             .await
         {
             Ok(session) => (session, false),

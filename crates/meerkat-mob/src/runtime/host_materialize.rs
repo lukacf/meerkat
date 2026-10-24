@@ -3199,7 +3199,7 @@ impl HostMemberMaterializer {
         let session = self
             .substrate
             .session_service
-            .load_persisted_session(session_id)
+            .load_persisted_session_tolerating_tail(session_id)
             .await?
             .ok_or_else(|| {
                 MaterializeServeError::SessionService(SessionError::NotFound {

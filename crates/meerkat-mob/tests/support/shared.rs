@@ -1259,6 +1259,15 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         self.inner.load_persisted_session(session_id).await
     }
 
+    async fn load_persisted_session_tolerating_tail(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError> {
+        self.inner
+            .load_persisted_session_tolerating_tail(session_id)
+            .await
+    }
+
     async fn observe_member_status_view(
         &self,
         session_id: &meerkat_core::SessionId,

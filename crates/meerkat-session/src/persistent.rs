@@ -19052,6 +19052,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
+    /// [`Self::observe_authoritative_session_body`] that serves the
+    /// committed snapshot while a run's provisional tail stands ahead of it:
+    /// on a revision conflict it reads the boundary's own snapshot through
+    /// the store-owned durable-tail source, and the conflict stands when no
+    /// provisional tail is applied on the boundary. Read-only like its strict
+    /// sibling: it never writes and never replays the rewrite audit. The
+    /// snapshot serves readers only and decides nothing about the tail.
+    pub async fn observe_authoritative_session_body_tolerating_tail(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        match self.observe_authoritative_session_body(id).await {
+            Err(conflict) if Self::is_transcript_revision_conflict_error(&conflict) => {
+                match meerkat_runtime::recovery::load_committed_snapshot_under_provisional_tail(
+                    self.runtime_store.as_ref(),
+                    id,
+                )
+                .await
+                {
+                    Ok(Some(committed)) => Ok(Some(committed)),
+                    Ok(None) => Err(conflict),
+                    Err(error) => Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to read the committed snapshot of session {id} under its provisional tail: {error}"
+                    )))),
+                }
+            }
+            other => other,
+        }
+    }
+
     /// Ask the RuntimeStore-owned recovery authority to resolve one durable
     /// boundary and translate its exact outcome to the operator vocabulary.
     ///
@@ -34904,6 +34934,38 @@ mod tests {
                 &service.load_authoritative_session(&id).await
             ),
             "the read wrote nothing: the round's tail still stands"
+        );
+    }
+
+    /// The read-only body observation a mob member's status view reads serves
+    /// the committed snapshot under the session's own round commit too, and
+    /// writes nothing: the strict observation still refuses afterwards.
+    #[tokio::test]
+    async fn the_read_only_body_observation_serves_the_committed_snapshot_under_a_round_commit() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(false).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.observe_authoritative_session_body(&id).await
+            ),
+            "the strict observation refuses the boundary while the round's tail is ahead of it"
+        );
+
+        let served = service
+            .observe_authoritative_session_body_tolerating_tail(&id)
+            .await
+            .expect("the observation serves the committed snapshot under the round's tail")
+            .expect("the session is committed");
+        assert_served_the_committed_snapshot(&served, &committed);
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.observe_authoritative_session_body(&id).await
+            ),
+            "the observation wrote nothing: the round's tail still stands"
         );
     }
 

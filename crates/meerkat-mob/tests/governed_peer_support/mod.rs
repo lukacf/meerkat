@@ -269,8 +269,11 @@ pub struct BindCall {
 }
 
 /// The trusted host's peer delivery binder: it pins the receiving member's
-/// live controller without waiting behind a turn and binds Core's exact input
-/// under an association naming Core's work for the delivery.
+/// live controller and binds Core's exact input under an association naming
+/// Core's work for the delivery. A supervisor delivery that arrives while the
+/// member's turn boundary is held waits for it (Core bounds that bind); a
+/// comms delivery is answered not ready instead, and stays at the head of the
+/// member's queue until bound.
 #[derive(Default)]
 struct Binder {
     service: OnceLock<Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
@@ -293,6 +296,19 @@ impl Binder {
             .ok_or(not_ready(ControllerReadinessFailure::ExecutorUnavailable))?;
         let pin = match service.try_pin_controller_client_for_actor(&witness).await {
             Ok(pin) => pin,
+            Err(meerkat_session::TryPinControllerError::TurnBoundaryHeld)
+                if matches!(request.origin, PeerIngressOrigin::SupervisorDelivery(_)) =>
+            {
+                let lease = service
+                    .acquire_live_session_actor_turn_boundary_lease_exact(&witness)
+                    .await
+                    .map_err(|error| PeerIngressBindRefusal::Unavailable(error.to_string()))?
+                    .ok_or(not_ready(ControllerReadinessFailure::ExecutorUnavailable))?;
+                service
+                    .pin_controller_client_for_actor(&lease)
+                    .await
+                    .map_err(|error| PeerIngressBindRefusal::Unavailable(error.to_string()))?
+            }
             Err(meerkat_session::TryPinControllerError::TurnBoundaryHeld) => {
                 return Err(not_ready(ControllerReadinessFailure::TurnBoundaryHeld));
             }

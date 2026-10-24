@@ -2484,7 +2484,9 @@ async fn a_placed_turn_driven_member_resumed_on_its_host_delivers_its_first_turn
 /// - an untracked delivery passes the supervisor's own response check: the
 ///   member admits it under its payload input id, and the tracked read of
 ///   that id finds the governed row;
-/// - a tracked delivery's completion reaches the supervisor;
+/// - a tracked delivery sent while the member's previous turn still holds its
+///   turn boundary is bound once that turn ends, and its completion reaches
+///   the supervisor;
 /// - the tracked cancel a stop sends ends a held tracked turn on the member
 ///   (a `Cancelled` host receipt, never `NoEffect`).
 #[tokio::test(flavor = "multi_thread")]
@@ -2527,7 +2529,11 @@ async fn a_governed_placed_member_takes_supervisor_deliveries_end_to_end() {
         .expect("member handle");
 
     // Untracked: the supervisor checks the member's answer against the payload
-    // input id it sent, and the governed row is admitted under that id.
+    // input id it sent, and the governed row is admitted under that id. Its
+    // turn is held in its controller call, so the tracked delivery below
+    // arrives while the member's turn boundary is held.
+    client.hold();
+    let entered = client.governed_entered();
     member
         .send(
             "an untracked governed delivery",
@@ -2535,6 +2541,11 @@ async fn a_governed_placed_member_takes_supervisor_deliveries_end_to_end() {
         )
         .await
         .expect("the supervisor reads the governed member's answer under its payload input id");
+    wait_until("the untracked turn reaches its controller", || {
+        let client = client.clone();
+        async move { client.governed_entered() > entered }
+    })
+    .await;
     let offered = governed.supervisor_calls();
     let [untracked] = offered.as_slice() else {
         panic!("one supervisor delivery offered: {offered:?}");
@@ -2561,15 +2572,35 @@ async fn a_governed_placed_member_takes_supervisor_deliveries_end_to_end() {
     assert!(stored.admitted_under_idempotency_key(&untracked.event_key));
     assert!(!stored.admitted_under_idempotency_key(&uuid::Uuid::new_v4().to_string()));
 
-    // Tracked: the member host journals the governed turn's terminal and the
-    // completion reaches the supervisor.
-    tokio::time::timeout(
-        RUN_WAIT,
-        member.internal_turn("a tracked governed delivery"),
+    // Tracked, sent while the untracked turn still holds the member's turn
+    // boundary: the binding waits for that turn to end, then the member host
+    // journals the governed turn's terminal and the completion reaches the
+    // supervisor.
+    let tracked_turn = {
+        let handle = controlling.handle.clone();
+        let worker = worker.clone();
+        tokio::spawn(async move {
+            handle
+                .member(&worker)
+                .await?
+                .internal_turn("a tracked governed delivery")
+                .await
+        })
+    };
+    wait_until(
+        "the tracked delivery is offered while the member is busy",
+        || {
+            let governed = std::sync::Arc::clone(&governed);
+            async move { governed.supervisor_calls().len() == 2 }
+        },
     )
-    .await
-    .expect("the tracked completion is bounded")
-    .expect("the tracked governed turn's completion reaches the supervisor");
+    .await;
+    client.release();
+    tokio::time::timeout(RUN_WAIT, tracked_turn)
+        .await
+        .expect("the tracked completion is bounded")
+        .expect("the tracked turn's task")
+        .expect("the tracked governed turn's completion reaches the supervisor");
     let tracked = governed
         .supervisor_calls()
         .last()

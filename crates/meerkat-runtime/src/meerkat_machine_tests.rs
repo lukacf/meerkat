@@ -58441,3 +58441,953 @@ fn interrupted_request_identity_is_the_one_its_run_stamped() {
         "a row without stored semantics keeps the prompt's own metadata"
     );
 }
+
+/// Terminal-completion batch bound rows.
+///
+/// A terminal-completion batch names at most 256 inputs: its owner row
+/// carries the whole recipient set, every reader validates that bound at
+/// load, and its finalization and receipt writes are one input-state batch
+/// CAS, which the store contract caps at 256 rows. A session holds no such
+/// bound on its backlog, so every row here works a backlog of 300 inputs
+/// through each path that completes a batch, on a persistent machine over
+/// the in-memory store, the SQLite store and a host store realm (the host
+/// store adapter over its in-memory test host). Each row requires every input
+/// to reach its terminal and its waiter to settle, and the registration to
+/// stay ready: a refused batch must never leave it reload-required.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+mod terminal_completion_batch_bound {
+    use super::*;
+    use crate::completion::{CompletionHandle, CompletionWaitError};
+    use crate::input_state::{InputAbandonReason, InputLifecycleState, InputTerminalOutcome};
+    use meerkat_core::types::HandlingMode;
+
+    /// More inputs than one terminal-completion batch may name.
+    const BACKLOG: usize = 300;
+    /// The most inputs one terminal-completion batch names.
+    const BATCH_BOUND: usize = 256;
+
+    #[derive(Clone, Copy, Debug)]
+    enum BoundStore {
+        Memory,
+        Sqlite,
+        HostRealm,
+    }
+
+    /// A persistent machine over one store, with everything that must
+    /// outlive it.
+    struct Fixture {
+        machine: Arc<MeerkatMachine>,
+        store: Arc<dyn crate::store::RuntimeStore>,
+        session_id: SessionId,
+        _owners: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    }
+
+    impl Fixture {
+        async fn new(store: BoundStore) -> Self {
+            let mut owners: Vec<Box<dyn std::any::Any + Send + Sync>> = Vec::new();
+            let runtime_store: Arc<dyn crate::store::RuntimeStore> = match store {
+                BoundStore::Memory => Arc::new(crate::store::InMemoryRuntimeStore::new()),
+                BoundStore::Sqlite => {
+                    let dir = tempfile::TempDir::new().expect("temp dir");
+                    let sqlite =
+                        crate::store::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite3"))
+                            .expect("sqlite runtime store");
+                    owners.push(Box::new(dir));
+                    Arc::new(sqlite)
+                }
+                BoundStore::HostRealm => {
+                    let host = Arc::new(crate::store::spi::test_host::TestHost::new());
+                    let realm = crate::store::spi::SpiRealm::open(
+                        Arc::clone(&host) as _,
+                        crate::store::spi::SpiRealmConfig::default(),
+                    )
+                    .await
+                    .expect("host store realm opens");
+                    let spi = crate::store::spi::SpiRuntimeStore::open(Arc::clone(&realm))
+                        .await
+                        .expect("host store runtime store opens");
+                    owners.push(Box::new(realm));
+                    owners.push(Box::new(host));
+                    Arc::new(spi)
+                }
+            };
+            let machine = Arc::new(
+                MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store())
+                    .expect("persistent machine"),
+            );
+            Self {
+                machine,
+                store: runtime_store,
+                session_id: SessionId::new(),
+                _owners: owners,
+            }
+        }
+
+        /// A process restart: a new machine over the same store.
+        fn restart(&mut self) {
+            self.machine = Arc::new(
+                MeerkatMachine::persistent(Arc::clone(&self.store), memory_blob_store())
+                    .expect("restarted persistent machine"),
+            );
+        }
+
+        /// Stop the runtime and wait for the stop to reach its terminal.
+        async fn stop_until_terminal(&self, reason: &str) {
+            let registration = self
+                .machine
+                .current_session_registration_witness(&self.session_id)
+                .await
+                .expect("the session is registered");
+            let stopped = tokio::time::timeout(
+                Duration::from_secs(120),
+                self.machine
+                    .stop_runtime_executor_until_terminal_if_current(&registration, reason),
+            )
+            .await
+            .expect("the stop reaches its terminal within 120 s")
+            .expect("stop the runtime");
+            assert!(stopped, "the stop ran against the current registration");
+        }
+
+        fn runtime_id(&self) -> LogicalRuntimeId {
+            runtime_id_for_session(&self.session_id)
+        }
+
+        /// Admit `count` non-prompt external events in `handling_mode`, in
+        /// admission order, with their waiters.
+        async fn admit_backlog(
+            &self,
+            count: usize,
+            handling_mode: HandlingMode,
+        ) -> (Vec<InputId>, Vec<CompletionHandle>) {
+            self.admit(
+                (0..count)
+                    .map(|index| {
+                        let mut input = make_queued_external_event(&format!("backlog-{index}"));
+                        if let Input::ExternalEvent(event) = &mut input {
+                            event.handling_mode = handling_mode;
+                        }
+                        input
+                    })
+                    .collect(),
+            )
+            .await
+        }
+
+        /// Admit `inputs` in order, with their waiters.
+        async fn admit(&self, inputs: Vec<Input>) -> (Vec<InputId>, Vec<CompletionHandle>) {
+            let mut input_ids = Vec::with_capacity(inputs.len());
+            let mut waiters = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let input_id = input.id().clone();
+                let (outcome, waiter) = self
+                    .machine
+                    .accept_input_with_completion(&self.session_id, input)
+                    .await
+                    .expect("admit a backlog input");
+                assert!(outcome.is_accepted(), "{outcome:?}");
+                input_ids.push(input_id);
+                waiters.push(waiter.expect("a queued input installs a waiter"));
+            }
+            (input_ids, waiters)
+        }
+
+        async fn assert_ready(&self, context: &str) {
+            let required = self
+                .machine
+                .durability_reload_required(&self.session_id)
+                .await;
+            assert!(
+                required.is_none(),
+                "{context}: the registration became reload-required: {required:?}"
+            );
+        }
+
+        /// Wait for every waiter, failing at once if the registration
+        /// becomes reload-required meanwhile.
+        async fn settle(
+            &self,
+            waiters: Vec<CompletionHandle>,
+            context: &str,
+        ) -> Vec<Result<CompletionOutcome, CompletionWaitError>> {
+            let mut all = tokio::spawn(async move {
+                let mut outcomes = Vec::with_capacity(waiters.len());
+                for waiter in waiters {
+                    outcomes.push(waiter.wait().await);
+                }
+                outcomes
+            });
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            loop {
+                match tokio::time::timeout(Duration::from_millis(100), &mut all).await {
+                    Ok(joined) => return joined.expect("the waiter task"),
+                    Err(_) => {
+                        self.assert_ready(context).await;
+                        assert!(
+                            tokio::time::Instant::now() < deadline,
+                            "{context}: the waiters did not settle within 120 s"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Every input reached `expected`, and its exact terminal completion
+        /// is readable.
+        async fn assert_every_terminal(
+            &self,
+            input_ids: &[InputId],
+            expected: &InputTerminalOutcome,
+            context: &str,
+        ) {
+            for input_id in input_ids {
+                let stored = self
+                    .machine
+                    .input_state(&self.session_id, input_id)
+                    .await
+                    .expect("read an input")
+                    .unwrap_or_else(|| panic!("{context}: input {input_id} is retained"));
+                assert_eq!(
+                    stored.seed.terminal_outcome.as_ref(),
+                    Some(expected),
+                    "{context}: input {input_id} reached its terminal"
+                );
+                let completion = self
+                    .machine
+                    .input_terminal_completion(&self.session_id, input_id)
+                    .await
+                    .expect("read an input's terminal completion");
+                assert!(
+                    completion.is_some(),
+                    "{context}: input {input_id} has its exact terminal completion"
+                );
+            }
+        }
+    }
+
+    /// Completes every run at once and records each run's contributors.
+    struct RecordingCompletingExecutor {
+        runs: Arc<std::sync::Mutex<Vec<Vec<InputId>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for RecordingCompletingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let contributors = primitive.contributing_input_ids().to_vec();
+            self.runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(contributors.clone());
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: primitive.apply_boundary(),
+                    contributing_input_ids: contributors,
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    /// Holds the first run inside `apply` until released; every later run
+    /// completes at once.
+    struct GatedFirstRunExecutor {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        gated: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for GatedFirstRunExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            if std::mem::take(&mut self.gated) {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: primitive.apply_boundary(),
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    fn abandoned(reason: InputAbandonReason) -> InputTerminalOutcome {
+        InputTerminalOutcome::Abandoned { reason }
+    }
+
+    fn assert_every_runtime_terminated(
+        outcomes: &[Result<CompletionOutcome, CompletionWaitError>],
+        reason: &str,
+        context: &str,
+    ) {
+        for outcome in outcomes {
+            assert!(
+                matches!(
+                    outcome,
+                    Ok(CompletionOutcome::RuntimeTerminated { reason: terminated, .. })
+                        if terminated == reason
+                ),
+                "{context}: every waiter gets the runtime terminal: {outcome:?}"
+            );
+        }
+    }
+
+    /// A session with a register-held backlog of 300 non-prompt inputs gets an
+    /// executor: the loop works the whole backlog, at most 256 inputs a run,
+    /// in admission order, until every input is consumed.
+    async fn backlog_runs_in_bounded_runs(store: BoundStore, handling_mode: HandlingMode) {
+        let fixture = Fixture::new(store).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, handling_mode).await;
+        let lanes = fixture
+            .machine
+            .meerkat_machine_spine_snapshot(&fixture.session_id)
+            .await
+            .expect("spine snapshot")
+            .inputs;
+        let lane = match handling_mode {
+            HandlingMode::Steer => lanes.steer_queue,
+            _ => lanes.queue,
+        };
+        assert_eq!(
+            lane, input_ids,
+            "the whole backlog waits in the {handling_mode:?} lane, in admission order"
+        );
+
+        let runs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        fixture
+            .machine
+            .ensure_session_with_executor(
+                fixture.session_id.clone(),
+                Box::new(RecordingCompletingExecutor {
+                    runs: Arc::clone(&runs),
+                }),
+            )
+            .await
+            .expect("attach the executor");
+        let outcomes = fixture.settle(waiters, "backlog runs").await;
+        for outcome in &outcomes {
+            assert!(
+                matches!(outcome, Ok(CompletionOutcome::CompletedWithoutResult)),
+                "every backlog input completes: {outcome:?}"
+            );
+        }
+        fixture
+            .assert_every_terminal(&input_ids, &InputTerminalOutcome::Consumed, "backlog runs")
+            .await;
+        fixture.assert_ready("after the backlog ran").await;
+
+        let runs = runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            runs.iter().all(|run| run.len() <= BATCH_BOUND),
+            "no run takes more than {BATCH_BOUND} inputs: {:?}",
+            runs.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            runs.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![BATCH_BOUND, BACKLOG - BATCH_BOUND],
+            "a full run takes the bound and the rest wait for the next run"
+        );
+        assert_eq!(
+            runs.concat(),
+            input_ids,
+            "every input runs exactly once, in admission order, across runs"
+        );
+    }
+
+    async fn queue_backlog_runs_in_bounded_runs(store: BoundStore) {
+        backlog_runs_in_bounded_runs(store, HandlingMode::Queue).await;
+    }
+
+    async fn steer_backlog_runs_in_bounded_runs(store: BoundStore) {
+        backlog_runs_in_bounded_runs(store, HandlingMode::Steer).await;
+    }
+
+    /// A stop of a session without a runtime loop completes its whole
+    /// 300-input backlog as stopped.
+    async fn loopless_stop_completes_every_input(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+        fixture.stop_until_terminal("operator stop").await;
+        let outcomes = fixture.settle(waiters, "loop-less stop").await;
+        assert_every_runtime_terminated(&outcomes, "runtime stopped", "loop-less stop");
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Stopped),
+                "loop-less stop",
+            )
+            .await;
+        fixture.assert_ready("after the loop-less stop").await;
+    }
+
+    /// A session whose runtime loop is held from starting runs is stopped
+    /// with a 300-input backlog: the loop's stop completes every input.
+    async fn held_loop_stop_completes_every_input(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        let runs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        fixture
+            .machine
+            .register_session_with_executor(
+                fixture.session_id.clone(),
+                Box::new(RecordingCompletingExecutor {
+                    runs: Arc::clone(&runs),
+                }),
+            )
+            .await
+            .expect("register the session with a loop");
+        fixture
+            .machine
+            .hold_run_starts(&fixture.session_id, crate::RunStartHoldReason::MobStop)
+            .await
+            .expect("hold run starts");
+        let mut parks = fixture.machine.run_start_held_parks();
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+        tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+            .await
+            .expect("the runtime loop parks on the hold")
+            .expect("park signal");
+        fixture.stop_until_terminal("operator stop").await;
+        let outcomes = fixture.settle(waiters, "held-loop stop").await;
+        for outcome in &outcomes {
+            assert!(
+                matches!(outcome, Ok(CompletionOutcome::RuntimeTerminated { .. })),
+                "held-loop stop: every waiter gets the runtime terminal: {outcome:?}"
+            );
+        }
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Stopped),
+                "held-loop stop",
+            )
+            .await;
+        fixture.assert_ready("after the held-loop stop").await;
+        assert!(
+            runs.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "nothing ran"
+        );
+    }
+
+    /// A destroy completes the whole 300-input backlog as destroyed.
+    async fn destroy_completes_every_input(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+        let report = crate::traits::RuntimeControlPlane::destroy(
+            fixture.machine.as_ref(),
+            &fixture.runtime_id(),
+        )
+        .await
+        .expect("destroy the runtime");
+        assert_eq!(report.inputs_abandoned, BACKLOG);
+        let outcomes = fixture.settle(waiters, "destroy").await;
+        assert_every_runtime_terminated(&outcomes, "runtime destroyed", "destroy");
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Destroyed),
+                "destroy",
+            )
+            .await;
+        fixture.assert_ready("after the destroy").await;
+    }
+
+    /// A retire of a session without a runtime loop completes the whole
+    /// 300-input backlog as retired.
+    async fn loopless_retire_completes_every_input(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+        let report = crate::traits::RuntimeControlPlane::retire(
+            fixture.machine.as_ref(),
+            &fixture.runtime_id(),
+        )
+        .await
+        .expect("retire the loop-less runtime");
+        assert_eq!(report.inputs_abandoned, BACKLOG);
+        let outcomes = fixture.settle(waiters, "loop-less retire").await;
+        assert_every_runtime_terminated(
+            &outcomes,
+            "retired without runtime loop",
+            "loop-less retire",
+        );
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Retired),
+                "loop-less retire",
+            )
+            .await;
+        fixture.assert_ready("after the loop-less retire").await;
+    }
+
+    /// A retired session whose held runtime loop still owns the drain gets
+    /// its retirement cleanup: the cleanup completes the whole 300-input
+    /// backlog as retired.
+    async fn retired_pending_cleanup_completes_every_input(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        let runs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        fixture
+            .machine
+            .register_session_with_executor(
+                fixture.session_id.clone(),
+                Box::new(RecordingCompletingExecutor {
+                    runs: Arc::clone(&runs),
+                }),
+            )
+            .await
+            .expect("register the session with a loop");
+        fixture
+            .machine
+            .hold_run_starts(&fixture.session_id, crate::RunStartHoldReason::MobStop)
+            .await
+            .expect("hold run starts");
+        let mut parks = fixture.machine.run_start_held_parks();
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+        tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+            .await
+            .expect("the runtime loop parks on the hold")
+            .expect("park signal");
+        crate::traits::RuntimeControlPlane::retire(fixture.machine.as_ref(), &fixture.runtime_id())
+            .await
+            .expect("retire while the held loop owns the drain");
+        let abandoned_count = tokio::time::timeout(
+            Duration::from_secs(120),
+            fixture
+                .machine
+                .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
+        )
+        .await
+        .expect("the retirement cleanup finishes")
+        .expect("retirement cleanup");
+        assert_eq!(abandoned_count, BACKLOG);
+        let outcomes = fixture.settle(waiters, "retirement cleanup").await;
+        assert_every_runtime_terminated(&outcomes, "retired cleanup", "retirement cleanup");
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Retired),
+                "retirement cleanup",
+            )
+            .await;
+        fixture.assert_ready("after the retirement cleanup").await;
+        assert!(
+            runs.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "nothing ran"
+        );
+    }
+
+    /// A replacement attachment published over a 300-input backlog cancels
+    /// every predecessor input and fails each waiter as replaced.
+    async fn attachment_replacement_completes_every_input(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+        let runs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pending = match fixture
+            .machine
+            .ensure_session_with_executor_factory(fixture.session_id.clone(), {
+                let runs = Arc::clone(&runs);
+                move |_witness| Box::new(RecordingCompletingExecutor { runs })
+            })
+            .await
+            .expect("prepare the replacement attachment")
+        {
+            EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+            EnsureRuntimeExecutorAttachment::Existing(witness) => {
+                panic!("the replacement unexpectedly found attachment {witness:?}")
+            }
+        };
+        let witness = pending
+            .commit_replacing_predecessor()
+            .await
+            .expect("publish the replacement and fence the predecessor waiters");
+        let outcomes = fixture.settle(waiters, "attachment replacement").await;
+        for outcome in &outcomes {
+            assert!(
+                matches!(outcome, Err(error) if error.is_attachment_replaced()),
+                "every predecessor waiter fails as replaced: {outcome:?}"
+            );
+        }
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Cancelled),
+                "attachment replacement",
+            )
+            .await;
+        fixture.assert_ready("after the replacement").await;
+        assert!(
+            fixture
+                .machine
+                .list_active_inputs(&fixture.session_id)
+                .await
+                .expect("inspect the backlog after the replacement")
+                .is_empty(),
+            "the replacement leaves no predecessor work"
+        );
+        assert!(
+            runs.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the replacement never runs predecessor work"
+        );
+        fixture
+            .machine
+            .unregister_executor_attachment_if_current(&witness)
+            .await
+            .expect("clean the replacement attachment");
+    }
+
+    /// A Reset the machine refuses while a run is in flight answers a typed
+    /// refusal before it prepares or checkpoints anything; the session stays
+    /// ready, its inputs run, and a new input runs to completion.
+    async fn reset_refused_while_running_keeps_the_session_usable(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture
+            .machine
+            .register_session_with_executor(
+                fixture.session_id.clone(),
+                Box::new(GatedFirstRunExecutor {
+                    started: Arc::clone(&started),
+                    release: Arc::clone(&release),
+                    gated: true,
+                }),
+            )
+            .await
+            .expect("register the gated session");
+        let in_flight = make_prompt("the run in flight");
+        let in_flight_id = in_flight.id().clone();
+        let (outcome, in_flight_waiter) = fixture
+            .machine
+            .accept_input_with_completion(&fixture.session_id, in_flight)
+            .await
+            .expect("admit the run's input");
+        assert!(outcome.is_accepted(), "{outcome:?}");
+        tokio::time::timeout(Duration::from_secs(30), started.notified())
+            .await
+            .expect("the run starts");
+        let (queued_ids, queued_waiters) = fixture.admit_backlog(2, HandlingMode::Queue).await;
+        assert!(
+            fixture
+                .machine
+                .current_run(&fixture.session_id)
+                .await
+                .is_some(),
+            "a run is in flight"
+        );
+
+        let refused = crate::traits::RuntimeControlPlane::reset(
+            fixture.machine.as_ref(),
+            &fixture.runtime_id(),
+        )
+        .await
+        .expect_err("the machine refuses Reset while a run is in flight");
+        fixture.assert_ready("after the refused reset").await;
+        assert!(
+            matches!(
+                refused,
+                RuntimeControlPlaneError::InvalidState {
+                    state: RuntimeState::Running
+                }
+            ),
+            "a typed refusal: {refused:?}"
+        );
+        let refused = fixture
+            .machine
+            .reset_runtime(&fixture.session_id)
+            .await
+            .expect_err("the session-service reset is refused the same way");
+        assert!(
+            matches!(
+                refused,
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Running
+                }
+            ),
+            "a typed refusal: {refused:?}"
+        );
+        fixture.assert_ready("after the refused reset").await;
+
+        release.notify_one();
+        let mut waiters = vec![in_flight_waiter.expect("the run's input has a waiter")];
+        waiters.extend(queued_waiters);
+        let outcomes = fixture.settle(waiters, "after the refused reset").await;
+        for outcome in &outcomes {
+            assert!(
+                matches!(outcome, Ok(CompletionOutcome::CompletedWithoutResult)),
+                "every input runs after the refused reset: {outcome:?}"
+            );
+        }
+        let mut ran = vec![in_flight_id];
+        ran.extend(queued_ids);
+        fixture
+            .assert_every_terminal(&ran, &InputTerminalOutcome::Consumed, "refused reset")
+            .await;
+        let (later_ids, later_waiters) = fixture.admit_backlog(1, HandlingMode::Queue).await;
+        let outcomes = fixture.settle(later_waiters, "a later input").await;
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [Ok(CompletionOutcome::CompletedWithoutResult)]
+            ),
+            "a later input runs to completion: {outcomes:?}"
+        );
+        fixture
+            .assert_every_terminal(&later_ids, &InputTerminalOutcome::Consumed, "a later input")
+            .await;
+        fixture.assert_ready("after the later input").await;
+    }
+
+    /// A Reset the machine refuses on a stopped session that still holds
+    /// queued inputs answers a typed refusal before it prepares or
+    /// checkpoints anything; the session stays ready, revives, and runs its
+    /// inputs and a new one.
+    ///
+    /// No public step leaves a registered session Stopped with inputs: a
+    /// stopped session admits none (`NotReady { state: Stopped }`), a stop
+    /// terminalizes every input but those a requeue unregister keeps, and a
+    /// restart registers those kept inputs on an Idle session. So the row
+    /// stops the session's machine with its two inputs queued: it applies
+    /// the generated `RuntimeExecutorExited` to the session's authority, the
+    /// transition a stop applies once its inputs are terminal.
+    async fn reset_refused_while_stopped_keeps_the_session_usable(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (queued_ids, queued_waiters) = fixture.admit_backlog(2, HandlingMode::Queue).await;
+        {
+            let authority = fixture
+                .machine
+                .session_dsl_authority(&fixture.session_id)
+                .await
+                .expect("session authority");
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            mm_dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                mm_dsl::MeerkatMachineInput::RuntimeExecutorExited,
+            )
+            .expect("the machine stops with the inputs queued");
+        }
+        let driver = fixture
+            .machine
+            .sessions
+            .read()
+            .await
+            .get(&fixture.session_id)
+            .map(|entry| Arc::clone(&entry.driver))
+            .expect("the session is registered");
+        driver
+            .lock()
+            .await
+            .sync_control_projection_from_dsl_authority();
+        assert_eq!(
+            fixture
+                .machine
+                .meerkat_machine_spine_snapshot(&fixture.session_id)
+                .await
+                .expect("spine snapshot")
+                .control
+                .phase,
+            RuntimeState::Stopped,
+            "the session is stopped with queued inputs"
+        );
+
+        let refused = crate::traits::RuntimeControlPlane::reset(
+            fixture.machine.as_ref(),
+            &fixture.runtime_id(),
+        )
+        .await
+        .expect_err("the machine refuses Reset on a stopped session");
+        fixture.assert_ready("after the refused reset").await;
+        assert!(
+            matches!(
+                refused,
+                RuntimeControlPlaneError::InvalidState {
+                    state: RuntimeState::Stopped
+                }
+            ),
+            "a typed refusal: {refused:?}"
+        );
+        for input_id in &queued_ids {
+            assert_eq!(
+                fixture
+                    .machine
+                    .input_state(&fixture.session_id, input_id)
+                    .await
+                    .expect("read a queued input")
+                    .expect("the queued input is retained")
+                    .seed
+                    .phase,
+                InputLifecycleState::Queued,
+                "the refused reset leaves the queued input queued"
+            );
+        }
+
+        fixture
+            .machine
+            .prepare_bindings(fixture.session_id.clone())
+            .await
+            .expect("revive the stopped session");
+        let runs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        fixture
+            .machine
+            .ensure_session_with_executor(
+                fixture.session_id.clone(),
+                Box::new(RecordingCompletingExecutor {
+                    runs: Arc::clone(&runs),
+                }),
+            )
+            .await
+            .expect("attach an executor");
+        let outcomes = fixture
+            .settle(queued_waiters, "after the refused reset")
+            .await;
+        for outcome in &outcomes {
+            assert!(
+                matches!(outcome, Ok(CompletionOutcome::CompletedWithoutResult)),
+                "the queued inputs run after the refused reset: {outcome:?}"
+            );
+        }
+        fixture
+            .assert_every_terminal(
+                &queued_ids,
+                &InputTerminalOutcome::Consumed,
+                "refused reset",
+            )
+            .await;
+        let (later_ids, later_waiters) = fixture.admit_backlog(1, HandlingMode::Queue).await;
+        let outcomes = fixture.settle(later_waiters, "a later input").await;
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [Ok(CompletionOutcome::CompletedWithoutResult)]
+            ),
+            "a later input runs to completion: {outcomes:?}"
+        );
+        fixture
+            .assert_every_terminal(&later_ids, &InputTerminalOutcome::Consumed, "a later input")
+            .await;
+        fixture.assert_ready("after the later input").await;
+    }
+
+    macro_rules! on_every_store {
+        ($($row:ident),* $(,)?) => {
+            $(
+                mod $row {
+                    use super::*;
+
+                    #[tokio::test]
+                    async fn memory() {
+                        super::$row(BoundStore::Memory).await;
+                    }
+
+                    #[tokio::test]
+                    async fn sqlite() {
+                        super::$row(BoundStore::Sqlite).await;
+                    }
+
+                    #[tokio::test]
+                    async fn host_realm() {
+                        super::$row(BoundStore::HostRealm).await;
+                    }
+                }
+            )*
+        };
+    }
+
+    on_every_store!(
+        queue_backlog_runs_in_bounded_runs,
+        steer_backlog_runs_in_bounded_runs,
+        loopless_stop_completes_every_input,
+        held_loop_stop_completes_every_input,
+        destroy_completes_every_input,
+        loopless_retire_completes_every_input,
+        retired_pending_cleanup_completes_every_input,
+        attachment_replacement_completes_every_input,
+        reset_refused_while_running_keeps_the_session_usable,
+        reset_refused_while_stopped_keeps_the_session_usable,
+    );
+}

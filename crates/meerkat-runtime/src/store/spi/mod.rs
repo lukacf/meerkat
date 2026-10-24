@@ -65,7 +65,7 @@ pub mod realm;
 mod runtime;
 mod session;
 #[cfg(test)]
-mod test_host;
+pub(crate) mod test_host;
 #[cfg(test)]
 mod tests;
 

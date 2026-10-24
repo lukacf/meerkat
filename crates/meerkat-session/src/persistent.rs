@@ -15223,13 +15223,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ///
     /// An actor without the receipt was not seeded for this run, and one whose
     /// image does not begin with the tail can no longer be proved to continue
-    /// it. Either refusal fails the resumed run as an ordinary run failure
-    /// before anything runs: the runtime replays the run's inputs, after the
-    /// failed-turn path has discarded the run's provisional tail, so they run
-    /// again from the committed body exactly once. Unless the run re-based
-    /// before its restart (its tail's cursor says so): its inputs are then
-    /// already in the committed body, so the failed-turn path keeps the tail,
-    /// the executor stops, and the next start resumes or repairs the run.
+    /// it. Either refusal fails the resumed run before anything runs, and a
+    /// resumed run never replays its inputs: a call of its rounds may already
+    /// have run before the restart. The failed-turn path keeps the run's
+    /// WholeBlob tail (`ReplayedRunTail::ResumedKept`; an applied
+    /// HeadCanonical tail is never discarded, so that profile reloads), the
+    /// executor stops, and the next start resumes or repairs the run.
     async fn resumed_run_checkpoint_receipt(
         &self,
         id: &SessionId,
@@ -39233,6 +39232,202 @@ mod tests {
         );
     }
 
+    /// A runtime turn request stamped as `kind`, for a WholeBlob replay row.
+    fn runtime_turn_request_of_kind(
+        prompt: &str,
+        kind: meerkat_core::lifecycle::RuntimeExecutionKind,
+    ) -> StartTurnRequest {
+        let mut req = start_turn_request(prompt);
+        req.runtime.turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                execution_kind: Some(kind),
+                ..Default::default()
+            },
+        );
+        req
+    }
+
+    /// A WholeBlob session whose store holds `run_id`'s round commit, a
+    /// provisional tail the live actor's image does not continue: written
+    /// through the actor's checkpointer over a copy of its session, so a
+    /// resumed dispatch of the run is refused before anything runs (the live
+    /// image does not begin with the tail its receipt names).
+    async fn whole_blob_session_with_a_tail_the_actor_does_not_continue(
+        run_id: &RunId,
+    ) -> (
+        PersistentSessionService<CheckpointerHoldingBuilder<FailingRunBuilder>>,
+        Arc<InMemoryRuntimeStore>,
+        SessionId,
+    ) {
+        use meerkat_core::SessionCheckpointer as _;
+
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(FailingRunBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&created.session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        let mut round = service
+            .inner
+            .export_session(&created.session_id)
+            .await
+            .expect("the created actor exports its session");
+        round.push(Message::User(UserMessage::text(
+            "the run's prompt".to_string(),
+        )));
+        round
+            .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                1,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            ))
+            .expect("the round's commit carries the run's cursor");
+        checkpointer
+            .checkpoint_run(&mut round, run_id, None)
+            .await
+            .expect("the round checkpoints")
+            .expect("a durable session writes a provisional tail");
+        (service, runtime_store, created.session_id)
+    }
+
+    async fn whole_blob_tail_run(
+        runtime_store: &InMemoryRuntimeStore,
+        session_id: &SessionId,
+    ) -> Option<RunId> {
+        RuntimeStore::load_whole_blob_provisional_tail(
+            runtime_store,
+            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(session_id),
+        )
+        .await
+        .expect("read the provisional tail")
+        .map(|tail| tail.authority().run_id().clone())
+    }
+
+    /// A resumed run whose dispatch is refused before it runs (its actor's
+    /// image does not continue the run's provisional tail) never replays its
+    /// inputs: its WholeBlob tail is kept and the failure stops the executor,
+    /// so the next start repairs the run from the tail as interrupted. A
+    /// replay would ask the model afresh from the committed body while a call
+    /// of the run's rounds may already have run. RED before: the failed-turn
+    /// path discarded the tail, and the runtime replayed the inputs.
+    #[tokio::test]
+    async fn a_resumed_run_refused_before_it_runs_keeps_its_whole_blob_tail_and_stops() {
+        let run_id = RunId::new();
+        let (service, runtime_store, session_id) =
+            whole_blob_session_with_a_tail_the_actor_does_not_continue(&run_id).await;
+        let refused = service
+            .apply_runtime_turn(
+                &session_id,
+                run_id.clone(),
+                runtime_turn_request_of_kind(
+                    "the resumed run's prompt",
+                    meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun,
+                ),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("the resume is refused before anything runs");
+        assert!(
+            refused.requests_runtime_executor_stop(),
+            "a resumed run's failure stops the executor instead of replaying: {refused}"
+        );
+        assert_eq!(
+            whole_blob_tail_run(&runtime_store, &session_id).await,
+            Some(run_id),
+            "the resumed run's tail is kept for the next start to repair"
+        );
+    }
+
+    /// An ordinary run's failure over its WholeBlob tail still replays: the
+    /// tail is discarded first, so the replay and a later recovery cannot
+    /// both carry the run's inputs.
+    #[tokio::test]
+    async fn an_ordinary_runs_failure_still_discards_its_whole_blob_tail() {
+        let run_id = RunId::new();
+        let (service, runtime_store, session_id) =
+            whole_blob_session_with_a_tail_the_actor_does_not_continue(&run_id).await;
+        let failed = service
+            .apply_runtime_turn(
+                &session_id,
+                run_id,
+                runtime_turn_request_of_kind(
+                    "an ordinary run's prompt",
+                    meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                ),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("the ordinary run fails");
+        assert!(
+            !failed.requests_runtime_executor_stop(),
+            "an ordinary run's failure is replayed, not an executor stop: {failed}"
+        );
+        assert_eq!(
+            whole_blob_tail_run(&runtime_store, &session_id).await,
+            None,
+            "the ordinary run's tail is discarded before the replay"
+        );
+    }
+
+    /// The HeadCanonical control: an applied round commit is never discarded,
+    /// so a resumed run's refused dispatch takes the reload it always took.
+    /// The tail stands, and the failure is not turned into an executor stop.
+    #[tokio::test]
+    async fn a_resumed_run_refused_before_it_runs_keeps_its_head_canonical_reload() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(false).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        let refused = service
+            .apply_runtime_turn(
+                &id,
+                run_id.clone(),
+                runtime_turn_request_of_kind(
+                    "the resumed run's prompt",
+                    meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun,
+                ),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("the resume is refused before anything runs");
+        assert!(
+            !refused.requests_runtime_executor_stop(),
+            "HeadCanonical takes the reload path, not the resumed run's stop: {refused}"
+        );
+        assert_eq!(
+            service
+                .runtime_store
+                .load_head_canonical_provisional_tail(
+                    &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                )
+                .await
+                .expect("read the provisional tail")
+                .map(|tail| tail.run_id().clone()),
+            Some(run_id),
+            "the applied round commit stands"
+        );
+    }
+
     /// A run that ends in a hard-failure terminal while the checkpoint held
     /// for it is a round's first commit (its closing save failed, so the
     /// round's staged calls, which may have run, are still owed their
@@ -39484,16 +39679,18 @@ mod tests {
         }
     }
 
-    /// A resumed run that re-based before its restart, and whose dispatch the
-    /// session refuses before it runs (here its actor holds no seeded
-    /// receipt, so nothing in memory marks the re-base), keeps its
-    /// provisional tail: the tail's cursor records the re-base, so the run's
-    /// inputs are already in the committed body, and the failure stops the
-    /// executor instead of discarding the tail and replaying them. The same
-    /// refusal over a tail whose cursor records no re-base still discards the
-    /// tail and replays the inputs. RED before: the failed-turn path
-    /// discarded the tail of every failure it replayed. Unrun: written while
-    /// Cargo is not run.
+    /// A resumed run whose dispatch the session refuses before it runs (here
+    /// its actor holds no seeded receipt, so nothing in memory marks a
+    /// re-base) keeps its provisional tail, and the failure stops the
+    /// executor instead of discarding the tail and replaying the inputs:
+    /// - a tail whose cursor records the re-base: the run's inputs are
+    ///   already in the committed body;
+    /// - a tail whose cursor records no re-base: a resumed run never replays
+    ///   its inputs, since a call of its rounds may already have run.
+    ///
+    /// RED before: the failed-turn path discarded the tail of every failure
+    /// it replayed, and then a refused resume of a run that never re-based
+    /// still did.
     #[tokio::test]
     async fn a_refused_resume_of_a_rebased_run_keeps_its_tail_and_stops() {
         for rebased in [true, false] {
@@ -39570,24 +39767,14 @@ mod tests {
                 .await
                 .expect("the tail read answers")
                 .is_some();
-            if rebased {
-                assert!(
-                    error.requests_runtime_executor_stop(),
-                    "a re-based run's refused resume stops the executor: {error}"
-                );
-                assert!(
-                    tail_stands,
-                    "the re-based run's tail is kept for the next start"
-                );
-            } else {
-                assert!(
-                    PersistentSessionService::<DummyBuilder>::runtime_turn_failure_replays_inputs(
-                        &error
-                    ),
-                    "a refused resume of a run that never re-based replays: {error}"
-                );
-                assert!(!tail_stands, "its tail is discarded before the replay");
-            }
+            assert!(
+                error.requests_runtime_executor_stop(),
+                "a refused resume stops the executor (rebased {rebased}): {error}"
+            );
+            assert!(
+                tail_stands,
+                "the resumed run's tail is kept for the next start (rebased {rebased})"
+            );
         }
     }
 

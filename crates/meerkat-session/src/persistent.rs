@@ -4653,17 +4653,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// into an error; after the last attempt the typed conflict surfaces
     /// unchanged (issue #1104). Every re-read holds the runtime turn
     /// finalization guard so it cannot interleave with a finalizer's write.
+    ///
+    /// These loads serve public readers only, so each attempt tolerates the
+    /// session's own provisional tail
+    /// ([`Self::load_authoritative_session_base_tolerating_tail`]): while a
+    /// durable run holds a round commit ahead of the committed snapshot, the
+    /// reader is served that snapshot instead of the conflict.
     async fn load_authoritative_session_base_for_observation(
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        let mut result = self.load_authoritative_session_base(id).await;
+        let mut result = self
+            .load_authoritative_session_base_tolerating_tail(id)
+            .await;
         for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
             if !Self::is_transcript_revision_conflict(&result) {
                 break;
             }
             let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-            result = self.load_authoritative_session_base(id).await;
+            result = self
+                .load_authoritative_session_base_tolerating_tail(id)
+                .await;
         }
         result
     }
@@ -7668,13 +7678,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// the exact planned child is already durable and exposes its committed
     /// body so the caller can verify selected-prefix provenance and inherited
     /// execution metadata before recording activation. It never mutates,
-    /// persists, or revives anything.
+    /// persists, or revives anything. While the session's own durable run
+    /// holds a provisional tail ahead of the committed snapshot it reads that
+    /// snapshot through the tail
+    /// ([`Self::load_authoritative_session_base_with_replay_info_tolerating_tail`]).
     pub async fn load_durable_session_body(
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         let mut replay = match self
-            .load_authoritative_session_base_with_replay_info(id)
+            .load_authoritative_session_base_with_replay_info_tolerating_tail(id)
             .await
         {
             Ok(replay) => replay,
@@ -17000,8 +17013,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                 Err(error) => return Err(error),
             }
             // No running actor: resolve retained views from the runtime's
-            // committed body, never from the physical latest checkpoint.
-            let loaded = self.load_authoritative_session_base(id).await;
+            // committed body, never from the physical latest checkpoint. A
+            // run hosted elsewhere may hold a provisional tail ahead of that
+            // body: read the committed snapshot through it.
+            let loaded = self
+                .load_authoritative_session_base_tolerating_tail(id)
+                .await;
             if Self::is_transcript_revision_conflict(&loaded) {
                 continue;
             }
@@ -34715,6 +34732,258 @@ mod tests {
                 .is_none_or(|history| history.commits().next().is_none()),
             "the snapshot carries none of the round's rewrites"
         );
+    }
+
+    /// The fork-source snapshot committed on either profile, and the actor
+    /// checkpointer that writes a running turn's round commits over it, with
+    /// no actor hosted. On HeadCanonical the round's provisional tail moves
+    /// the physical head past the committed snapshot, and the strict read
+    /// refuses the boundary; on WholeBlob the tail is a separate row and the
+    /// committed document stays the snapshot (the control).
+    async fn committed_snapshot_with_a_round_checkpointer(
+        head_canonical: bool,
+    ) -> (
+        Option<tempfile::TempDir>,
+        PersistentSessionService<DummyBuilder>,
+        StoreCheckpointer,
+        Session,
+    ) {
+        if head_canonical {
+            let (directory, service, checkpointer, committed) =
+                caller_turn_fork_source_fixture().await;
+            return (Some(directory), service, checkpointer, committed);
+        }
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let mut source = recoverable_store_row();
+        source
+            .set_build_state(meerkat_core::SessionBuildState {
+                app_context: Some(serde_json::json!({"domain": "fork-source"})),
+                ..meerkat_core::SessionBuildState::default()
+            })
+            .expect("seed the source build state");
+        source.push(user_message("the previous turn's question"));
+        source.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::Text {
+                    text: "the previous turn's answer".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        let committed = service
+            .save_normalized_session(source)
+            .await
+            .expect("commit the snapshot");
+        let authority = runtime_store
+            .load_whole_blob_store_authority(&LogicalRuntimeId::for_session(committed.id()))
+            .await
+            .expect("load the committed authority")
+            .expect("the committed authority exists");
+        let checkpointer = StoreCheckpointer {
+            runtime_store,
+            incremental: None,
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(Some(authority)),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
+        };
+        (None, service, checkpointer, committed)
+    }
+
+    /// The committed snapshot with a running turn's round committed over it.
+    async fn committed_snapshot_under_a_round_commit(
+        head_canonical: bool,
+    ) -> (
+        Option<tempfile::TempDir>,
+        PersistentSessionService<DummyBuilder>,
+        Session,
+    ) {
+        let (directory, service, checkpointer, committed) =
+            committed_snapshot_with_a_round_checkpointer(head_canonical).await;
+        let mut running = committed.clone();
+        commit_running_turn_round(&checkpointer, &mut running, &RunId::new()).await;
+        assert_eq!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session(committed.id()).await
+            ),
+            head_canonical,
+            "the strict read refuses the boundary on HeadCanonical only"
+        );
+        (directory, service, committed)
+    }
+
+    fn messages_digest(messages: &[Message]) -> String {
+        meerkat_core::transcript_messages_digest(messages).unwrap()
+    }
+
+    /// Session history, the current transcript revision, the revision list
+    /// and the activation records of a session whose own run holds a round
+    /// commit serve the committed snapshot, on both profiles.
+    async fn history_reads_serve_the_committed_snapshot_under_a_round_commit(head_canonical: bool) {
+        let (_directory, service, committed) =
+            committed_snapshot_under_a_round_commit(head_canonical).await;
+        let id = committed.id().clone();
+
+        let history = service
+            .read_history(&id, SessionHistoryQuery::default())
+            .await
+            .expect("the history reads the committed snapshot");
+        assert_eq!(history.message_count, committed.messages().len());
+        assert_eq!(
+            messages_digest(&history.messages),
+            messages_digest(committed.messages())
+        );
+
+        let head_revision = committed.transcript_revision().unwrap();
+        let revision = service
+            .read_transcript_revision(
+                &id,
+                SessionTranscriptRevisionQuery {
+                    revision: "current".to_string(),
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("the current revision reads the committed snapshot");
+        assert_eq!(revision.head_revision, head_revision);
+        assert_eq!(
+            messages_digest(&revision.messages),
+            messages_digest(committed.messages())
+        );
+
+        let revisions = service
+            .list_transcript_revisions(&id, SessionTranscriptRevisionListQuery::default())
+            .await
+            .expect("the revision list reads the committed snapshot");
+        assert_eq!(revisions.head_revision, head_revision);
+        assert!(revisions.entries.is_empty(), "the snapshot has no rewrites");
+
+        let activations = service
+            .read_instruction_activation_records(
+                &id,
+                meerkat_core::InstructionActivationReadQuery::default(),
+            )
+            .await
+            .expect("the activation records read the committed snapshot");
+        assert!(activations.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_reads_serve_the_committed_snapshot_under_a_round_commit_head_canonical() {
+        history_reads_serve_the_committed_snapshot_under_a_round_commit(true).await;
+    }
+
+    #[tokio::test]
+    async fn history_reads_serve_the_committed_snapshot_under_a_round_commit_whole_blob() {
+        history_reads_serve_the_committed_snapshot_under_a_round_commit(false).await;
+    }
+
+    /// `read` with no live actor serves the committed snapshot's view of a
+    /// session whose own run holds a round commit, on both profiles.
+    async fn read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit(
+        head_canonical: bool,
+    ) {
+        let (_directory, service, committed) =
+            committed_snapshot_under_a_round_commit(head_canonical).await;
+        let view = service
+            .read(committed.id())
+            .await
+            .expect("the read serves the committed snapshot's view");
+        assert_eq!(view.state.message_count, committed.messages().len());
+        assert_eq!(
+            view.state.last_assistant_text.as_deref(),
+            Some("the previous turn's answer")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit_head_canonical()
+     {
+        read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit(true).await;
+    }
+
+    #[tokio::test]
+    async fn read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit_whole_blob()
+     {
+        read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit(false).await;
+    }
+
+    /// The durable body a planned fork verifies is the committed snapshot of
+    /// a session whose own run holds a round commit, on both profiles.
+    async fn durable_session_body_serves_the_committed_snapshot_under_a_round_commit(
+        head_canonical: bool,
+    ) {
+        let (_directory, service, committed) =
+            committed_snapshot_under_a_round_commit(head_canonical).await;
+        let body = service
+            .load_durable_session_body(committed.id())
+            .await
+            .expect("the durable body reads the committed snapshot")
+            .expect("the session is committed");
+        assert_served_the_committed_snapshot(&body, &committed);
+    }
+
+    #[tokio::test]
+    async fn durable_session_body_serves_the_committed_snapshot_under_a_round_commit_head_canonical()
+     {
+        durable_session_body_serves_the_committed_snapshot_under_a_round_commit(true).await;
+    }
+
+    #[tokio::test]
+    async fn durable_session_body_serves_the_committed_snapshot_under_a_round_commit_whole_blob() {
+        durable_session_body_serves_the_committed_snapshot_under_a_round_commit(false).await;
+    }
+
+    /// Tool application observations with no actor hosted resolve from the
+    /// committed snapshot, never from the running turn's round, on both
+    /// profiles: the round's tool call is not observed.
+    async fn tool_application_observations_without_an_actor_serve_the_committed_snapshot(
+        head_canonical: bool,
+    ) {
+        let (_directory, service, committed) =
+            committed_snapshot_under_a_round_commit(head_canonical).await;
+        let observations = service
+            .read_tool_application_observations(committed.id())
+            .await
+            .expect("the observations read the committed snapshot");
+        assert_eq!(
+            observations.len(),
+            meerkat_core::ToolApplicationObservation::from_messages(committed.messages()).len()
+        );
+        assert!(
+            observations.is_empty(),
+            "the round's tool call is not committed yet: {observations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_application_observations_without_an_actor_serve_the_committed_snapshot_head_canonical()
+     {
+        tool_application_observations_without_an_actor_serve_the_committed_snapshot(true).await;
+    }
+
+    #[tokio::test]
+    async fn tool_application_observations_without_an_actor_serve_the_committed_snapshot_whole_blob()
+     {
+        tool_application_observations_without_an_actor_serve_the_committed_snapshot(false).await;
     }
 
     /// A session whose committed boundary already carries a compaction, and

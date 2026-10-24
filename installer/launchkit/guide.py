@@ -748,7 +748,8 @@ def guide_package_availability(state, *, runtime_target=None, verified_artifacts
             "Configured edges do not implement optional agent-to-agent delegation. "
             "It also disables native Recorder memory, even when the plan requests memory. "
             "Conversation history does not provide native memory recall. "
-            "Native setup requests use their separate selected tools; additional required collaboration remains implementation work."]
+            "When a setup helper is selected, native setup requests use its separate selected tools; "
+            "additional required collaboration remains implementation work."]
     return result
 
 

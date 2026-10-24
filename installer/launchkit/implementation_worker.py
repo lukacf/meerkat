@@ -443,7 +443,7 @@ class BuildTools:
             try:
                 source, _, reference_metadata = load_reference(name)
             except (OSError, ValueError, KeyError, TypeError, SyntaxError) as error:
-                return {"name": name, "ok": False, "error": "The selected SDK source page is unavailable: " + str(error)}
+                return {"name": name, "ok": False, "error": "The selected reference page is unavailable: " + str(error)}
             if reference_metadata.get("ok") is False:
                 return {"name": name, **reference_metadata}
             lines = source.splitlines()

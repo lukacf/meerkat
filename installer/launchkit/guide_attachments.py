@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import lru_cache
 import hashlib
 import io
 import importlib.util
@@ -52,6 +53,10 @@ class _PdfEvidenceError(ValueError):
     pass
 
 
+# Keep only two successful extractions, keyed by the original bounded PDF bytes.
+# Paging still checks the submitted reference and reads/verifies storage before
+# reaching this cache. It retains no parser objects and writes no extracted text.
+@lru_cache(maxsize=2)
 def _pdf_text(data):
     try:
         from pypdf import PdfReader

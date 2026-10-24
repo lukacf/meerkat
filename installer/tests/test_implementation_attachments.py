@@ -128,3 +128,8 @@ def test_registered_evidence_reader_returns_original_pdf_extraction(evidence, ro
     assert result["attachment"] == ref and result["text"].strip() == text
     assert result["complete"] and result["next_offset"] is None
     assert result["extraction"] == "PDF text only; no OCR or image analysis."
+    # A warm extraction cannot replace verification of the retained original.
+    path = evidence["root"] / "guide-attachments" / evidence["guide"]["id"] / (ref["sha256"] + ".bin")
+    path.write_bytes(b"Changed PDF bytes after a successful read")
+    refused = asyncio.run(handler(evidence[role])({"attachment_id": ref["id"]}))
+    assert refused["ok"] is False and "text" not in refused

@@ -549,8 +549,8 @@ use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::ControllerRouteObservation;
 pub use session_service::LiveDurableSourceObservation;
 pub use session_service::{
-    AgentEventSubscription, AuthorizedSessionResume, MemberSessionActivity,
-    MemberStatusSessionView, MemberStatusViewSource, MobSessionService,
+    AgentEventSubscription, AuthorizedSessionResume, ColdStartTailSettlement,
+    MemberSessionActivity, MemberStatusSessionView, MemberStatusViewSource, MobSessionService,
     PersistedSessionAuthorityReadCost, ResumeRejectionKind, ResumeSessionLoad,
     ResumeVerdictTerminality, SessionResumeAuthority, SessionResumeLifecycle,
     SessionResumeMaterialization, SessionResumePreparationReceipt, SessionResumeRejection,

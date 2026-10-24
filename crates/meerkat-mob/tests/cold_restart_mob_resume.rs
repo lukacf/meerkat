@@ -9452,3 +9452,431 @@ async fn a_retiring_members_tuple_divergence_still_fail_stops_the_start() {
     let _ = handle.shutdown().await;
     drop(other_owner_claim);
 }
+
+// ---------------------------------------------------------------------------
+// A graceful stop over a member's open run, then a cold start
+// ---------------------------------------------------------------------------
+
+/// The persistent session service of one process start over `runtime_store`:
+/// HeadCanonical (co-tenant SQLite session store) or WholeBlob (JSONL).
+#[cfg(feature = "test-support")]
+fn requeue_service(
+    paths: &Paths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    head_canonical: bool,
+    client: Arc<HoldingToolLoopClient>,
+) -> Arc<PersistentSessionService<FactoryAgentBuilder>> {
+    if head_canonical {
+        persistent_head_canonical_service_with(paths, runtime_store, Config::default(), client).0
+    } else {
+        persistent_service_with_client(paths, runtime_store, client).0
+    }
+}
+
+/// The run the store's provisional tail for `session_id` belongs to, if one
+/// stands.
+#[cfg(feature = "test-support")]
+async fn provisional_tail_run(
+    runtime_store: &dyn meerkat_runtime::RuntimeStore,
+    session_id: &meerkat_core::types::SessionId,
+    head_canonical: bool,
+) -> Option<meerkat_core::RunId> {
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+    if head_canonical {
+        runtime_store
+            .load_head_canonical_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail")
+            .map(|tail| tail.run_id().clone())
+    } else {
+        runtime_store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail")
+            .map(|tail| tail.authority().run_id().clone())
+    }
+}
+
+/// What the first process start left: member `w-1`'s session and the open run
+/// its provisional tail belongs to.
+#[cfg(feature = "test-support")]
+struct RequeuedMemberRun {
+    w1_sid: meerkat_core::types::SessionId,
+    run_id: meerkat_core::RunId,
+}
+
+/// The first process start, ended the way a host's graceful shutdown ends it:
+/// member `w-1` of a mob led by `lead-1` runs a turn that makes one tool call
+/// (the round commits: the run's provisional tail stands ahead of the
+/// committed boundary) and is held at its next model request; the host then
+/// stops the mob, leaving the run running, and shuts it down with the default
+/// queued-input disposition, which suspends a run that commits each round
+/// for the mob's next start. The run's tail outlives the process.
+#[cfg(feature = "test-support")]
+async fn stop_gracefully_over_an_open_member_run(
+    paths: &Paths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    head_canonical: bool,
+) -> RequeuedMemberRun {
+    let client_1 = Arc::new(HoldingToolLoopClient::new(2));
+    let service_1 = requeue_service(
+        paths,
+        runtime_store.clone(),
+        head_canonical,
+        client_1.clone(),
+    );
+    let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
+    let handle_1 = MobBuilder::new(mob_definition(MobRuntimeMode::TurnDriven), storage_1)
+        .with_session_service(service_1.clone())
+        .with_default_llm_client(client_1.clone())
+        .create()
+        .await
+        .expect("create persistent mob");
+    handle_1
+        .spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1")))
+        .await
+        .expect("spawn lead");
+    handle_1
+        .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("w-1")))
+        .await
+        .expect("spawn worker");
+    let identity = AgentIdentity::from("w-1");
+    let w1_sid = handle_1
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("w1 session id");
+    let lead_sid = handle_1
+        .resolve_bridge_session_id(&AgentIdentity::from("lead-1"))
+        .await
+        .expect("lead session id");
+    let mut runtime_release_witnesses = Vec::new();
+    for session_id in [&lead_sid, &w1_sid] {
+        let runtime = service_1
+            .comms_runtime(session_id)
+            .await
+            .unwrap_or_else(|| panic!("comms runtime missing for {session_id}"));
+        runtime_release_witnesses.push(Arc::downgrade(&runtime));
+    }
+
+    handle_1
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .send(
+            format!("{} token-requeue", HoldingToolLoopClient::LOOP_MARKER),
+            HandlingMode::Queue,
+        )
+        .await
+        .expect("the run's input is admitted");
+    tokio::time::timeout(Duration::from_secs(30), client_1.wait_until_holding())
+        .await
+        .expect("the run reaches its held second model request");
+    let run_id = provisional_tail_run(runtime_store.as_ref(), &w1_sid, head_canonical)
+        .await
+        .expect("the run's first round commit stands as the provisional tail");
+
+    // The host's graceful shutdown: Stop (the run keeps running), then the
+    // default Shutdown, which suspends the run at its last round commit.
+    handle_1
+        .stop_with_options(meerkat_mob::StopOptions::default().leave_runs_running())
+        .await
+        .expect("the mob stops");
+    handle_1
+        .shutdown_with_report(meerkat_mob::ShutdownOptions::default())
+        .await
+        .expect("the mob shuts down");
+    service_1
+        .try_shutdown()
+        .await
+        .expect("shutdown first session service");
+    drop(handle_1);
+    drop(service_1);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runtime_release_witnesses
+            .iter()
+            .any(|runtime| runtime.upgrade().is_some())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("every old session runtime is released before the next start");
+
+    assert_eq!(
+        provisional_tail_run(runtime_store.as_ref(), &w1_sid, head_canonical).await,
+        Some(run_id.clone()),
+        "the graceful shutdown suspends the run: its tail outlives the process"
+    );
+    RequeuedMemberRun { w1_sid, run_id }
+}
+
+/// Start the mob again over the stores, through `session_service`.
+#[cfg(feature = "test-support")]
+async fn start_again(
+    paths: &Paths,
+    session_service: Arc<dyn MobSessionService>,
+    client: Arc<HoldingToolLoopClient>,
+) -> Result<MobHandle, meerkat_mob::MobError> {
+    MobBuilder::for_resume(MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"))
+        .with_session_service(session_service)
+        .with_default_llm_client(client)
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+}
+
+/// After the start resumed the mob: `w-1`'s open run resumes from its last
+/// round commit exactly once and completes once. The second process's model
+/// answers the loop's next request with its final text, so the run asks the
+/// model once more and calls no tool again; its input is not run again.
+#[cfg(feature = "test-support")]
+async fn assert_the_open_run_resumes_once_and_completes(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    runtime_store: &dyn meerkat_runtime::RuntimeStore,
+    client: &HoldingToolLoopClient,
+    run: &RequeuedMemberRun,
+    head_canonical: bool,
+    context: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let session = loop {
+        let session = service
+            .load_authoritative_session(&run.w1_sid)
+            .await
+            .unwrap_or_else(|error| panic!("[{context}] read w-1's committed session: {error}"))
+            .unwrap_or_else(|| panic!("[{context}] w-1's session is committed"));
+        let done = session.messages().iter().any(|message| match message {
+            meerkat_core::Message::BlockAssistant(assistant) => {
+                assistant.text_blocks().collect::<String>() == "loop done"
+            }
+            _ => false,
+        });
+        if done {
+            break session;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "[{context}] the resumed run did not complete: {:?}",
+            session.messages().last()
+        );
+        sleep(Duration::from_millis(100)).await;
+    };
+    // A duplicate resume or a rerun of the input would ask the model again.
+    sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "[{context}] the run resumes from its last round commit exactly once"
+    );
+    let prompts = session
+        .messages()
+        .iter()
+        .filter(|message| match message {
+            meerkat_core::Message::User(user) => user
+                .text_content()
+                .contains(HoldingToolLoopClient::LOOP_MARKER),
+            _ => false,
+        })
+        .count();
+    assert_eq!(prompts, 1, "[{context}] the run's input is not run again");
+    let tool_uses = session
+        .messages()
+        .iter()
+        .map(|message| match message {
+            meerkat_core::Message::BlockAssistant(assistant) => assistant
+                .blocks
+                .iter()
+                .filter(|block| {
+                    matches!(
+                        block,
+                        meerkat_core::AssistantBlock::ToolUse { id, .. } if id == "loop-call-1"
+                    )
+                })
+                .count(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    let tool_results = session
+        .messages()
+        .iter()
+        .map(|message| match message {
+            meerkat_core::Message::ToolResults { results, .. } => results
+                .iter()
+                .filter(|result| result.tool_use_id == "loop-call-1")
+                .count(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    assert_eq!(
+        (tool_uses, tool_results),
+        (1, 1),
+        "[{context}] the committed tool round is kept once and its call is not made again"
+    );
+    let answers = session
+        .messages()
+        .iter()
+        .filter(|message| match message {
+            meerkat_core::Message::BlockAssistant(assistant) => {
+                assistant.text_blocks().collect::<String>() == "loop done"
+            }
+            _ => false,
+        })
+        .count();
+    assert_eq!(answers, 1, "[{context}] the run completes once");
+    assert_eq!(
+        provisional_tail_run(runtime_store, &run.w1_sid, head_canonical).await,
+        None,
+        "[{context}] the completed run committed its tail"
+    );
+}
+
+/// A host's graceful shutdown suspends a member's run at its last round
+/// commit (a requeueing stop), so the run's provisional tail outlives the
+/// process, and the mob's durable state is Stopped. On HeadCanonical, every
+/// committed read of the member's session refuses with a transcript revision
+/// conflict while that tail stands. The next start restores every member of
+/// the stopped mob before it admits a command: it settled the tail first,
+/// the store-owned recovery CONTINUED the run (it keeps the tail, writing
+/// nothing), and the read after the settle still refused, so the start failed
+/// with `MemberDurableTailUnprovable` and the mob never started.
+///
+/// The settle now reports the continuation with the committed snapshot under
+/// the tail: the start restores the member over its open run, and once the
+/// mob resumes, the run resumes from its last round commit, once.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_start_after_a_graceful_stop_resumes_a_members_open_run_head_canonical() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+
+    let client_2 = Arc::new(HoldingToolLoopClient::new(0));
+    let service_2 = requeue_service(&paths, runtime_store.clone(), true, client_2.clone());
+    let handle = start_again(&paths, service_2.clone(), client_2.clone())
+        .await
+        .unwrap_or_else(|error| panic!("the start restores the member over its open run: {error}"));
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Stopped)),
+        "the mob starts as it was left, stopped: {status:?}"
+    );
+    assert_eq!(
+        provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await,
+        Some(run.run_id.clone()),
+        "the start keeps the open run's tail for the run"
+    );
+    handle.resume().await.expect("the mob resumes");
+    assert_the_open_run_resumes_once_and_completes(
+        service_2.as_ref(),
+        runtime_store.as_ref(),
+        client_2.as_ref(),
+        &run,
+        true,
+        "head-canonical",
+    )
+    .await;
+    let _ = handle.shutdown().await;
+}
+
+/// The same graceful stop and cold start on WholeBlob: a committed read is
+/// not refused under a WholeBlob provisional tail, so the start restores the
+/// member and the run resumes from its last round commit, once.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_start_after_a_graceful_stop_resumes_a_members_open_run_whole_blob() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+            .expect("open durable runtime store"),
+    );
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), false).await;
+
+    let client_2 = Arc::new(HoldingToolLoopClient::new(0));
+    let service_2 = requeue_service(&paths, runtime_store.clone(), false, client_2.clone());
+    let handle = start_again(&paths, service_2.clone(), client_2.clone())
+        .await
+        .unwrap_or_else(|error| panic!("the WholeBlob start restores the member: {error}"));
+    handle.resume().await.expect("the mob resumes");
+    assert_the_open_run_resumes_once_and_completes(
+        service_2.as_ref(),
+        runtime_store.as_ref(),
+        client_2.as_ref(),
+        &run,
+        false,
+        "whole-blob",
+    )
+    .await;
+    let _ = handle.shutdown().await;
+}
+
+/// The typed refusal a start that cannot prove a member's tail fails with,
+/// through any shared-failure wrapper.
+#[cfg(feature = "test-support")]
+fn is_unprovable_tail_start_failure(
+    error: &meerkat_mob::MobError,
+    member: &AgentIdentity,
+    session: &meerkat_core::types::SessionId,
+) -> bool {
+    match error {
+        meerkat_mob::MobError::SharedLifecycleFailure(inner) => {
+            is_unprovable_tail_start_failure(inner, member, session)
+        }
+        meerkat_mob::MobError::MemberStartupRecoveryFailed {
+            member_id,
+            session_id,
+            cause,
+        } => {
+            member_id == member
+                && session_id == session
+                && matches!(
+                    cause.as_ref(),
+                    meerkat_mob::MobError::MemberDurableTailUnprovable { member_id, session_id }
+                        if member_id == member && session_id == session
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Unprovable still means unprovable: over the same suspended run, a store
+/// whose durable-tail recovery HOLDS the tail (it cannot produce exact
+/// recovery evidence) gives the settle no continuation to report, so the
+/// start still refuses, typed, and leaves the tail as it was.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_start_over_a_held_member_tail_still_refuses_typed() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+
+    power_store.hold_durable_tail_recovery(true);
+    let client_2 = Arc::new(HoldingToolLoopClient::new(0));
+    let service_2 = requeue_service(&paths, runtime_store.clone(), true, client_2.clone());
+    let error = start_again(&paths, service_2.clone(), client_2.clone())
+        .await
+        .err()
+        .expect("a start over a held tail refuses");
+    assert!(
+        is_unprovable_tail_start_failure(&error, &AgentIdentity::from("w-1"), &run.w1_sid),
+        "the start refuses with the member's typed unprovable tail: {error:?}"
+    );
+    assert_eq!(
+        provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await,
+        Some(run.run_id.clone()),
+        "the held tail stays as the shutdown left it"
+    );
+    assert_eq!(
+        client_2
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing resumed the run"
+    );
+}

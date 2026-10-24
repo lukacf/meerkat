@@ -3685,6 +3685,16 @@ impl MobSessionService for NonForwardingDecorator {
         )
         .await
     }
+    async fn settle_durable_tail_before_cold_start_reporting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::ColdStartTailSettlement, SessionError> {
+        <Service as MobSessionService>::settle_durable_tail_before_cold_start_reporting(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
     async fn load_persisted_session_metadata(
         &self,
         session_id: &SessionId,

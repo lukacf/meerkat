@@ -1300,6 +1300,32 @@ pub enum CommittedBoundaryRecovery {
     },
 }
 
+/// What a cold attach's durable-tail settle left for the session
+/// ([`PersistentSessionService::prepare_cold_attach_reporting`]).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ColdAttachSettlement {
+    /// No open run's provisional tail stands ahead of the committed boundary
+    /// for the settle to report: there was none, the store-owned recovery
+    /// committed it, or it held, refused or failed to prove it (the tail then
+    /// stays, and a committed read still refuses). The caller's next committed
+    /// read decides.
+    Settled,
+    /// The store-owned recovery continues the session's open run from its
+    /// last round commit (a run a requeueing stop suspended): the tail is
+    /// kept for that run, which resumes when the session's actor is next
+    /// materialized, and nothing was written. `committed` is the session's
+    /// committed snapshot under that tail
+    /// (`meerkat_runtime::recovery::load_committed_snapshot_under_provisional_tail`),
+    /// for readers only: it is never the input to a decision about the tail.
+    ContinuesOpenRun {
+        /// The open run the recovery continues.
+        run_id: RunId,
+        /// The session's last committed snapshot.
+        committed: Box<Session>,
+    },
+}
+
 /// A durable session's open run that durable-tail recovery continues: the
 /// provisional tail the actor is seeded from, the run it resumes and the
 /// receipt that run's next checkpoint chains from.
@@ -18628,6 +18654,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         claim: meerkat_core::session_hosting::HostingClaim,
     ) -> Result<(), SessionError> {
+        self.prepare_cold_attach_reporting(id, claim)
+            .await
+            .map(|_settlement| ())
+    }
+
+    /// [`Self::prepare_cold_attach`], reporting what the settle left: a
+    /// session whose durable-tail recovery continues its open run keeps that
+    /// run's provisional tail, so its committed body reads only through the
+    /// committed snapshot under the tail, which the report carries
+    /// ([`ColdAttachSettlement::ContinuesOpenRun`]). Whether the run
+    /// continues is the store-owned recovery's own disposition; the snapshot
+    /// only serves the caller's reads.
+    pub async fn prepare_cold_attach_reporting(
+        &self,
+        id: &SessionId,
+        claim: meerkat_core::session_hosting::HostingClaim,
+    ) -> Result<ColdAttachSettlement, SessionError> {
         if claim.session_id() != id {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "cold attach of session {id} was offered the hosting claim of session {}",
@@ -18646,14 +18689,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         .await
     }
 
-    async fn prepare_cold_attach_hosted(&self, id: &SessionId) -> Result<(), SessionError> {
+    async fn prepare_cold_attach_hosted(
+        &self,
+        id: &SessionId,
+    ) -> Result<ColdAttachSettlement, SessionError> {
         if self.inner.has_live_session(id).await? {
-            return Ok(());
+            return Ok(ColdAttachSettlement::Settled);
         }
         if self.runtime_store.session_persistence_profile()
             != RuntimeSessionPersistenceProfile::HeadCanonicalV1
         {
-            return Ok(());
+            return Ok(ColdAttachSettlement::Settled);
         }
         match self
             .runtime_store
@@ -18661,26 +18707,35 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
         {
             Ok(Some(_)) => {}
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(ColdAttachSettlement::Settled),
             Err(error) => {
                 tracing::warn!(
                     session_id = %id,
                     %error,
                     "could not observe the provisional tail before a cold attach"
                 );
-                return Ok(());
+                return Ok(ColdAttachSettlement::Settled);
             }
         }
-        match self
-            .recover_committed_boundary_retaining_aligned_body(id)
-            .await
-        {
-            Ok((
+        match self.recover_committed_boundary_for_resume(id).await {
+            Ok(ResumeBoundaryRecovery::Settled(
                 CommittedBoundaryRecovery::Recovered { .. }
                 | CommittedBoundaryRecovery::AlreadyCommitted,
                 _,
             )) => {}
-            Ok((CommittedBoundaryRecovery::Unprovable { reason }, _)) => {
+            // The recovery's own disposition: the open run continues from its
+            // last round commit, so its provisional tail stays (nothing was
+            // written) and a committed read of the session still meets it.
+            Ok(ResumeBoundaryRecovery::Continue(seed)) => {
+                return Ok(self.continued_run_cold_attach(id, seed.run_id).await);
+            }
+            Ok(
+                ResumeBoundaryRecovery::Settled(
+                    CommittedBoundaryRecovery::Unprovable { reason },
+                    _,
+                )
+                | ResumeBoundaryRecovery::Withheld { reason, .. },
+            ) => {
                 tracing::warn!(
                     session_id = %id,
                     reason,
@@ -18698,7 +18753,55 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 );
             }
         }
-        Ok(())
+        Ok(ColdAttachSettlement::Settled)
+    }
+
+    /// The cold attach's report for a session whose durable-tail recovery
+    /// continues `run_id`: the committed snapshot under the run's provisional
+    /// tail, for the caller's reads. Without one (no applied provisional tail
+    /// on exactly the committed boundary, or a read that failed) the settle
+    /// reports [`ColdAttachSettlement::Settled`], and the caller's committed
+    /// read refuses as before.
+    async fn continued_run_cold_attach(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+    ) -> ColdAttachSettlement {
+        match meerkat_runtime::recovery::load_committed_snapshot_under_provisional_tail(
+            self.runtime_store.as_ref(),
+            id,
+        )
+        .await
+        {
+            Ok(Some(committed)) => {
+                tracing::info!(
+                    session_id = %id,
+                    %run_id,
+                    "the session's open run continues from its last round commit; its tail stays for the run"
+                );
+                ColdAttachSettlement::ContinuesOpenRun {
+                    run_id,
+                    committed: Box::new(committed),
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %run_id,
+                    "durable-tail recovery continues the open run, but no applied provisional tail stands on the committed boundary to read under"
+                );
+                ColdAttachSettlement::Settled
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %run_id,
+                    %error,
+                    "could not read the committed snapshot under the continued run's provisional tail"
+                );
+                ColdAttachSettlement::Settled
+            }
+        }
     }
 
     /// Observe the exact committed RuntimeStore body without reconciling the

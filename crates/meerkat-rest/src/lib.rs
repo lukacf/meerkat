@@ -27,6 +27,9 @@
 )]
 
 pub mod auth_endpoints;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod resumed_run_tests;
 mod schedule_host;
 pub mod webhook;
 

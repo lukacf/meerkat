@@ -55736,6 +55736,120 @@ impl CoreExecutor for HealthProbeBlockingExecutor {
     }
 }
 
+/// A caller waiting on an input its runtime admitted is answered, typed,
+/// once the session's registration must reload and its runtime loop exits
+/// without serving that input. The registration stays detached until a
+/// reload, so nothing would answer the waiter otherwise: a turn request that
+/// queued behind a run whose actor could not be materialized waited forever.
+/// The input stays durably admitted for the runtime's reload.
+#[tokio::test]
+async fn a_waiter_on_a_registration_that_must_reload_is_answered_when_its_loop_exits() {
+    struct GatedFailingExecutor {
+        apply_entered: Arc<Notify>,
+        release_apply: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for GatedFailingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_entered.notify_one();
+            self.release_apply.notified().await;
+            Err(CoreExecutorError::apply_failed_runtime_turn(
+                "the run's actor could not be materialized",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let store: Arc<dyn RuntimeStore> = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = Arc::new(
+        MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+            .expect("persistent machine"),
+    );
+    let session_id = SessionId::new();
+    let apply_entered = Arc::new(Notify::new());
+    let release_apply = Arc::new(Notify::new());
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(GatedFailingExecutor {
+                apply_entered: Arc::clone(&apply_entered),
+                release_apply: Arc::clone(&release_apply),
+            }),
+        )
+        .await
+        .expect("register the session with its executor");
+
+    let (_running, running_waiter) = machine
+        .accept_input_with_completion(&session_id, make_prompt("the run that fails"))
+        .await
+        .expect("accept the running input");
+    tokio::time::timeout(Duration::from_secs(5), apply_entered.notified())
+        .await
+        .expect("the first input's run reaches its apply");
+    let (queued, queued_waiter) = machine
+        .accept_input_with_completion(&session_id, make_prompt("the input queued behind it"))
+        .await
+        .expect("accept the queued input");
+    assert!(
+        matches!(queued, AcceptOutcome::Accepted { .. }),
+        "the second input queues behind the run: {queued:?}"
+    );
+
+    assert!(
+        machine
+            .force_session_durability_reload_required_for_test(&session_id)
+            .await,
+        "the registration must reload"
+    );
+    release_apply.notify_one();
+
+    let queued_answer = tokio::time::timeout(
+        Duration::from_secs(10),
+        queued_waiter
+            .expect("the queued input has a completion waiter")
+            .try_wait(),
+    )
+    .await
+    .expect("the queued input's waiter is answered once the registration must reload");
+    match queued_answer {
+        Err(crate::completion::CompletionWaitError::AuthorityUnavailable(reason)) => assert!(
+            reason.contains("must reload") && reason.contains("do not resubmit"),
+            "the answer says the runtime must reload and the input is kept: {reason}"
+        ),
+        other => panic!("expected the typed reload answer, got {other:?}"),
+    }
+    let running_answer = tokio::time::timeout(
+        Duration::from_secs(10),
+        running_waiter
+            .expect("the running input has a completion waiter")
+            .try_wait(),
+    )
+    .await
+    .expect("the running input's waiter is answered too");
+    assert!(
+        running_answer.is_err(),
+        "the run that failed under a reload requirement answers its waiter with an error: {running_answer:?}"
+    );
+}
+
 fn persistent_health_probe_machine() -> Arc<MeerkatMachine> {
     let store: Arc<dyn crate::store::RuntimeStore> =
         Arc::new(crate::store::InMemoryRuntimeStore::new());

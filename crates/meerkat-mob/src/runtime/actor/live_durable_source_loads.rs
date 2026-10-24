@@ -25,7 +25,7 @@ use meerkat_core::types::SessionId;
 use tokio::sync::{oneshot, watch};
 
 use super::super::LiveBridgeOperationStartError;
-use super::super::session_service::MobSessionService;
+use super::super::session_service::{LiveDurableSourceObservation, MobSessionService};
 
 /// Longest one shared durable-source body load is driven before it is
 /// abandoned as temporarily unavailable.
@@ -132,20 +132,19 @@ impl Drop for LoadSlotRelease {
     }
 }
 
-/// The durable-source check itself: the exact session must load.
+/// The durable-source check itself: the exact session is committed and not
+/// archived. Body-free (the store's own observation), so a run whose
+/// provisional tail stands ahead of the committed snapshot does not reject
+/// it.
 async fn load_durable_source(
     session_service: &dyn MobSessionService,
     session_id: &SessionId,
 ) -> LoadResult {
-    let source = session_service
-        .load_persisted_session(session_id)
+    match session_service
+        .observe_live_durable_source(session_id)
         .await
-        .map_err(|_| LiveBridgeOperationStartError::Rejected)?;
-    if source
-        .as_ref()
-        .is_none_or(|session| session.id() != session_id)
     {
-        return Err(LiveBridgeOperationStartError::Rejected);
+        Ok(LiveDurableSourceObservation::Committed { .. }) => Ok(()),
+        Ok(_) | Err(_) => Err(LiveBridgeOperationStartError::Rejected),
     }
-    Ok(())
 }

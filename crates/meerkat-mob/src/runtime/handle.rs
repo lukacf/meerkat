@@ -99,10 +99,13 @@ fn agent_event_subscription_error(
 enum ForkSourceAppContextRead {
     /// The source session's durable build state, read before the fork.
     SourceSession,
-    /// The committed child's durable build state, read after the fork: a
-    /// fork from the source's own running turn never reads the running
-    /// source's durable body.
-    ForkChild,
+    /// The same read, for a fork from the source's own running turn. Once
+    /// that turn has committed a round, its HeadCanonical provisional tail
+    /// sits ahead of the committed snapshot and the read refuses with
+    /// `TranscriptRevisionConflict`; the context is then read from the
+    /// committed child after the fork, which the durable fork gives the
+    /// snapshot's build state.
+    SourceSessionOrForkChild,
 }
 
 /// Type a durable member fork's session failure. A fork refused because of
@@ -16965,6 +16968,7 @@ impl MobHandle {
             ForkSourceAppContextRead::SourceSession,
         )
         .await
+        .map(|(inheritance, _)| inheritance)
     }
 
     /// Resolve the source's build inheritance from this mob's own records:
@@ -16980,15 +16984,16 @@ impl MobHandle {
     /// the fork. A durable service reads the build state from its store and
     /// never waits on the session task or the turn.
     ///
-    /// With [`ForkSourceAppContextRead::ForkChild`] the source session is not
-    /// read at all and the inheritance carries no application context: the
-    /// caller reads it back from the committed child.
+    /// With [`ForkSourceAppContextRead::SourceSessionOrForkChild`] a source
+    /// read refused by its own running turn's tail leaves the inheritance
+    /// without an application context, and the second value is `true`: the
+    /// caller reads the context back from the committed child.
     async fn resolve_fork_build_inheritance(
         &self,
         source_identity: &AgentIdentity,
         source_session_id: &meerkat_core::SessionId,
         app_context_read: ForkSourceAppContextRead,
-    ) -> Result<super::ForkBuildInheritance, MobError> {
+    ) -> Result<(super::ForkBuildInheritance, bool), MobError> {
         if !self.session_service.supports_persistent_sessions() {
             return Err(MobError::from(
                 super::session_service::durable_fork_unsupported(),
@@ -17012,13 +17017,23 @@ impl MobHandle {
         // its current build ran with (the factory persists it at every build).
         // A source with no loadable durable session has no persisted context;
         // whether such a source can be forked at all is the fork owner's call.
-        let source_session = match app_context_read {
-            ForkSourceAppContextRead::SourceSession => {
-                self.session_service
-                    .load_persisted_session(source_session_id)
-                    .await?
+        // Rounds never change the build state, so a source whose run holds a
+        // round commit is read through the tolerant read: the committed
+        // snapshot carries the context its build ran with. A read its own
+        // running turn's tail still refuses falls back to the committed child.
+        let (source_session, app_context_from_fork_child) = match self
+            .session_service
+            .load_persisted_session_tolerating_tail(source_session_id)
+            .await
+        {
+            Ok(session) => (session, false),
+            Err(error)
+                if app_context_read == ForkSourceAppContextRead::SourceSessionOrForkChild
+                    && super::actor::is_transcript_revision_conflict(&error) =>
+            {
+                (None, true)
             }
-            ForkSourceAppContextRead::ForkChild => None,
+            Err(error) => return Err(MobError::from(error)),
         };
         let app_context = match source_session {
             Some(session) => session
@@ -17054,7 +17069,7 @@ impl MobHandle {
             external_tools_origin,
         );
         inheritance.creation_source = Some(creation_source);
-        Ok(inheritance)
+        Ok((inheritance, app_context_from_fork_child))
     }
 
     /// Seat an already committed durable fork as a new mob member through the
@@ -17210,7 +17225,13 @@ impl MobHandle {
     ///
     /// The child inherits its source's build inputs: `member` leaves with the
     /// source's [`super::ForkBuildInheritance`] applied, resolved before the
-    /// fork commits so a failure leaves nothing durable behind.
+    /// fork commits so a failure leaves nothing durable behind. One exception:
+    /// in a fork from the source's own running turn
+    /// ([`meerkat_core::DurableForkSourceAdmission::CallerTurn`]) whose
+    /// source read meets that turn's round-commit tail, the application
+    /// context is read from the committed child after the fork, so a failure
+    /// of that read leaves the committed child unseated, as a seat failure
+    /// after the fork does.
     async fn fork_source_session(
         &self,
         source_identity: &AgentIdentity,
@@ -17238,24 +17259,25 @@ impl MobHandle {
             self.refuse_fork_source_with_admitted_work(source_identity, &source_session_id)
                 .await?;
         }
-        // A fork from the source's own running turn never reads the running
-        // source's durable body: once that turn has committed a round, its
-        // provisional tail sits ahead of the committed snapshot and a
-        // committed read of the source refuses. The session service cuts the
-        // branch at that snapshot and gives the child the snapshot's build
-        // state (`fork_child_projection` keeps `app_context` verbatim), so the
-        // application context is read back from the committed child, under
-        // the same rule: a context the request states wins.
-        let caller_turn = source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn;
-        let app_context_read = if caller_turn {
-            ForkSourceAppContextRead::ForkChild
-        } else {
-            ForkSourceAppContextRead::SourceSession
-        };
+        // In a fork from the source's own running turn, once that turn has
+        // committed a round, its provisional tail sits ahead of the committed
+        // snapshot and the committed read of the source refuses. The durable
+        // fork still cuts the branch at that snapshot and gives the child the
+        // snapshot's build state (`fork_child_projection` keeps `app_context`
+        // verbatim), so the application context is then read back from the
+        // committed child, under the same rule: a context the request states
+        // wins.
+        let app_context_read =
+            if source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn {
+                ForkSourceAppContextRead::SourceSessionOrForkChild
+            } else {
+                ForkSourceAppContextRead::SourceSession
+            };
         let context_requested = member.context.is_some();
-        self.resolve_fork_build_inheritance(source_identity, &source_session_id, app_context_read)
-            .await?
-            .apply_to(member);
+        let (inheritance, app_context_from_fork_child) = self
+            .resolve_fork_build_inheritance(source_identity, &source_session_id, app_context_read)
+            .await?;
+        inheritance.apply_to(member);
         let fork = self
             .session_service
             .fork_persisted_session(
@@ -17272,14 +17294,15 @@ impl MobHandle {
                 },
                 error => fork_session_error(source_identity, error),
             })?;
-        if caller_turn && !context_requested {
+        if app_context_from_fork_child && !context_requested {
             member.context = self.fork_child_app_context(&fork.session_id).await?;
         }
         Ok(fork)
     }
 
     /// The application context of a committed fork child's durable build
-    /// state: its source's, carried verbatim by the fork.
+    /// state: its source's committed snapshot's, carried verbatim by the
+    /// durable fork.
     async fn fork_child_app_context(
         &self,
         child_session_id: &meerkat_core::SessionId,

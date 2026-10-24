@@ -2211,35 +2211,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentRuntimeExecutor<B> {
         self
     }
 
+    /// After the actor answered `NotFound`: is the session still committed and
+    /// not archived? Body-free, from the RuntimeStore's own observation
+    /// (`observe_live_durable_source`), so a run that holds a provisional
+    /// tail ahead of the committed snapshot cannot turn the answer into a
+    /// revision conflict.
     async fn authoritative_non_archived_session_after_not_found<F>(
         &self,
         not_found: &SessionError,
         authority_failure: F,
-    ) -> Result<Session, CoreExecutorError>
+    ) -> Result<(), CoreExecutorError>
     where
         F: Fn(String) -> CoreExecutorError,
     {
-        let Some(session) = self
+        match self
             .service
-            .load_authoritative_session(&self.session_id)
-            .await
-            .map_err(|error| authority_failure(error.to_string()))?
-        else {
-            return Err(CoreExecutorError::session_unavailable_requires_teardown(
-                not_found.to_string(),
-            ));
-        };
-        if self
-            .service
-            .session_archived_by_authority(&self.session_id, &session)
+            .observe_live_durable_source(&self.session_id)
             .await
             .map_err(|error| authority_failure(error.to_string()))?
         {
-            return Err(CoreExecutorError::archived_session_requires_teardown(
-                not_found.to_string(),
-            ));
+            meerkat_session::LiveDurableSourceObservation::Absent => Err(
+                CoreExecutorError::session_unavailable_requires_teardown(not_found.to_string()),
+            ),
+            meerkat_session::LiveDurableSourceObservation::Archived => Err(
+                CoreExecutorError::archived_session_requires_teardown(not_found.to_string()),
+            ),
+            meerkat_session::LiveDurableSourceObservation::Committed { .. } => Ok(()),
+            other => Err(authority_failure(format!(
+                "session {} has a durable source observation this build does not know: {other:?}",
+                self.session_id
+            ))),
         }
-        Ok(session)
     }
 }
 

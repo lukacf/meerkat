@@ -311,9 +311,11 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
     ) -> Result<ScheduledSessionAdmission, ScheduleDomainError> {
         self.ensure_session_target_exists(session_id).await?;
 
+        // Rounds never change the session metadata read here, so a run that
+        // holds a round commit is served the committed snapshot.
         let session = self
             .service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
             .map_err(schedule_internal)?
             .ok_or_else(|| {
@@ -591,7 +593,7 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
     ) -> Result<bool, ScheduleDomainError> {
         let session = self
             .service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
             .map_err(schedule_internal)?
             .ok_or_else(|| {
@@ -615,7 +617,7 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
         {
             let session = self
                 .service
-                .load_authoritative_session(session_id)
+                .load_committed_session_tolerating_tail(session_id)
                 .await
                 .map_err(schedule_internal)?
                 .ok_or_else(|| {
@@ -659,7 +661,7 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
     ) -> Result<Option<Session>, ScheduleDomainError> {
         let Some(session) = self
             .service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
             .map_err(schedule_internal)?
         else {

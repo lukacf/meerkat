@@ -1974,6 +1974,34 @@ impl TestRuntimeControlBarrier {
     }
 }
 
+/// How the mock's durable read of a session refuses.
+#[derive(Debug, Clone, Copy)]
+enum PersistedSessionReadRefusal {
+    /// As a HeadCanonical store refuses a committed read once a running turn
+    /// has committed a round: the provisional tail sits ahead of the
+    /// committed snapshot, a typed `TranscriptRevisionConflict`.
+    RevisionConflict,
+    /// Any other store failure.
+    StoreFailure,
+}
+
+impl PersistedSessionReadRefusal {
+    fn error(self, session_id: &SessionId) -> SessionError {
+        match self {
+            Self::RevisionConflict => SessionError::Store(Box::new(
+                meerkat_core::SessionStoreError::TranscriptRevisionConflict {
+                    id: session_id.clone(),
+                    expected: "committed-snapshot-revision".to_string(),
+                    actual: "provisional-tail-revision".to_string(),
+                },
+            )),
+            Self::StoreFailure => SessionError::Store(Box::new(std::io::Error::other(format!(
+                "durable read of session {session_id} failed"
+            )))),
+        }
+    }
+}
+
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
     /// The spawner restrictions handed to the build of each session this
@@ -2162,6 +2190,12 @@ struct MockSessionService {
     load_persisted_session_started: tokio::sync::Notify,
     live_durable_source_observations: AtomicUsize,
     fail_load_persisted_session: AtomicBool,
+    /// Sessions whose every durable read refuses, and how.
+    persisted_session_read_refusals_for:
+        std::sync::Mutex<HashMap<SessionId, PersistedSessionReadRefusal>>,
+    /// Whether a durable fork commits its child with its source's build
+    /// state, projected as the persistent service's fork projects it.
+    fork_carries_source_build_state: AtomicBool,
     load_persisted_session_calls: AtomicU64,
     load_persisted_session_metadata_calls: AtomicU64,
     /// #1250 seam: per-read delay for the metadata-only durable read, and
@@ -2381,6 +2415,8 @@ impl MockSessionService {
             load_persisted_session_started: tokio::sync::Notify::new(),
             live_durable_source_observations: AtomicUsize::new(0),
             fail_load_persisted_session: AtomicBool::new(false),
+            persisted_session_read_refusals_for: std::sync::Mutex::new(HashMap::new()),
+            fork_carries_source_build_state: AtomicBool::new(false),
             load_persisted_session_calls: AtomicU64::new(0),
             load_persisted_session_metadata_calls: AtomicU64::new(0),
             load_persisted_session_metadata_delay_ms: AtomicU64::new(0),
@@ -3160,6 +3196,19 @@ impl MockSessionService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id.clone(), count);
+    }
+
+    /// Make every durable read of `session_id`
+    /// ([`MobSessionService::load_persisted_session`]) refuse with `refusal`.
+    fn refuse_persisted_session_reads(
+        &self,
+        session_id: &SessionId,
+        refusal: PersistedSessionReadRefusal,
+    ) {
+        self.persisted_session_read_refusals_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), refusal);
     }
 
     fn take_session_read_failure(&self, session_id: &SessionId) -> bool {
@@ -5352,9 +5401,18 @@ impl MobSessionService for MockSessionService {
                 id: source_session_id.clone(),
             })?;
         let selected_count = message_count.unwrap_or_else(|| source.messages().len());
-        let forked = source
+        let mut forked = source
             .fork_at_complete_boundary(selected_count)
             .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        if self.fork_carries_source_build_state.load(Ordering::Relaxed)
+            && let Some(build_state) = source
+                .try_build_state()
+                .map_err(|error| SessionError::Unsupported(error.to_string()))?
+        {
+            forked
+                .set_build_state(build_state.fork_child_projection())
+                .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        }
         let mut forked = factory_policy_session(forked, "test-model".to_string(), 1_024);
         let mut metadata = forked.session_metadata().ok_or_else(|| {
             SessionError::Unsupported(
@@ -5852,6 +5910,15 @@ impl MobSessionService for MockSessionService {
                     "durable source body failed typed restore".to_string(),
                 ),
             ));
+        }
+        let refusal = self
+            .persisted_session_read_refusals_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied();
+        if let Some(refusal) = refusal {
+            return Err(refusal.error(session_id));
         }
         let _authority_guard = self.resume_authority_gate.lock().await;
         // Mirror PersistentSessionService: archived sessions have no loadable
@@ -29543,6 +29610,149 @@ async fn caller_turn_fork_child_is_built_with_the_source_build_inputs() {
 
     assert_child_built_as_source(&service, &source_identity, &source_session, &child_identity)
         .await;
+}
+
+/// Whether the mock holds a committed durable session bound to `member`.
+async fn member_session_committed(service: &MockSessionService, member: &AgentIdentity) -> bool {
+    service
+        .persisted_sessions
+        .read()
+        .await
+        .values()
+        .any(|session| {
+            session
+                .session_metadata()
+                .and_then(|metadata| metadata.mob_member_binding)
+                .is_some_and(|binding| binding.member == member.as_str())
+        })
+}
+
+/// A `fork_off` from the source's own running turn whose source read meets
+/// that turn's round-commit tail (a HeadCanonical store refuses the committed
+/// read with a typed `TranscriptRevisionConflict`) still builds its child
+/// with the source's application context: the durable fork commits the child
+/// with the committed snapshot's build state, and the context is read back
+/// from that child. A context the request states still wins. Only that
+/// refusal, and only in a fork from the source's own turn, is answered from
+/// the child: the same refusal in a quiescent fork, or any other failed
+/// source read, refuses before anything is forked.
+#[tokio::test]
+async fn caller_turn_fork_under_its_turn_tail_reads_the_source_context_from_the_child() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    service
+        .fork_carries_source_build_state
+        .store(true, Ordering::Relaxed);
+    let source_identity = AgentIdentity::from("fork-tail-caller-source");
+    let source_session = spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+    service.refuse_persisted_session_reads(
+        &source_session,
+        PersistedSessionReadRefusal::RevisionConflict,
+    );
+
+    let quiescent_identity = AgentIdentity::from("fork-tail-quiescent-child");
+    let mut quiescent_spec =
+        SpawnMemberSpec::new(ProfileName::from("worker"), quiescent_identity.clone());
+    quiescent_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let refusal = handle
+        .fork_member(&source_identity, quiescent_spec, None)
+        .await
+        .expect_err("a quiescent fork never answers a refused source read from a child");
+    assert!(
+        matches!(
+            &refusal,
+            MobError::SessionError(error) if super::actor::is_transcript_revision_conflict(error)
+        ),
+        "the quiescent fork refuses with the source read's own refusal: {refusal:?}"
+    );
+    assert!(
+        handle
+            .get_member(&quiescent_identity)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !member_session_committed(&service, &quiescent_identity).await,
+        "the refused quiescent fork committed no child"
+    );
+
+    let child_identity = AgentIdentity::from("fork-tail-caller-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+        .expect("a caller-turn fork under its turn's tail seats the child");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), run.outcome()).await;
+    assert_child_built_as_source(&service, &source_identity, &source_session, &child_identity)
+        .await;
+
+    let stated_context = serde_json::json!({"domain": "stated-by-the-request"});
+    let stated_identity = AgentIdentity::from("fork-tail-caller-stated");
+    let mut stated_spec = bounded_fork_child_spec(&stated_identity);
+    stated_spec.context = Some(stated_context.clone());
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            stated_spec,
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+        .expect("a caller-turn fork under its turn's tail seats a child that states a context");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), run.outcome()).await;
+    assert_eq!(
+        last_member_build(&service, &stated_identity)
+            .await
+            .app_context,
+        Some(stated_context),
+        "a context the request states wins over the committed child's"
+    );
+
+    service
+        .refuse_persisted_session_reads(&source_session, PersistedSessionReadRefusal::StoreFailure);
+    let failed_identity = AgentIdentity::from("fork-tail-caller-failed-read");
+    let refusal = match handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&failed_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+    {
+        Ok(_) => panic!("a caller-turn fork answered a failed source read from a child"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &refusal,
+            BoundedMemberRunError::Admission(MobError::SessionError(error @ SessionError::Store(_)))
+                if !super::actor::is_transcript_revision_conflict(error)
+        ),
+        "the caller-turn fork refuses with the source read's own failure: {refusal:?}"
+    );
+    assert!(handle.get_member(&failed_identity).await.unwrap().is_none());
+    assert!(
+        !member_session_committed(&service, &failed_identity).await,
+        "the refused caller-turn fork committed no child"
+    );
 }
 
 /// The external (`Quiescent`) fork contract seats its child the same way.

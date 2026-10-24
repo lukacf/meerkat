@@ -15956,14 +15956,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await?;
             } else if let Some(seed) = continued_run.as_ref()
-                && runtime_marked_run.as_ref() != Some(&seed.run_id)
+                && !self
+                    .runtime_resumes_run(
+                        resume_session_id,
+                        runtime_hosted,
+                        runtime_marked_run.as_ref(),
+                        &seed.run_id,
+                    )
+                    .await
             {
-                // A prepared continuation whose run the registration does not
-                // mark would never be dispatched, and the session's ordinary
-                // writes are refused while the run's provisional tail stands:
-                // refused as held, as an unprepared one is.
+                // A prepared continuation whose run the hosting runtime
+                // neither marks nor runs would never be dispatched, and the
+                // session's ordinary writes are refused while the run's
+                // provisional tail stands: refused as held, as an unprepared
+                // one is.
                 let reason = format!(
-                    "the prepared continuation of run {} is not the run the registration marks",
+                    "the prepared continuation of run {} is not the run the registration resumes",
                     seed.run_id
                 );
                 tracing::warn!(
@@ -19060,6 +19068,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
+    /// [`Self::observe_authoritative_session_body`] that serves the
+    /// committed snapshot while a run's provisional tail stands ahead of it:
+    /// on a revision conflict it reads the boundary's own snapshot through
+    /// the store-owned durable-tail source, and the conflict stands when no
+    /// provisional tail is applied on the boundary. Read-only like its strict
+    /// sibling: it never writes and never replays the rewrite audit. The
+    /// snapshot serves readers only and decides nothing about the tail.
+    pub async fn observe_authoritative_session_body_tolerating_tail(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        match self.observe_authoritative_session_body(id).await {
+            Err(conflict) if Self::is_transcript_revision_conflict_error(&conflict) => {
+                match meerkat_runtime::recovery::load_committed_snapshot_under_provisional_tail(
+                    self.runtime_store.as_ref(),
+                    id,
+                )
+                .await
+                {
+                    Ok(Some(committed)) => Ok(Some(committed)),
+                    Ok(None) => Err(conflict),
+                    Err(error) => Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to read the committed snapshot of session {id} under its provisional tail: {error}"
+                    )))),
+                }
+            }
+            other => other,
+        }
+    }
+
     /// Ask the RuntimeStore-owned recovery authority to resolve one durable
     /// boundary and translate its exact outcome to the operator vocabulary.
     ///
@@ -19150,16 +19188,39 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         adapter.resumable_run_id(id).await
     }
 
+    /// Whether the runtime that hosts an actor being materialized resumes
+    /// `run_id`, the open run its durable tail continues: the registration
+    /// marked the run resumable (`marked`, read when the materialization
+    /// began), or the runtime holds the run open now, as its current run or
+    /// its resumable one ([`Self::runtime_holds_run_open`]). The runtime loop
+    /// begins a resumed run by making it current, which clears the mark
+    /// (`ResumeRun`), so an executor that materializes its actor on the
+    /// resumed run's own dispatch finds the run current, not marked. An actor
+    /// no runtime hosts resumes nothing.
+    async fn runtime_resumes_run(
+        &self,
+        id: &SessionId,
+        hosted: bool,
+        marked: Option<&RunId>,
+        run_id: &RunId,
+    ) -> bool {
+        hosted && (marked == Some(run_id) || self.runtime_holds_run_open(id, run_id).await)
+    }
+
     /// Settle what an actor's durable-tail recovery means for the run the
     /// session's registration marked resumable, and return the open run the
     /// actor resumes, if any. `hosted` is whether a runtime registration
     /// hosts the actor (a `SessionOwned` build), and `marked` the run it
     /// marks.
     ///
-    /// - The recovery continues the marked run: the actor is seeded from it.
-    /// - It continues a run nothing marked, or another run than the marked
-    ///   one: no runtime dispatches that continuation, and the session's
-    ///   ordinary writes are refused while the run's provisional tail stands.
+    /// - The recovery continues the run the hosting runtime resumes (the
+    ///   marked run, or the runtime's current run once its loop has begun the
+    ///   resumed run; see [`Self::runtime_resumes_run`]): the actor is seeded
+    ///   from it.
+    /// - It continues a run the runtime does not resume (nothing marked, or
+    ///   another run than the marked one): no runtime dispatches that
+    ///   continuation, and the session's ordinary writes are refused while
+    ///   the run's provisional tail stands.
     ///   The materialization is refused as held for recovery
     ///   ([`SessionError::DurableTailHeldForRecovery`]), and a hosting
     ///   runtime reloads, so its registration observes the tail again.
@@ -19183,7 +19244,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Option<ContinuedRunSeed>, SessionError> {
         match recovery {
             Ok(ResumeBoundaryRecovery::Continue(seed)) => {
-                if marked == Some(&seed.run_id) {
+                if self
+                    .runtime_resumes_run(id, hosted, marked, &seed.run_id)
+                    .await
+                {
                     return Ok(Some(seed));
                 }
                 let reason = match marked {
@@ -34605,7 +34669,12 @@ mod tests {
     /// committed snapshot (the previous turn's end) with the canonical
     /// metadata and build state a targeted fork copies, and the actor
     /// checkpointer that writes the running turn's round commits over it.
-    async fn caller_turn_fork_source_fixture() -> (
+    /// With `rewrite_audit` the service projects events into a file event
+    /// store and the checkpointer carries the rewrite audit sink, as a
+    /// service with event projection builds it.
+    async fn caller_turn_fork_source_fixture(
+        rewrite_audit: bool,
+    ) -> (
         tempfile::TempDir,
         PersistentSessionService<DummyBuilder>,
         StoreCheckpointer,
@@ -34620,13 +34689,23 @@ mod tests {
             meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path).unwrap(),
         );
         let store = Arc::new(meerkat_store::SqliteSessionStore::open(&database_path).unwrap());
-        let service = PersistentSessionService::new(
+        let audit = rewrite_audit.then(|| {
+            let event_store: Arc<dyn EventStore> = Arc::new(
+                crate::event_store::FileEventStore::new(directory.path().join("events")),
+            );
+            let projector = Arc::new(SessionProjector::new(directory.path().join(".rkat")));
+            (event_store, projector)
+        });
+        let mut service = PersistentSessionService::new(
             DummyBuilder,
             4,
             store,
             runtime_store.clone(),
             memory_blob_store(),
         );
+        if let Some((event_store, projector)) = audit.clone() {
+            service = service.with_event_projection(event_store, projector);
+        }
         let mut source = recoverable_store_row();
         source
             .set_build_state(meerkat_core::SessionBuildState {
@@ -34663,7 +34742,10 @@ mod tests {
             rebased_run: std::sync::Mutex::new(None),
             latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
             rebase_outcome_unknown: std::sync::Mutex::new(None),
-            rewrite_audit: None,
+            rewrite_audit: audit.map(|(event_store, projector)| RewriteAuditSink {
+                event_store,
+                projector: Some(projector),
+            }),
         };
         (directory, service, checkpointer, committed)
     }
@@ -34760,7 +34842,7 @@ mod tests {
     #[tokio::test]
     async fn a_caller_turn_fork_branches_at_the_committed_snapshot_under_a_round_commit() {
         let (_directory, service, checkpointer, committed) =
-            caller_turn_fork_source_fixture().await;
+            caller_turn_fork_source_fixture(false).await;
         let id = committed.id().clone();
         let run_id = RunId::new();
         let mut running = committed.clone();
@@ -34809,7 +34891,7 @@ mod tests {
     #[tokio::test]
     async fn a_caller_turn_fork_after_a_compacting_round_branches_at_the_committed_snapshot() {
         let (_directory, service, checkpointer, committed) =
-            caller_turn_fork_source_fixture().await;
+            caller_turn_fork_source_fixture(false).await;
         let id = committed.id().clone();
         let run_id = RunId::new();
         let mut running = committed.clone();
@@ -34871,7 +34953,7 @@ mod tests {
     #[tokio::test]
     async fn the_tolerant_read_serves_the_committed_snapshot_under_a_round_commit() {
         let (_directory, service, checkpointer, committed) =
-            caller_turn_fork_source_fixture().await;
+            caller_turn_fork_source_fixture(false).await;
         let id = committed.id().clone();
         let run_id = RunId::new();
         let mut running = committed.clone();
@@ -34897,6 +34979,38 @@ mod tests {
         );
     }
 
+    /// The read-only body observation a mob member's status view reads serves
+    /// the committed snapshot under the session's own round commit too, and
+    /// writes nothing: the strict observation still refuses afterwards.
+    #[tokio::test]
+    async fn the_read_only_body_observation_serves_the_committed_snapshot_under_a_round_commit() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(false).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.observe_authoritative_session_body(&id).await
+            ),
+            "the strict observation refuses the boundary while the round's tail is ahead of it"
+        );
+
+        let served = service
+            .observe_authoritative_session_body_tolerating_tail(&id)
+            .await
+            .expect("the observation serves the committed snapshot under the round's tail")
+            .expect("the session is committed");
+        assert_served_the_committed_snapshot(&served, &committed);
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.observe_authoritative_session_body(&id).await
+            ),
+            "the observation wrote nothing: the round's tail still stands"
+        );
+    }
+
     /// A physical head moved past the boundary with no provisional tail the
     /// store issued is not the session's own run: the tolerant read serves
     /// nothing. It fails closed with the store's own refusal, which names the
@@ -34904,7 +35018,7 @@ mod tests {
     #[tokio::test]
     async fn the_tolerant_read_keeps_the_refusal_without_a_bound_tail() {
         let (_directory, service, _checkpointer, committed) =
-            caller_turn_fork_source_fixture().await;
+            caller_turn_fork_source_fixture(false).await;
         let id = committed.id().clone();
         let incremental = service.incremental.as_ref().expect("an incremental store");
         let physical = incremental
@@ -34947,7 +35061,7 @@ mod tests {
     #[tokio::test]
     async fn the_tolerant_read_replays_the_rewrite_audit_after_a_compacting_round() {
         let (_directory, service, checkpointer, committed) =
-            caller_turn_fork_source_fixture().await;
+            caller_turn_fork_source_fixture(false).await;
         let id = committed.id().clone();
         let run_id = RunId::new();
         let mut running = committed.clone();
@@ -34994,7 +35108,7 @@ mod tests {
     ) {
         if head_canonical {
             let (directory, service, checkpointer, committed) =
-                caller_turn_fork_source_fixture().await;
+                caller_turn_fork_source_fixture(false).await;
             return (Some(directory), service, checkpointer, committed);
         }
         let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
@@ -35228,6 +35342,55 @@ mod tests {
     async fn tool_application_observations_without_an_actor_serve_the_committed_snapshot_whole_blob()
      {
         tool_application_observations_without_an_actor_serve_the_committed_snapshot(false).await;
+    }
+
+    /// The compacting round again, on a service that projects events with
+    /// the checkpointer's rewrite audit sink. A HeadCanonical round commit
+    /// appends no rewrite audit receipt, so the replay the fork runs on the
+    /// committed snapshot finds no newer rewrite to graft: the child is
+    /// still exactly the snapshot.
+    #[tokio::test]
+    async fn a_caller_turn_fork_after_a_compacting_round_under_the_rewrite_audit_is_exact() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(true).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        compact_and_retire(
+            &mut running,
+            0,
+            meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap(),
+        );
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert_eq!(
+            physical_rewrite_count(&service, &id).await,
+            1,
+            "the round's tail carries the compaction"
+        );
+        let rewrite_receipts = service
+            .event_log_read_from(&id, 1)
+            .await
+            .unwrap()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|stored| {
+                matches!(
+                    stored.event,
+                    meerkat_core::event::AgentEvent::TranscriptRewriteAuditReceiptCommitted { .. }
+                        | meerkat_core::event::AgentEvent::TranscriptRewriteCommitted { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            rewrite_receipts, 0,
+            "a HeadCanonical round commit appends no rewrite audit receipt"
+        );
+
+        let forked = service
+            .fork_durable_session(&id, None, None, Some(caller_turn_fork_target()))
+            .await
+            .expect("a caller-turn fork branches at the committed snapshot under the audit");
+        assert_fork_child_is_the_committed_snapshot(&service, &forked, &committed).await;
     }
 
     /// A session whose committed boundary already carries a compaction, and

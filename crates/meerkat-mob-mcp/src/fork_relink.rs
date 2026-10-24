@@ -696,9 +696,21 @@ async fn relink_owned_child(
         // admitted input (a crash between admission and the owner's commit
         // leaves exactly that); once its payload is retired the committed
         // record carries it.
+        // An outcome that cannot be read retires no child.
         let delivered = match pending_completion(&admitted, mob_id, child, job) {
             Some(pending) => Some(pending),
-            None => committed_completion(&service, mob_id, child, job).await,
+            None => match committed_completion(&service, mob_id, child, job).await {
+                Ok(committed) => committed,
+                Err(error) => {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        child = %child,
+                        %error,
+                        "fork_off re-link could not read the owner's committed completion; the child is not retired"
+                    );
+                    None
+                }
+            },
         };
         let child_retirement = if delivered.is_some_and(|delivered| delivered.retires_child()) {
             retire_owed_child(
@@ -763,10 +775,19 @@ async fn relink_owned_child(
         })
         .await;
     }
-    if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
-        return ForkRelinkOutcome::retiring_nothing(
-            deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
-        );
+    match durable_reply(&service, mob_id, handle, child, job).await {
+        Ok(Some(completion)) => {
+            return ForkRelinkOutcome::retiring_nothing(
+                deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
+            );
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            mob_id = %mob_id,
+            child = %child,
+            %error,
+            "fork_off re-link could not read the child's durable reply; observing the child"
+        ),
     }
     let deadline_ms = job
         .max_run_ms
@@ -779,12 +800,17 @@ async fn relink_owned_child(
         // zero-length timer would decide by chance.
         let remaining_ms = deadline_ms.map(|deadline| deadline.saturating_sub(now_ms()));
         if remaining_ms == Some(0) {
-            if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
-                return ForkRelinkOutcome::retiring_nothing(
-                    deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
-                );
-            }
-            return limit_elapsed(&service, delivery, &owner, mob_id, handle, child, job).await;
+            let completion = match durable_reply(&service, mob_id, handle, child, job).await {
+                Ok(Some(completion)) => completion,
+                Ok(None) => {
+                    return limit_elapsed(&service, delivery, &owner, mob_id, handle, child, job)
+                        .await;
+                }
+                Err(error) => unreadable_reply(mob_id, child, &error),
+            };
+            return ForkRelinkOutcome::retiring_nothing(
+                deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
+            );
         }
         let observe = box_in_own_frame(|| observe_child(runtime, handle, child));
         let observed = match remaining_ms {
@@ -821,11 +847,19 @@ async fn relink_owned_child(
                 // neither starts nor restarts the commit wait. A child that
                 // finished meanwhile has a durable reply; otherwise read
                 // again.
-                if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await
-                {
-                    return ForkRelinkOutcome::retiring_nothing(
-                        deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
-                    );
+                match durable_reply(&service, mob_id, handle, child, job).await {
+                    Ok(Some(completion)) => {
+                        return ForkRelinkOutcome::retiring_nothing(
+                            deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::debug!(
+                        mob_id = %mob_id,
+                        child = %child,
+                        %error,
+                        "fork_off re-link could not read the child's durable reply"
+                    ),
                 }
                 tracing::debug!(
                     mob_id = %mob_id,
@@ -841,13 +875,22 @@ async fn relink_owned_child(
                 // Degraded durability does not say the turn's own commit
                 // failed: a reply that is durable is delivered now, not
                 // held back to the ceiling.
-                if evidence == CommitEvidence::DurabilityDegraded
-                    && let Some(completion) =
-                        durable_reply(&service, mob_id, handle, child, job).await
-                {
-                    return ForkRelinkOutcome::retiring_nothing(
-                        deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
-                    );
+                if evidence == CommitEvidence::DurabilityDegraded {
+                    match durable_reply(&service, mob_id, handle, child, job).await {
+                        Ok(Some(completion)) => {
+                            return ForkRelinkOutcome::retiring_nothing(
+                                deliver(delivery, &owner, mob_id, handle, child, job, completion)
+                                    .await,
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::debug!(
+                            mob_id = %mob_id,
+                            child = %child,
+                            %error,
+                            "fork_off re-link could not read the child's durable reply"
+                        ),
+                    }
                 }
                 (Some(evidence), None)
             }
@@ -859,11 +902,29 @@ async fn relink_owned_child(
             tokio::time::sleep(within_limit(WATCH_INTERVAL, deadline_ms)).await;
             continue;
         };
-        // A reply that did land wins over the bound.
-        if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
-            return ForkRelinkOutcome::retiring_nothing(
-                deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
-            );
+        // A reply that did land wins over the bound; one that cannot be
+        // read decides nothing about the commit.
+        match durable_reply(&service, mob_id, handle, child, job).await {
+            Ok(Some(completion)) => {
+                return ForkRelinkOutcome::retiring_nothing(
+                    deliver(delivery, &owner, mob_id, handle, child, job, completion).await,
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return ForkRelinkOutcome::retiring_nothing(
+                    deliver(
+                        delivery,
+                        &owner,
+                        mob_id,
+                        handle,
+                        child,
+                        job,
+                        unreadable_reply(mob_id, child, &error),
+                    )
+                    .await,
+                );
+            }
         }
         tracing::warn!(
             mob_id = %mob_id,
@@ -1167,27 +1228,58 @@ fn from_runtime(
 /// record with one is settled from the runtime's receipt for the job turn
 /// instead (see [`relink_by_receipt`]), which compacting the child's
 /// transcript cannot move.
+///
+/// The child's committed snapshot is read through the tolerant read, so a
+/// run's provisional tail standing ahead of it is no failure. A read that
+/// still fails is an error, never "no reply": the caller does not settle the
+/// job on an absence it did not observe.
 async fn durable_reply(
     service: &Arc<dyn meerkat_mob::MobSessionService>,
     mob_id: &MobId,
     handle: &MobHandle,
     child: &AgentIdentity,
     job: &ForkJobRecord,
-) -> Option<ForkOffCompletion> {
-    let session_id = handle.resolve_bridge_session_id(child).await?;
-    let session = service
-        .load_persisted_session(&session_id)
-        .await
-        .ok()
-        .flatten()?;
-    let result = job.durable_terminal_result(&session).ok().flatten()?;
+) -> Result<Option<ForkOffCompletion>, meerkat_core::service::SessionError> {
+    let Some(session_id) = handle.resolve_bridge_session_id(child).await else {
+        return Ok(None);
+    };
+    let Some(session) = service
+        .load_persisted_session_tolerating_tail(&session_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(result) = job.durable_terminal_result(&session).ok().flatten() else {
+        return Ok(None);
+    };
     let mut completion = ForkOffCompletion::empty(
         child.to_string(),
         member_ref(mob_id, child),
         ForkOffCompletionStatus::Completed,
     );
     completion.bounded_result = Some(result.to_wire());
-    Some(completion)
+    Ok(Some(completion))
+}
+
+/// The outcome the re-link delivers when it cannot read whether the
+/// child's reply is durable at a point where it must decide: inconclusive,
+/// so `restart_interrupted` with the read error and no reason, and the
+/// child stays seated. Never a verdict built on an absence it did not
+/// observe (`max_run_elapsed`, a commit that never landed).
+fn unreadable_reply(
+    mob_id: &MobId,
+    child: &AgentIdentity,
+    error: &meerkat_core::service::SessionError,
+) -> ForkOffCompletion {
+    let mut completion = ForkOffCompletion::empty(
+        child.to_string(),
+        member_ref(mob_id, child),
+        ForkOffCompletionStatus::RestartInterrupted,
+    );
+    completion.error = Some(format!(
+        "the child's durable reply could not be read: {error}"
+    ));
+    completion
 }
 
 /// Re-link a job whose turn was admitted under a stable delivery identity:
@@ -2029,9 +2121,21 @@ async fn retires_after_delivery(
 ) -> bool {
     match action {
         ForkRelinkAction::Delivered | ForkRelinkAction::OwnerGone => true,
-        ForkRelinkAction::AlreadyDelivered => committed_completion(service, mob_id, child, job)
-            .await
-            .is_some_and(|committed| committed.retires_child()),
+        ForkRelinkAction::AlreadyDelivered => {
+            match committed_completion(service, mob_id, child, job).await {
+                Ok(committed) => committed.is_some_and(|committed| committed.retires_child()),
+                // An outcome that cannot be read retires no child.
+                Err(error) => {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        child = %child,
+                        %error,
+                        "fork_off re-link could not read the owner's committed completion; the child is not retired"
+                    );
+                    false
+                }
+            }
+        }
         ForkRelinkAction::Failed(_) => false,
     }
 }
@@ -2046,12 +2150,13 @@ async fn settled_outcome(
     job: &ForkJobRecord,
 ) -> ForkOffCompletion {
     match durable_reply(service, mob_id, handle, child, job).await {
-        Some(completion) => completion,
-        None => ForkOffCompletion::empty(
+        Ok(Some(completion)) => completion,
+        Ok(None) => ForkOffCompletion::empty(
             child.to_string(),
             member_ref(mob_id, child),
             ForkOffCompletionStatus::RestartInterrupted,
         ),
+        Err(error) => unreadable_reply(mob_id, child, &error),
     }
 }
 
@@ -2124,18 +2229,23 @@ impl CommittedChild {
 /// keyed by owner session and job id, so a record whose detail names another
 /// child (see [`CommittedChild`]) is not this child's. A record whose detail
 /// names no child (it does not decode) is matched by its job id alone.
+///
+/// The owner's committed snapshot is read through the tolerant read, so the
+/// owner's own run holding a provisional tail is no failure. A read that
+/// still fails is an error, never "no record".
 async fn committed_completion(
     service: &Arc<dyn meerkat_mob::MobSessionService>,
     mob_id: &MobId,
     child: &AgentIdentity,
     job: &ForkJobRecord,
-) -> Option<CommittedCompletion> {
-    let session = service
-        .load_persisted_session(&job.owner_session_id)
-        .await
-        .ok()
-        .flatten()?;
-    session.messages().iter().find_map(|message| {
+) -> Result<Option<CommittedCompletion>, meerkat_core::service::SessionError> {
+    let Some(session) = service
+        .load_persisted_session_tolerating_tail(&job.owner_session_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(session.messages().iter().find_map(|message| {
         let meerkat_core::Message::SystemNotice(notice) = message else {
             return None;
         };
@@ -2143,7 +2253,7 @@ async fn committed_completion(
             .blocks
             .iter()
             .find_map(|block| completion_in_block(block, mob_id, child, job))
-    })
+    }))
 }
 
 /// `child`'s completion record for its job carried by an admitted completion
@@ -2342,13 +2452,42 @@ mod tests {
         MAX_INCONCLUSIVE_CEILING_READS, ProgressVerdict, ReceiptFailure,
         UNOBSERVED_RETRY_INITIAL_INTERVAL, UNOBSERVED_RETRY_MAX_INTERVAL, UnobservedBackoff,
         ceiling_receipt, commit_observation, from_runtime, in_flight_step, now_ms,
-        past_limit_ceiling_receipt, pending_completion, receipt_failure, within_limit,
+        past_limit_ceiling_receipt, pending_completion, receipt_failure, unreadable_reply,
+        within_limit,
     };
     use crate::agent_tools::RestartInterruptedReason;
     use meerkat_mob::{AgentIdentity, MemberRunState, MobId, MobState};
     use meerkat_runtime::{RuntimeDriverError, RuntimeState};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
+
+    /// A durable reply that cannot be read decides nothing at a decision point:
+    /// the outcome is `restart_interrupted` with the read error and no reason,
+    /// and it retires no child. It is never `max_run_elapsed` or a commit that
+    /// never landed, which would be verdicts on an absence nobody observed.
+    #[test]
+    fn an_unreadable_reply_is_inconclusive_and_retires_no_child() {
+        let mob_id = MobId::from("relink-mob");
+        let child = AgentIdentity::from("child-1");
+        let error = meerkat_core::service::SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError("the store is unreadable".to_string()),
+        );
+        let completion = unreadable_reply(&mob_id, &child, &error);
+        assert!(matches!(
+            completion.status,
+            crate::agent_tools::ForkOffCompletionStatus::RestartInterrupted
+        ));
+        assert!(
+            completion
+                .error
+                .as_deref()
+                .is_some_and(|detail| detail.contains("the store is unreadable")),
+            "the read error is carried: {:?}",
+            completion.error
+        );
+        assert!(completion.restart_reason.is_none());
+        assert!(!completion.status.retires_child());
+    }
 
     /// Unobserved reads back off: the pause doubles from the initial interval
     /// up to the cap, and an observed read restarts it. A read that did not

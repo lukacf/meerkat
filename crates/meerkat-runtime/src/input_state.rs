@@ -1644,6 +1644,16 @@ impl InputStatePersistenceRecord {
         })
     }
 
+    /// Test support: package an exact stored row, so recovery tests can start
+    /// from a durable row the current runtime no longer writes (an input a
+    /// pre-release build left staged for a run that never committed). The
+    /// seed still passes the machine's stored-seed authority.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn stored_row_for_test(bundle: StoredInputState) -> Result<Self, String> {
+        Self::from_machine_snapshot(bundle)
+    }
+
     /// Fence this update on the exact stored row bytes it was derived from
     /// (domain-prefixed SHA-256, as reported by
     /// `RuntimeStore::load_input_states_with_versions`). A store applying a

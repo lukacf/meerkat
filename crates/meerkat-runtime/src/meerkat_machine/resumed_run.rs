@@ -401,11 +401,11 @@ impl super::driver::DriverEntry {
     /// (`crate::recovery::recover_durable_tail_for_run`), commits the tail as
     /// an interrupted run (every row kept, open calls answered as
     /// outcome-unknown, the interrupted notice appended), and the inputs stay
-    /// terminal with the settlement's reason. It runs under the registration
-    /// gate and this driver's lock, on the store's current tail, as a
-    /// registration's recovery does; the store's fences hold across
-    /// processes. A crash between the settlement and the repair leaves the
-    /// same state for the next registration's recovery.
+    /// terminal with the settlement's reason. It runs under this driver's
+    /// lock, on the store's current tail, as a registration's recovery does;
+    /// the store's fences hold across processes. A crash between the
+    /// settlement and the repair leaves the same state for the next
+    /// registration's recovery.
     ///
     /// Returns whether the session must reload before it serves again:
     /// - the repair committed: it wrote a boundary this live registration did

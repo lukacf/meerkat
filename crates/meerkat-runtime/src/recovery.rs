@@ -145,6 +145,11 @@ struct PreparedRecoveryCandidate {
     physical_message_count: usize,
     /// The calls the recovered document answers as outcome unknown.
     closed_call_ids: Vec<String>,
+    /// The inputs the tail's run cursor binds to its run; `None` for a tail
+    /// without a readable run cursor. An operator's requeue of another run's
+    /// stranded inputs needs a readable cursor and never touches one of these
+    /// (see [`observe_stranded_run_inputs`]).
+    cursor_bound_inputs: Option<Vec<InputId>>,
 }
 
 /// Which verdict a prepared candidate serves.
@@ -228,6 +233,19 @@ pub enum HeldTailResolution {
     HeldOtherwise { reason: String },
     /// An ambiguous held tail and the operator repair, planned or applied.
     Ambiguous(Box<HeldTailRepair>),
+    /// An interrupted tail that ordinary recovery holds only because content
+    /// inputs of another run stand beside it, and the operator repair,
+    /// planned or applied. Each such input is staged for, or queued after, a
+    /// run that never committed (no provisional tail and no boundary
+    /// receipt in the store), and the tail's run cursor does not bind it: that
+    /// run binding is the proof that the input is not the tail's own. The
+    /// tail's run binds only its own inputs, all ended. The repair commits
+    /// the tail as interrupted, as ordinary recovery commits an interrupted
+    /// tail, and requeues those inputs with their content
+    /// ([`HeldTailRepair::requeued_inputs`]), so each runs once after it.
+    /// Only a pre-release build of 0.9.5, whose cancelled run kept its tail,
+    /// leaves this shape.
+    StrandedInputs(Box<HeldTailRepair>),
 }
 
 /// The operator repair of an ambiguous held tail.
@@ -250,6 +268,10 @@ pub struct HeldTailRepair {
     /// The inputs the repair terminalizes: those proved bound to the run.
     /// Other inputs stay for ordinary redelivery.
     pub terminalized_inputs: Vec<InputId>,
+    /// The inputs the repair requeues, with their content, to run once after
+    /// the repaired run: another run's stranded inputs
+    /// ([`HeldTailResolution::StrandedInputs`]). Empty for any other repair.
+    pub requeued_inputs: Vec<InputId>,
     /// Whether the persisted lifecycle row is quiescent (missing, Idle or
     /// Retired, or a Stopped row this repair normalizes) with no current
     /// run. The repair is refused otherwise. A live host whose runtime is
@@ -464,6 +486,15 @@ fn observe_run_cursor(
             .iter()
             .all(|input_id| bound_input_runs.get(input_id) == Some(&cursor.run_id));
     Ok((DurableTailRunCursor::Agrees, inputs_bound))
+}
+
+/// The inputs a tail's run cursor binds to its run; `None` for a tail
+/// without a readable run cursor.
+fn cursor_bound_inputs(head: &Session) -> Option<Vec<InputId>> {
+    match head.try_run_cursor() {
+        Ok(Some(cursor)) => Some(cursor.bound_input_ids),
+        Ok(None) | Err(_) => None,
+    }
 }
 
 fn durable_tail_run_cursor_name(cursor: DurableTailRunCursor) -> &'static str {
@@ -1382,6 +1413,7 @@ fn prepare_head_canonical_recovery_candidate_in(
             tail_facts: HeldTailFacts::observed(&observation),
             physical_message_count: physical_head.messages().len(),
             closed_call_ids,
+            cursor_bound_inputs: cursor_bound_inputs(physical_head),
         },
     ))
 }
@@ -1526,6 +1558,7 @@ fn prepare_whole_blob_recovery_candidate_in(
     }
     let physical_envelope = candidate_session.clone();
     let physical_message_count = candidate_session.messages().len();
+    let candidate_cursor_bound_inputs = cursor_bound_inputs(&candidate_session);
     let mut recovered = candidate_session;
     let closer = match class {
         DurableTailRecoveryClass::CompletedCandidate => None,
@@ -1628,6 +1661,7 @@ fn prepare_whole_blob_recovery_candidate_in(
             tail_facts: HeldTailFacts::observed(&observation),
             physical_message_count,
             closed_call_ids,
+            cursor_bound_inputs: candidate_cursor_bound_inputs,
         },
     ))
 }
@@ -1985,6 +2019,15 @@ pub async fn observe_resumable_run(
 /// `Ok(None)` when the profile is not HeadCanonical, the store keeps no
 /// durable-tail source, or no applied provisional tail sits on the boundary:
 /// the caller's refusal then stands. It only reads.
+///
+/// The snapshot is evidence of the committed boundary only. It proves nothing
+/// about the tail: a source whose rewrites the store could not prove descend
+/// from the boundary still answers `Some`, so a caller never uses the answer
+/// as tail evidence (recovery owns that judgment). A round's intent written
+/// but not yet applied also answers `None`; a reader in another task than
+/// the run's re-observes then. Under a tail the store verifies both the
+/// boundary and the physical head, so a call costs about two committed
+/// reads.
 ///
 /// The session service reads its fork source through it when the fork comes
 /// from the source's own running turn
@@ -2554,8 +2597,11 @@ pub async fn recover_durable_tail(
 /// tail held as ambiguous answers `Held` whichever run it belongs to, and
 /// nothing is touched then either.
 ///
-/// The caller holds the session's registration gate across the call, and
-/// the store's fences order it against any other process.
+/// The caller holds the session's driver lock across the call, as the
+/// runtime loop's settle of a refused resume and of a cancelled run do (the
+/// loop never takes the registration gate here: an unregister holds it while
+/// it waits for the loop). The lock orders the call against the loop's own
+/// writes, and the store's fences order it against any other process.
 pub async fn recover_durable_tail_for_run(
     store: &dyn RuntimeStore,
     session_id: &SessionId,
@@ -2579,12 +2625,17 @@ pub async fn recover_durable_tail_for_run(
 /// resolve-held-tail`), through the store traits alone, so a host store is
 /// served as a built-in one is.
 ///
-/// Only a tail the recovery drive holds as ambiguous qualifies. Its machine
-/// verdict comes from the operator-attested
+/// Two held shapes qualify. A tail the recovery drive holds as ambiguous
+/// takes its machine verdict from the operator-attested
 /// `AuthorizeOperatorDurableTailRepair`, which repairs only under the
 /// admissible core of an ordinary commit (a quiescent persisted runtime with
 /// no current run, no prior commit that covers or contradicts the tail,
-/// attributable inputs) and refuses otherwise.
+/// attributable inputs) and refuses otherwise. An interrupted tail ordinary
+/// recovery holds only beside another run's stranded inputs
+/// ([`HeldTailResolution::StrandedInputs`]) takes ordinary recovery's own
+/// `AuthorizeDurableTailRecovery`, with those inputs attributed to their own
+/// run by their run binding; its repair commits the tail as ordinary recovery
+/// commits an interrupted tail and requeues those inputs in the same commit.
 ///
 /// The caller opens the store exclusively, so no live process owns the
 /// session, and nothing registers its runtime. A lifecycle row a host left
@@ -2630,6 +2681,7 @@ pub async fn resolve_held_durable_tail(
         DriveAnswer::NotHeld(class) => HeldTailResolution::NotHeld { class },
         DriveAnswer::HeldOtherwise(reason) => HeldTailResolution::HeldOtherwise { reason },
         DriveAnswer::Operator(repair) => HeldTailResolution::Ambiguous(repair),
+        DriveAnswer::Stranded(repair) => HeldTailResolution::StrandedInputs(repair),
         DriveAnswer::Outcome(_) | DriveAnswer::OtherRun => {
             return Err(DurableTailRecoveryError::Authority(
                 "the operator recovery drive answered an ordinary recovery outcome".to_string(),
@@ -2671,18 +2723,22 @@ enum DriveAnswer {
     HeldOtherwise(String),
     /// Operator mode: the repair, planned or applied.
     Operator(Box<HeldTailRepair>),
+    /// Operator mode: the repair of an interrupted tail held beside another
+    /// run's stranded inputs, planned or applied.
+    Stranded(Box<HeldTailRepair>),
 }
 
 impl DriveAnswer {
     fn into_outcome(self) -> Result<DurableTailRecoveryOutcome, DurableTailRecoveryError> {
         match self {
             Self::Outcome(outcome) => Ok(outcome),
-            Self::OtherRun | Self::NotHeld(_) | Self::HeldOtherwise(_) | Self::Operator(_) => {
-                Err(DurableTailRecoveryError::Authority(
-                    "an ordinary recovery drive answered for another run or an operator"
-                        .to_string(),
-                ))
-            }
+            Self::OtherRun
+            | Self::NotHeld(_)
+            | Self::HeldOtherwise(_)
+            | Self::Operator(_)
+            | Self::Stranded(_) => Err(DurableTailRecoveryError::Authority(
+                "an ordinary recovery drive answered for another run or an operator".to_string(),
+            )),
         }
     }
 }
@@ -2692,6 +2748,7 @@ impl DriveAnswer {
 fn operator_plan(
     candidate: &PreparedRecoveryCandidate,
     inputs: &CandidateInputObservation,
+    stranded: Option<&[(StoredInputState, String)]>,
     observed: &ObservedPersistedLifecycle,
     verdict: HeldTailRepairVerdict,
 ) -> HeldTailRepair {
@@ -2704,6 +2761,11 @@ fn operator_plan(
         closed_calls: candidate.closed_call_ids.clone(),
         terminalized_inputs: inputs
             .attributed
+            .iter()
+            .map(|(bundle, _)| bundle.state.input_id.clone())
+            .collect(),
+        requeued_inputs: stranded
+            .unwrap_or_default()
             .iter()
             .map(|(bundle, _)| bundle.state.input_id.clone())
             .collect(),
@@ -2792,8 +2854,8 @@ pub async fn recover_durable_tail_for_session_archive(
 /// The recovery drive: ordinary, an archive's, or an operator's. It answers
 /// `OtherRun` only when `expected_run` names a run whose tail the store does
 /// not hold, before anything is written. In operator mode it never rolls back
-/// an intent, plans only an ambiguous candidate, and writes only when `apply`
-/// is set.
+/// an intent, plans only an ambiguous candidate or an interrupted one held
+/// beside another run's stranded inputs, and writes only when `apply` is set.
 async fn recover_durable_tail_capturing(
     store: &dyn RuntimeStore,
     session_id: &SessionId,
@@ -2985,6 +3047,31 @@ async fn recover_durable_tail_capturing(
         &prior.receipt_bound_inputs,
     )
     .await?;
+    // An operator's drive also resolves one held shape that is not
+    // ambiguous: an interrupted tail held only beside another run's stranded
+    // inputs. The run binding of each such input proves it is not the tail's
+    // own, so the operator attests the input evidence as attributed, and the
+    // repair requeues those inputs. Ordinary recovery never takes this path.
+    let stranded = if ordinary_probe
+        && candidate.class == DurableTailRecoveryClass::InterruptedRepairableCandidate
+        && inputs.evidence == mm_dsl::DurableRecoveryInputEvidence::UnboundContentInput
+    {
+        observe_stranded_run_inputs(
+            store,
+            &runtime_id,
+            &candidate,
+            &prior.receipt_bound_inputs,
+            inputs.predecessor_nonterminal_input_set_revision,
+        )
+        .await?
+    } else {
+        None
+    };
+    let input_evidence = if stranded.is_some() {
+        mm_dsl::DurableRecoveryInputEvidence::AllBoundOrInert
+    } else {
+        inputs.evidence
+    };
 
     let mut authority =
         crate::meerkat_machine::dsl_authority::new_registered_authority_without_runtime_entry(
@@ -3004,7 +3091,7 @@ async fn recover_durable_tail_capturing(
             observed_current_run: observed.current_run,
             last_committed_sequence: prior.last_committed_sequence,
             prior_commit: prior.classification,
-            input_evidence: inputs.evidence,
+            input_evidence,
         }
     } else {
         mm_dsl::MeerkatMachineInput::AuthorizeDurableTailRecovery {
@@ -3016,7 +3103,7 @@ async fn recover_durable_tail_capturing(
             observed_current_run: observed.current_run,
             last_committed_sequence: prior.last_committed_sequence,
             prior_commit: prior.classification,
-            input_evidence: inputs.evidence,
+            input_evidence,
         }
     };
     let transition = mm_dsl::MeerkatMachineMutator::apply(&mut authority, authorization)
@@ -3043,7 +3130,7 @@ async fn recover_durable_tail_capturing(
         }
     }
 
-    if ordinary_probe {
+    if ordinary_probe && stranded.is_none() {
         return match (commit_verdict, non_commit_verdict) {
             (Some(_), _) | (None, Some(DurableTailRecoveryDisposition::ContinueRun)) => {
                 Ok(DriveAnswer::NotHeld(candidate.class))
@@ -3107,6 +3194,18 @@ async fn recover_durable_tail_capturing(
                 )));
             }
             match non_commit {
+                // Only a stranded-input drive reaches a hold in operator
+                // mode: ordinary recovery's own verdict holds the tail for a
+                // reason the attributed inputs do not settle.
+                DurableTailRecoveryDisposition::HoldIntact
+                    if matches!(mode, DriveMode::Operator { .. }) =>
+                {
+                    return Ok(DriveAnswer::HeldOtherwise(
+                        "ordinary recovery holds this tail for a reason other than the inputs \
+                         another run left beside it"
+                            .to_string(),
+                    ));
+                }
                 DurableTailRecoveryDisposition::HoldIntact => {
                     tracing::warn!(
                         session_id = %candidate.session_id,
@@ -3120,12 +3219,18 @@ async fn recover_durable_tail_capturing(
                 }
                 DurableTailRecoveryDisposition::RefuseRecovery => {
                     if let DriveMode::Operator { .. } = mode {
-                        return Ok(DriveAnswer::Operator(Box::new(operator_plan(
+                        let plan = Box::new(operator_plan(
                             &candidate,
                             &inputs,
+                            stranded.as_deref(),
                             &observed,
                             HeldTailRepairVerdict::Refused,
-                        ))));
+                        ));
+                        return Ok(if stranded.is_some() {
+                            DriveAnswer::Stranded(plan)
+                        } else {
+                            DriveAnswer::Operator(plan)
+                        });
                     }
                     return Ok(DriveAnswer::Outcome(DurableTailRecoveryOutcome::Refused));
                 }
@@ -3189,15 +3294,21 @@ async fn recover_durable_tail_capturing(
             let plan = operator_plan(
                 &candidate,
                 &inputs,
+                stranded.as_deref(),
                 &observed,
                 HeldTailRepairVerdict::WouldRepair,
             );
             if !apply {
-                return Ok(DriveAnswer::Operator(Box::new(plan)));
+                return Ok(if stranded.is_some() {
+                    DriveAnswer::Stranded(Box::new(plan))
+                } else {
+                    DriveAnswer::Operator(Box::new(plan))
+                });
             }
             Some(plan)
         }
     };
+    let stranded_shape = stranded.is_some();
 
     // Realize-only pass: terminalize exactly the rows the observation PROVED
     // bound to the candidate run — durable staging bindings or a committed
@@ -3237,6 +3348,11 @@ async fn recover_durable_tail_capturing(
         .iter()
         .map(|record| record.as_stored().state.input_id.clone())
         .collect();
+    // Another run's stranded inputs are no contributors of the recovered
+    // boundary: they go back to their lane in the same fenced commit.
+    if let Some(rows) = stranded {
+        input_updates.extend(requeue_stranded_inputs(rows)?);
+    }
     // Retained rows are deliberately not rewritten. The store-owned input-set
     // revision fences every mutation since observation, while the exact set
     // token records the classified identities and bytes in durable evidence.
@@ -3365,7 +3481,11 @@ async fn recover_durable_tail_capturing(
     Ok(match operator_repair {
         Some(mut repair) => {
             repair.verdict = HeldTailRepairVerdict::Repaired { boundary_sequence };
-            DriveAnswer::Operator(Box::new(repair))
+            if stranded_shape {
+                DriveAnswer::Stranded(Box::new(repair))
+            } else {
+                DriveAnswer::Operator(Box::new(repair))
+            }
         }
         None => DriveAnswer::Outcome(outcome),
     })
@@ -3530,6 +3650,131 @@ fn terminalize_attributed_inputs(
         if crate::store::input_state_payload_is_retirable(&bundle) {
             bundle.state.persisted_input = None;
         }
+        let record = InputStatePersistenceRecord::from_machine_snapshot(bundle)
+            .map_err(DurableTailRecoveryError::Authority)?
+            .with_expected_row_digest(row_digest);
+        updates.push(record);
+    }
+    Ok(updates)
+}
+
+/// Operator pass: the inputs of another run stranded beside an interrupted
+/// tail, when they are the only reason ordinary recovery holds it.
+///
+/// Every row is read again from a snapshot at the same input-set revision the
+/// observation read (a moved set answers `None`), and the shape holds only
+/// when:
+/// - the tail carries a readable run cursor, and every input it binds that
+///   has a row has ended (the run's own inputs);
+/// - no non-terminal row is bound to the candidate run;
+/// - every non-terminal content row names another run (its staging run as
+///   `last_run_id`) and is Staged or Queued (so the cursor binds none of
+///   them);
+/// - each run they name has no boundary receipt in the store. The store
+///   keeps one provisional tail per session, the candidate's, so such a run
+///   has no tail either: it never committed.
+///
+/// That binding is the proof that an input is not the tail's own: nothing is
+/// inferred from order or timing. Rows without content (operations,
+/// continuations, external events) are left as they are, as ordinary recovery
+/// leaves them. `None` leaves the tail to today's verdict.
+async fn observe_stranded_run_inputs(
+    store: &dyn RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    candidate: &PreparedRecoveryCandidate,
+    receipt_bound_inputs: &BTreeSet<String>,
+    observed_revision: Option<RecoveryInputSetRevision>,
+) -> Result<Option<Vec<(StoredInputState, String)>>, DurableTailRecoveryError> {
+    let snapshot = match store.load_input_states_with_versions(runtime_id).await {
+        Ok(snapshot) => snapshot,
+        Err(RuntimeStoreError::Unsupported(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if snapshot.runtime_id() != runtime_id {
+        return Err(DurableTailRecoveryError::Authority(format!(
+            "store returned a recovery input snapshot for {}, not {runtime_id}",
+            snapshot.runtime_id()
+        )));
+    }
+    let (rows, revision, _token) = snapshot.into_parts();
+    if observed_revision != Some(revision) {
+        return Ok(None);
+    }
+    let Some(cursor_bound_inputs) = candidate.cursor_bound_inputs.as_deref() else {
+        return Ok(None);
+    };
+    let mut stranded = Vec::new();
+    let mut stranding_runs: BTreeMap<String, RunId> = BTreeMap::new();
+    for (bundle, row_digest) in rows {
+        if is_terminal(bundle.seed.phase) {
+            continue;
+        }
+        if cursor_bound_inputs.contains(&bundle.state.input_id)
+            || bundle.seed.last_run_id.as_ref() == Some(&candidate.candidate_run_id)
+            || receipt_bound_inputs.contains(&bundle.state.input_id.to_string())
+        {
+            return Ok(None);
+        }
+        if !carries_redeliverable_content(bundle.state.persisted_input.as_ref()) {
+            continue;
+        }
+        let Some(run_id) = bundle.seed.last_run_id.clone() else {
+            return Ok(None);
+        };
+        if !matches!(
+            bundle.seed.phase,
+            InputLifecycleState::Staged | InputLifecycleState::Queued
+        ) {
+            return Ok(None);
+        }
+        stranding_runs.insert(run_id.to_string(), run_id);
+        stranded.push((bundle, row_digest));
+    }
+    if stranded.is_empty() {
+        return Ok(None);
+    }
+    for run_id in stranding_runs.values() {
+        match store
+            .load_durable_tail_recovery_receipts(runtime_id, run_id)
+            .await
+        {
+            Ok(receipts) if receipts.is_empty() => {}
+            Ok(_)
+            | Err(
+                RuntimeStoreError::Unsupported(_)
+                | RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas { .. },
+            ) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(Some(stranded))
+}
+
+/// Realize pass of an operator's stranded-input repair: each input goes back
+/// to its lane with its content, as a staged rollback puts it back (the run
+/// association ends, the attempt count and lane stay), fenced on the exact row
+/// bytes the observation read.
+fn requeue_stranded_inputs(
+    rows: Vec<(StoredInputState, String)>,
+) -> Result<Vec<InputStatePersistenceRecord>, DurableTailRecoveryError> {
+    let now = chrono::Utc::now();
+    let mut updates = Vec::with_capacity(rows.len());
+    for (mut bundle, row_digest) in rows {
+        let from = bundle.seed.phase;
+        bundle.seed.phase = InputLifecycleState::Queued;
+        bundle.seed.last_run_id = None;
+        if from != InputLifecycleState::Queued {
+            bundle
+                .state
+                .history
+                .push(crate::input_state::InputStateHistoryEntry {
+                    timestamp: now,
+                    from,
+                    to: InputLifecycleState::Queued,
+                    reason: Some("ResolveHeldTailRequeue".to_string()),
+                });
+        }
+        bundle.state.updated_at = now;
         let record = InputStatePersistenceRecord::from_machine_snapshot(bundle)
             .map_err(DurableTailRecoveryError::Authority)?
             .with_expected_row_digest(row_digest);

@@ -917,6 +917,7 @@ type MobTurnStartSupportedWireOptionKeys =
   | "provider"
   | "provider_params"
   | "self_hosted_server_id"
+  | "session_events"
   | "skill_refs"
   | "structured_output_retries"
   | "system_prompt"

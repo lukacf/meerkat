@@ -18170,7 +18170,7 @@ fn held_tail_resolution_json(
     apply: bool,
     resolution: &meerkat_runtime::recovery::HeldTailResolution,
 ) -> serde_json::Value {
-    use meerkat_runtime::recovery::{HeldTailRepairVerdict, HeldTailResolution};
+    use meerkat_runtime::recovery::HeldTailResolution;
     let mut report = serde_json::Map::new();
     report.insert("session_id".into(), session_id.to_string().into());
     report.insert("apply".into(), apply.into());
@@ -18190,45 +18190,12 @@ fn held_tail_resolution_json(
             report.insert("reason".into(), reason.clone().into());
         }
         HeldTailResolution::Ambiguous(repair) => {
-            let (verdict, boundary_sequence) = match repair.verdict {
-                HeldTailRepairVerdict::WouldRepair => ("would_repair", None),
-                HeldTailRepairVerdict::Refused => ("refused", None),
-                HeldTailRepairVerdict::Repaired { boundary_sequence } => {
-                    ("repaired", Some(boundary_sequence))
-                }
-                _ => ("unknown", None),
-            };
-            let facts = &repair.facts;
-            let mut repair_json = serde_json::json!({
-                "candidate_id": repair.candidate_id,
-                "run_id": repair.run_id.to_string(),
-                "facts": {
-                    "run_rows": facts.run_rows,
-                    "last_stop": facts.last_stop,
-                    "dangling_calls": facts.dangling_calls,
-                    "orphan_results": facts.orphan_results,
-                    "rows_after_terminal_reply": facts.rows_after_terminal_reply,
-                    "run_cursor": facts.run_cursor,
-                    "cursor_inputs_bound": facts.cursor_inputs_bound,
-                },
-                "messages_before": repair.messages_before,
-                "messages_after": repair.messages_after,
-                "closed_calls": repair.closed_calls,
-                "terminalized_inputs": repair
-                    .terminalized_inputs
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>(),
-                "runtime_quiescent": repair.runtime_quiescent,
-                "normalizes_stopped_lifecycle": repair.normalizes_stopped_lifecycle,
-                "verdict": verdict,
-            });
-            if let (Some(sequence), Some(object)) = (boundary_sequence, repair_json.as_object_mut())
-            {
-                object.insert("boundary_sequence".into(), sequence.into());
-            }
             report.insert("resolution".into(), "ambiguous".into());
-            report.insert("repair".into(), repair_json);
+            report.insert("repair".into(), held_tail_repair_json(repair));
+        }
+        HeldTailResolution::StrandedInputs(repair) => {
+            report.insert("resolution".into(), "stranded_inputs".into());
+            report.insert("repair".into(), held_tail_repair_json(repair));
         }
         _ => {
             report.insert("resolution".into(), "unknown".into());
@@ -18237,14 +18204,61 @@ fn held_tail_resolution_json(
     serde_json::Value::Object(report)
 }
 
+/// The `repair` object of a `--json` report: the plan, and its verdict.
+#[cfg(feature = "session-store")]
+fn held_tail_repair_json(repair: &meerkat_runtime::recovery::HeldTailRepair) -> serde_json::Value {
+    use meerkat_runtime::recovery::HeldTailRepairVerdict;
+    let (verdict, boundary_sequence) = match repair.verdict {
+        HeldTailRepairVerdict::WouldRepair => ("would_repair", None),
+        HeldTailRepairVerdict::Refused => ("refused", None),
+        HeldTailRepairVerdict::Repaired { boundary_sequence } => {
+            ("repaired", Some(boundary_sequence))
+        }
+        _ => ("unknown", None),
+    };
+    let facts = &repair.facts;
+    let mut repair_json = serde_json::json!({
+        "candidate_id": repair.candidate_id,
+        "run_id": repair.run_id.to_string(),
+        "facts": {
+            "run_rows": facts.run_rows,
+            "last_stop": facts.last_stop,
+            "dangling_calls": facts.dangling_calls,
+            "orphan_results": facts.orphan_results,
+            "rows_after_terminal_reply": facts.rows_after_terminal_reply,
+            "run_cursor": facts.run_cursor,
+            "cursor_inputs_bound": facts.cursor_inputs_bound,
+        },
+        "messages_before": repair.messages_before,
+        "messages_after": repair.messages_after,
+        "closed_calls": repair.closed_calls,
+        "terminalized_inputs": repair
+            .terminalized_inputs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "requeued_inputs": repair
+            .requeued_inputs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "runtime_quiescent": repair.runtime_quiescent,
+        "normalizes_stopped_lifecycle": repair.normalizes_stopped_lifecycle,
+        "verdict": verdict,
+    });
+    if let (Some(sequence), Some(object)) = (boundary_sequence, repair_json.as_object_mut()) {
+        object.insert("boundary_sequence".into(), sequence.into());
+    }
+    repair_json
+}
+
 /// The human report of `rkat session resolve-held-tail`.
 #[cfg(feature = "session-store")]
 fn print_held_tail_resolution(
     session_id: &SessionId,
     resolution: &meerkat_runtime::recovery::HeldTailResolution,
 ) {
-    use meerkat_runtime::recovery::{HeldTailRepairVerdict, HeldTailResolution};
-    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    use meerkat_runtime::recovery::HeldTailResolution;
     match resolution {
         HeldTailResolution::NoTail => {
             println!("session {session_id}: no durable tail is held; nothing to resolve");
@@ -18263,76 +18277,114 @@ fn print_held_tail_resolution(
             );
         }
         HeldTailResolution::Ambiguous(repair) => {
-            let facts = &repair.facts;
             println!(
                 "session {session_id}: held durable tail, candidate {}, run {}",
                 repair.candidate_id, repair.run_id
             );
-            println!("why it is held:");
-            println!("  run rows: {}", facts.run_rows);
-            println!("  last stop: {}", facts.last_stop);
+            print_held_tail_repair(repair);
+        }
+        HeldTailResolution::StrandedInputs(repair) => {
             println!(
-                "  calls without a result: {} [{}]",
-                facts.dangling_calls.len(),
-                facts.dangling_calls.join(", ")
-            );
-            println!("  results that answer no call: {}", facts.orphan_results);
-            println!(
-                "  rows after the terminal reply: {}",
-                yes_no(facts.rows_after_terminal_reply)
+                "session {session_id}: durable tail of interrupted run {}, candidate {}, held \
+                 beside another run's stranded inputs",
+                repair.run_id, repair.candidate_id
             );
             println!(
-                "  run cursor: {}; inputs bound to the run: {}",
-                facts.run_cursor,
-                yes_no(facts.cursor_inputs_bound)
-            );
-            println!("repair:");
-            println!(
-                "  keeps all {} messages ({} after the repair)",
-                repair.messages_before, repair.messages_after
-            );
-            println!(
-                "  answers {} calls as outcome unknown [{}]",
-                repair.closed_calls.len(),
-                repair.closed_calls.join(", ")
-            );
-            println!(
-                "  ends {} inputs bound to the run [{}]",
-                repair.terminalized_inputs.len(),
+                "  {} inputs staged for, or queued after, a run that never committed stand \
+                 beside the tail [{}]; the tail's run cursor binds none of them",
+                repair.requeued_inputs.len(),
                 repair
-                    .terminalized_inputs
+                    .requeued_inputs
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            println!(
-                "  persisted lifecycle quiescent: {}",
-                yes_no(repair.runtime_quiescent)
-            );
-            if repair.normalizes_stopped_lifecycle {
-                println!(
-                    "  the persisted lifecycle row is Stopped (a host stopped the runtime and \
-                     ended before unregistering it): the repair writes the clean Idle row a \
-                     start would normalize it to"
-                );
-            }
-            match repair.verdict {
-                HeldTailRepairVerdict::WouldRepair => println!(
-                    "verdict: the runtime machine authorizes the repair; nothing was written. \
-                     Run again with --apply to commit it."
-                ),
-                HeldTailRepairVerdict::Refused => {
-                    println!("verdict: refused; nothing was written");
-                }
-                HeldTailRepairVerdict::Repaired { boundary_sequence } => println!(
-                    "verdict: repaired; the tail is committed as an interrupted run at boundary \
-                     sequence {boundary_sequence}"
-                ),
-                other => println!("verdict: {other:?}"),
-            }
+            print_held_tail_repair(repair);
         }
         other => println!("session {session_id}: {other:?}"),
+    }
+}
+
+/// The facts, the plan and the verdict of an operator repair, for the human
+/// report.
+#[cfg(feature = "session-store")]
+fn print_held_tail_repair(repair: &meerkat_runtime::recovery::HeldTailRepair) {
+    use meerkat_runtime::recovery::HeldTailRepairVerdict;
+    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    let ids = |inputs: &[meerkat_core::InputId]| {
+        inputs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let facts = &repair.facts;
+    println!("why it is held:");
+    println!("  run rows: {}", facts.run_rows);
+    println!("  last stop: {}", facts.last_stop);
+    println!(
+        "  calls without a result: {} [{}]",
+        facts.dangling_calls.len(),
+        facts.dangling_calls.join(", ")
+    );
+    println!("  results that answer no call: {}", facts.orphan_results);
+    println!(
+        "  rows after the terminal reply: {}",
+        yes_no(facts.rows_after_terminal_reply)
+    );
+    println!(
+        "  run cursor: {}; inputs bound to the run: {}",
+        facts.run_cursor,
+        yes_no(facts.cursor_inputs_bound)
+    );
+    println!("repair:");
+    println!(
+        "  keeps all {} messages ({} after the repair)",
+        repair.messages_before, repair.messages_after
+    );
+    println!(
+        "  answers {} calls as outcome unknown [{}]",
+        repair.closed_calls.len(),
+        repair.closed_calls.join(", ")
+    );
+    println!(
+        "  ends {} inputs bound to the run [{}]",
+        repair.terminalized_inputs.len(),
+        ids(&repair.terminalized_inputs)
+    );
+    if !repair.requeued_inputs.is_empty() {
+        println!(
+            "  requeues {} stranded inputs with their content, to run once after the repaired \
+             run [{}]",
+            repair.requeued_inputs.len(),
+            ids(&repair.requeued_inputs)
+        );
+    }
+    println!(
+        "  persisted lifecycle quiescent: {}",
+        yes_no(repair.runtime_quiescent)
+    );
+    if repair.normalizes_stopped_lifecycle {
+        println!(
+            "  the persisted lifecycle row is Stopped (a host stopped the runtime and ended \
+             before unregistering it): the repair writes the clean Idle row a start would \
+             normalize it to"
+        );
+    }
+    match repair.verdict {
+        HeldTailRepairVerdict::WouldRepair => println!(
+            "verdict: the runtime machine authorizes the repair; nothing was written. Run again \
+             with --apply to commit it."
+        ),
+        HeldTailRepairVerdict::Refused => {
+            println!("verdict: refused; nothing was written");
+        }
+        HeldTailRepairVerdict::Repaired { boundary_sequence } => println!(
+            "verdict: repaired; the tail is committed as an interrupted run at boundary sequence \
+             {boundary_sequence}"
+        ),
+        other => println!("verdict: {other:?}"),
     }
 }
 
@@ -18344,34 +18396,46 @@ fn held_tail_resolution_failure(
     session_id: &SessionId,
     resolution: &meerkat_runtime::recovery::HeldTailResolution,
 ) -> Option<String> {
-    use meerkat_runtime::recovery::{HeldTailRepairVerdict, HeldTailResolution};
+    use meerkat_runtime::recovery::HeldTailResolution;
     match resolution {
         HeldTailResolution::NoTail | HeldTailResolution::NotHeld { .. } => None,
         HeldTailResolution::HeldOtherwise { reason } => Some(format!(
             "the durable tail of session {session_id} is held for a reason this command does not \
              resolve: {reason}"
         )),
-        HeldTailResolution::Ambiguous(repair) => match repair.verdict {
-            HeldTailRepairVerdict::WouldRepair | HeldTailRepairVerdict::Repaired { .. } => None,
-            HeldTailRepairVerdict::Refused if !repair.runtime_quiescent => Some(format!(
-                "the repair of session {session_id}'s held durable tail was refused: the \
-                 persisted lifecycle row is not quiescent (a runtime is attached or running, or \
-                 a run is current); stop every host of the session first, then run the command \
-                 again"
-            )),
-            HeldTailRepairVerdict::Refused => Some(format!(
-                "the repair of session {session_id}'s held durable tail was refused by the \
-                 runtime machine: a prior recovery commit covers or contradicts the tail, or the \
-                 run's inputs are not attributable to it; nothing was written"
-            )),
-            other => Some(format!(
-                "the repair of session {session_id}'s held durable tail answered a verdict this \
-                 rkat does not know: {other:?}"
-            )),
-        },
+        HeldTailResolution::Ambiguous(repair) | HeldTailResolution::StrandedInputs(repair) => {
+            held_tail_repair_failure(session_id, repair)
+        }
         other => Some(format!(
             "the durable tail of session {session_id} answered a resolution this rkat does not \
              know: {other:?}"
+        )),
+    }
+}
+
+/// The failure an operator repair's verdict ends the command with, if any.
+#[cfg(feature = "session-store")]
+fn held_tail_repair_failure(
+    session_id: &SessionId,
+    repair: &meerkat_runtime::recovery::HeldTailRepair,
+) -> Option<String> {
+    use meerkat_runtime::recovery::HeldTailRepairVerdict;
+    match repair.verdict {
+        HeldTailRepairVerdict::WouldRepair | HeldTailRepairVerdict::Repaired { .. } => None,
+        HeldTailRepairVerdict::Refused if !repair.runtime_quiescent => Some(format!(
+            "the repair of session {session_id}'s held durable tail was refused: the \
+             persisted lifecycle row is not quiescent (a runtime is attached or running, or \
+             a run is current); stop every host of the session first, then run the command \
+             again"
+        )),
+        HeldTailRepairVerdict::Refused => Some(format!(
+            "the repair of session {session_id}'s held durable tail was refused by the \
+             runtime machine: a prior recovery commit covers or contradicts the tail, or the \
+             run's inputs are not attributable to it; nothing was written"
+        )),
+        other => Some(format!(
+            "the repair of session {session_id}'s held durable tail answered a verdict this \
+             rkat does not know: {other:?}"
         )),
     }
 }

@@ -124,7 +124,7 @@ async def test_received_terminal_error_survives_dispatcher_transport_cleanup():
     from meerkat import EventSubscriptionError
     from meerkat.event_envelope import parse_agent_event_envelope
     from meerkat.streaming import EventSubscription, _StdoutDispatcher
-    from test_streaming import agent_event_envelope, jline, make_reader
+    from tests.test_streaming import agent_event_envelope, jline, make_reader
 
     terminal = {"stream_id": "stream-1", "ended": True, "outcome": "terminal_error",
                 "error": {"code": "future_stream_code", "message": "exact terminal detail"}}
@@ -160,7 +160,7 @@ async def test_open_response_then_eof_retains_events_and_primary_terminal_error(
 
     from meerkat import EventSubscriptionError, MeerkatClient
     from meerkat.streaming import _StdoutDispatcher
-    from test_streaming import agent_event_envelope, jline, make_reader
+    from tests.test_streaming import agent_event_envelope, jline, make_reader
 
     notification = "session" if scope == "session" else "mob"
     terminal = {"stream_id": "stream-1", "ended": True, "outcome": "terminal_error",
@@ -220,7 +220,7 @@ async def test_open_response_then_eof_retains_events_and_primary_terminal_error(
 @pytest.mark.asyncio
 async def test_late_subscription_without_terminal_has_eof_after_received_prefix():
     from meerkat.streaming import _StdoutDispatcher, _SubscriptionEvent
-    from test_streaming import agent_event_envelope, stream_notification, make_reader
+    from tests.test_streaming import agent_event_envelope, stream_notification, make_reader
 
     envelope = agent_event_envelope({"type": "text_delta", "delta": "prefix"})
     dispatcher = _StdoutDispatcher(make_reader([stream_notification("stream-1", envelope)]))

@@ -822,7 +822,8 @@ resume fails typed rather than with internal-error prose:
 
 - `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` - the durable tail exists but
   machine-authorized recovery has not promoted it yet; it awaits
-  reconciliation. An operator resolves a tail held as ambiguous with
+  reconciliation. An operator resolves a tail held as ambiguous, or an
+  interrupted tail held beside inputs another run left staged, with
   `rkat session resolve-held-tail`.
 - `SESSION_DURABLE_TAIL_RECOVERY_REFUSED` - machine-authorized recovery was
   refused by conflicting persisted runtime facts (another live runtime, or

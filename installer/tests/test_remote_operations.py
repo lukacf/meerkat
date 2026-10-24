@@ -93,7 +93,9 @@ def test_install_command_runs_locally_before_linux_guard(package, monkeypatch, c
     assert command[:3] == ['python3', '-I', '-c']
     assert command[4:] == ['my-team', 'a' * 32, 'b' * 64,
                           hashlib.sha256((package / 'remote_operations.py').read_bytes()).hexdigest()]
-    blueprint = starter_blueprint().model_copy(update={'target': 'gcp'})
+    blueprint = starter_blueprint()
+    blueprint = blueprint.model_copy(update={'target': 'gcp',
+        'gcp': blueprint.gcp.model_copy(update={'project': 'forge-test-project'})})
     script = generate_files(blueprint)['deploy/deploy-gcp.sh']
     assignment = next(line for line in script.splitlines() if line.startswith('REMOTE_INSTALL='))
     assert 'remote_operations.py install-command' in assignment and '<<' not in assignment

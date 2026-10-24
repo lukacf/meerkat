@@ -36,11 +36,11 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
 
-const DEADLINE: Duration = Duration::from_secs(20);
+pub(super) const DEADLINE: Duration = Duration::from_secs(20);
 
 /// What the model answers to one request.
 #[derive(Clone, Copy)]
-enum Step {
+pub(super) enum Step {
     /// One call of the `probe` tool.
     Tool,
     /// Text, once the test releases it.
@@ -48,15 +48,15 @@ enum Step {
     Text(&'static str),
 }
 
-struct ScriptedModel {
+pub(super) struct ScriptedModel {
     steps: StdMutex<VecDeque<Step>>,
-    requests: AtomicUsize,
-    entered: Semaphore,
-    release: Semaphore,
+    pub(super) requests: AtomicUsize,
+    pub(super) entered: Semaphore,
+    pub(super) release: Semaphore,
 }
 
 impl ScriptedModel {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             steps: StdMutex::new(VecDeque::new()),
             requests: AtomicUsize::new(0),
@@ -65,7 +65,7 @@ impl ScriptedModel {
         }
     }
 
-    fn push(&self, step: Step) {
+    pub(super) fn push(&self, step: Step) {
         self.steps.lock().expect("steps").push_back(step);
     }
 }
@@ -176,9 +176,9 @@ impl AgentToolDispatcher for ProbeTools {
 }
 
 /// The ordinary factory build with the model client and the tools overridden.
-struct ScriptedBuilder {
-    factory: AgentFactory,
-    client: Arc<ScriptedModel>,
+pub(super) struct ScriptedBuilder {
+    pub(super) factory: AgentFactory,
+    pub(super) client: Arc<ScriptedModel>,
 }
 
 #[async_trait]
@@ -248,11 +248,11 @@ impl Stores {
 }
 
 /// One process start over the stores.
-struct Start {
-    service: Arc<PersistentSessionService<ScriptedBuilder>>,
-    machine: Arc<MeerkatMachine>,
-    runtime_store: Arc<dyn RuntimeStore>,
-    head_canonical: bool,
+pub(super) struct Start {
+    pub(super) service: Arc<PersistentSessionService<ScriptedBuilder>>,
+    pub(super) machine: Arc<MeerkatMachine>,
+    pub(super) runtime_store: Arc<dyn RuntimeStore>,
+    pub(super) head_canonical: bool,
 }
 
 impl Start {
@@ -429,7 +429,7 @@ impl Start {
 /// A started session whose first turn, run A, made one tool round (its
 /// round commits stand as the provisional tail) and is held at its second
 /// model call. Returns A's completion waiter and run id.
-async fn run_a_held_after_a_round_commit(
+pub(super) async fn run_a_held_after_a_round_commit(
     start: &Start,
     client: &ScriptedModel,
     id: &SessionId,
@@ -450,7 +450,7 @@ async fn run_a_held_after_a_round_commit(
 }
 
 /// The committed history after the cancelled run A and one more turn.
-fn history_with_closed_run_a(next_prompt: &str, next_answer: &str) -> Vec<String> {
+pub(super) fn history_with_closed_run_a(next_prompt: &str, next_answer: &str) -> Vec<String> {
     vec![
         "user first".to_string(),
         "assistant tool use".to_string(),

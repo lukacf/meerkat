@@ -13117,10 +13117,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let _ = self
             .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
             .await?;
-        if let Some(session) = self.load_authoritative_session_base(id).await? {
-            self.reject_if_archived_session(id, &session)
-                .await
-                .map_err(crate::control_error_into_session_error)?;
+        // The archive verdict is the RuntimeStore's own terminal projection;
+        // the body is never read for it.
+        if matches!(
+            self.observe_live_durable_source(id).await?,
+            crate::LiveDurableSourceObservation::Archived
+        ) {
+            return Err(crate::control_error_into_session_error(
+                Self::archived_not_found(id),
+            ));
         }
         Ok(SessionMutationGuard {
             _turn_finalization_guard: Some(turn_finalization_guard.into()),
@@ -15478,10 +15483,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// unchanged resume observation proves the committed head that
     /// preparation audited is still current, so only the body-free verdict is
     /// read; a changed observation falls back to the authoritative read.
+    ///
+    /// `continued_tail` is the receipt of the run the actor was seeded to
+    /// continue, which recovery's own `Continue` handed over. That run's
+    /// HeadCanonical provisional tail stands ahead of the committed head
+    /// until the run commits its boundary, so the physical head is checked
+    /// against the tail the receipt names, never against the committed head.
     async fn reject_archived_resume_under_recovery_gate(
         &self,
         resume_session_id: &SessionId,
         prepared_observation: Option<&meerkat_runtime::store::RuntimeSessionResumeObservation>,
+        continued_tail: Option<&RunCheckpointReceipt>,
         archived_resume_allowed: bool,
     ) -> Result<(), SessionError> {
         if let Some(expected) = prepared_observation {
@@ -15497,8 +15509,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )))
                 })?;
             if &current == expected && current.session_authority().is_some() {
-                self.verify_prepared_physical_head_current(resume_session_id, &current)
-                    .await?;
+                match continued_tail {
+                    Some(receipt) => {
+                        self.verify_continued_tail_physical_head_current(
+                            resume_session_id,
+                            receipt,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        self.verify_prepared_physical_head_current(resume_session_id, &current)
+                            .await?;
+                    }
+                }
                 if !archived_resume_allowed
                     && self
                         .session_archived_by_runtime_store_authority(resume_session_id)
@@ -15511,17 +15534,66 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 return Ok(());
             }
         }
-        if let Some(session) = self
-            .load_authoritative_session_base(resume_session_id)
-            .await?
+        // Unprepared, the archive question is answered body-free, by the same
+        // RuntimeStore terminal projections the prepared branch reads above:
+        // the archive rule never reads the body.
+        if !archived_resume_allowed
             && self
-                .session_archived_by_authority(resume_session_id, &session)
+                .session_archived_by_runtime_store_authority(resume_session_id)
                 .await?
-            && !archived_resume_allowed
         {
-            self.reject_if_archived_session(resume_session_id, &session)
-                .await
-                .map_err(crate::control_error_into_session_error)?;
+            return Err(SessionError::NotFound {
+                id: resume_session_id.clone(),
+            });
+        }
+        // The rewrite-audit replay a preparation otherwise owns runs on the
+        // committed snapshot. A run this registration resumes holds its
+        // HeadCanonical provisional tail ahead of that snapshot until it
+        // commits its boundary, where the strict read refuses the boundary,
+        // so the snapshot is read through the tail. The read decides nothing
+        // about the tail: recovery's own `Continue` already did.
+        self.load_authoritative_session_base_tolerating_tail(resume_session_id)
+            .await?;
+        Ok(())
+    }
+
+    /// The physical head is still the HeadCanonical provisional tail the
+    /// receipt of a continued run names: the tail its actor was seeded from.
+    /// A WholeBlob receipt names no physical head, and is not checked here.
+    async fn verify_continued_tail_physical_head_current(
+        &self,
+        id: &SessionId,
+        receipt: &RunCheckpointReceipt,
+    ) -> Result<(), SessionError> {
+        let Some(tail) = receipt.head_canonical() else {
+            return Ok(());
+        };
+        let incremental = self.incremental.as_ref().ok_or_else(|| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "cannot compare the HeadCanonical physical head of session {id} without incremental store capability"
+            )))
+        })?;
+        if tail.session_id() != id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the continued run's receipt for session {id} names a tail of session {}",
+                tail.session_id()
+            ))));
+        }
+        let current = incremental
+            .load_head(id)
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let current_token = meerkat_core::session_store::session_head_cas_token(&current)
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        if current_token != tail.physical_head_token() {
+            return Err(SessionError::Store(Box::new(
+                SessionStoreError::TranscriptRevisionConflict {
+                    id: id.clone(),
+                    expected: tail.physical_head_token().to_string(),
+                    actual: current_token,
+                },
+            )));
         }
         Ok(())
     }
@@ -15683,6 +15755,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 _ => (false, None),
             };
         let mut resumed_from_continued_run = false;
+        let mut continued_tail_receipt: Option<RunCheckpointReceipt> = None;
         if let Some(resume_session_id) = requested_resume_session_id.as_ref() {
             // Receipt-backed mob materialization has already completed the
             // recovery transition. The profile branches below still perform
@@ -15743,6 +15816,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             }
             if let Some(seed) = continued_run.take() {
                 resumed_from_continued_run = true;
+                continued_tail_receipt = Some(seed.receipt.clone());
                 if let Err(error) = self
                     .seed_actor_from_continued_run(resume_session_id, seed, &mut req, &checkpointer)
                     .await
@@ -16103,6 +16177,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         self.reject_archived_resume_under_recovery_gate(
                             resume_session_id,
                             prepared_observation.as_ref(),
+                            continued_tail_receipt.as_ref(),
                             archived_resume_allowed,
                         )
                     })
@@ -52049,7 +52124,12 @@ mod tests {
             .await;
         assert!(is_conflict(&seed), "actor seeding must refuse: {seed:?}");
         let archive_check = service
-            .reject_archived_resume_under_recovery_gate(&session_id, Some(&observation), false)
+            .reject_archived_resume_under_recovery_gate(
+                &session_id,
+                Some(&observation),
+                None,
+                false,
+            )
             .await;
         assert!(
             is_conflict(&archive_check),

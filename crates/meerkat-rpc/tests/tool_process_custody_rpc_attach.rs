@@ -431,13 +431,21 @@ async fn rpc_on_demand_attach_settles_an_interrupted_run_instead_of_replaying_it
     let client = Arc::new(ScriptedShellClient::new(tool_command(root)));
     let runtime = build_runtime(root, Arc::clone(&client)).await;
     let mut rpc = RpcClient::serve(Arc::clone(&runtime));
-    rpc.call(
-        "turn/start",
-        serde_json::json!({ "session_id": session_id, "prompt": NEXT_PROMPT }),
-    )
-    .await;
-
-    assert_eq!(tool_runs(root), 1, "the interrupted call ran again");
+    let id = rpc
+        .send(
+            "turn/start",
+            serde_json::json!({ "session_id": session_id, "prompt": NEXT_PROMPT }),
+        )
+        .await;
+    let response = rpc.response(id).await;
+    // The open run resumes at the attach, before the new turn is admitted,
+    // so a call it runs again has its `runs` line by now.
+    assert_eq!(
+        tool_runs(root),
+        1,
+        "the interrupted call ran again: {response}"
+    );
+    assert!(response["error"].is_null(), "turn/start failed: {response}");
     assert_eq!(
         client.tool_calls.load(Ordering::SeqCst),
         0,

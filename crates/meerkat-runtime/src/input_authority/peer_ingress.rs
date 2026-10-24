@@ -298,20 +298,21 @@ pub enum PeerIngressBindRefusal {
 ///   one task per receiving session, and supervisor deliveries are served in
 ///   the receiving member's own drain, so a slow binder holds back only its
 ///   own session's later deliveries.
-///   - For a comms delivery the binder never awaits a member turn, or
-///     anything that waits on the receiving session's ingress: Core does not
-///     bound that await, and the turn may itself be waiting on the drain the
-///     bind holds. What it cannot answer now is `NotReady`, which keeps the
-///     delivery at the head of the session's queue.
-///   - For a supervisor delivery Core bounds the await at 2 s, below the
-///     supervisor's command timeout, and reads expiry as `NotReady`. Within
-///     that bound the binder waits for the member's turn boundary before it
-///     pins the member's controller. A supervisor delivery often reaches a
-///     member mid-turn, and answering it `NotReady` at once (only trying the
-///     pin) rejects it, a rejection neither Core nor the mob retries. The
-///     member's later deliveries wait behind that bind, at most the bound,
-///     and a turn that is itself waiting on the member's ingress cannot end
-///     meanwhile: that bind expires and the delivery is rejected `NotReady`.
+///   - On the comms path the binder never awaits a member turn, or anything
+///     that waits on the receiving session's ingress. Core does not bound
+///     that await, so a turn waiting on the drain the bind holds would
+///     deadlock it. What the binder cannot answer now is `NotReady`, which
+///     keeps the delivery at the head of the session's queue.
+///   - On the supervisor-bridge path only, Core bounds the await at 2 s,
+///     below the supervisor's command timeout, and reads expiry as
+///     `NotReady`. Within that bound the binder may wait for the member's
+///     turn boundary before it pins the member's controller. A supervisor
+///     delivery often reaches a member mid-turn, and answering it `NotReady`
+///     at once (only trying the pin) rejects it, a rejection neither Core nor
+///     the mob retries. The cost of waiting: the member's drain is blocked
+///     meanwhile, and a running turn that needs that same drain cannot end,
+///     so the bind gives up at the bound and the delivery is rejected
+///     `NotReady`. That is a stall and a rejection, never a deadlock.
 /// - It binds Core's exact `request.input`, setting only its authority
 ///   association, its idempotency key (to `request.event_key`) and its
 ///   trusted ingress observation, for example through `bind_scoped_original`.

@@ -54,8 +54,8 @@ class _PdfEvidenceError(ValueError):
 
 
 # Keep only two successful extractions, keyed by the original bounded PDF bytes.
-# Paging still checks the submitted reference and reads/verifies storage before
-# reaching this cache. It retains no parser objects and writes no extracted text.
+# Each page reads and verifies storage before cache lookup; callers check the
+# submitted reference before returning text. No parser or disk cache is retained.
 @lru_cache(maxsize=2)
 def _pdf_text(data):
     try:

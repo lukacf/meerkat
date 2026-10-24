@@ -17210,7 +17210,12 @@ impl MobHandle {
     ///
     /// The child inherits its source's build inputs: `member` leaves with the
     /// source's [`super::ForkBuildInheritance`] applied, resolved before the
-    /// fork commits so a failure leaves nothing durable behind.
+    /// fork commits so a failure leaves nothing durable behind. One exception:
+    /// a fork from the source's own running turn
+    /// ([`meerkat_core::DurableForkSourceAdmission::CallerTurn`]) reads the
+    /// application context from the committed child after the fork, so a
+    /// failure of that read leaves the committed child unseated, as a seat
+    /// failure after the fork does.
     async fn fork_source_session(
         &self,
         source_identity: &AgentIdentity,

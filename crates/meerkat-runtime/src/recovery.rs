@@ -1986,6 +1986,15 @@ pub async fn observe_resumable_run(
 /// durable-tail source, or no applied provisional tail sits on the boundary:
 /// the caller's refusal then stands. It only reads.
 ///
+/// The snapshot is evidence of the committed boundary only. It proves nothing
+/// about the tail: a source whose rewrites the store could not prove descend
+/// from the boundary still answers `Some`, so a caller never uses the answer
+/// as tail evidence (recovery owns that judgment). A round's intent written
+/// but not yet applied also answers `None`; a reader in another task than
+/// the run's re-observes then. Under a tail the store verifies both the
+/// boundary and the physical head, so a call costs about two committed
+/// reads.
+///
 /// The session service reads its fork source through it when the fork comes
 /// from the source's own running turn
 /// ([`meerkat_core::DurableForkSourceAdmission::CallerTurn`]).

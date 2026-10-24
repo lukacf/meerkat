@@ -3121,9 +3121,40 @@ impl MeerkatMachine {
             let (state, _exact_row_digest) = observation.into_parts();
             return Ok(Some(state));
         }
+        if let Some(governed) =
+            Self::durable_governed_row_named_by_key(store.as_ref(), &runtime_id, &key.0).await?
+        {
+            return Ok(Some(governed));
+        }
 
         Self::require_durable_runtime_after_input_point_miss(store.as_ref(), &runtime_id).await?;
         Ok(None)
+    }
+
+    /// The governed row its submitter's key `key` names by its own input id
+    /// in the durable store, when the store's key index has none: a governed
+    /// admission indexes the key's qualification, not the key (see
+    /// [`crate::input_authority::governed_row_admitted_under`]). One point
+    /// read, only for a key that is a canonical input id.
+    async fn durable_governed_row_named_by_key(
+        store: &dyn crate::store::RuntimeStore,
+        runtime_id: &LogicalRuntimeId,
+        key: &str,
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
+        let Some(input_id) = crate::input_authority::governed_input_id_named_by_key(key) else {
+            return Ok(None);
+        };
+        let row = store
+            .load_input_state(runtime_id, &input_id)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "durable governed input witness read failed for {runtime_id}: {err}"
+                ))
+            })?;
+        Ok(row.filter(|stored| {
+            crate::input_authority::governed_row_admitted_under(&stored.state, key)
+        }))
     }
 
     /// Resolve one durable input by exact id while preserving the public
@@ -3186,7 +3217,7 @@ impl MeerkatMachine {
             return Ok(None);
         };
         let runtime_id = Self::logical_runtime_id(session_id);
-        store
+        let indexed = store
             .load_input_state_by_idempotency_key(
                 &runtime_id,
                 &crate::identifiers::IdempotencyKey::new(key),
@@ -3198,8 +3229,12 @@ impl MeerkatMachine {
                     "optional indexed input witness read",
                     error,
                 )
-            })
-            .map(|observation| observation.map(|observation| observation.into_parts().0))
+            })?
+            .map(|observation| observation.into_parts().0);
+        match indexed {
+            Some(row) => Ok(Some(row)),
+            None => Self::durable_governed_row_named_by_key(store.as_ref(), &runtime_id, key).await,
+        }
     }
 
     /// Input-state witnesses for a session: the live DSL-backed snapshot when
@@ -3509,9 +3544,11 @@ impl MeerkatMachine {
                         let live = {
                             let driver = driver.lock().await;
                             let driver = driver.as_driver();
-                            driver
-                                .input_id_for_idempotency_key(&idempotency_key)
-                                .and_then(|input_id| driver.stored_input_state(&input_id))
+                            crate::input_authority::live_input_id_for_submitter_key(
+                                driver,
+                                &idempotency_key,
+                            )
+                            .and_then(|input_id| driver.stored_input_state(&input_id))
                         };
                         Ok(MeerkatMachineCommandResult::InputState(match live {
                             Some(live) => Some(live),
@@ -3573,10 +3610,15 @@ impl MeerkatMachine {
                                     driver.stored_input_state(input_id)
                                 }
                                 // Live path: the machine-owned admission map is
-                                // the authority for key -> input resolution.
-                                InteractionSelector::IdempotencyKey(key) => driver
-                                    .input_id_for_idempotency_key(key)
-                                    .and_then(|input_id| driver.stored_input_state(&input_id)),
+                                // the authority for key -> input resolution
+                                // (a governed row by its own id, see
+                                // `live_input_id_for_submitter_key`).
+                                InteractionSelector::IdempotencyKey(key) => {
+                                    crate::input_authority::live_input_id_for_submitter_key(
+                                        driver, key,
+                                    )
+                                    .and_then(|input_id| driver.stored_input_state(&input_id))
+                                }
                             }
                         };
                         match live {

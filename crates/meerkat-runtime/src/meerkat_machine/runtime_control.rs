@@ -17815,9 +17815,10 @@ impl MeerkatMachine {
                 // Subscribed under the driver before the read: a lifecycle
                 // step committed after it is a change on this receiver.
                 let input_transitions = driver_guard.subscribe_input_transitions();
-                let input_id = driver_guard
-                    .as_driver()
-                    .input_id_for_idempotency_key(idempotency_key);
+                let input_id = crate::input_authority::live_input_id_for_submitter_key(
+                    driver_guard.as_driver(),
+                    idempotency_key,
+                );
                 let action = match input_id {
                     None => Action::Done,
                     Some(input_id) => {

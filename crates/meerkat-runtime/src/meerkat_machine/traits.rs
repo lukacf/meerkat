@@ -1180,7 +1180,7 @@ impl MeerkatMachine {
             .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))
     }
 
-    pub(super) async fn existing_session_runtime_state(
+    pub(crate) async fn existing_session_runtime_state(
         &self,
         session_id: &SessionId,
     ) -> Option<RuntimeState> {

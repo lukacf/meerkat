@@ -139,6 +139,13 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
     /// after re-registering a session a host can ask "did the interaction I
     /// submitted under this key reach a terminal state, and which?" without
     /// keeping its own run journal. Read-only: never registers a binding.
+    ///
+    /// A governed admission binds the key's qualification under the input's
+    /// association, not the key itself. A key that is also the governed
+    /// row's input id (a supervisor delivery keeps its payload input id)
+    /// still names that row, only when the row's own retained association
+    /// qualifies the key to the row's admission key
+    /// ([`StoredInputState::admitted_under_idempotency_key`]).
     async fn input_state_by_idempotency_key(
         &self,
         session_id: &SessionId,

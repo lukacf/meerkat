@@ -125,9 +125,11 @@ pub struct PeerIngressBindRequest {
     /// refuses a binding that names any other work, so an association
     /// minted for one delivery cannot be bound to another.
     pub delivery_work: EvidenceId,
-    /// Core's exact projected input. The binding sets only its authority
-    /// association, its idempotency key (to `event_key`) and its trusted
-    /// ingress observation; Core refuses any other change.
+    /// Core's exact projected input, under one id per delivery: a comms
+    /// delivery's derived id, or a supervisor delivery's payload input id.
+    /// The binding sets only its authority association, its idempotency key
+    /// (to `event_key`) and its trusted ingress observation; Core refuses any
+    /// other change.
     pub input: Input,
 }
 
@@ -181,10 +183,12 @@ fn delivery_work(
         .map_err(|error| format!("peer delivery work id: {error}"))
 }
 
-/// The id Core gives a governed peer delivery's input: one id per delivery
+/// The id Core gives a governed comms delivery's input: one id per delivery
 /// (origin and event key), the same across every redelivery of it, so a
 /// delivery the store already admitted is found again by its id whatever the
-/// host binds the next time.
+/// host binds the next time. A supervisor-bridge delivery keeps its payload
+/// input id, which is already one id per delivery (it is the event key) and
+/// is the id the supervisor checks its answers against.
 pub(crate) fn delivery_input_id(
     origin: &PeerIngressOrigin,
     event_key: &IdempotencyKey,
@@ -333,6 +337,18 @@ pub enum PeerIngressBindRefusal {
 ///   verbatim re-bind names the old destination and is refused before the
 ///   replay lookup: the redelivery ends rejected while the first admission
 ///   stands and runs once.
+/// - Cancel-safe. Core may drop the future before it completes (the
+///   supervisor-bridge bound, a drain that stops): a dropped bind must leave
+///   the host's custody as consistent as an answered one, and a later bind of
+///   the same event key must still answer verbatim or refuse.
+/// - Core refuses a re-bind that changes the requester, target or namespace
+///   for as long as it keeps the first admission's input row: the same
+///   horizon as its deduplication of that delivery.
+/// - On the supervisor-bridge path every refusal is a rejected delivery,
+///   since the supervisor never resends a rejection: `Denied` and a malformed
+///   binding as `Internal`, a pending answer (or the bound's expiry) as
+///   `NotReady`, which the mob layer or the sender can retry with the same
+///   input id (Core adds no retry).
 pub trait PeerIngressBinder: Send + Sync {
     /// Bind one governed peer delivery for its receiving session, or refuse.
     fn bind_peer_ingress(&self, request: PeerIngressBindRequest) -> PeerIngressBindFuture<'_>;

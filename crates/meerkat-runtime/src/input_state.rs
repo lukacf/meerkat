@@ -1271,6 +1271,20 @@ impl PublishedDirectedTerminalBinding {
 }
 
 impl StoredInputState {
+    /// Whether this row was admitted under its submitter's own idempotency
+    /// key `key`: its admission key is `key` itself, or it is a governed row
+    /// whose admission key is `key` qualified under the row's own retained
+    /// association (a governed admission binds that qualification, never the
+    /// submitter's key). Holds for a terminal row whose payload is retired.
+    #[must_use]
+    pub fn admitted_under_idempotency_key(&self, key: &str) -> bool {
+        self.state
+            .idempotency_key
+            .as_ref()
+            .is_some_and(|admitted| admitted.0 == key)
+            || crate::input_authority::governed_row_admitted_under(&self.state, key)
+    }
+
     /// Whether this row carries its run's result payload (a result or
     /// callback arguments) in its terminal completion or directed outbox.
     pub(crate) fn carries_result_payload(&self) -> bool {

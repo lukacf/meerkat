@@ -704,6 +704,7 @@ rust_test(
     ],
     srcs = [
         "tests/cross_host_flows.rs",
+        "tests/governed_peer_support/mod.rs",
         "tests/support/mod.rs",
         "tests/support/probe_shared.rs",
         "tests/support/shared.rs",

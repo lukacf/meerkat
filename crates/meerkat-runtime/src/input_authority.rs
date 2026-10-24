@@ -760,15 +760,71 @@ pub(crate) fn qualified_idempotency_key(
     let Some(association) = &input.header().authority_association else {
         return Ok(Some(raw.clone()));
     };
+    qualify_idempotency_key(association, &raw.0).map(Some)
+}
+
+/// The submitter's key `raw` qualified under `association`: the key a
+/// governed admission binds in place of `raw`.
+fn qualify_idempotency_key(
+    association: &InputAuthorityAssociation,
+    raw: &str,
+) -> Result<IdempotencyKey, RuntimeDriverError> {
     let event = EvidenceId::new(raw.to_string()).map_err(|_| unavailable())?;
     let bytes = association
         .qualified_key(event)
         .canonical_bytes()
         .map_err(|_| unavailable())?;
-    Ok(Some(IdempotencyKey::new(format!(
+    Ok(IdempotencyKey::new(format!(
         "local-governed-v1:{}",
         hex(&bytes)
-    ))))
+    )))
+}
+
+/// Whether `state` is a governed row admitted under its submitter's own key
+/// `key`: its admission key is `key` qualified under the row's own retained
+/// association. That association survives payload retirement, so a terminal
+/// row answers too. A row admitted without an association (or as a retained
+/// resume, whose contributors are not its own) is never governed here.
+pub(crate) fn governed_row_admitted_under(
+    state: &crate::input_state::InputState,
+    key: &str,
+) -> bool {
+    let Some(admitted) = state.idempotency_key.as_ref() else {
+        return false;
+    };
+    if state.retained_resume.is_some() {
+        return false;
+    }
+    state
+        .authority_contributors
+        .iter()
+        .find(|contributor| contributor.input_id() == &state.input_id)
+        .and_then(|own| qualify_idempotency_key(own.association(), key).ok())
+        .is_some_and(|qualified| &qualified == admitted)
+}
+
+/// The governed row the key `key` names by its own input id, when there is
+/// one: a supervisor delivery keeps its payload input id, which is also the
+/// key it was submitted under, while a governed admission binds that key's
+/// qualification. Every other key names no row here.
+pub(crate) fn governed_input_id_named_by_key(key: &str) -> Option<InputId> {
+    let uuid = uuid::Uuid::parse_str(key).ok()?;
+    (uuid.to_string() == key).then(|| InputId::from_uuid(uuid))
+}
+
+/// The input its submitter's own key `key` names in `driver`'s live state:
+/// the machine-owned binding of `key`, or else the governed row whose input
+/// id is `key` and which was admitted under it (see
+/// [`governed_row_admitted_under`]).
+pub(crate) fn live_input_id_for_submitter_key(
+    driver: &dyn crate::traits::RuntimeDriver,
+    key: &str,
+) -> Option<InputId> {
+    driver.input_id_for_idempotency_key(key).or_else(|| {
+        let input_id = governed_input_id_named_by_key(key)?;
+        let stored = driver.stored_input_state(&input_id)?;
+        governed_row_admitted_under(&stored.state, key).then_some(input_id)
+    })
 }
 
 pub(crate) fn replay_digest(input: &Input) -> Result<[u8; 32], RuntimeDriverError> {

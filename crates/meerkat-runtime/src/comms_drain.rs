@@ -1040,8 +1040,15 @@ async fn bind_governed_peer_ingress(
         return GovernedPeerBind::Unbound(input);
     };
     let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
+    // One input id per delivery, the same across every redelivery. A
+    // supervisor delivery already has one, its payload input id, which the
+    // supervisor checks its answers against and addresses the delivery by; a
+    // comms delivery's projection mints a fresh id, so Core derives its id
+    // from the origin and the event key.
     let mut handed = input.clone();
-    handed.header_mut().id = crate::input_authority::delivery_input_id(&origin, &event_key);
+    if matches!(origin, crate::input_authority::PeerIngressOrigin::Comms(_)) {
+        handed.header_mut().id = crate::input_authority::delivery_input_id(&origin, &event_key);
+    }
     let request = match crate::input_authority::PeerIngressBindRequest::new(
         runtime_id.clone(),
         session_id.clone(),
@@ -1182,6 +1189,34 @@ fn governed_delivery_rejection(input_id: &str, detail: String) -> BridgeDelivery
                 detail: detail.clone(),
             },
             reason: detail,
+        },
+    }
+}
+
+/// The rejected delivery a supervisor gets when the installed binder could
+/// not bind a governed delivery now (`NotReady`, `Unavailable`, or the
+/// bound's expiry): cause `NotReady`, with the member runtime's state, so the
+/// mob layer or the sender can tell it is retryable with the same input id.
+/// The supervisor never resends a rejection on its own, and Core adds no
+/// retry.
+async fn governed_pending_delivery_rejection(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    input_id: &str,
+    error: &crate::RuntimeDriverError,
+) -> BridgeDeliveryResponse {
+    let state = adapter
+        .existing_session_runtime_state(session_id)
+        .await
+        .unwrap_or(crate::RuntimeState::Initializing);
+    BridgeDeliveryResponse {
+        input_id: input_id.to_string(),
+        canonical_input_id: None,
+        outcome: BridgeDeliveryOutcome::Rejected {
+            cause: BridgeDeliveryRejectionCause::NotReady {
+                state: runtime_state_to_bridge(state),
+            },
+            reason: format!("peer delivery binding is not ready: {error}"),
         },
     }
 }
@@ -5393,14 +5428,18 @@ async fn try_handle_supervisor_bridge_command_from(
                     return true;
                 }
                 GovernedPeerBind::Pending(error) => {
+                    let response = governed_pending_delivery_rejection(
+                        adapter,
+                        session_id,
+                        &request_input_id,
+                        &error,
+                    )
+                    .await;
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::Delivery(governed_delivery_rejection(
-                            &request_input_id,
-                            format!("peer delivery binding is not ready: {error}"),
-                        )),
+                        BridgeReply::Delivery(response),
                         None,
                     )
                     .await;
@@ -7955,14 +7994,14 @@ async fn serve_tracked_member_delivery(
             return;
         }
         GovernedPeerBind::Pending(error) => {
+            let response =
+                governed_pending_delivery_rejection(adapter, session_id, &request_input_id, &error)
+                    .await;
             send_bridge_response(
                 comms_runtime,
                 candidate,
                 meerkat_core::interaction::ResponseStatus::Completed,
-                BridgeReply::Delivery(governed_delivery_rejection(
-                    &request_input_id,
-                    format!("peer delivery binding is not ready: {error}"),
-                )),
+                BridgeReply::Delivery(response),
                 None,
             )
             .await;

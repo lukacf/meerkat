@@ -16,6 +16,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod governed_peer_support;
 mod support;
 
 use std::time::Duration;
@@ -2470,5 +2471,182 @@ async fn a_placed_turn_driven_member_resumed_on_its_host_delivers_its_first_turn
         Some(meerkat_mob::runtime::bridge_protocol::BridgeAdoptedFirstTurn::Started)
     );
 
+    fixture.shutdown().await;
+}
+
+// ==========================================================================
+// A governed placed member: the supervisor's deliveries bind through the
+// member host's peer ingress binder, end to end through the controlling mob
+// ==========================================================================
+
+/// A placed member on a governed host takes the controlling mob's deliveries
+/// through the host's peer ingress binder, end to end:
+/// - an untracked delivery passes the supervisor's own response check: the
+///   member admits it under its payload input id, which also names the
+///   governed row by key;
+/// - a tracked delivery's completion reaches the supervisor;
+/// - the tracked cancel a stop sends ends a held tracked turn on the member
+///   (a `Cancelled` host receipt, never `NoEffect`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_governed_placed_member_takes_supervisor_deliveries_end_to_end() {
+    use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let governed = governed_peer_support::GovernedMember::new();
+    let client = governed.client();
+    let mut opts = HostFixtureOptions::named("xhf-governed-host-b").with_member_build();
+    opts.member_llm_client = Some(client.clone());
+    opts.governed_member = Some(governed.clone());
+    let fixture = spawn_host_daemon_fixture(opts)
+        .await
+        .expect("spawn the governed member host");
+    let controlling = create_controlling_mob("xhf-governed").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let mob_id = controlling.mob_id.to_string();
+    let worker = identity("governed-b1");
+    controlling
+        .spawn_placed("worker", worker.as_str(), &report.host_id)
+        .await
+        .expect("the governed member materializes on host B");
+    let session_id = controlling
+        .handle
+        .get_member(&worker)
+        .await
+        .expect("roster read")
+        .expect("placed member")
+        .bridge_session_id()
+        .expect("placed member names its remote session")
+        .clone();
+    let machine = fixture
+        .member_session_service()
+        .acquire_runtime_adapter(None)
+        .expect("member runtime")
+        .expect("member runtime adapter");
+    let member = controlling
+        .handle
+        .member(&worker)
+        .await
+        .expect("member handle");
+
+    // Untracked: the supervisor checks the member's answer against the payload
+    // input id it sent, and the governed row is admitted under that id.
+    member
+        .send(
+            "an untracked governed delivery",
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("the supervisor reads the governed member's answer under its payload input id");
+    let offered = governed.supervisor_calls();
+    let [untracked] = offered.as_slice() else {
+        panic!("one supervisor delivery offered: {offered:?}");
+    };
+    assert_eq!(untracked.supervisor_tracked, Some(false));
+    assert_eq!(
+        untracked.input_id, untracked.event_key,
+        "a supervisor delivery keeps its payload input id"
+    );
+    let stored = machine
+        .input_state_by_idempotency_key(&session_id, &untracked.event_key)
+        .await
+        .expect("key read")
+        .expect("the payload input id names the governed row by key");
+    assert_eq!(stored.state.input_id.to_string(), untracked.event_key);
+    assert!(
+        stored
+            .state
+            .idempotency_key
+            .as_ref()
+            .is_some_and(|admitted| admitted.0 != untracked.event_key),
+        "a governed row is admitted under its key's qualification"
+    );
+    assert!(stored.admitted_under_idempotency_key(&untracked.event_key));
+    assert!(!stored.admitted_under_idempotency_key(&uuid::Uuid::new_v4().to_string()));
+
+    // Tracked: the member host journals the governed turn's terminal and the
+    // completion reaches the supervisor.
+    tokio::time::timeout(
+        RUN_WAIT,
+        member.internal_turn("a tracked governed delivery"),
+    )
+    .await
+    .expect("the tracked completion is bounded")
+    .expect("the tracked governed turn's completion reaches the supervisor");
+    let tracked = governed
+        .supervisor_calls()
+        .last()
+        .cloned()
+        .expect("the tracked delivery was offered");
+    assert_eq!(tracked.supervisor_tracked, Some(true));
+    assert_eq!(tracked.input_id, tracked.event_key);
+
+    // A tracked turn held in its controller call: the tracked cancel the stop
+    // sends reaches it on the member host.
+    client.hold();
+    let entered = client.governed_entered();
+    let held_turn = {
+        let handle = controlling.handle.clone();
+        let worker = worker.clone();
+        tokio::spawn(async move {
+            handle
+                .member(&worker)
+                .await?
+                .internal_turn("a held tracked governed delivery")
+                .await
+        })
+    };
+    wait_until("the held tracked turn reaches its controller", || {
+        let client = client.clone();
+        async move { client.governed_entered() > entered }
+    })
+    .await;
+    let held = governed
+        .supervisor_calls()
+        .last()
+        .cloned()
+        .expect("the held delivery was offered");
+    assert_eq!(held.supervisor_tracked, Some(true));
+    assert_ne!(held.event_key, tracked.event_key);
+    controlling
+        .handle
+        .stop()
+        .await
+        .expect("stop the controlling mob");
+    wait_until("the tracked cancel ends the held turn", || {
+        let machine = machine.clone();
+        let session_id = session_id.clone();
+        let key = held.event_key.clone();
+        async move {
+            machine
+                .input_state_by_idempotency_key(&session_id, &key)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|stored| stored.seed.terminal_outcome.is_some())
+        }
+    })
+    .await;
+    let record = fixture.host_binding_record(&mob_id).await;
+    let receipts = record
+        .tracked_input_cancellations
+        .get(worker.as_str())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        receipts
+            .iter()
+            .any(|receipt| receipt.input_id == held.event_key
+                && receipt.outcome
+                    == meerkat_mob::runtime::host_actor::RecordedTrackedInputCancelKind::Cancelled),
+        "the member host cancelled the held governed turn: {receipts:?}"
+    );
+
+    client.release();
+    let _ = tokio::time::timeout(RUN_WAIT, held_turn).await;
+    assert_eq!(
+        client.ungoverned(),
+        0,
+        "every member turn ran as governed work"
+    );
     fixture.shutdown().await;
 }

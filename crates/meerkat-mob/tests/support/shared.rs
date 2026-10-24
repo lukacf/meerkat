@@ -454,6 +454,31 @@ pub struct HostFixtureOptions {
     /// the same composition seam; tests use a small ring when the behavior
     /// under test is cursor overrun rather than the default 1024-row bound.
     pub event_ring_capacity: Option<std::num::NonZeroUsize>,
+    /// Govern the member machine (the `PersistentTemp` substrate only): its
+    /// native host and peer delivery binder are installed before any member
+    /// session registers.
+    pub governed_member: Option<Arc<dyn GovernedMemberMachine>>,
+}
+
+/// A governed member composition for [`HostFixtureOptions::governed_member`]:
+/// the member service's persistent machine is governed by
+/// [`Self::native_host`] and binds the peer deliveries it is offered through
+/// [`Self::peer_ingress_binder`].
+pub trait GovernedMemberMachine: Send + Sync {
+    /// The native work authorization host installed on the member machine.
+    fn native_host(
+        &self,
+        machine: &MeerkatMachine,
+    ) -> Arc<dyn meerkat_runtime::input_authority::NativeWorkAuthorizationHost>;
+
+    /// The peer delivery binder installed after the host.
+    fn peer_ingress_binder(&self) -> Arc<dyn meerkat_runtime::input_authority::PeerIngressBinder>;
+
+    /// The member service the binder pins live controllers through, once built.
+    fn attach_member_service(
+        &self,
+        service: Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
+    );
 }
 
 impl HostFixtureOptions {
@@ -488,6 +513,7 @@ impl HostFixtureOptions {
             failing_member_region_persistence: false,
             listen_tcp: None,
             event_ring_capacity: None,
+            governed_member: None,
         }
     }
 
@@ -2228,7 +2254,9 @@ pub async fn spawn_host_daemon_fixture(
         }
         MemberSubstrateOption::PersistentTemp => {
             let realm = opts.member_realm.clone().unwrap_or_else(member_realm);
-            let service = persistent_service_with_client(
+            let blob_store: Arc<dyn meerkat_core::BlobStore> =
+                Arc::new(meerkat_store::MemoryBlobStore::default());
+            let service = persistent_service_with_client_and_blob_store(
                 &realm.paths,
                 Arc::clone(&realm.runtime_store),
                 opts.member_llm_client.clone().unwrap_or_else(|| {
@@ -2236,7 +2264,25 @@ pub async fn spawn_host_daemon_fixture(
                         meerkat_core::Provider::Anthropic,
                     ))
                 }),
+                Arc::clone(&blob_store),
             );
+            if let Some(governed) = opts.governed_member.as_ref() {
+                // The governed machine over the member realm, its host and
+                // binder installed before the service registers any session.
+                let machine = MeerkatMachine::persistent_governed_with_host_for_test(
+                    Arc::clone(&realm.runtime_store),
+                    Some(Arc::clone(&blob_store)),
+                    |machine| governed.native_host(machine),
+                )
+                .expect("governed member machine over the member realm");
+                machine
+                    .install_peer_ingress_binder(governed.peer_ingress_binder())
+                    .expect("the binder installs before any member session");
+                service
+                    .acquire_canonical_runtime_adapter(Some(Arc::new(machine)))
+                    .expect("the member service adopts the governed machine");
+                governed.attach_member_service(Arc::clone(&service));
+            }
             // Phase 6b: the live-plane fixture half composes
             // `ServiceLiveProjection` over the CONCRETE service (the
             // mob_host.rs:553-590 shape), so the pre-erasure handle is
@@ -3944,6 +3990,24 @@ pub fn persistent_service_with_client(
     persistent_service_with_client_in_realm(paths, runtime_store, client, "test-realm")
 }
 
+/// [`persistent_service_with_client`] over `blob_store`, which a machine the
+/// caller builds over the same realm shares.
+pub fn persistent_service_with_client_and_blob_store(
+    paths: &ControllingMobPaths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    client: Arc<dyn meerkat_client::LlmClient>,
+    blob_store: Arc<dyn meerkat_core::BlobStore>,
+) -> Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>> {
+    persistent_service_with_builder_and_blob_store_in_realm(
+        paths,
+        runtime_store,
+        client,
+        "test-realm",
+        blob_store,
+        |builder| builder,
+    )
+}
+
 fn persistent_service_with_client_in_realm(
     paths: &ControllingMobPaths,
     runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
@@ -4056,6 +4120,26 @@ fn persistent_service_with_builder_in_realm<B: meerkat_session::SessionAgentBuil
     workgraph_realm: &str,
     wrap_builder: impl FnOnce(meerkat::FactoryAgentBuilder) -> B,
 ) -> Arc<meerkat_session::PersistentSessionService<B>> {
+    persistent_service_with_builder_and_blob_store_in_realm(
+        paths,
+        runtime_store,
+        client,
+        workgraph_realm,
+        Arc::new(meerkat_store::MemoryBlobStore::default()),
+        wrap_builder,
+    )
+}
+
+fn persistent_service_with_builder_and_blob_store_in_realm<
+    B: meerkat_session::SessionAgentBuilder + 'static,
+>(
+    paths: &ControllingMobPaths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    client: Arc<dyn meerkat_client::LlmClient>,
+    workgraph_realm: &str,
+    blob_store: Arc<dyn meerkat_core::BlobStore>,
+    wrap_builder: impl FnOnce(meerkat::FactoryAgentBuilder) -> B,
+) -> Arc<meerkat_session::PersistentSessionService<B>> {
     paths.materialize_project_context();
     let factory = meerkat::AgentFactory::new(paths.runtime_root.join("factory-store"))
         .user_config_root(paths.user_config_root.clone())
@@ -4089,8 +4173,6 @@ fn persistent_service_with_builder_in_realm<B: meerkat_session::SessionAgentBuil
     builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(store.clone())));
 
     let store_dyn: Arc<dyn meerkat::SessionStore> = store;
-    let blob_store: Arc<dyn meerkat_core::BlobStore> =
-        Arc::new(meerkat_store::MemoryBlobStore::default());
     // Durable event projection (the production Jsonl composition shape,
     // crates/meerkat/src/persistence.rs): phase-6 member observation serves
     // PollMemberEvents and terminal_seq binding from this log.

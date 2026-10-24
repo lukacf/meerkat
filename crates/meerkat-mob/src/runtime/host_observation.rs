@@ -2626,7 +2626,9 @@ impl DirectedTurnRuntimeAttribution {
             .idempotency_key
             .as_ref()
             .ok_or_else(|| "runtime input has no stored idempotency key".to_string())?;
-        if shell_key.0 != pending_input_id {
+        // A governed delivery is admitted under its key's qualification, so
+        // the runtime decides whether its admission key is this one.
+        if !stored.admitted_under_idempotency_key(pending_input_id) {
             return Err(format!(
                 "runtime idempotency binding '{}' differs from Pending '{}'",
                 shell_key.0, pending_input_id

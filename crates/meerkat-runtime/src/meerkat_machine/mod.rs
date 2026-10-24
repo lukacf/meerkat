@@ -3392,12 +3392,14 @@ impl MeerkatMachine {
     /// A governed persistent machine over `store` with the host `build`
     /// makes for it installed, as a governed open builds one, for tests
     /// whose host is a fixture.
-    #[cfg(test)]
-    pub(crate) fn persistent_governed_with_host_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn persistent_governed_with_host_for_test(
         store: Arc<dyn RuntimeStore>,
+        blob_store: Option<Arc<dyn meerkat_core::BlobStore>>,
         build: impl FnOnce(&Self) -> Arc<dyn crate::input_authority::NativeWorkAuthorizationHost>,
     ) -> Result<Self, RuntimeDriverError> {
-        let machine = Self::persistent_with_mode(store, None, true)?;
+        let machine = Self::persistent_with_mode(store, blob_store, true)?;
         let host = build(&machine);
         machine.install_native_work_authorization(|_| host)
     }

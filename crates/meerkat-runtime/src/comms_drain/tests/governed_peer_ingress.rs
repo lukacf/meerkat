@@ -242,17 +242,19 @@ impl Governed {
         custody: Arc<Custody>,
     ) -> Self {
         let mut chosen = None;
-        let machine = MeerkatMachine::persistent_governed_with_host_for_test(store, |machine| {
-            let host = Arc::new(match selection {
-                Some(selection) => {
-                    TestIngress::with_selection(machine.generated_auth_lease_handle(), selection)
-                }
-                None => TestIngress::isolated(machine.generated_auth_lease_handle()),
-            });
-            chosen = Some(host.selection().clone());
-            host as Arc<dyn crate::input_authority::NativeWorkAuthorizationHost>
-        })
-        .expect("governed persistent machine");
+        let machine =
+            MeerkatMachine::persistent_governed_with_host_for_test(store, None, |machine| {
+                let host = Arc::new(match selection {
+                    Some(selection) => TestIngress::with_selection(
+                        machine.generated_auth_lease_handle(),
+                        selection,
+                    ),
+                    None => TestIngress::isolated(machine.generated_auth_lease_handle()),
+                });
+                chosen = Some(host.selection().clone());
+                host as Arc<dyn crate::input_authority::NativeWorkAuthorizationHost>
+            })
+            .expect("governed persistent machine");
         let binder = Arc::new(TestBinder::new(
             chosen.expect("the host's selection"),
             custody,
@@ -928,6 +930,7 @@ async fn a_supervisor_delivery_is_bound_only_from_an_established_supervisor() {
 
     for tracked in [false, true] {
         let input = supervisor_delivery_input(&session_id);
+        let payload_input_id = input.id().clone();
         let GovernedPeerBind::Bound { input, custody } = bind_supervisor_member_delivery(
             &fixture.adapter,
             &session_id,
@@ -952,6 +955,10 @@ async fn a_supervisor_delivery_is_bound_only_from_an_established_supervisor() {
             "{:?}",
             call.origin
         );
+        assert_eq!(
+            call.input_id, payload_input_id,
+            "tracked {tracked}: a supervisor delivery keeps its payload input id"
+        );
         let (outcome, _) = fixture
             .adapter
             .accept_governed_peer_input(
@@ -962,10 +969,14 @@ async fn a_supervisor_delivery_is_bound_only_from_an_established_supervisor() {
             )
             .await
             .expect("the bound delivery is admitted");
-        assert!(matches!(
-            outcome,
-            crate::accept::AcceptOutcome::Accepted { .. }
-        ));
+        assert!(
+            matches!(
+                &outcome,
+                crate::accept::AcceptOutcome::Accepted { input_id, .. }
+                    if *input_id == payload_input_id
+            ),
+            "tracked {tracked}: the supervisor reads its own payload id back: {outcome:?}"
+        );
     }
     assert_eq!(
         fixture.binder.settlements(),
@@ -987,4 +998,279 @@ async fn a_supervisor_delivery_is_bound_only_from_an_established_supervisor() {
     .await;
     assert!(matches!(pending, GovernedPeerBind::Pending(_)));
     assert!(started.elapsed() < Duration::from_secs(5), "bounded");
+}
+
+/// The binder is installed once, after the host, before any session: a
+/// second install is refused typed and the first binder keeps serving; an
+/// install once a session is registered is refused typed and the runtime
+/// stays without a binder, so its deliveries take today's refusal.
+#[tokio::test]
+async fn a_binder_installs_once_and_only_before_any_session() {
+    let fixture = Governed::storeless(true);
+    let second = Arc::new(TestBinder::new(
+        fixture.binder.selection.clone(),
+        Arc::default(),
+    ));
+    assert_eq!(
+        fixture.adapter.install_peer_ingress_binder(second.clone()),
+        Err(crate::PeerIngressBinderInstallRefused::AlreadyInstalled)
+    );
+    let session_id = fixture.session().await;
+    let runtime = message_runtime(actionable_message_candidate(0));
+    fixture
+        .drain(
+            &session_id,
+            &runtime,
+            SenderAuthentication::SignatureVerified,
+        )
+        .await;
+    assert_eq!(fixture.binder.calls().len(), 1, "the first binder serves");
+    assert!(
+        second.calls().is_empty(),
+        "the refused binder is never asked"
+    );
+    assert!(matches!(
+        runtime.queue.committed_outcomes().as_slice(),
+        [Some(Terminal::RuntimeAccepted { .. })]
+    ));
+
+    let late = Governed::storeless(false);
+    let session_id = late.session().await;
+    assert_eq!(
+        late.adapter
+            .install_peer_ingress_binder(late.binder.clone()),
+        Err(crate::PeerIngressBinderInstallRefused::SessionsRegistered)
+    );
+    assert!(!late.adapter.has_peer_ingress_binder());
+    let runtime = message_runtime(actionable_message_candidate(0));
+    late.drain(
+        &session_id,
+        &runtime,
+        SenderAuthentication::SignatureVerified,
+    )
+    .await;
+    assert!(late.binder.calls().is_empty(), "nothing was installed");
+    assert!(matches!(
+        runtime.queue.committed_outcomes().as_slice(),
+        [Some(Terminal::RuntimeRejected { .. })]
+    ));
+}
+
+/// A runtime with no binder treats every governed delivery exactly as a
+/// binder answering `NotOffered`: Core admits Core's own projection unbound
+/// (its id included, nothing Core derived for a binding), and a governed
+/// runtime refuses it. A comms delivery ends `RuntimeRejected` either way, and
+/// a supervisor delivery takes its unbound path with its input unchanged.
+#[tokio::test]
+async fn no_binder_is_exactly_the_not_offered_path() {
+    let mut outcomes = Vec::new();
+    for install in [false, true] {
+        let fixture = Governed::storeless(install);
+        let session_id = fixture.session().await;
+        if install {
+            fixture
+                .binder
+                .answer(&session_id, [Answer::NotOffered, Answer::NotOffered]);
+        }
+        let runtime = message_runtime(actionable_message_candidate(0));
+        fixture
+            .drain(
+                &session_id,
+                &runtime,
+                SenderAuthentication::SignatureVerified,
+            )
+            .await;
+        assert_eq!(
+            fixture.input_count(&session_id).await,
+            0,
+            "install {install}"
+        );
+        assert!(fixture.binder.settlements().is_empty());
+        let terminal = match runtime.queue.committed_outcomes().as_slice() {
+            [Some(Terminal::RuntimeRejected { .. })] => "rejected",
+            other => panic!("install {install}: {other:?}"),
+        };
+
+        let input = supervisor_delivery_input(&session_id);
+        let projected = serde_json::to_vec(&input).expect("encode the projection");
+        let GovernedPeerBind::Unbound(unbound) = bind_supervisor_member_delivery(
+            &fixture.adapter,
+            &session_id,
+            SenderAuthentication::SignatureVerified,
+            PeerId::parse(PEER_ID_SUPERVISOR).expect("supervisor peer id"),
+            InteractionId(Uuid::new_v4()),
+            false,
+            input,
+            None,
+        )
+        .await
+        else {
+            panic!("install {install}: the supervisor delivery is not bound");
+        };
+        assert_eq!(
+            serde_json::to_vec(&unbound).expect("encode the unbound input"),
+            projected,
+            "install {install}: the unbound path admits Core's own projection"
+        );
+        outcomes.push((terminal, fixture.binder.calls().len()));
+    }
+    assert_eq!(outcomes, vec![("rejected", 0), ("rejected", 2)]);
+}
+
+/// A supervisor delivery the binder could not bind now is answered as a
+/// rejected delivery typed `NotReady`, with the member runtime's state and the
+/// cause in its reason, so the mob layer or the sender can tell it is
+/// retryable with the same input id.
+#[tokio::test]
+async fn a_pending_supervisor_binding_is_rejected_typed_not_ready() {
+    let fixture = Governed::storeless(true);
+    let session_id = fixture.session().await;
+    let response = governed_pending_delivery_rejection(
+        &fixture.adapter,
+        &session_id,
+        "payload-input",
+        &crate::RuntimeDriverError::ControllerReadinessUnavailable {
+            reason: meerkat_core::authorization::ControllerReadinessFailure::ExecutorUnavailable,
+        },
+    )
+    .await;
+    assert_eq!(response.input_id, "payload-input");
+    assert_eq!(response.canonical_input_id, None);
+    let BridgeDeliveryOutcome::Rejected { cause, reason } = &response.outcome else {
+        panic!("a rejected delivery: {response:?}");
+    };
+    assert!(
+        matches!(cause, BridgeDeliveryRejectionCause::NotReady { .. }),
+        "{cause:?}"
+    );
+    assert!(reason.contains("not ready"), "{reason}");
+}
+
+/// A governed supervisor delivery is admitted under its key's qualification,
+/// and its payload input id still names it by key: the by-key reads find the
+/// governed row whose own retained association qualifies that key to its
+/// admission key, live and from the store after a restart. A key the row was
+/// not admitted under, and another session, name nothing.
+#[tokio::test]
+async fn a_governed_supervisor_delivery_is_named_by_its_payload_key() {
+    use crate::service_ext::SessionServiceRuntimeExt as _;
+
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let custody = Arc::<Custody>::default();
+    let session_id = SessionId::new();
+    let supervisor = PeerId::parse(PEER_ID_SUPERVISOR).expect("supervisor peer id");
+    let other_key = Uuid::new_v4().to_string();
+    let (selection, payload_input_id) = {
+        let first = Governed::persistent(Arc::clone(&store), None, Arc::clone(&custody));
+        first.register(&session_id).await;
+        let input = supervisor_delivery_input(&session_id);
+        let payload_input_id = input.id().clone();
+        let GovernedPeerBind::Bound { input, custody } = bind_supervisor_member_delivery(
+            &first.adapter,
+            &session_id,
+            SenderAuthentication::SignatureVerified,
+            supervisor,
+            InteractionId(Uuid::new_v4()),
+            true,
+            input,
+            None,
+        )
+        .await
+        else {
+            panic!("an established supervisor's delivery is bound");
+        };
+        first
+            .adapter
+            .accept_governed_peer_input(
+                &session_id,
+                input,
+                crate::meerkat_machine_types::MemberResidencyExpectation::PeerOnly,
+                Some(custody),
+            )
+            .await
+            .expect("the bound delivery is admitted");
+        let key = payload_input_id.to_string();
+        let live = first
+            .adapter
+            .input_state_by_idempotency_key(&session_id, &key)
+            .await
+            .expect("live key read")
+            .expect("the payload key names the live governed row");
+        assert_eq!(live.state.input_id, payload_input_id);
+        assert!(
+            live.state
+                .idempotency_key
+                .as_ref()
+                .is_some_and(|admitted| admitted.0 != key),
+            "admitted under the key's qualification"
+        );
+        assert!(live.admitted_under_idempotency_key(&key));
+        assert!(!live.admitted_under_idempotency_key(&other_key));
+        assert!(
+            first
+                .adapter
+                .input_state_by_idempotency_key(&session_id, &other_key)
+                .await
+                .expect("live key read")
+                .is_none(),
+            "a key the row was not admitted under names nothing"
+        );
+        (first.binder.selection.clone(), payload_input_id)
+    };
+
+    let restarted = Governed::persistent(Arc::clone(&store), Some(selection), custody);
+    let key = payload_input_id.to_string();
+    let durable = restarted
+        .adapter
+        .input_state_by_idempotency_key(&session_id, &key)
+        .await
+        .expect("durable key read")
+        .expect("the payload key names the stored governed row");
+    assert_eq!(durable.state.input_id, payload_input_id);
+    assert!(durable.admitted_under_idempotency_key(&key));
+    let durable_only = restarted
+        .adapter
+        .durable_input_state_by_idempotency_key(&session_id, &key)
+        .await
+        .expect("durable-only key read")
+        .expect("the durable-only read finds it as well");
+    assert_eq!(durable_only.state.input_id, payload_input_id);
+    assert!(
+        restarted
+            .adapter
+            .durable_input_state_by_idempotency_key(&session_id, &other_key)
+            .await
+            .expect("durable-only key read")
+            .is_none()
+    );
+    assert!(
+        restarted
+            .adapter
+            .durable_input_state_by_idempotency_key(&SessionId::new(), &key)
+            .await
+            .expect("durable-only key read")
+            .is_none(),
+        "another session names nothing"
+    );
+}
+
+/// A row admitted without an association never takes the governed
+/// resolution: whatever its key, its by-key reads stay the machine binding
+/// alone, as before.
+#[test]
+fn an_ungoverned_row_is_never_named_through_the_governed_resolution() {
+    let input_id = meerkat_core::lifecycle::InputId::new();
+    let key = input_id.to_string();
+    let mut stored = crate::input_state::StoredInputState::new_accepted(input_id.clone());
+    stored.state.idempotency_key = Some(IdempotencyKey::new(key.clone()));
+    assert!(!crate::input_authority::governed_row_admitted_under(
+        &stored.state,
+        &key
+    ));
+    assert!(stored.admitted_under_idempotency_key(&key), "its own key");
+    stored.state.idempotency_key = Some(IdempotencyKey::new(format!(
+        "local-governed-v1:{}",
+        "00".repeat(32)
+    )));
+    assert!(!stored.admitted_under_idempotency_key(&key));
 }

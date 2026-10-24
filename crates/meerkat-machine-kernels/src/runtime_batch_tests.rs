@@ -182,3 +182,35 @@ fn ordinary_batches_keep_execution_kind_boundary() {
         assert_eq!(selected(&state, source), ["first"]);
     }
 }
+
+/// One run's commit names its whole batch as one terminal-completion batch,
+/// which names at most 256 inputs: a longer lane of compatible inputs stages
+/// the bound and leaves the rest queued, in admission order, for the next
+/// batch.
+#[test]
+fn ordinary_batches_stop_at_the_batch_bound() {
+    const BATCH_BOUND: usize = 256;
+    for (lane, source) in [
+        (InputLane::Queue, RuntimeLoopBatchSource::Queue),
+        (InputLane::Steer, RuntimeLoopBatchSource::Steer),
+    ] {
+        let mut state = State::default();
+        let backlog = (0..300_u64)
+            .map(|index| format!("input-{index:03}"))
+            .collect::<Vec<_>>();
+        for (sequence, id) in (1_u64..).zip(&backlog) {
+            queued_input(&mut state, id, sequence, lane, false);
+        }
+        let first = selected(&state, source);
+        assert_eq!(first, backlog[..BATCH_BOUND].to_vec());
+        for id in &first {
+            state.input_lane.remove(id);
+            state.input_phases.insert(id.clone(), InputPhase::Consumed);
+        }
+        assert_eq!(
+            selected(&state, source),
+            backlog[BATCH_BOUND..].to_vec(),
+            "the rest runs in the next batch"
+        );
+    }
+}

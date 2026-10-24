@@ -358,9 +358,11 @@ session whose every send reports `reload_required`; see
 [Storage operations](/guides/storage-operations#repair-a-wholeblob-session-wedged-on-its-audited-endpoint).
 
 `session resolve-held-tail` reports why durable-tail recovery holds a
-session's tail as ambiguous (`tail_held_for_recovery`) and what the repair
-keeps, answers and ends. With `--apply` it commits a repair the runtime
-machine authorizes as an interrupted run. Stop every host of the session
+session's tail as ambiguous (`tail_held_for_recovery`), or holds an
+interrupted tail beside inputs another run left staged (a shape only
+pre-release builds of 0.9.5 leave), and what the repair keeps, answers,
+ends and requeues. With `--apply` it commits a repair the runtime machine
+authorizes as an interrupted run. Stop every host of the session
 first: the repair is refused while the persisted lifecycle row is not
 quiescent, and an idle live host is not detected. A row a host left `Stopped`
 when it ended before unregistering (no current run, no unregister in

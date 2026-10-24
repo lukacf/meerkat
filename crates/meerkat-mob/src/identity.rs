@@ -4195,7 +4195,12 @@ mod tests {
                 }
             }
         }
-        assert_eq!(classified, 31_500);
+        // 6 intents x 7 leases x 7 sessions x 5^3 resource triples. The lease
+        // axis has 7 since IdentityLeaseCondition::HeldByEndedIncarnation (the
+        // lease reclaim of an incarnation whose process ended). The total stays
+        // hard-coded on purpose: a new condition variant must fail here so that
+        // someone reviews the classifier for it.
+        assert_eq!(classified, 36_750);
         assert_eq!(authority.state(), &initial_state);
     }
 

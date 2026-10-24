@@ -11662,6 +11662,12 @@ mod tests {
         .await;
         let admission = RpcOutboundAdmission::isolated_production();
         router.notification_sink.outbound_admission = admission.clone();
+        // The runtime holds its own handle on the connection's sink, installed
+        // at router construction; in production both share one admission, so
+        // the turns' session/event copies meet the same full data budget.
+        router
+            .runtime
+            .set_notification_sink(router.notification_sink.clone());
         let created = router
             .dispatch(make_request(
                 "session/create",

@@ -9,6 +9,11 @@
 //! runtime loop: turns are admitted through `accept_input_with_completion`,
 //! and the interrupt and the stop are the runtime's own
 //! (`hard_cancel_current_run`, `stop_run`).
+//!
+//! The operator rows start from the durable state a pre-release build of
+//! 0.9.5 left: its interrupt kept the run's tail, and the next prompt stood
+//! staged for a run that never committed. `resolve_held_durable_tail`
+//! requeues that prompt only when the store proves it is not the tail's own.
 
 use super::*;
 use async_trait::async_trait;
@@ -22,6 +27,7 @@ use meerkat_core::{
 };
 use meerkat_runtime::completion::CompletionOutcome;
 use meerkat_runtime::identifiers::LogicalRuntimeId;
+use meerkat_runtime::input_state::StoredInputState;
 use meerkat_runtime::store::RuntimeStore;
 use meerkat_runtime::{InMemoryRuntimeStore, Input, MeerkatMachine, PromptInput};
 use meerkat_session::PersistentSessionService;
@@ -510,6 +516,58 @@ async fn an_interrupt_after_a_round_commit_closes_the_run_and_the_next_turn_comp
     an_interrupt_closes_the_run_and_the_next_turn_completes(true).await;
 }
 
+/// The next turn after the interrupt makes a tool round of its own: its round
+/// commits land on the base the interrupted run's closing committed, and the
+/// turn completes with both runs' rounds in history.
+async fn an_interrupt_then_a_tool_round_turn_completes(head_canonical: bool) {
+    let root = TempDir::new().expect("temp");
+    let stores = Stores::new(head_canonical, &root);
+    let client = Arc::new(ScriptedModel::new());
+    let start = Start::open(&stores, &root, &client);
+    let id = start.materialize(None).await;
+    let (turn_a, _run_a) = run_a_held_after_a_round_commit(&start, &client, &id).await;
+    start
+        .machine
+        .hard_cancel_current_run(&id, "user interrupt")
+        .await
+        .expect("the interrupt reaches run A");
+    turn_a.await.expect("turn A task");
+    assert_eq!(start.tail_run(&id).await, None);
+
+    client.push(Step::Tool);
+    client.push(Step::Text("second answer"));
+    let outcome_b = start.turn(&id, "second").await;
+    assert!(
+        matches!(outcome_b, Some(CompletionOutcome::Completed(ref run)) if run.text == "second answer"),
+        "the next turn, with a tool round, completes: {outcome_b:?}"
+    );
+    assert_eq!(
+        start.committed_rows(&id).await,
+        vec![
+            "user first".to_string(),
+            "assistant tool use".to_string(),
+            "tool results".to_string(),
+            "notice Generic".to_string(),
+            "user second".to_string(),
+            "assistant tool use".to_string(),
+            "tool results".to_string(),
+            "assistant second answer".to_string(),
+        ],
+        "history keeps run A's round, closed as interrupted, then run B's round and answer"
+    );
+    assert_eq!(start.tail_run(&id).await, None);
+}
+
+#[tokio::test]
+async fn an_interrupt_then_a_turn_with_a_tool_round_completes_whole_blob() {
+    an_interrupt_then_a_tool_round_turn_completes(false).await;
+}
+
+#[tokio::test]
+async fn an_interrupt_then_a_turn_with_a_tool_round_completes_head_canonical() {
+    an_interrupt_then_a_tool_round_turn_completes(true).await;
+}
+
 async fn an_interrupt_then_a_save_applies(head_canonical: bool) {
     let root = TempDir::new().expect("temp");
     let stores = Stores::new(head_canonical, &root);
@@ -704,4 +762,473 @@ async fn a_restart_after_an_interrupt_resumes_and_requeues_nothing_whole_blob() 
 #[tokio::test]
 async fn a_restart_after_an_interrupt_resumes_and_requeues_nothing_head_canonical() {
     a_restart_resumes_and_requeues_nothing_of_the_interrupted_run(true).await;
+}
+
+// ---------------------------------------------------------------------------
+// A pre-release interrupt's held tail, and the operator verb that resolves it.
+// ---------------------------------------------------------------------------
+
+/// How the fixture binds the prompt it strands beside run A's tail.
+#[derive(Clone, Copy)]
+enum Strand {
+    /// Staged for a run that never started: the row a pre-release build of
+    /// 0.9.5 left for the turn after its interrupt.
+    ForANewRun,
+    /// Staged for the session's earlier run, which committed: a boundary
+    /// receipt names that run.
+    ForACommittedRun,
+    /// Queued and bound to no run.
+    Unattributed,
+}
+
+/// The durable state a pre-release interrupt left, every host stopped.
+struct PreReleaseWedge {
+    id: SessionId,
+    run_a: RunId,
+    /// Run A's own input row as the store held it while run A ran.
+    run_a_row: StoredInputState,
+    /// The prompt stranded beside run A's tail.
+    second: meerkat_core::InputId,
+}
+
+impl Stores {
+    fn head_canonical(&self) -> bool {
+        matches!(self, Self::HeadCanonical { .. })
+    }
+
+    /// The runtime store as an operator opens it, with no host running.
+    fn operator_store(&self) -> Arc<dyn RuntimeStore> {
+        match self {
+            Self::WholeBlob { runtime, .. } => runtime.clone(),
+            Self::HeadCanonical { path } => Arc::new(
+                meerkat_runtime::store::SqliteRuntimeStore::open_existing(path.clone())
+                    .expect("open the runtime database"),
+            ),
+        }
+    }
+}
+
+/// The session's input rows, decoded.
+async fn input_rows(store: &dyn RuntimeStore, id: &SessionId) -> Vec<StoredInputState> {
+    store
+        .load_input_states(&LogicalRuntimeId::for_session(id))
+        .await
+        .expect("read the input rows")
+        .into_iter()
+        .map(|row| match row {
+            meerkat_runtime::store::InputStateRow::Decoded(stored) => *stored,
+            other => panic!("an input row decodes: {other:?}"),
+        })
+        .collect()
+}
+
+/// Write one exact input row, as a store holds it.
+async fn write_input_row(store: &dyn RuntimeStore, id: &SessionId, row: StoredInputState) {
+    let record =
+        meerkat_runtime::input_state::InputStatePersistenceRecord::stored_row_for_test(row)
+            .expect("the row passes the stored-seed authority");
+    store
+        .persist_input_state(&LogicalRuntimeId::for_session(id), &record)
+        .await
+        .expect("write the input row");
+}
+
+/// The row of `input` the fixture strands: run A's admission facts (policy,
+/// semantics, durability, destination), the next admission sequence, and
+/// staged for `bound_run`, or queued and bound to no run.
+fn stranded_row(
+    run_a_row: &StoredInputState,
+    input: &Input,
+    bound_run: Option<RunId>,
+) -> StoredInputState {
+    use meerkat_runtime::input_state::{
+        InputLifecycleState as Phase, InputStateHistoryEntry, InputStateSeed,
+    };
+    let mut row = StoredInputState::accepted_for_test(input).expect("an accepted row");
+    row.state.persisted_input = Some(input.clone());
+    row.state.durability = run_a_row.state.durability;
+    row.state.policy = run_a_row.state.policy.clone();
+    row.state.runtime_semantics = run_a_row.state.runtime_semantics;
+    row.state.scoped_destination = run_a_row.state.scoped_destination.clone();
+    let entry = |from, to, reason: String| InputStateHistoryEntry {
+        timestamp: chrono::Utc::now(),
+        from,
+        to,
+        reason: Some(reason),
+    };
+    row.state.history = vec![entry(
+        Phase::Accepted,
+        Phase::Queued,
+        "QueueAccepted".to_string(),
+    )];
+    let (phase, attempt_count) = match &bound_run {
+        Some(run) => {
+            row.state.history.push(entry(
+                Phase::Queued,
+                Phase::Staged,
+                format!("StageForRun({run})"),
+            ));
+            (Phase::Staged, 1)
+        }
+        None => (Phase::Queued, 0),
+    };
+    row.seed = InputStateSeed {
+        phase,
+        last_run_id: bound_run,
+        last_boundary_sequence: None,
+        terminal_outcome: None,
+        attempt_count,
+        admission_sequence: run_a_row
+            .seed
+            .admission_sequence
+            .map(|sequence| sequence + 1),
+        recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
+    };
+    row
+}
+
+/// The durable state a pre-release build of 0.9.5 left: its interrupt kept
+/// run A's round commit as the tail, run A's input ended, and the next
+/// prompt, `second`, stood staged for a run that never committed. The
+/// runtime no longer writes that row, so the fixture writes it (bound as
+/// `strand` says) while run A is held. The interrupt then ends run A, and the
+/// cancelled run's settle holds A's tail beside the row, as ordinary recovery
+/// held the pre-release one.
+async fn pre_release_wedge(
+    stores: &Stores,
+    root: &TempDir,
+    client: &Arc<ScriptedModel>,
+    strand: Strand,
+) -> PreReleaseWedge {
+    let start = Start::open(stores, root, client);
+    let id = start.materialize(None).await;
+    let committed_run = match strand {
+        Strand::ForACommittedRun => {
+            client.push(Step::Text("zeroth answer"));
+            let outcome = start.turn(&id, "zeroth").await;
+            assert!(
+                matches!(outcome, Some(CompletionOutcome::Completed(_))),
+                "the earlier run commits: {outcome:?}"
+            );
+            input_rows(start.runtime_store.as_ref(), &id)
+                .await
+                .into_iter()
+                .find_map(|row| row.seed.last_run_id)
+        }
+        Strand::ForANewRun | Strand::Unattributed => None,
+    };
+    let (turn_a, run_a) = run_a_held_after_a_round_commit(&start, client, &id).await;
+    let run_a_row = input_rows(start.runtime_store.as_ref(), &id)
+        .await
+        .into_iter()
+        .find(|row| row.seed.last_run_id.as_ref() == Some(&run_a))
+        .expect("run A's own input row");
+    let bound_run = match strand {
+        Strand::ForANewRun => Some(RunId::new()),
+        Strand::ForACommittedRun => {
+            Some(committed_run.expect("the earlier run's input names its run"))
+        }
+        Strand::Unattributed => None,
+    };
+    let second = Input::Prompt(PromptInput::new("second", None));
+    write_input_row(
+        start.runtime_store.as_ref(),
+        &id,
+        stranded_row(&run_a_row, &second, bound_run),
+    )
+    .await;
+    start
+        .machine
+        .hard_cancel_current_run(&id, "user interrupt")
+        .await
+        .expect("the interrupt reaches run A");
+    turn_a.await.expect("turn A task");
+    assert_eq!(
+        start.tail_run(&id).await,
+        Some(run_a.clone()),
+        "run A's tail stays held beside the stranded prompt"
+    );
+    start.service.try_shutdown().await.expect("shutdown");
+    PreReleaseWedge {
+        id,
+        run_a,
+        run_a_row,
+        second: second.id().clone(),
+    }
+}
+
+/// Every durable fact the operator verb could write, as one comparable
+/// value: the committed authority, the tail, every input row with the input
+/// set's revision and token, and the lifecycle row.
+async fn durable_witness(store: &dyn RuntimeStore, id: &SessionId, head_canonical: bool) -> String {
+    let runtime_id = LogicalRuntimeId::for_session(id);
+    let authority = store
+        .load_session_boundary_authority(&runtime_id)
+        .await
+        .expect("read the committed authority");
+    let tail = if head_canonical {
+        format!(
+            "{:?}",
+            store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .expect("read the provisional tail")
+        )
+    } else {
+        format!(
+            "{:?}",
+            store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .expect("read the provisional tail")
+        )
+    };
+    let (versioned, revision, token) = store
+        .load_input_states_with_versions(&runtime_id)
+        .await
+        .expect("read the versioned input rows")
+        .into_parts();
+    let versioned: Vec<String> = versioned
+        .iter()
+        .map(|(row, digest)| format!("{} {digest}", row.state.input_id))
+        .collect();
+    let rows = store
+        .load_input_states(&runtime_id)
+        .await
+        .expect("read the input rows");
+    let lifecycle = store
+        .observe_machine_lifecycle(&runtime_id)
+        .await
+        .expect("read the lifecycle row");
+    format!(
+        "{authority:?}\n{tail}\n{} {token} {versioned:?}\n{rows:?}\n{lifecycle:?}",
+        revision.store_generation()
+    )
+}
+
+/// A pre-release interrupt left run A's tail held beside the next prompt,
+/// staged for a run that never committed. The operator's dry run names that
+/// shape and the prompt it requeues and writes nothing; the repair closes
+/// run A as interrupted and requeues the prompt; a second repair finds no
+/// tail. The next start runs the prompt exactly once.
+async fn an_operator_requeues_the_prompt_stranded_beside_a_pre_release_interrupt(
+    head_canonical: bool,
+) {
+    use meerkat_runtime::input_state::InputLifecycleState as Phase;
+    use meerkat_runtime::recovery::{
+        HeldTailRepairVerdict, HeldTailResolution, resolve_held_durable_tail,
+    };
+
+    let root = TempDir::new().expect("temp");
+    let stores = Stores::new(head_canonical, &root);
+    let client = Arc::new(ScriptedModel::new());
+    let wedge = pre_release_wedge(&stores, &root, &client, Strand::ForANewRun).await;
+    let id = &wedge.id;
+
+    let store = stores.operator_store();
+    let before = durable_witness(store.as_ref(), id, head_canonical).await;
+    let HeldTailResolution::StrandedInputs(plan) =
+        resolve_held_durable_tail(store.as_ref(), id, false)
+            .await
+            .expect("the dry run reads the held tail")
+    else {
+        panic!("the tail is held beside a stranded prompt");
+    };
+    assert_eq!(plan.verdict, HeldTailRepairVerdict::WouldRepair);
+    assert_eq!(plan.run_id, wedge.run_a);
+    assert_eq!(plan.requeued_inputs, vec![wedge.second.clone()]);
+    assert!(
+        plan.terminalized_inputs.is_empty(),
+        "run A's own input has ended"
+    );
+    assert!(
+        plan.closed_calls.is_empty(),
+        "run A's round answered its call"
+    );
+    assert!(plan.runtime_quiescent);
+    assert_eq!(
+        durable_witness(store.as_ref(), id, head_canonical).await,
+        before,
+        "the dry run writes nothing"
+    );
+
+    let HeldTailResolution::StrandedInputs(applied) =
+        resolve_held_durable_tail(store.as_ref(), id, true)
+            .await
+            .expect("the repair applies")
+    else {
+        panic!("the tail is still held beside the stranded prompt when applied");
+    };
+    assert!(
+        matches!(applied.verdict, HeldTailRepairVerdict::Repaired { .. }),
+        "{:?}",
+        applied.verdict
+    );
+    assert_eq!(applied.candidate_id, plan.candidate_id);
+    assert_eq!(applied.requeued_inputs, vec![wedge.second.clone()]);
+    let rows = input_rows(store.as_ref(), id).await;
+    let second = rows
+        .iter()
+        .find(|row| row.state.input_id == wedge.second)
+        .expect("the stranded prompt's row");
+    assert_eq!(second.seed.phase, Phase::Queued);
+    assert_eq!(
+        second.seed.last_run_id, None,
+        "the prompt is bound to no run"
+    );
+    assert!(
+        second.state.persisted_input.is_some(),
+        "the prompt keeps its content"
+    );
+    let run_a_input = rows
+        .iter()
+        .find(|row| row.state.input_id == wedge.run_a_row.state.input_id)
+        .expect("run A's own input row");
+    assert_eq!(
+        run_a_input.seed.phase,
+        Phase::Abandoned,
+        "run A's own input stays ended"
+    );
+    assert_eq!(
+        resolve_held_durable_tail(store.as_ref(), id, true)
+            .await
+            .expect("a second repair reads the store"),
+        HeldTailResolution::NoTail,
+        "a second repair finds no tail"
+    );
+    drop(store);
+
+    let start = Start::open(&stores, &root, &client);
+    let requests_before = client.requests.load(Ordering::SeqCst);
+    client.push(Step::Text("second answer"));
+    start.materialize(Some(id)).await;
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    loop {
+        let rows = start.committed_rows(id).await;
+        if rows.last().map(String::as_str) == Some("assistant second answer") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the requeued prompt runs after the start: {rows:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        client.requests.load(Ordering::SeqCst),
+        requests_before + 1,
+        "the requeued prompt calls the model once"
+    );
+    assert_eq!(
+        start.committed_rows(id).await,
+        history_with_closed_run_a("second", "second answer"),
+        "run A is closed once, and the requeued prompt runs once after it"
+    );
+    client.push(Step::Text("third answer"));
+    let outcome = start.turn(id, "third").await;
+    assert!(
+        matches!(outcome, Some(CompletionOutcome::Completed(ref run)) if run.text == "third answer"),
+        "the next turn completes: {outcome:?}"
+    );
+    assert_eq!(
+        client.requests.load(Ordering::SeqCst),
+        requests_before + 2,
+        "only the new turn calls the model again"
+    );
+}
+
+#[tokio::test]
+async fn an_operator_requeues_the_prompt_stranded_beside_a_pre_release_interrupt_whole_blob() {
+    an_operator_requeues_the_prompt_stranded_beside_a_pre_release_interrupt(false).await;
+}
+
+#[tokio::test]
+async fn an_operator_requeues_the_prompt_stranded_beside_a_pre_release_interrupt_head_canonical() {
+    an_operator_requeues_the_prompt_stranded_beside_a_pre_release_interrupt(true).await;
+}
+
+/// The shapes beside an interrupted tail the operator verb cannot prove
+/// stranded, each held for its inputs and refused, typed, with nothing
+/// written. A run the stranded prompt names cannot hold a tail of its own:
+/// the store keeps one tail per session, and run A's holds it.
+#[derive(Clone, Copy)]
+enum Unproven {
+    /// The tail's run cursor binds the row staged for another run.
+    InTheTailsCursor,
+    /// The stranded prompt names a run that committed.
+    ForACommittedRun,
+    /// The stranded prompt is bound to no run.
+    Unattributed,
+}
+
+async fn the_operator_refuses_a_stranded_shape_it_cannot_prove(
+    head_canonical: bool,
+    unproven: Unproven,
+) {
+    use meerkat_runtime::recovery::{HeldTailResolution, resolve_held_durable_tail};
+
+    let root = TempDir::new().expect("temp");
+    let stores = Stores::new(head_canonical, &root);
+    let client = Arc::new(ScriptedModel::new());
+    let strand = match unproven {
+        Unproven::InTheTailsCursor => Strand::ForANewRun,
+        Unproven::ForACommittedRun => Strand::ForACommittedRun,
+        Unproven::Unattributed => Strand::Unattributed,
+    };
+    let wedge = pre_release_wedge(&stores, &root, &client, strand).await;
+    let id = &wedge.id;
+    let store = stores.operator_store();
+    if let Unproven::InTheTailsCursor = unproven {
+        // Run A's own input, which its cursor binds, staged again for a run
+        // that never committed.
+        let mut row = wedge.run_a_row.clone();
+        row.seed.last_run_id = Some(RunId::new());
+        write_input_row(store.as_ref(), id, row).await;
+    }
+
+    let before = durable_witness(store.as_ref(), id, head_canonical).await;
+    for apply in [false, true] {
+        let resolution = resolve_held_durable_tail(store.as_ref(), id, apply)
+            .await
+            .expect("the operator reads the held tail");
+        let HeldTailResolution::HeldOtherwise { reason } = &resolution else {
+            panic!("the tail stays held for its inputs (apply {apply}): {resolution:?}");
+        };
+        assert!(reason.contains("input rows"), "{reason}");
+        assert_eq!(
+            durable_witness(store.as_ref(), id, head_canonical).await,
+            before,
+            "nothing is written (apply {apply})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_operator_refuses_a_row_of_the_tails_cursor_staged_for_another_run_whole_blob() {
+    the_operator_refuses_a_stranded_shape_it_cannot_prove(false, Unproven::InTheTailsCursor).await;
+}
+
+#[tokio::test]
+async fn the_operator_refuses_a_row_of_the_tails_cursor_staged_for_another_run_head_canonical() {
+    the_operator_refuses_a_stranded_shape_it_cannot_prove(true, Unproven::InTheTailsCursor).await;
+}
+
+#[tokio::test]
+async fn the_operator_refuses_a_prompt_staged_for_a_run_that_committed_whole_blob() {
+    the_operator_refuses_a_stranded_shape_it_cannot_prove(false, Unproven::ForACommittedRun).await;
+}
+
+#[tokio::test]
+async fn the_operator_refuses_a_prompt_staged_for_a_run_that_committed_head_canonical() {
+    the_operator_refuses_a_stranded_shape_it_cannot_prove(true, Unproven::ForACommittedRun).await;
+}
+
+#[tokio::test]
+async fn the_operator_refuses_an_unattributed_prompt_beside_the_tail_whole_blob() {
+    the_operator_refuses_a_stranded_shape_it_cannot_prove(false, Unproven::Unattributed).await;
+}
+
+#[tokio::test]
+async fn the_operator_refuses_an_unattributed_prompt_beside_the_tail_head_canonical() {
+    the_operator_refuses_a_stranded_shape_it_cannot_prove(true, Unproven::Unattributed).await;
 }

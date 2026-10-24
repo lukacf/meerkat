@@ -354,7 +354,9 @@ call without its result, and holds the tail rather than guess what happened
 The same answer can come from a tail this command does not resolve, for
 example one whose input rows cannot be attributed to its run; for those,
 the command answers `held_otherwise` with the reason. Since 0.9.5 an
-operator can resolve a hold over ambiguous evidence:
+operator can resolve a hold over ambiguous evidence, and one hold over
+input rows that only pre-release builds of 0.9.5 leave (see
+[An interrupted tail held beside a stranded input](#an-interrupted-tail-held-beside-a-stranded-input)):
 
 1. Stop every host of the session. The repair is refused while the
    session's persisted runtime state shows it in use (for example attached
@@ -426,6 +428,7 @@ The command answers in one of these ways (`resolution` in the JSON report):
 | `not_held` | The tail is not held: ordinary recovery commits or continues it when the session next resumes. Nothing is written | 0 |
 | `held_otherwise` | The tail is held for a reason this command does not resolve, given in the report: ordinary recovery holds it because its input rows cannot be attributed to its run, or refuses it (a runtime in use, or a commit that already covers or contradicts the tail); the store cannot prove an exact recovery source or boundary, or that the tail descends from the committed head (an unproven rewrite); an incomplete HeadCanonical intent, which ordinary recovery rolls back at the next resume; or a recovery of this exact tail that has already committed | Error |
 | `ambiguous` | The repair report, with the verdict `would_repair` (a dry run), `refused` (nothing written) or `repaired` (with the boundary sequence it committed) | 0, or an error for `refused` |
+| `stranded_inputs` | An interrupted tail held only beside inputs another run left staged or queued (below): the same repair report, whose `requeued_inputs` lists the inputs the repair puts back in their queue | 0, or an error for `refused` |
 
 A `refused` verdict means the session's persisted runtime state shows it in
 use (stop every host of the session and run the command again), a commit
@@ -447,7 +450,7 @@ output, and the error's message goes to standard error. An error before any
 answer (the store cannot be opened, or the evidence cannot be verified)
 prints only the error.
 
-Only this hold has an operator path. A session answering
+Only these holds have an operator path. A session answering
 `SESSION_DURABLE_EVIDENCE_QUARANTINED` stays quarantined;
 `SESSION_DURABLE_TAIL_RECOVERY_REFUSED` clears once the conflicting runtime
 quiesces (a refusal over receipts that cover or contradict the tail does
@@ -457,6 +460,40 @@ including any host that keeps a realm in its own database, call
 `meerkat_runtime::recovery::resolve_held_durable_tail` with the store, the
 session id and whether to apply. It answers `HeldTailResolution` and works
 on any runtime store, a host store included.
+
+### An interrupted tail held beside a stranded input
+
+Builds of 0.9.5 from before its release did not close a run when it was
+interrupted: the run's last round commit stayed as the session's durable
+tail. A turn submitted after the interrupt was then staged for a new run
+that never committed, and recovery holds the interrupted tail beside that
+input, because the input could be the tail's own. The command resolves
+this hold when the store proves that the input is not the tail's own:
+
+- the tail's run cursor binds only the interrupted run's own inputs, and
+  every one of them has ended;
+- every other input beside the tail that carries content is staged or
+  queued and names another run as its run, and that run has neither a
+  boundary receipt nor a durable tail (the store keeps one tail per
+  session, the interrupted run's).
+
+Nothing is inferred from timing or order. The answer is `stranded_inputs`,
+with the report an `ambiguous` hold gets plus the inputs the repair
+requeues. Applied, the repair commits the tail as interrupted, as recovery
+commits any interrupted run: every row is kept, the interrupted notice is
+appended, and the run's own inputs do not run again. In the same commit it
+puts each stranded input back in its queue with its content, bound to no
+run, so it runs once, after the interrupted run, when the session next
+starts. The command requeues no input this proof does not cover (one bound
+to no run, one the tail's cursor binds, one that names a run with a
+receipt): while such an input holds the tail, the answer stays
+`held_otherwise` and nothing is written.
+
+On a WholeBlob session, run the command before 0.9.5 opens the session.
+The first open ends the stranded input as abandoned, and the next start
+then closes the interrupted run by itself; the abandoned input does not
+run, so submit it again. An interrupted tail with no input beside it needs
+no operator: the next start closes it as interrupted.
 
 ## Blob Digests In Meerkat And Meta
 

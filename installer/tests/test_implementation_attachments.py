@@ -128,8 +128,30 @@ def test_registered_evidence_reader_returns_original_pdf_extraction(evidence, ro
     assert result["attachment"] == ref and result["text"].strip() == text
     assert result["complete"] and result["next_offset"] is None
     assert result["extraction"] == "PDF text only; no OCR or image analysis."
-    # A warm extraction cannot replace verification of the retained original.
+    replacement = pdf_bytes(text=text.replace("weather", "traffic"))
+    assert len(replacement) == ref["size"], "Equal size makes the digest check decisive"
+    evidence["uploads"].save(evidence["guide"]["id"], [("replacement.pdf", "application/pdf", replacement)])
+    # Both PDFs are valid and warm. Skipping byte verification would now serve
+    # the replacement text, instead of merely failing to parse invalid bytes.
     path = evidence["root"] / "guide-attachments" / evidence["guide"]["id"] / (ref["sha256"] + ".bin")
-    path.write_bytes(b"Changed PDF bytes after a successful read")
+    path.write_bytes(replacement)
     refused = asyncio.run(handler(evidence[role])({"attachment_id": ref["id"]}))
     assert refused["ok"] is False and "text" not in refused
+
+
+@pytest.mark.parametrize("role", ["builder", "reviewer"])
+@pytest.mark.parametrize("kind", ["offset", "encrypted_pdf"])
+def test_build_readers_refuse_mismatch_before_offset_or_pdf_details(evidence, role, kind, monkeypatch):
+    read = handler(evidence[role])
+    frozen = evidence["builder"].input if role == "builder" else evidence["reviewer"].acceptance.frozen
+    if kind == "encrypted_pdf":
+        from test_guide_attachments import retained_encrypted_pdf
+        ref = retained_encrypted_pdf(evidence["uploads"], evidence["guide"]["id"], monkeypatch)
+        frozen["messages"][0]["attachments"].append(ref)
+        assert "Encrypted" in asyncio.run(read({"attachment_id": ref["id"]}))["error"]
+    else:
+        ref = frozen["messages"][0]["attachments"][0]
+    ref["filename"] = "changed.pdf" if kind == "encrypted_pdf" else "changed.csv"
+    result = asyncio.run(read({"attachment_id": ref["id"], "offset": 1_000_000}))
+    assert result["error"] == "The submitted evidence reference does not match its stored file."
+    assert result["ok"] is False and "text" not in result

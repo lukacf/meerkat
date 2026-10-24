@@ -132,11 +132,27 @@ async def test_document_tool_is_bounded_and_excludes_foreign_and_unsent_uploads(
 @pytest.mark.asyncio
 @pytest.mark.parametrize('field,value', [('filename', 'renamed.txt'), ('size', 1),
     ('sha256', '0' * 64), ('url', 'https://example.test/changed')])
-async def test_document_tool_checks_the_reference_of_the_returned_page(evidence, field, value):
+@pytest.mark.parametrize('offset', [0, 1_000_000])
+async def test_document_tool_checks_the_reference_before_reading_a_page(evidence, field, value, offset):
     service, context, refs = evidence
     context['current_user_message']['attachments'][0][field] = value
-    result = await service.read_setup_attachment({'attachment_id': refs[0]['id']})
-    assert 'reference' in result['error'] and 'text' not in result
+    result = await service.read_setup_attachment({'attachment_id': refs[0]['id'], 'offset': offset})
+    assert result['error'] == 'The submitted evidence reference does not match its stored file.'
+    assert 'text' not in result
+
+
+@pytest.mark.asyncio
+async def test_document_tool_refuses_mismatched_reference_before_pdf_extraction(evidence, monkeypatch):
+    from test_guide_attachments import retained_encrypted_pdf
+    service, context, _ = evidence
+    ref = retained_encrypted_pdf(service.attachments, context['guide_id'], monkeypatch)
+    context['current_user_message']['attachments'].append(ref)
+    assert 'Encrypted' in (await service.read_setup_attachment({'attachment_id': ref['id']}))['error']
+    ref['filename'] = 'changed.pdf'
+    for offset in (0, 1_000_000):
+        result = await service.read_setup_attachment({'attachment_id': ref['id'], 'offset': offset})
+        assert result['error'] == 'The submitted evidence reference does not match its stored file.'
+        assert 'text' not in result
 
 
 @pytest.mark.asyncio

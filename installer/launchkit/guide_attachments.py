@@ -54,8 +54,8 @@ class _PdfEvidenceError(ValueError):
 
 
 # Keep only two successful extractions, keyed by the original bounded PDF bytes.
-# Each page reads and verifies storage before cache lookup; callers check the
-# submitted reference before returning text. No parser or disk cache is retained.
+# Each page verifies storage and any caller-supplied reference before cache lookup.
+# No parser objects or extracted files are retained.
 @lru_cache(maxsize=2)
 def _pdf_text(data):
     try:
@@ -268,10 +268,13 @@ class GuideAttachments:
             raise ValueError('Attachments together must be at most 16 MiB.')
         return result
 
-    def read_content(self, guide_id, attachment_id, *, offset=0, max_chars=MAX_READ_CHARS):
+    def read_content(self, guide_id, attachment_id, *, offset=0, max_chars=MAX_READ_CHARS,
+                     expected_reference=None):
         if type(offset) is not int or offset < 0 or type(max_chars) is not int or not 1 <= max_chars <= MAX_READ_CHARS:
             raise ValueError('Use a nonnegative text offset and a read size between 1 and 12000 characters.')
         ref, data = self.read(guide_id, attachment_id)
+        if expected_reference is not None and ref != expected_reference:
+            raise ValueError('The submitted evidence reference does not match its stored file.')
         if ref['media_type'].startswith('image/'):
             raise ValueError('This attachment is an image. Read its verified image bytes instead of claiming extracted text.')
         text = _text(data, ref['media_type'])

@@ -248,7 +248,7 @@ mod tests {
     /// the first execution only, then the delayed effect.
     fn tool_command(root: &Path) -> String {
         format!(
-            "echo $$ >> '{pids}'; echo ran >> '{runs}'; if [ ! -e '{once}' ]; then : > '{once}'; echo started > '{fifo}'; fi; sleep 2; echo effect >> '{effect}'",
+            "echo $$ >> '{pids}'; echo ran >> '{runs}'; if [ ! -e '{once}' ]; then : > '{once}'; echo started > '{fifo}'; fi; sleep 30; echo effect >> '{effect}'",
             pids = root.join("pids").display(),
             runs = root.join("runs").display(),
             once = root.join("started-once").display(),
@@ -258,6 +258,8 @@ mod tests {
     }
 
     /// Bound on the scripted tool's shells exiting after recovery killed them.
+    /// The tool sleeps three times as long before its effect, so a shell gone
+    /// within the bound was killed, not finished.
     const PROCESS_EXIT_BOUND: Duration = Duration::from_secs(10);
 
     /// Whether a process with this pid exists (`kill -0`; a zombie counts until

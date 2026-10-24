@@ -1171,6 +1171,16 @@ class ImplementationService:
             return self._directory(guide_id, build_id)
         return parent / build_id
 
+    def _reserve_directory(self, guide_id, build_id):
+        directory = self._directory(guide_id, build_id)
+        # Recursive mkdir applies mode only to the final component. Recovery
+        # also checks the guide parent, so create each owned level privately.
+        # Existing directories retain their modes and recovery refusal checks.
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.parent.mkdir(exist_ok=True, mode=0o700)
+        directory.mkdir(mode=0o700)
+        return directory
+
     def selected_build_id(self, guide_id):
         """Read the current selection for a synchronous admission fence."""
         return self._directory(guide_id).name
@@ -1656,8 +1666,7 @@ class ImplementationService:
                     raise ImplementationPrerequisiteNotAdmitted('Prepare application checks in the wizard before starting a new build. No builder was started.')
             identity = str(uuid.uuid4())
             preparation_started = time.monotonic_ns()
-            directory = self._directory(guide_id, identity)
-            directory.mkdir(parents=True, mode=0o700)
+            directory = self._reserve_directory(guide_id, identity)
             with self._unpublished_preparation(directory):
                 from .implementation_workspace import ImplementationWorkspace
                 workspace = ImplementationWorkspace(directory / "workspace", proposal)

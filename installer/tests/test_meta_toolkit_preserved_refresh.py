@@ -366,8 +366,10 @@ def retained(tmp_path, products, monkeypatch):
     for name, (kind, mode, _) in old.nodes.items():
         if kind != "link": (native / name).chmod(mode)
     site = root / ".venv/lib/python-fixture/site-packages"
-    site.mkdir(parents=True, mode=0o700)
-    (root / ".venv").chmod(0o700)
+    # These inert SDK directories model a private installation independently
+    # of the validation host's umask. Native specimen modes above stay exact.
+    for directory in (root / ".venv", root / ".venv/lib", site.parent, site):
+        directory.mkdir(mode=0o700, exist_ok=True)
     (root / ".venv/bin").mkdir(mode=0o700)
     (root / ".venv/bin/python").write_bytes(b"INERT interpreter must never run\n")
     (root / ".venv/bin/python").chmod(0o700)
@@ -375,7 +377,10 @@ def retained(tmp_path, products, monkeypatch):
         with zipfile.ZipFile(wheel.path) as archive:
             for name in archive.namelist():
                 path = site / name
-                path.parent.mkdir(parents=True, exist_ok=True)
+                parent = site
+                for part in Path(name).parts[:-1]:
+                    parent = parent / part
+                    parent.mkdir(mode=0o700, exist_ok=True)
                 path.write_bytes(archive.read(name)); path.chmod(0o600)
     def locations(base, python=None, site_packages=None):
         assert python is None or Path(python) == Path(base) / ".venv/bin/python"

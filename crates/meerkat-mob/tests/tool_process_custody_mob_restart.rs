@@ -141,12 +141,50 @@ impl LlmClient for ScriptedShellClient {
 /// first execution only, then the delayed effect.
 fn tool_command(root: &Path) -> String {
     format!(
-        "echo ran >> '{runs}'; if [ ! -e '{once}' ]; then : > '{once}'; echo started > '{fifo}'; fi; sleep 2; echo effect >> '{effect}'",
+        "echo $$ >> '{pids}'; echo ran >> '{runs}'; if [ ! -e '{once}' ]; then : > '{once}'; echo started > '{fifo}'; fi; sleep 2; echo effect >> '{effect}'",
+        pids = root.join("pids").display(),
         runs = root.join("runs").display(),
         once = root.join("started-once").display(),
         fifo = root.join("started.fifo").display(),
         effect = root.join("effect").display()
     )
+}
+
+/// Bound on the scripted tool's shells exiting after recovery killed them.
+const PROCESS_EXIT_BOUND: Duration = Duration::from_secs(10);
+
+/// Whether a process with this pid exists (`kill -0`; a zombie counts until
+/// it is reaped).
+fn process_exists(pid: u32) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", &format!("kill -0 {pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// The scripted tool's delayed effect can no longer happen: every shell the
+/// tool started has exited (recovery killed the interrupted one, which
+/// writes the effect only after its sleep). Waits a bounded time for exits
+/// still being reaped; a shell still running fails the row.
+async fn assert_tool_processes_gone(root: &Path) {
+    let pids = std::fs::read_to_string(root.join("pids")).unwrap_or_default();
+    assert!(
+        !pids.trim().is_empty(),
+        "the scripted tool recorded no process"
+    );
+    let started = std::time::Instant::now();
+    for pid in pids.lines() {
+        let pid: u32 = pid.trim().parse().expect("a recorded pid");
+        while process_exists(pid) {
+            assert!(
+                started.elapsed() < PROCESS_EXIT_BOUND,
+                "the interrupted tool's shell {pid} is still running"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 /// How many times the scripted tool has run.
@@ -473,8 +511,8 @@ async fn mob_member_interrupted_by_host_death_is_settled_not_replayed_on_resume(
         answers, 2,
         "the resumed run and the new turn answered once each"
     );
-    // The killed tool's delayed effect never happens.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // The killed tool's delayed effect never happens: its shell is gone.
+    assert_tool_processes_gone(root).await;
     assert!(
         !root.join("effect").exists(),
         "the interrupted tool's effect happened"

@@ -1512,6 +1512,17 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn settle_durable_tail_before_cold_start_reporting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::ColdStartTailSettlement, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start_reporting(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat::LiveSessionActorWitness,

@@ -32414,6 +32414,17 @@ impl MobActor {
     /// tail the recovery keeps still refuses, typed:
     /// [`MobError::MemberDurableTailUnprovable`].
     ///
+    /// A tail the recovery keeps because it CONTINUES the member's open run
+    /// (a run a requeueing stop suspended at its last round commit, as a
+    /// host's graceful shutdown leaves it) is not unprovable: the run resumes
+    /// from that commit when the member's actor is next materialized, and the
+    /// start must not fail over it. The settle reports that disposition
+    /// ([`ColdStartTailSettlement::ContinuesOpenRun`]) with the session's
+    /// committed snapshot under the tail, which this read returns; the tail
+    /// stays for the run. Whether the run continues is the recovery's own
+    /// disposition, never derived from that snapshot. A held or refused tail
+    /// still refuses as above.
+    ///
     /// The settle runs under this runtime owner's hosting claim for the
     /// session (#1813), taken for the settle alone; the second read takes
     /// none. A session another runtime owner on the realm hosts is refused,
@@ -32435,27 +32446,45 @@ impl MobActor {
                     "settling a durable tail ahead of its runtime boundary before the mob start \
                      restores the member"
                 );
-                if let Err(error) = io
+                let settlement = match io
                     .session_service
-                    .settle_durable_tail_before_cold_start(session)
+                    .settle_durable_tail_before_cold_start_reporting(session)
                     .await
                 {
-                    if matches!(
-                        error,
-                        meerkat_core::service::SessionError::ServedElsewhere { .. }
-                            | meerkat_core::service::SessionError::HostingUnavailable { .. }
-                    ) {
-                        tracing::error!(
-                            %member,
-                            session_id = %session,
-                            %error,
-                            "a member's session has a durable tail and this runtime owner cannot \
-                             host it; the mob start refuses rather than settle another owner's \
-                             tail. Stop the runtime owner that hosts the session, or wait until it \
-                             releases it, then start the mob again"
-                        );
+                    Ok(settlement) => settlement,
+                    Err(error) => {
+                        if matches!(
+                            error,
+                            meerkat_core::service::SessionError::ServedElsewhere { .. }
+                                | meerkat_core::service::SessionError::HostingUnavailable { .. }
+                        ) {
+                            tracing::error!(
+                                %member,
+                                session_id = %session,
+                                %error,
+                                "a member's session has a durable tail and this runtime owner \
+                                 cannot host it; the mob start refuses rather than settle another \
+                                 owner's tail. Stop the runtime owner that hosts the session, or \
+                                 wait until it releases it, then start the mob again"
+                            );
+                        }
+                        return Err(error.into());
                     }
-                    return Err(error.into());
+                };
+                // The recovery continues the member's open run: its tail
+                // stays for the run, which resumes when the member's actor is
+                // next materialized. The start reads the committed snapshot
+                // under it.
+                if let ColdStartTailSettlement::ContinuesOpenRun { run_id, committed } = settlement
+                {
+                    tracing::info!(
+                        %member,
+                        session_id = %session,
+                        %run_id,
+                        "the member's open run continues from its last round commit; the mob \
+                         start restores the member over it"
+                    );
+                    return Ok(Some(*committed));
                 }
                 // A tail the recovery kept still reads as a revision conflict
                 // at the boundary: that is the typed unprovable-tail outcome.

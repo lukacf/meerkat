@@ -1036,6 +1036,25 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
             .await
     }
 
+    async fn settle_durable_tail_before_cold_start_reporting(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<meerkat_mob::ColdStartTailSettlement, meerkat_core::service::SessionError> {
+        if self.fail_durable_tail_settles.load(Ordering::SeqCst) {
+            self.durable_tail_settle_failed
+                .store(true, Ordering::SeqCst);
+            return Err(meerkat_core::service::SessionError::Store(
+                "injected session store failure while settling a durable tail".into(),
+            ));
+        }
+        if self.keep_durable_tails.load(Ordering::SeqCst) {
+            return Ok(meerkat_mob::ColdStartTailSettlement::Settled);
+        }
+        self.inner
+            .settle_durable_tail_before_cold_start_reporting(session_id)
+            .await
+    }
+
     async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         session_id: &meerkat_core::SessionId,

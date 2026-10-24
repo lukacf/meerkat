@@ -207,6 +207,29 @@ impl SessionResumeAuthority {
     }
 }
 
+/// What settling a session's durable tail before a cold start left
+/// ([`MobSessionService::settle_durable_tail_before_cold_start_reporting`]).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ColdStartTailSettlement {
+    /// No open run's tail is reported: there was none, the store-owned
+    /// recovery committed it, or it kept it unproven. The caller's next
+    /// committed read decides (a tail that stands still refuses it).
+    Settled,
+    /// The store-owned recovery continues the session's open run from its
+    /// last round commit (a run a requeueing stop suspended): the run's
+    /// provisional tail stays for it, and the run resumes when the session's
+    /// actor is next materialized. `committed` is the session's committed
+    /// snapshot under that tail, for readers only: whether the run continues
+    /// is the recovery's own disposition, never derived from the snapshot.
+    ContinuesOpenRun {
+        /// The open run the recovery continues.
+        run_id: RunId,
+        /// The session's last committed snapshot.
+        committed: Box<Session>,
+    },
+}
+
 /// Operational resume decision after durable-tail convergence.
 ///
 /// This carrier deliberately contains only facts the current owner can prove:
@@ -1974,6 +1997,30 @@ pub trait MobSessionService:
             .map(|_| ())
     }
 
+    /// [`Self::settle_durable_tail_before_cold_start`], reporting what the
+    /// settle left: a session whose store-owned durable-tail recovery
+    /// continues its open run (a run a requeueing stop suspended at its last
+    /// round commit) keeps that run's provisional tail, so a committed read of
+    /// it refuses until the run resumes. The report then carries the committed
+    /// snapshot under the tail
+    /// ([`ColdStartTailSettlement::ContinuesOpenRun`]), so a start path that
+    /// only reads the member's session can restore the member over its open
+    /// run instead of failing the start.
+    ///
+    /// The default settles through [`Self::settle_durable_tail_before_cold_start`]
+    /// and reports [`ColdStartTailSettlement::Settled`]: a service that cannot
+    /// say its tail continues leaves the caller's committed read to decide, as
+    /// before. The persistent service reports the continuation; a wrapper
+    /// around a persistent service should forward this method too.
+    async fn settle_durable_tail_before_cold_start_reporting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ColdStartTailSettlement, SessionError> {
+        self.settle_durable_tail_before_cold_start(session_id)
+            .await
+            .map(|()| ColdStartTailSettlement::Settled)
+    }
+
     /// Load the persisted session METADATA view when available.
     ///
     /// Metadata-only sibling of [`Self::load_persisted_session`] (meta
@@ -3302,6 +3349,25 @@ where
         // any recovery.
         let claim = self.grant_session_hosting(session_id)?;
         self.prepare_cold_attach(session_id, claim).await
+    }
+
+    async fn settle_durable_tail_before_cold_start_reporting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ColdStartTailSettlement, SessionError> {
+        // #1813, as for the plain settle: the hosting claim first, by move.
+        let claim = self.grant_session_hosting(session_id)?;
+        Ok(
+            match self
+                .prepare_cold_attach_reporting(session_id, claim)
+                .await?
+            {
+                meerkat_session::ColdAttachSettlement::ContinuesOpenRun { run_id, committed } => {
+                    ColdStartTailSettlement::ContinuesOpenRun { run_id, committed }
+                }
+                _ => ColdStartTailSettlement::Settled,
+            },
+        )
     }
 
     async fn materialize_session_resume_verdict(

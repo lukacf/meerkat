@@ -2,13 +2,20 @@
 //!
 //! A child host process creates a persistent mob whose worker's scripted
 //! model calls the shell tool with a delayed file effect, starts a worker
-//! turn, and is SIGKILLed while the tool runs. The next host incarnation
-//! (this test process) resumes the mob. Reviving the worker must settle the
-//! member session's process custody before it serves: kill the orphaned
-//! tool, settle the interrupted input instead of replaying it (a replay would
-//! reach the model without the notice and call the tool again), and record
-//! the typed notice, preceded by the interrupted request, so the worker's
-//! next turn sees both exactly once.
+//! turn, and is SIGKILLed while the tool runs. The worker's run is open at
+//! its committed round (the round commit precedes the tool), so the next host
+//! incarnation (this test process) resumes it when it revives the worker.
+//! Reviving the worker must settle the member session's process custody
+//! before it serves (kill the orphaned tool, so its delayed effect never
+//! happens), and the resumed round must answer the interrupted call with an
+//! outcome-uncertain result instead of running it again. The run then ends
+//! once, without an interrupted-run notice: the call's own result tells the
+//! model.
+//!
+//! The scripted tool appends a line to `runs` on every execution and signals
+//! `started.fifo` on its first execution only, so a call that runs again
+//! shows as a second line (and as its effect) instead of blocking on the
+//! FIFO.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![allow(
@@ -27,8 +34,7 @@ use std::time::Duration;
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder, PersistentSessionService};
 use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use meerkat_core::Message;
-use meerkat_core::tool_process::InterruptedToolRunDisposition;
-use meerkat_core::types::{HandlingMode, SystemNoticeBlock, SystemNoticeKind};
+use meerkat_core::types::{HandlingMode, SystemNoticeKind};
 use meerkat_mob::{
     AgentIdentity, MemberTurnOptions, MobBuilder, MobDefinition, MobId, MobRuntimeMode, MobStorage,
     Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
@@ -41,12 +47,17 @@ const TOOL_CALL_ID: &str = "call-mob-crash";
 const WORKER: &str = "w-1";
 const INTERRUPTED_PROMPT: &str = "create the effect file";
 const NEXT_PROMPT: &str = "what happened?";
+const ANSWER: &str = "noted";
+/// Bound on the host child reaching the tool; a child that exits first fails
+/// the row at once.
+const CHILD_BOUND: Duration = Duration::from_secs(180);
 
 /// Scripted model: on a fresh request (no tool results, no interrupted-run
 /// notice) it calls the shell tool; otherwise it answers.
 struct ScriptedShellClient {
     command: String,
     tool_calls: AtomicUsize,
+    requests: AtomicUsize,
     requests_seeing_notice: AtomicUsize,
 }
 
@@ -55,6 +66,7 @@ impl ScriptedShellClient {
         Self {
             command,
             tool_calls: AtomicUsize::new(0),
+            requests: AtomicUsize::new(0),
             requests_seeing_notice: AtomicUsize::new(0),
         }
     }
@@ -71,6 +83,7 @@ impl LlmClient for ScriptedShellClient {
         request: &'a LlmRequest,
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>
     {
+        self.requests.fetch_add(1, Ordering::SeqCst);
         let sees_notice = request.messages.iter().any(|message| {
             matches!(
                 message,
@@ -88,7 +101,7 @@ impl LlmClient for ScriptedShellClient {
         let mut events = Vec::new();
         let stop_reason = if answered {
             events.push(LlmEvent::TextDelta {
-                delta: "noted".to_string(),
+                delta: ANSWER.to_string(),
                 meta: None,
             });
             meerkat_core::StopReason::EndTurn
@@ -124,12 +137,78 @@ impl LlmClient for ScriptedShellClient {
     }
 }
 
+/// The scripted tool: one `runs` line per execution, the FIFO signal on the
+/// first execution only, then the delayed effect.
 fn tool_command(root: &Path) -> String {
     format!(
-        "echo started > '{}'; sleep 2; echo effect >> '{}'",
-        root.join("started.fifo").display(),
-        root.join("effect").display()
+        "echo ran >> '{runs}'; if [ ! -e '{once}' ]; then : > '{once}'; echo started > '{fifo}'; fi; sleep 2; echo effect >> '{effect}'",
+        runs = root.join("runs").display(),
+        once = root.join("started-once").display(),
+        fifo = root.join("started.fifo").display(),
+        effect = root.join("effect").display()
     )
+}
+
+/// How many times the scripted tool has run.
+fn tool_runs(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("runs"))
+        .map(|runs| runs.lines().count())
+        .unwrap_or(0)
+}
+
+/// Wait for the tool's line in `started.fifo`. A host that exits first, or
+/// never starts the tool within the bound, fails the row at once with its
+/// log.
+async fn tool_started(root: &Path, host: &mut std::process::Child) -> String {
+    let fifo = root.join("started.fifo");
+    // A plain thread, not a runtime blocking task, so a read that never ends
+    // cannot hold the test runtime's shutdown.
+    let reader = std::thread::spawn({
+        let fifo = fifo.clone();
+        move || std::fs::read_to_string(fifo)
+    });
+    let started = std::time::Instant::now();
+    loop {
+        if reader.is_finished() {
+            return reader
+                .join()
+                .expect("join the FIFO reader")
+                .expect("read the FIFO");
+        }
+        let failure = match host.try_wait().expect("poll the host") {
+            Some(status) => Some(format!("exited before its tool started ({status})")),
+            None if started.elapsed() > CHILD_BOUND => Some("never started its tool".to_string()),
+            None => None,
+        };
+        if let Some(failure) = failure {
+            let _ = host.kill();
+            let _ = host.wait();
+            // End the blocked read: a writer that opens and closes the FIFO
+            // gives it end of file. Detached, since its open blocks when the
+            // reader has already finished.
+            drop(std::thread::spawn(move || {
+                std::fs::OpenOptions::new().write(true).open(fifo)
+            }));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !reader.is_finished() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            if reader.is_finished() {
+                let line = reader
+                    .join()
+                    .expect("join the FIFO reader")
+                    .unwrap_or_default();
+                if !line.is_empty() {
+                    return line;
+                }
+            }
+            panic!(
+                "the host {failure}: {}",
+                std::fs::read_to_string(root.join("host.log")).unwrap_or_default()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 fn mkfifo(path: &Path) {
@@ -258,30 +337,23 @@ async fn mob_member_interrupted_by_host_death_is_settled_not_replayed_on_resume(
     let mob_id = format!("custody-mob-{}", meerkat_core::time_compat::new_uuid_v7());
     std::fs::write(root.join("mob-id"), &mob_id).expect("mob id");
 
+    let log = std::fs::File::create(root.join("host.log")).expect("host log");
     let mut host = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
         .env(PHASE_ENV, "host")
         .env(ROOT_ENV, root)
         .env("MEERKAT_DISABLE_GRAPH_DECODE_MEMO", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(log.try_clone().expect("host log"))
+        .stderr(log)
         .spawn()
         .expect("spawn host");
-    // Block (no polling) until the tool itself reports it is running.
-    let fifo = root.join("started.fifo");
-    let started = tokio::time::timeout(
-        Duration::from_secs(180),
-        tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo)),
-    )
-    .await;
+    // The tool itself reports it is running.
+    let started = tool_started(root, &mut host).await;
     // Abrupt host death mid-tool.
     host.kill().unwrap();
     host.wait().unwrap();
-    let started = started
-        .expect("the worker's shell tool never started")
-        .unwrap()
-        .unwrap();
     assert_eq!(started.trim(), "started");
+    assert_eq!(tool_runs(root), 1, "the first host ran the tool once");
     let session_id = meerkat::SessionId::parse(
         std::fs::read_to_string(root.join("session-id"))
             .expect("session id")
@@ -289,7 +361,8 @@ async fn mob_member_interrupted_by_host_death_is_settled_not_replayed_on_resume(
     )
     .expect("valid session id");
 
-    // Next host: resume the mob and give the revived worker a real turn.
+    // Next host: resume the mob, which revives the worker and resumes its
+    // open run, then give the worker a real turn, queued behind that run.
     let client = Arc::new(ScriptedShellClient::new(tool_command(root)));
     let service = build_service(root, Arc::clone(&client)).await;
     let storage = MobStorage::persistent(root.join("mob.db")).expect("reopen mob storage");
@@ -318,56 +391,87 @@ async fn mob_member_interrupted_by_host_death_is_settled_not_replayed_on_resume(
             .expect("worker turn completes");
     })
     .await
-    .expect("worker turn completes in time");
+    .unwrap_or_else(|_| {
+        panic!(
+            "worker turn completes in time (the interrupted call ran {} times)",
+            tool_runs(root)
+        )
+    });
 
+    assert_eq!(tool_runs(root), 1, "the interrupted call ran again");
     assert_eq!(
         client.tool_calls.load(Ordering::SeqCst),
         0,
-        "the interrupted worker input was replayed"
+        "the model never asked for the call again"
+    );
+    assert_eq!(
+        client.requests.load(Ordering::SeqCst),
+        2,
+        "two model calls: the resumed run's next one and the new turn's"
     );
     assert_eq!(
         client.requests_seeing_notice.load(Ordering::SeqCst),
-        1,
-        "the worker's next turn sees the interrupted-run notice"
+        0,
+        "the call's own result tells the model: no interrupted-run notice"
     );
     let session = service
         .load_authoritative_session(&session_id)
         .await
         .expect("load worker session")
         .expect("worker session");
-    let prompts = session
-        .messages()
+    let messages = session.messages();
+    let prompts = messages
         .iter()
         .filter(|message| {
             matches!(message, Message::User(user) if user.text_content().contains(INTERRUPTED_PROMPT))
         })
         .count();
     assert_eq!(prompts, 1, "the interrupted request appears exactly once");
-    let blocks: Vec<&SystemNoticeBlock> = session
-        .messages()
+    let calls = messages
+        .iter()
+        .filter(|message| {
+            matches!(message, Message::BlockAssistant(answer)
+                if answer.tool_calls().any(|call| call.id == TOOL_CALL_ID))
+        })
+        .count();
+    assert_eq!(calls, 1, "the model asked for the call exactly once");
+    let results: Vec<String> = messages
         .iter()
         .filter_map(|message| match message {
-            Message::SystemNotice(notice)
-                if notice.kind == SystemNoticeKind::ToolProcessRecovery =>
-            {
-                Some(notice.blocks.iter())
-            }
+            Message::ToolResults { results, .. } => Some(results),
             _ => None,
         })
         .flatten()
+        .filter(|result| result.tool_use_id == TOOL_CALL_ID)
+        .map(meerkat_core::ToolResult::text_content)
         .collect();
-    assert_eq!(blocks.len(), 1, "exactly one interrupted-run notice");
+    assert_eq!(
+        results.len(),
+        1,
+        "the call has exactly one result: {results:?}"
+    );
     assert!(
-        matches!(
-            blocks[0],
-            SystemNoticeBlock::ToolProcessInterrupted {
-                tool_call_id: Some(id),
-                disposition: InterruptedToolRunDisposition::InputsSettled { inputs: 1, .. },
-                ..
-            } if id == TOOL_CALL_ID
-        ),
-        "{:?}",
-        blocks[0]
+        results[0].contains("outcome_uncertain") && results[0].contains("It was not run again"),
+        "the interrupted call is answered outcome-uncertain: {}",
+        results[0]
+    );
+    assert!(
+        !messages.iter().any(|message| matches!(
+            message,
+            Message::SystemNotice(notice) if notice.kind == SystemNoticeKind::ToolProcessRecovery
+        )),
+        "no interrupted-run notice"
+    );
+    let answers = messages
+        .iter()
+        .filter(|message| {
+            matches!(message, Message::BlockAssistant(answer)
+                if answer.text_blocks().collect::<String>() == ANSWER)
+        })
+        .count();
+    assert_eq!(
+        answers, 2,
+        "the resumed run and the new turn answered once each"
     );
     // The killed tool's delayed effect never happens.
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -375,5 +479,6 @@ async fn mob_member_interrupted_by_host_death_is_settled_not_replayed_on_resume(
         !root.join("effect").exists(),
         "the interrupted tool's effect happened"
     );
+    assert_eq!(tool_runs(root), 1, "the interrupted call ran again");
     handle.shutdown().await.expect("shutdown resumed mob");
 }

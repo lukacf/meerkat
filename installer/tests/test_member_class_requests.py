@@ -1,7 +1,7 @@
-"""Forge input mapping only; these tests cannot qualify native admission.
+"""Forge mapping and call ordering; these tests cannot qualify native admission.
 
-SDK cases require the selected real Toolkit artifact. No fake native reply or
-Console enrollment is used to turn a prepared request into an admitted member.
+SDK cases require the selected real Toolkit artifact. Client spies check the
+host boundary only; they cannot prove native authority or an admitted member.
 """
 import asyncio
 from copy import deepcopy
@@ -12,7 +12,7 @@ import pytest
 
 from launchkit.connect_installer_caller import CustodyError
 from launchkit.connect_member_class_requests import (
-    _installation_inputs, _roster_member, bind_member_class_requests, member_class_add_request,
+    _installation_inputs, _roster_member, bind_member_class_requests, _member_class_add_request,
 )
 from test_application_extension import load_host
 from test_selected_member_classes import ClassFixture
@@ -43,7 +43,7 @@ class RequestFixture(ClassFixture):
                 "event_domain": {"authority": deepcopy(self.ingress), "namespace": "selected-events"},
                 "application_parent": None, "controller_parent": None}]}
         self.value["application"]["realm"] = {"realm_id": "fixture-realm"}
-        self.value["owner"] = {"native_host": self.native}
+        self.value["owner"] = {"deployment": "fixture-deployment", "native_host": self.native}
         self.select()
         self.observe()
 
@@ -71,7 +71,7 @@ def test_public_member_codec(identity, member):
 def test_request_copies_selected_facts_and_survives_cold_reconstruction(tmp_path, sdk):
     f = RequestFixture(tmp_path)
     spec = sdk.Spec(identity="reader:one", profile="reusable-reader", context={"records": ["one"]})
-    request = member_class_add_request(f.callbacks, f.deployment, admission_id="saved-add-one",
+    request = _member_class_add_request(f.callbacks, f.deployment, admission_id="saved-add-one",
         class_id="reader", spec=spec)
     assert isinstance(request, sdk.Request)
     wire = json.loads(json.dumps(request.wire()))
@@ -97,25 +97,32 @@ def test_request_copies_selected_facts_and_survives_cold_reconstruction(tmp_path
     assert request.wire() == wire
     f.select()
     f.observe()
-    cold = member_class_add_request(f.callbacks, f.deployment, admission_id="saved-add-one",
+    cold = _member_class_add_request(f.callbacks, f.deployment, admission_id="saved-add-one",
         class_id="reader", spec=sdk.Spec.from_dict(wire["spec"]))
     assert cold.wire() == wire
-    another = member_class_add_request(f.callbacks, f.deployment, admission_id="saved-add-two",
+    another = _member_class_add_request(f.callbacks, f.deployment, admission_id="saved-add-two",
         class_id="reader", spec=sdk.Spec.from_dict(wire["spec"]))
     assert another.route["id"] != request.route["id"]
     assert another.controller["issuance_id"] != request.controller["issuance_id"]
-    request.route["origin"]["requester"]["id"] = "changed-output"
+    f.value["owner"]["deployment"] = "other-deployment"
+    f.select()
+    f.observe()
+    other_deployment = _member_class_add_request(f.callbacks, f.deployment, admission_id="saved-add-one",
+        class_id="reader", spec=sdk.Spec.from_dict(wire["spec"]))
+    assert other_deployment.route["id"] != request.route["id"]
+    assert other_deployment.controller["issuance_id"] != request.controller["issuance_id"]
     assert cold.wire() == wire
     assert _installation_inputs(f.callbacks)[0] == f.human
 
 
-@pytest.mark.parametrize("case", ["missing-owner", "realm", "classes", "no-route", "ambiguous-domain",
+@pytest.mark.parametrize("case", ["missing-owner", "missing-deployment", "realm", "classes", "no-route", "ambiguous-domain",
     "requester", "subject", "ingress", "authentication", "event", "missing-namespace",
     "logical-owner", "human-domain", "audience", "duplicate-member", "unqualified-ingress"])
 def test_missing_or_inconsistent_selected_mapping_is_refused(tmp_path, case):
     f = RequestFixture(tmp_path)
     route = f.native["routes"][0]
     if case == "missing-owner": del f.value["owner"]
+    elif case == "missing-deployment": del f.value["owner"]["deployment"]
     elif case == "realm": f.native["realm"] = "another-realm"
     elif case == "classes": f.native["member_classes"] = []
     elif case == "no-route": f.native["routes"] = []
@@ -162,25 +169,27 @@ def test_request_refuses_invalid_intent_or_lost_selection(tmp_path, sdk, case):
     elif case == "invalid-deadline": intent["hold_timeout_ms"] = 0
     else: intent["requester"] = f.human
     with pytest.raises((CustodyError, ValueError, TypeError, RuntimeError)):
-        member_class_add_request(f.callbacks, f.deployment, **intent)
+        _member_class_add_request(f.callbacks, f.deployment, **intent)
 
 
 @pytest.mark.parametrize("change", ["runtime", "context-runtime", "application", "callbacks", "shutdown", "stop", "owner"])
-def test_bound_factory_refuses_stale_lifetime_before_mapping(tmp_path, monkeypatch, change):
+async def test_bound_entry_refuses_stale_lifetime_before_mapping(tmp_path, monkeypatch, change):
     f = RequestFixture(tmp_path)
-    runtime = object()
+    result = object()
+    runtime = SimpleNamespace(member_classes=SimpleNamespace(begin_add=lambda request, **kwargs: result))
     context = SimpleNamespace(runtime=runtime, stop_event=asyncio.Event())
     app = SimpleNamespace(dynamic=True, context=context, deployment=f.deployment, _application_callbacks=f.callbacks)
     owner = SimpleNamespace(runtime=runtime, application=app, callbacks=f.callbacks,
         _shutdown_task=None, _require_current=lambda: None)
     seen = []
-    result = object()
     def prepare(callbacks, deployment, **intent):
         seen.append((callbacks, deployment, intent))
-        return result
-    monkeypatch.setattr("launchkit.connect_member_class_requests.member_class_add_request", prepare)
+        return SimpleNamespace(wire=lambda: {"id": intent["admission_id"]})
+    async def retain(value): pass
+    async def publish(): pass
+    monkeypatch.setattr("launchkit.connect_member_class_requests._member_class_add_request", prepare)
     bind_member_class_requests(owner, app, runtime)
-    assert context._member_class_requests(admission_id="one") is result
+    assert await context._begin_member_class_add(admission_id="one", retain_request=retain, publish=publish) is result
     assert seen == [(f.callbacks, f.deployment, {"admission_id": "one"})]
     if change == "runtime": owner.runtime = object()
     elif change == "context-runtime": context.runtime = object()
@@ -191,28 +200,95 @@ def test_bound_factory_refuses_stale_lifetime_before_mapping(tmp_path, monkeypat
     else:
         def expired(): raise CustodyError("Expired owner")
         owner._require_current = expired
-    with pytest.raises(CustodyError): context._member_class_requests(admission_id="two")
+    with pytest.raises(CustodyError):
+        await context._begin_member_class_add(admission_id="two", retain_request=retain, publish=publish)
     assert len(seen) == 1
 
 
-def test_context_has_no_mapping_before_connected_host(tmp_path, monkeypatch):
+async def test_context_has_no_mapping_before_connected_host(tmp_path, monkeypatch):
     host = load_host(monkeypatch, tmp_path)
     context = host.ApplicationContext(tmp_path, {}, asyncio.Event())
     with pytest.raises(RuntimeError, match="connected selected"):
-        context.member_class_add_request(admission_id="one", class_id="reader", spec=object())
+        await context.begin_member_class_add(admission_id="one", class_id="reader", spec=object(),
+            retain_request=lambda value: None, publish=lambda: None)
+    assert not hasattr(context, "member_class_add_request")
     bind_member_class_requests(object(), SimpleNamespace(dynamic=False), object())
 
 
-def test_bound_factory_rechecks_owner_after_preparation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["stop", "changed-plan", "retention-error", "cancelled"])
+async def test_no_native_submission_when_retention_or_currentness_fails(tmp_path, monkeypatch, failure):
     f = RequestFixture(tmp_path)
-    runtime = object()
+    runtime = SimpleNamespace(member_classes=SimpleNamespace(
+        begin_add=lambda *args, **kwargs: pytest.fail("No Add may be submitted")))
     context = SimpleNamespace(runtime=runtime, stop_event=asyncio.Event())
     app = SimpleNamespace(dynamic=True, context=context, deployment=f.deployment, _application_callbacks=f.callbacks)
     owner = SimpleNamespace(runtime=runtime, application=app, callbacks=f.callbacks,
         _shutdown_task=None, _require_current=lambda: None)
     def prepare(*args, **kwargs):
-        context.stop_event.set()
-        return object()
-    monkeypatch.setattr("launchkit.connect_member_class_requests.member_class_add_request", prepare)
+        return SimpleNamespace(wire=lambda: {"id": "original-request"})
+    async def retain(value):
+        assert isinstance(value, str)
+        if failure == "stop": context.stop_event.set()
+        elif failure == "changed-plan": f.path.write_bytes(f.path.read_bytes() + b" ")
+        elif failure == "retention-error": raise OSError("durable write failed")
+        else: raise asyncio.CancelledError()
+    async def publish(): pytest.fail("No listing may occur")
+    owner._require_current = f.callbacks._current
+    monkeypatch.setattr("launchkit.connect_member_class_requests._member_class_add_request", prepare)
     bind_member_class_requests(owner, app, runtime)
-    with pytest.raises(CustodyError): context._member_class_requests(admission_id="one")
+    error = {"retention-error": OSError, "cancelled": asyncio.CancelledError}.get(failure, CustodyError)
+    with pytest.raises(error):
+        await context._begin_member_class_add(admission_id="one", retain_request=retain, publish=publish)
+
+
+async def test_host_retains_immutable_original_then_submits_private_request_once(tmp_path, sdk):
+    f = RequestFixture(tmp_path)
+    spec = sdk.Spec(identity="reader:one", profile="reusable-reader", context={"records": ["original"]})
+    events = []
+    saved = tmp_path / "app-admitting-request.json"
+    attempt = object()
+    def begin(request, *, publish):
+        assert isinstance(request, sdk.Request)
+        assert request.wire() == json.loads(saved.read_text())
+        assert request.spec.context == {"records": ["original"]}
+        assert publish is publish_listed
+        events.append("native-submit")
+        # A native write has an exact correlation. Do not lose it by checking
+        # currentness again after the synchronous SDK submission has happened.
+        context.stop_event.set()
+        return attempt
+    runtime = SimpleNamespace(member_classes=SimpleNamespace(begin_add=begin))
+    context = SimpleNamespace(runtime=runtime, stop_event=asyncio.Event())
+    app = SimpleNamespace(dynamic=True, context=context, deployment=f.deployment, _application_callbacks=f.callbacks)
+    owner = SimpleNamespace(runtime=runtime, application=app, callbacks=f.callbacks,
+        _shutdown_task=None, _require_current=f.callbacks._current)
+    async def retain(value):
+        assert isinstance(value, str)
+        saved.write_text(value)
+        changed = json.loads(value)
+        changed["route"]["represented_subject"]["id"] = "forged-subject"
+        spec.context["records"].append("changed-after-retention")
+        events.append("app-retained")
+    async def publish_listed(): pytest.fail("The host cannot invoke listing itself")
+    bind_member_class_requests(owner, app, runtime)
+    result = await context._begin_member_class_add(admission_id="saved-add", class_id="reader", spec=spec,
+        retain_request=retain, publish=publish_listed)
+    assert result is attempt
+    assert events == ["app-retained", "native-submit"]
+
+
+@pytest.mark.parametrize("extra", [{"mcp": object()}, {"mcp": None}, {"console_enrollment_id": 42}])
+async def test_host_entry_refuses_mcp_and_enrollment_before_retention(tmp_path, extra):
+    f = RequestFixture(tmp_path)
+    runtime = SimpleNamespace(member_classes=SimpleNamespace(
+        begin_add=lambda *args, **kwargs: pytest.fail("MCP entry must not submit")))
+    context = SimpleNamespace(runtime=runtime, stop_event=asyncio.Event())
+    app = SimpleNamespace(dynamic=True, context=context, deployment=f.deployment, _application_callbacks=f.callbacks)
+    owner = SimpleNamespace(runtime=runtime, application=app, callbacks=f.callbacks,
+        _shutdown_task=None, _require_current=f.callbacks._current)
+    async def retain(value): pytest.fail("MCP entry must not retain")
+    async def publish(): pytest.fail("MCP entry must not list")
+    bind_member_class_requests(owner, app, runtime)
+    with pytest.raises(TypeError):
+        await context._begin_member_class_add(admission_id="saved-add", class_id="reader", spec=object(),
+            retain_request=retain, publish=publish, **extra)

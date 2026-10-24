@@ -84,20 +84,22 @@ class ApplicationContext:
         self.runtime = None
         self.console_url = None
         self._application = None
-        self._member_class_requests = None
+        self._begin_member_class_add = None
 
-    def member_class_add_request(self, *, admission_id, class_id, spec,
-                                 hold_timeout_ms=60_000, expected_predecessor=None, mcp=None):
-        """Map application intent to the selected installation's unissued Add inputs.
+    async def begin_member_class_add(self, *, admission_id, class_id, spec, retain_request, publish,
+                                     hold_timeout_ms=60_000, expected_predecessor=None):
+        """Retain and submit an ordinary Add through this selected installation.
 
-        This host-only operation does not authenticate the triggering user or
-        grant an action. The application checks its own policy and persists the
-        returned request before calling runtime.member_classes.begin_add.
+        The application checks domain policy and durably saves the immutable
+        request JSON in retain_request before the host calls native begin_add.
+        Native owns authority enforcement, held publication and the outcome.
+        This connector entry accepts no MCP intent or Console enrollment.
         """
-        if self._member_class_requests is None:
+        if self._begin_member_class_add is None:
             raise RuntimeError("Member Add mapping requires a connected selected Fresh or Restore application host.")
-        return self._member_class_requests(admission_id=admission_id, class_id=class_id, spec=spec,
-            hold_timeout_ms=hold_timeout_ms, expected_predecessor=expected_predecessor, mcp=mcp)
+        return await self._begin_member_class_add(admission_id=admission_id, class_id=class_id, spec=spec,
+            retain_request=retain_request, publish=publish,
+            hold_timeout_ms=hold_timeout_ms, expected_predecessor=expected_predecessor)
 
     async def reconcile_agents(self):
         """Validate application desired identities, then use native reconciliation."""

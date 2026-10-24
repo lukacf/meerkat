@@ -1,11 +1,12 @@
-"""Lower application Add intent using the original installation's selections.
+"""Submit application Add intent using the original installation's selections.
 
-This constructs an unissued request, never an admission or authentication result.
+The host builds and submits unissued inputs, never an authentication result.
 The application owns its decision and durable admitting row; native owns Add,
-controller issuance, held publication and the eventual outcome.
+authority enforcement, controller issuance, held publication and the outcome.
 """
 from copy import deepcopy
 import hashlib
+import json
 import re
 
 from .connect_installer_caller import CustodyError, _json, _same_member_classes
@@ -44,6 +45,9 @@ def _installation_inputs(callbacks):
             or native["realm"] != realm.get("realm_id")
             or not _same_member_classes(list(callbacks.member_classes.values()), native.get("member_classes", []))):
         raise CustodyError("Member Add requires the original installation's native class and realm selection.")
+    deployment = owner.get("deployment")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise CustodyError("Member Add requires the original installation's deployment identity.")
     human = native.get("remote_operator")
     ingress_domain = native.get("ingress_domain")
     ingress = ingress_domain.get("authority") if isinstance(ingress_domain, dict) else None
@@ -82,12 +86,12 @@ def _installation_inputs(callbacks):
         selected.append((authentication, event))
     if not selected or any(item != selected[0] for item in selected[1:]):
         raise CustodyError("Member Add needs unambiguous selected Console authentication and event domains.")
-    return human, ingress, selected[0]
+    return human, ingress, selected[0], deployment
 
 
-def member_class_add_request(callbacks, deployment, *, admission_id, class_id, spec,
-                             hold_timeout_ms=60_000, expected_predecessor=None, mcp=None):
-    """Prepare only; callers persist this exact request before native begin_add."""
+def _member_class_add_request(callbacks, deployment, *, admission_id, class_id, spec,
+                              hold_timeout_ms=60_000, expected_predecessor=None):
+    """Private construction; only the bound host submits the returned request."""
     from meerkat_meta.identity_first_models import DurableAgentSpec
     from meerkat_toolkit.member_classes import MemberClassAddRequest
 
@@ -105,11 +109,12 @@ def member_class_add_request(callbacks, deployment, *, admission_id, class_id, s
     if (not isinstance(admission_id, str) or not admission_id.strip()
             or len(admission_id.encode("utf-8")) > 256):
         raise ValueError("Member Add requires a bounded durable admission ID.")
-    human, ingress, (authentication, event) = _installation_inputs(callbacks)
+    human, ingress, (authentication, event), deployment_id = _installation_inputs(callbacks)
     logical = {"kind": "shared_agent", "id": exact.identity, "qualification": deepcopy(ingress["qualification"])}
     member = {"mob_id": definition["id"], "member": _roster_member(exact.identity), "role": exact.profile}
-    # Domain-separated deterministic names retain the original admission across restart.
-    key = hashlib.sha256(admission_id.encode("utf-8")).hexdigest()
+    # Bind deterministic names to deployment and admission without delimiter ambiguity.
+    key = hashlib.sha256(json.dumps([deployment_id, admission_id], ensure_ascii=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
     route_id = "forge-member-route:" + key
     request = MemberClassAddRequest(id=admission_id, spec=exact,
         instance={"class": class_id, "member": {"member": member, "logical_owner": deepcopy(logical),
@@ -121,14 +126,14 @@ def member_class_add_request(callbacks, deployment, *, admission_id, class_id, s
             "event_domain": deepcopy(event)},
         controller={"target": {"kind": "original_route", "route": route_id},
             "issuance_id": "forge-member-controller:" + key},
-        hold_timeout_ms=hold_timeout_ms, expected_predecessor=deepcopy(expected_predecessor), mcp=deepcopy(mcp))
+        hold_timeout_ms=hold_timeout_ms, expected_predecessor=deepcopy(expected_predecessor))
     request.wire()
     callbacks._current()
     return request
 
 
 def bind_member_class_requests(owner, application, runtime):
-    """Install a request factory after successful Fresh/Restore connection."""
+    """Bind host construction and submission after successful Fresh/Restore."""
     if not application.dynamic:
         return
     callbacks, context = owner.callbacks, application.context
@@ -140,10 +145,18 @@ def bind_member_class_requests(owner, application, runtime):
                 or owner._shutdown_task is not None or context.stop_event.is_set()):
             raise CustodyError("Member Add request mapping needs its current connected application owner.")
 
-    def prepare(**intent):
+    async def begin(*, retain_request, publish, **intent):
         current()
-        request = member_class_add_request(callbacks, application.deployment, **intent)
+        if not callable(retain_request) or not callable(publish):
+            raise TypeError("Member Add requires application retention and publication callbacks.")
+        request = _member_class_add_request(callbacks, application.deployment, **intent)
+        # The app owns durable retention. It receives immutable JSON, never the
+        # internal request or a dict alias it could alter before submission.
+        serialized = json.dumps(request.wire(), ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        await retain_request(serialized)
         current()
-        return request
+        # This synchronous SDK method writes once and returns its correlation.
+        # Do not lose that handle through a post-submission currentness check.
+        return runtime.member_classes.begin_add(request, publish=publish)
 
-    context._member_class_requests = prepare
+    context._begin_member_class_add = begin

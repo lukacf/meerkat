@@ -46,42 +46,55 @@ paired desired_roster/desired_edges hooks so Forge supplies the customizer, even
 before the first instance. Native governed Add and held completion still own
 admission; a declaration or desired row does not create or authorize a member.
 
-After a selected Fresh or Restore host connects, the application can prepare the
-selected SDK's MemberClassAddRequest through its host context:
+After a selected Fresh or Restore host connects, the application can begin an
+ordinary declared class Add through its host context:
 ```python
 from meerkat_meta.identity_first_models import DurableAgentSpec
 
 spec = DurableAgentSpec(identity=identity, profile=context.deployment["applicationProfiles"][class_id])
-request = context.member_class_add_request(
-    admission_id=admission_id, class_id=class_id, spec=spec)
+attempt = await context.begin_member_class_add(
+    admission_id=admission_id, class_id=class_id, spec=spec,
+    retain_request=retain_original_request, publish=publish_listed_owner)
 ```
 The application chooses a durable admission_id, identity and declared ordinary
-class, checks its domain policy, and saves the exact request.wire() in its own
-admitting row before calling context.runtime.member_classes.begin_add(request,
-publish=...). Retain that original request for recovery; do not generate a new
-admission ID, infer admission from a desired row, or retry under changed facts.
+class and checks its domain policy first. Implement retain_original_request as an
+async callback that durably saves the supplied immutable request JSON string in
+the application's admitting row. Only after this callback succeeds and the host
+is still current does Forge call the selected runtime.member_classes.begin_add
+with its private detached request. The app never receives that mutable request.
+publish_listed_owner is the application's async durable listing callback, invoked
+by native held completion. Retain the original request for recovery; do not generate
+a new admission ID, infer admission from a desired row, or retry under changed facts.
 Read the selected member_classes reference with read_runtime_reference(name="roster")
-for native held completion, observations and recovery. Native owns issuance and
-the admission outcome; this synchronous factory only prepares unissued inputs.
+for the returned attempt, native held completion, observations and recovery.
+Native owns issuance and the admission outcome. Retention failure or host loss
+before submission sends no Add. After submission, keep the exact native attempt
+or the SDK's observation-unknown exception and its attempt; never blindly retry.
 
 Forge copies requester and represented_subject from the selected installation
 operator, copies ingress and domain facts from its pinned native seed routes,
 and derives the destination and logical owner for the exact durable identity.
 It omits issued application_parent, controller_parent and controller_route;
-native derives the held controller route and issues the parents. The application
-does not supply principal or route overrides. An absent or ambiguous installation
-mapping is refused, as are use before connection and use after shutdown or source
-replacement. Existing fixed-roster and replacement hosts do not gain this route.
+native derives the held controller route and issues the parents. This context
+API accepts no principal or route overrides. Native enforcement must compare the
+actual submitted authority facts with this installation; a Python mapping or
+private helper alone cannot enforce that boundary. An absent or ambiguous
+installation mapping is refused, as are use before connection and use after
+shutdown or source replacement. Existing fixed-roster and replacement hosts do
+not gain this route.
 
-The application may initiate Add for its declared classes under the installation
-operator's grant when its own domain policy permits the action. Record the trigger's
-connector and external subject as provenance. This factory does not authenticate
-that event or give its sender the operator's identity; a Google subject is not a
-native requester. A plain Add does not require current Console login enrollment.
-Optional mcp= intent with operator_self requires its own actual current
-Console enrollment; never borrow a Console login for a connector sender. The
-factory also accepts hold_timeout_ms and an explicitly observed expected_predecessor,
-with the selected SDK validating them. No checkpoint lookup or retry is implicit.
+The application may initiate Add for its ordinary declared classes under the
+installation operator's grant when its own domain policy permits the action.
+Record the trigger's connector and external subject as provenance. This entry does
+not authenticate that event or give its sender the operator's identity; a Google
+subject is not a native requester. Per-user requesters (an external user as
+requester) are outside this seam. A plain Add does not require current Console
+login enrollment.
+This host entry refuses MCP intent and Console enrollment, including a stored
+operator_self enrollment ID. A connector trigger cannot borrow the operator's
+live Console login. The entry accepts hold_timeout_ms and an explicitly observed
+expected_predecessor, with the selected SDK validating them. No checkpoint lookup
+or retry is implicit.
 
 Keep admitting rows separate from listed owners until native held completion calls
 the application's durable publication callback. Implement the class's real scoped

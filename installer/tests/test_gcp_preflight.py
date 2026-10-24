@@ -409,6 +409,27 @@ async def test_unknown_and_denied_preconditions_never_become_readiness(harness, 
     assert result["ready_for_plan"] is False and result["plan"] is None
 
 
+async def test_firewall_creation_requires_network_policy_permission(harness):
+    # The firewall insert also authorizes its network field. Being able to
+    # create firewall resources and read the VPC does not prove that right.
+    # https://docs.cloud.google.com/compute/docs/reference/rest/v1/firewalls/insert
+    cloud = harness[3]
+    permission = "compute.networks.updatePolicy"
+    path = "/v1/projects/" + PROJECT + ":testIamPermissions"
+    cloud.overrides[path] = RestResult(200, {
+        "permissions": [value for value in PERMISSIONS if value != permission],
+    })
+    result = await checked(harness)
+    requests = [body for _, url, body, _ in cloud.calls if urlsplit(url).path == path]
+    assert any("compute.firewalls.create" in body["permissions"]
+        and permission in body["permissions"] for body in requests)
+    assert "compute.firewalls.create" in cloud.overrides[path].value["permissions"]
+    assert row(result, "network")["status"] == "checked"
+    assert row(result, "permissions")["status"] == "blocked"
+    assert permission in row(result, "permissions")["detail"]
+    assert result["ready_for_plan"] is False and result["plan"] is None
+
+
 @pytest.mark.parametrize("override,status", [
     (RestResult(403, {"kind": "compute#instanceList", "items": []}), "unknown"),
     (RestResult(200, {}), "unknown"),

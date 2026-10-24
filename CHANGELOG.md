@@ -204,7 +204,8 @@ them.
   keeps its bytes, and the adaptive `LayerDecision` schema leaves it out, so
   packs stay compatible across versions. The wire forms refuse unknown fields,
   so an older host refuses a profile that sets `durable`. A spawn of a durable
-  profile on a mob whose session service keeps no persistent sessions is
+  profile on a mob whose member sessions do not outlive the process
+  (`MobSessionService::keeps_durable_member_sessions`, see Added) is
   refused with the new `MobError::NonDurableService { member_id, profile }`,
   under the existing `CAPABILITY_UNAVAILABLE` wire code (structured data kind
   `mob_non_durable_service`).
@@ -1248,13 +1249,25 @@ them.
   durable workers. The spawn records a durable identity
   (`SpawnContinuityIntent::DurableIdentity`, keyed by the member's identity),
   so a host can list and re-attach the worker after a restart
-  (`MobHandle::durable_identity_members`). A mob whose session service keeps
-  no persistent sessions refuses the spawn (`MobError::NonDurableService`)
+  (`MobHandle::durable_identity_members`). A mob whose member sessions do not
+  outlive the process refuses the spawn (`MobError::NonDurableService`)
   instead of spawning a worker that would not survive one. Like every member
   of a persisted mob, a durable worker is rebuilt on its session after a
   crash, kill or restart, and a run it was in continues from its last
   committed round. An explicit continuity intent on the spawn wins over the
   profile.
+
+- `meerkat-mob`: `MobSessionService::keeps_durable_member_sessions`, whether
+  the service's member sessions outlive the process, so a durable profile
+  can spawn on it. Only the durable-profile spawn checks read it: a mob whose
+  service answers `false` refuses the spawn with
+  `MobError::NonDurableService`, on every spawn path. Its default is
+  `supports_persistent_sessions`, so a service that does not override it
+  answers as before. A host that runs the persistent session service over
+  stores that do not outlive the process (in-memory stores) keeps the
+  persistent-session contract for everything else and answers `false` here.
+  A session-service wrapper around another service should forward it, as it
+  forwards `supports_persistent_sessions`.
 
 - `MobBuilder::with_durable_resume_gate`: a host's check before a durable
   worker's interrupted run resumes. The mob binds the `DurableResumeGate` on

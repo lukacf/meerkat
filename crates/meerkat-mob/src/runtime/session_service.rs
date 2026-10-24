@@ -1490,6 +1490,22 @@ pub trait MobSessionService:
         false
     }
 
+    /// Whether a durable worker profile (`durable = true`) can spawn its
+    /// members on this service: their sessions must outlive the process, so
+    /// a host can re-attach the worker and resume its run after a restart. A
+    /// mob whose service answers `false` refuses such a spawn with
+    /// [`crate::MobError::NonDurableService`] before anything exists. Only the
+    /// durable-profile spawn checks read this.
+    ///
+    /// The default is [`Self::supports_persistent_sessions`]. A host that runs
+    /// a persistent session service over stores that do not outlive the
+    /// process (in-memory stores) keeps that contract for everything else and
+    /// answers `false` here. A wrapper around another service should forward
+    /// this method, or the wrapped service's answer is lost.
+    fn keeps_durable_member_sessions(&self) -> bool {
+        self.supports_persistent_sessions()
+    }
+
     /// Cost contract for exact persisted-session authority observation.
     fn persisted_session_authority_read_cost(&self) -> PersistedSessionAuthorityReadCost {
         PersistedSessionAuthorityReadCost::Unsupported

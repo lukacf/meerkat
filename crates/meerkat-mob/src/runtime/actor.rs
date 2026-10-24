@@ -33346,9 +33346,9 @@ impl MobActor {
         };
         // A durable profile spawns its member with a durable identity, which
         // a host reads back to re-attach the worker after a restart. That
-        // needs a session service that keeps sessions, so a mob without one
-        // refuses the spawn before anything exists.
-        if profile.durable && !self.session_service.supports_persistent_sessions() {
+        // needs a session service whose member sessions outlive the process,
+        // so a mob without one refuses the spawn before anything exists.
+        if profile.durable && !self.session_service.keeps_durable_member_sessions() {
             reject_spawn_before_custody!(
                 "durable_profile",
                 MobError::NonDurableService {
@@ -37010,8 +37010,9 @@ impl MobActor {
         }
         // A policy auto-spawn of a durable profile is a durable worker like
         // any other spawn of it (see `enqueue_spawn_with_origin`): refused
-        // before anything exists on a mob without persistent sessions.
-        if profile.durable && !self.session_service.supports_persistent_sessions() {
+        // before anything exists on a mob whose member sessions do not
+        // outlive the process.
+        if profile.durable && !self.session_service.keeps_durable_member_sessions() {
             return Err(MobError::NonDurableService {
                 member_id: agent_identity.clone(),
                 profile: profile_name.clone(),

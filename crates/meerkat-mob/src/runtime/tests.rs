@@ -2263,6 +2263,10 @@ struct MockSessionService {
     /// Cleared by [`Self::keep_no_durable_sessions`]: the service then reports
     /// that it keeps no durable sessions, as an ephemeral service does.
     keeps_durable_sessions: AtomicBool,
+    /// Cleared by [`Self::keep_member_sessions_in_memory`]: the service keeps
+    /// the persistent-session contract, but its member sessions do not
+    /// outlive the process.
+    member_sessions_outlive_process: AtomicBool,
 }
 
 impl MockSessionService {
@@ -2429,12 +2433,20 @@ impl MockSessionService {
             interrupt_gate_entered: tokio::sync::Notify::new(),
             runtime_boundary_acknowledgements: RwLock::new(Vec::new()),
             keeps_durable_sessions: AtomicBool::new(true),
+            member_sessions_outlive_process: AtomicBool::new(true),
         }
     }
 
     /// Report, from now on, that this service keeps no durable sessions.
     fn keep_no_durable_sessions(&self) {
         self.keeps_durable_sessions.store(false, Ordering::SeqCst);
+    }
+
+    /// Report, from now on, that this service's member sessions do not
+    /// outlive the process, while it keeps the persistent-session contract.
+    fn keep_member_sessions_in_memory(&self) {
+        self.member_sessions_outlive_process
+            .store(false, Ordering::SeqCst);
     }
 
     async fn fail_subscribe_for_session(&self, session_id: SessionId) {
@@ -5491,6 +5503,11 @@ impl MobSessionService for MockSessionService {
 
     fn supports_persistent_sessions(&self) -> bool {
         self.keeps_durable_sessions.load(Ordering::SeqCst)
+    }
+
+    fn keeps_durable_member_sessions(&self) -> bool {
+        self.supports_persistent_sessions()
+            && self.member_sessions_outlive_process.load(Ordering::SeqCst)
     }
 
     fn supports_runtime_turn_apply(&self) -> bool {
@@ -31939,6 +31956,70 @@ async fn a_durable_profile_spawn_without_persistent_sessions_is_refused_typed() 
         .await
         .expect("an ordinary profile needs no persistent sessions");
     assert!(handle.get_member(&ordinary).await.expect("read").is_some());
+}
+
+/// A service that keeps the persistent-session contract, but whose member
+/// sessions do not outlive the process (a persistent service over in-memory
+/// stores), answers `keeps_durable_member_sessions` false: a durable
+/// profile's spawn is refused typed before any session is built, and an
+/// ordinary profile still spawns on the same mob.
+#[tokio::test]
+async fn a_durable_profile_spawn_on_member_sessions_kept_in_memory_is_refused_typed() {
+    let service = Arc::new(MockSessionService::new());
+    service.keep_member_sessions_in_memory();
+    let _ = service.enable_runtime_adapter();
+    assert!(
+        service.supports_persistent_sessions(),
+        "the service keeps the persistent-session contract"
+    );
+    let handle = MobBuilder::new(durable_worker_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create a mob whose member sessions live in memory");
+    let member = AgentIdentity::from("durable-worker-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let error = handle
+        .spawn_spec(spec)
+        .await
+        .expect_err("a durable profile needs member sessions that outlive the process");
+    assert!(
+        matches!(
+            &error,
+            MobError::NonDurableService { member_id, profile }
+                if member_id == &member && profile.as_str() == "worker"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(member_build_count(&service, &member).await, 0);
+    assert!(handle.get_member(&member).await.expect("read").is_none());
+
+    let ordinary = AgentIdentity::from("ordinary-lead-1");
+    handle
+        .spawn_spec(SpawnMemberSpec::new(
+            ProfileName::from("lead"),
+            ordinary.clone(),
+        ))
+        .await
+        .expect("an ordinary profile needs no durable member sessions");
+    assert!(handle.get_member(&ordinary).await.expect("read").is_some());
+}
+
+/// `keeps_durable_member_sessions` defaults to the persistent-session
+/// contract: a service that does not answer it (here a decorator that
+/// forwards only `supports_persistent_sessions`) answers what that contract
+/// answers, so a durable profile spawns exactly where it did before.
+#[test]
+fn durable_member_sessions_default_to_the_persistent_session_contract() {
+    let inner = Arc::new(MockSessionService::new());
+    let service = PersistedListingSessionService::new(Arc::clone(&inner));
+    assert!(service.supports_persistent_sessions());
+    assert!(MobSessionService::keeps_durable_member_sessions(&service));
+
+    inner.keep_no_durable_sessions();
+    assert!(!service.supports_persistent_sessions());
+    assert!(!MobSessionService::keeps_durable_member_sessions(&service));
 }
 
 /// A policy auto-spawn of a durable profile is refused the same way, before

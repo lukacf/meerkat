@@ -531,7 +531,7 @@ Knowledge service read access does not ingest data; understand what knowledge sh
 retained/shared and state its actual ingestion/hosting requirements later.
 When package_availability.design_constraints is present, respect that selected
 runtime's limits in the proposed roles, topology, instructions and requirements.
-When package_availability.source_authoring is present, use that compiler-owned
+When package_availability.source_authoring is present and the requested work needs setup, use that compiler-owned
 contract to author the desired setup caller and helper. It is bound to the current
 plan and selected artifacts, not proof that a revised candidate is supported.
 Request inspect_blueprint with include_schema:true before claiming an authoring

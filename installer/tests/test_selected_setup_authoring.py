@@ -92,7 +92,7 @@ def test_normal_clarification_authors_supported_caller_from_host_contract(
             # tool. It does not prove that an LLM makes the same design choice.
             edits.extend([
                 {"op": "add", "path": "/blueprint/agent_classes/1", "value": desired_helper},
-                {"op": "replace", "path": "/blueprint/acquisition",
+                {"op": "add", "path": "/blueprint/acquisition",
                     "value": {**desired_acquisition, **requirements["acquisition"]}},
             ])
         result = await author.publish_guide_edit(edit_args(author, edits))

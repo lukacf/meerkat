@@ -84,6 +84,20 @@ class ApplicationContext:
         self.runtime = None
         self.console_url = None
         self._application = None
+        self._member_class_requests = None
+
+    def member_class_add_request(self, *, admission_id, class_id, spec,
+                                 hold_timeout_ms=60_000, expected_predecessor=None, mcp=None):
+        """Map application intent to the selected installation's unissued Add inputs.
+
+        This host-only operation does not authenticate the triggering user or
+        grant an action. The application checks its own policy and persists the
+        returned request before calling runtime.member_classes.begin_add.
+        """
+        if self._member_class_requests is None:
+            raise RuntimeError("Member Add mapping requires a connected selected Fresh or Restore application host.")
+        return self._member_class_requests(admission_id=admission_id, class_id=class_id, spec=spec,
+            hold_timeout_ms=hold_timeout_ms, expected_predecessor=expected_predecessor, mcp=mcp)
 
     async def reconcile_agents(self):
         """Validate application desired identities, then use native reconciliation."""

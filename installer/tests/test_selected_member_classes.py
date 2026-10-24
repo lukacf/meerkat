@@ -157,6 +157,7 @@ async def test_shared_workflow_only_declarations_keep_the_typed_refusal(tmp_path
 async def test_selected_startup_retains_actual_dynamic_providers_and_customizer(tmp_path, monkeypatch, mode):
     f = startup_fixture(tmp_path, monkeypatch, mode)
     await f.owner.prepare(f.app)
+    assert getattr(f.app.context, "_member_class_requests", None) is None
     config = f.owner.builder_config(roster_provider=f.app, topology_provider=f.app,
         agent_customizer=f.app, persistent_state=str(f.root / ".mobkit/state"))
     runtime = await f.owner.connect(config, f.app)
@@ -164,7 +165,10 @@ async def test_selected_startup_retains_actual_dynamic_providers_and_customizer(
     assert config.roster_provider is config.topology_provider is config.agent_customizer is f.app
     assert f.app._application_callbacks is f.owner.callbacks
     assert set(f.owner.callbacks.member_classes) == {"reader"}
+    assert callable(f.app.context._member_class_requests)
     await f.owner.shutdown(runtime)
+    with pytest.raises(CustodyError):
+        f.app.context._member_class_requests(admission_id="after-shutdown", class_id="reader", spec=object())
 
 
 @pytest.mark.parametrize("mode", ["fresh", "restored"])

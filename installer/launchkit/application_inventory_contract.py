@@ -46,18 +46,42 @@ paired desired_roster/desired_edges hooks so Forge supplies the customizer, even
 before the first instance. Native governed Add and held completion still own
 admission; a declaration or desired row does not create or authorize a member.
 
-For the selected SDK's MemberClassAddRequest, route describes a requested local
-Console source WITHOUT issued application_parent or controller_parent. Omit those
-parents or leave them null; the SDK rejects non-null parents. controller carries
-the issuance intent (target, issuance_id and optional controller_route), not
-pre-issued credentials. Read the exact selected member_classes reference through
-read_runtime_reference(name="roster") and call
-context.runtime.member_classes.begin_add(request, publish=...) on that runtime.
-Supply the real member, class/profile, principal and route facts from the trusted
-application entry. Native validates these facts and owns issuance. Do not invent
-an actor or treat a model-supplied class id or a Google identity as native authority.
-If that authenticated-entry mapping is missing, name the exact missing input;
-do not report that begin_add requires pre-issued parents or does not exist.
+After a selected Fresh or Restore host connects, the application can prepare the
+selected SDK's MemberClassAddRequest through its host context:
+```python
+from meerkat_meta.identity_first_models import DurableAgentSpec
+
+spec = DurableAgentSpec(identity=identity, profile=context.deployment["applicationProfiles"][class_id])
+request = context.member_class_add_request(
+    admission_id=admission_id, class_id=class_id, spec=spec)
+```
+The application chooses a durable admission_id, identity and declared ordinary
+class, checks its domain policy, and saves the exact request.wire() in its own
+admitting row before calling context.runtime.member_classes.begin_add(request,
+publish=...). Retain that original request for recovery; do not generate a new
+admission ID, infer admission from a desired row, or retry under changed facts.
+Read the selected member_classes reference with read_runtime_reference(name="roster")
+for native held completion, observations and recovery. Native owns issuance and
+the admission outcome; this synchronous factory only prepares unissued inputs.
+
+Forge copies requester and represented_subject from the selected installation
+operator, copies ingress and domain facts from its pinned native seed routes,
+and derives the destination and logical owner for the exact durable identity.
+It omits issued application_parent, controller_parent and controller_route;
+native derives the held controller route and issues the parents. The application
+does not supply principal or route overrides. An absent or ambiguous installation
+mapping is refused, as are use before connection and use after shutdown or source
+replacement. Existing fixed-roster and replacement hosts do not gain this route.
+
+This factory does not authenticate a connector event or give its sender the
+installation operator's identity. A Google subject stays application provenance;
+it is not a native requester. Whether an application trigger may initiate an Add
+under the installation operator's grant is a separate product/domain decision,
+not permission supplied by this API. A plain Add does not require Console login
+enrollment. Optional mcp= intent with operator_self requires its own actual current
+Console enrollment; never borrow a Console login for a connector sender. The
+factory also accepts hold_timeout_ms and an explicitly observed expected_predecessor,
+with the selected SDK validating them. No checkpoint lookup or retry is implicit.
 
 Keep admitting rows separate from listed owners until native held completion calls
 the application's durable publication callback. Implement the class's real scoped

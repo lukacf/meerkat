@@ -653,6 +653,8 @@ class FreshApplicationStartup:
             await self._require_source_current_async()
             self._require_current()
             _require_model_builder(self, config)
+            from .connect_member_class_requests import bind_member_class_requests
+            bind_member_class_requests(self, application, runtime)
             return runtime
         except BaseException as original_failure:
             try:
@@ -902,6 +904,8 @@ class RestoredApplicationStartup:
             await _joined(self._read_inputs)
             self._require_current()
             _require_model_builder(self, config)
+            from .connect_member_class_requests import bind_member_class_requests
+            bind_member_class_requests(self, application, runtime)
             return runtime
         except BaseException as original_failure:
             try:

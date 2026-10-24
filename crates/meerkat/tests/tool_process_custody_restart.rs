@@ -28,6 +28,10 @@
 //! final incarnation never runs the call again and tells the model about it
 //! once, through the call's result.
 //!
+//! The model-error rows pin behaviour that already holds: a model error
+//! after the resumed round answered the call is a hard failure that commits
+//! the run's rounds, never a replay, so the call never runs again.
+//!
 //! The idle-session row owes a notice at attach for an ended run whose
 //! interrupted call the transcript does not answer, and pins that the idle
 //! session records it exactly once when its loop checked for notices before
@@ -88,6 +92,10 @@ mod tests {
     /// Resume the run and let it end while its custody evidence cannot be
     /// acknowledged, then wait to be killed.
     const PHASE_RESUME_WITHOUT_ACK: &str = "resume-without-ack";
+    /// Resume the run, fail its next model call after the resumed round
+    /// answered the interrupted call, wait for its input's terminal, then
+    /// wait to be killed.
+    const PHASE_RESUME_THEN_MODEL_ERROR: &str = "resume-then-model-error";
     /// Create an idle session and wait to be killed.
     const PHASE_CREATE: &str = "create";
     /// The realm profile of a row, read by every incarnation.
@@ -138,6 +146,8 @@ mod tests {
         /// Make the custody scope unwritable (acknowledging its evidence then
         /// fails), then answer.
         LockScopeThenAnswer(PathBuf),
+        /// Fail the request with a model error the client does not retry.
+        ModelError,
     }
 
     /// Scripted model: on a fresh request (no tool results, no
@@ -200,6 +210,13 @@ mod tests {
                         return Box::pin(futures::stream::pending::<Result<LlmEvent, LlmError>>());
                     }
                     OnAnswered::LockScopeThenAnswer(scope) => set_mode(scope, 0o500),
+                    OnAnswered::ModelError => {
+                        return Box::pin(futures::stream::iter(vec![Err(
+                            LlmError::InvalidRequest {
+                                message: "the model refused the request".to_string(),
+                            },
+                        )]));
+                    }
                 }
             }
             let mut events = Vec::new();
@@ -680,6 +697,45 @@ mod tests {
                 wait_for_the_resumed_run_to_end(&root, &service, &adapter, &session_id, &input_id)
                     .await;
                 signal_parent(&root, "phase.fifo", "ended").await;
+            }
+            PHASE_RESUME_THEN_MODEL_ERROR => {
+                // The resumed round answers the interrupted call, then the
+                // run's next model call fails. Settled once the run's input
+                // is terminal; a replay would ask the model again.
+                let session_id = read_session_id(&root);
+                let input_id = read_input_id(&root);
+                let client = Arc::new(ScriptedShellClient::with(
+                    tool_command(&root),
+                    OnAnswered::ModelError,
+                ));
+                let (_service, adapter) = recover(&root, Arc::clone(&client), &session_id).await;
+                let started = std::time::Instant::now();
+                loop {
+                    let terminal = adapter
+                        .input_state(&session_id, &input_id)
+                        .await
+                        .expect("input state")
+                        .is_some_and(|state| state.seed.terminal_outcome.is_some());
+                    if terminal || tool_runs(&root) > 1 {
+                        break;
+                    }
+                    assert!(
+                        started.elapsed() < RUN_BOUND,
+                        "the failed resumed run's input never reached a terminal"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                assert_eq!(
+                    client.requests.load(Ordering::SeqCst),
+                    1,
+                    "the resumed run asked the model once, and nothing replayed it"
+                );
+                assert_eq!(
+                    client.tool_calls.load(Ordering::SeqCst),
+                    0,
+                    "no run asked for the call again"
+                );
+                signal_parent(&root, "phase.fifo", "settled").await;
             }
             PHASE_CREATE => {
                 let client = Arc::new(ScriptedShellClient::new(tool_command(&root)));
@@ -1266,5 +1322,103 @@ mod tests {
     #[tokio::test]
     async fn a_crash_before_the_resumed_run_acknowledged_does_not_run_the_call_again_whole_blob() {
         crash_before_the_resumed_run_acknowledged(Profile::WholeBlob).await;
+    }
+
+    /// Regression pin of behaviour that already holds: a model error after
+    /// the resumed round answered the interrupted call is a machine-owned
+    /// hard failure, never a replay. The run's rounds are committed, the
+    /// round that answered the call included, and the interrupted run itself
+    /// ends its input. The failed incarnation asked the model once and for no
+    /// call, and the call ran once.
+    async fn model_error_after_the_resumed_round_answered(profile: Profile) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let (session_id, input_id) = crash_gateway_mid_tool(root, profile).await;
+        let interrupted_run = record_run_id(&scope_dir(root, &session_id));
+        run_child_until(root, PHASE_RESUME_THEN_MODEL_ERROR, "settled").await;
+        assert_eq!(
+            tool_runs(root),
+            1,
+            "the interrupted call ran again after the model error"
+        );
+
+        let client = Arc::new(ScriptedShellClient::new(tool_command(root)));
+        let (service, adapter) = recover(root, Arc::clone(&client), &session_id).await;
+        assert_eq!(
+            tail_run(&service, &session_id).await,
+            None,
+            "the failed run's rounds are committed: no tail stands"
+        );
+        let input = adapter
+            .input_state(&session_id, &input_id)
+            .await
+            .expect("input state")
+            .expect("the interrupted input is known");
+        assert!(
+            input.seed.terminal_outcome.is_some(),
+            "the failed run ended its input: {:?}",
+            input.seed
+        );
+        assert_eq!(
+            input.seed.last_run_id.as_ref(),
+            Some(&interrupted_run),
+            "the interrupted run itself ended its input: no other run replayed it"
+        );
+        let session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load")
+            .expect("session");
+        let messages = session.messages();
+        let prompts = messages
+            .iter()
+            .filter(|message| {
+                matches!(message, Message::User(user)
+                    if user.text_content().contains(INTERRUPTED_PROMPT))
+            })
+            .count();
+        assert_eq!(prompts, 1, "the interrupted prompt appears exactly once");
+        let results: Vec<String> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .filter(|result| result.tool_use_id == TOOL_CALL_ID)
+            .map(meerkat_core::ToolResult::text_content)
+            .collect();
+        assert_eq!(
+            results.len(),
+            1,
+            "the call keeps the one answer its resumed round gave: {results:?}"
+        );
+        assert!(
+            results[0].contains("outcome_uncertain"),
+            "the interrupted call is answered outcome-uncertain: {}",
+            results[0]
+        );
+        assert_eq!(
+            client.tool_calls.load(Ordering::SeqCst),
+            0,
+            "the next start asks for no call"
+        );
+        assert_tool_processes_gone(root).await;
+        assert!(
+            !root.join("effect").exists(),
+            "the interrupted tool's effect happened"
+        );
+        assert_eq!(tool_runs(root), 1, "the interrupted call ran again");
+    }
+
+    #[tokio::test]
+    async fn a_model_error_after_the_resumed_round_answered_does_not_replay() {
+        model_error_after_the_resumed_round_answered(Profile::HeadCanonical).await;
+    }
+
+    #[cfg(feature = "jsonl-store")]
+    #[tokio::test]
+    async fn a_model_error_after_the_resumed_round_answered_does_not_replay_whole_blob() {
+        model_error_after_the_resumed_round_answered(Profile::WholeBlob).await;
     }
 }

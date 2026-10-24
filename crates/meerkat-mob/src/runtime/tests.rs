@@ -17244,6 +17244,16 @@ async fn a_lost_identity_lease_claim_is_retried_once_the_holders_lease_expires()
 
 #[tokio::test]
 async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_prompt_source() {
+    fn system_rows(messages: &[meerkat_core::Message]) -> Vec<&str> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     let definition = with_unique_mob_id(sample_definition(), "persisted-prompt-adoption");
     let mob_id = definition.id.clone();
     let member = AgentIdentity::from("worker-persisted-prompt");
@@ -17290,8 +17300,9 @@ async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_p
         &event_store,
         Arc::new(crate::store::SystemMobIdentityStoreClock),
     ));
+    let events: Arc<dyn MobEventStore> = Arc::new(event_store);
     let storage = MobStorage {
-        events: Arc::new(event_store),
+        events: events.clone(),
         runs,
         specs,
         definition_projection_composition:
@@ -17317,6 +17328,23 @@ async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_p
         )
         .await
         .expect("attach existing persisted session");
+    // No identity intent exists yet, so nothing reconciles the attached
+    // member and its live history is stable here.
+    let attached = service
+        .read_history(
+            &session_id,
+            meerkat_core::service::SessionHistoryQuery {
+                offset: 0,
+                limit: None,
+            },
+        )
+        .await
+        .expect("read attached history");
+    assert_eq!(
+        system_rows(&attached.messages),
+        vec![stale_prompt, intermediate_prompt, persisted_prompt],
+        "the attached member must materialize every legacy unkeyed System row in order"
+    );
 
     let adoption = crate::identity::AdoptMemberIdentityDeclaration {
         mob_id: mob_id.clone(),
@@ -17404,26 +17432,50 @@ async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_p
         rematerialization.system_prompt_override.is_none(),
         "exact-session resume must not replace or collapse the persisted System sequence"
     );
-    let history = service
-        .read_history(
-            &session_id,
-            meerkat_core::service::SessionHistoryQuery {
-                offset: 0,
-                limit: None,
-            },
-        )
+    // Adoption hands the attached legacy realization to identity
+    // reconciliation, which replaces it in the background: the retirement
+    // archives the session and tears down its live actor, the only copy this
+    // mock's `read_history` serves, so a history read issued right after
+    // adoption raced it. The exact-session resume that would follow cannot
+    // complete in this fixture (its ephemeral runtime has no cold lifecycle
+    // to observe), so the live copy does not come back. Wait until the
+    // retirement is journaled, then read the durable transcript the
+    // replacement keeps for that resume.
+    let retired = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let journaled = events
+                .replay_all()
+                .await
+                .expect("replay the adoption mob journal")
+                .iter()
+                .any(|event| {
+                    matches!(
+                        &event.kind,
+                        MobEventKind::MemberRetired { agent_identity, .. }
+                            if agent_identity == &member
+                    )
+                });
+            if journaled {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        retired.is_ok(),
+        "identity reconciliation must retire the adopted legacy realization; latest status: {:?}",
+        handle
+            .identity_convergence_status(&member)
+            .await
+            .expect("read adoption convergence")
+    );
+    let durable = service
+        .persisted_session_clone(&session_id)
         .await
-        .expect("read preserved adopted history");
-    let system_prompts = history
-        .messages
-        .iter()
-        .filter_map(|message| match message {
-            meerkat_core::Message::System(system) => Some(system.content.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+        .expect("adoption must keep the durable transcript");
     assert_eq!(
-        system_prompts,
+        system_rows(durable.messages()),
         vec![stale_prompt, intermediate_prompt, persisted_prompt],
         "adoption must leave every legacy unkeyed System row intact and ordered"
     );

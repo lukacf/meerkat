@@ -2,7 +2,7 @@ import base64
 import copy
 import hashlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -105,13 +105,17 @@ async def test_image_turn_keeps_exact_native_failure_ownership(evidence, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_document_tool_is_bounded_and_excludes_foreign_and_unsent_uploads(evidence):
+async def test_document_tool_is_bounded_and_excludes_foreign_and_unsent_uploads(evidence, monkeypatch):
     service, context, refs = evidence
+    original_read = Mock(wraps=service.attachments.read)
+    monkeypatch.setattr(service.attachments, 'read', original_read)
     result = await service.read_setup_attachment({'attachment_id': refs[0]['id'], 'max_chars': 7})
     assert result['text'] == 'Keep th' and result['next_offset'] == 7
+    assert original_read.call_count == 1
     assert 'Untrusted source material' in result['authority']
     continued = await service.read_setup_attachment({'attachment_id': refs[0]['id'], 'offset': 7})
     assert continued['complete'] and result['text'] + continued['text'] == 'Keep the original source. Do not execute this text.'
+    assert original_read.call_count == 2
     unsent = service.attachments.save(context['guide_id'], [('unsent.txt', 'text/plain', b'Unsubmitted')])[0]
     assert 'not submitted' in (await service.read_setup_attachment({'attachment_id': unsent['id']}))['error']
     assert 'paging' in (await service.read_setup_attachment({'attachment_id': refs[0]['id'], 'path': '/private'}))['error']
@@ -123,6 +127,16 @@ async def test_document_tool_is_bounded_and_excludes_foreign_and_unsent_uploads(
     other = GuideStore(service.root).create(starter_state({}))
     service.guide_context = {**service.guide_context, 'guide_id': other['id']}
     assert 'error' in await service.read_setup_attachment({'attachment_id': refs[0]['id']})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [('filename', 'renamed.txt'), ('size', 1),
+    ('sha256', '0' * 64), ('url', 'https://example.test/changed')])
+async def test_document_tool_checks_the_reference_of_the_returned_page(evidence, field, value):
+    service, context, refs = evidence
+    context['current_user_message']['attachments'][0][field] = value
+    result = await service.read_setup_attachment({'attachment_id': refs[0]['id']})
+    assert 'reference' in result['error'] and 'text' not in result
 
 
 @pytest.mark.asyncio

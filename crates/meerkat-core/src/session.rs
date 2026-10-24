@@ -10425,7 +10425,7 @@ mod tests {
             },
         );
         let settled = SystemNoticeBlock::ToolProcessInterrupted {
-            run_id: run_id.clone(),
+            run_id,
             tool_call_id: Some("call-1".to_string()),
             spawner: ToolProcessSpawner::ShellCall,
             cessation: ToolProcessCessation::KilledByRecovery { members: 1 },

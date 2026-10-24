@@ -73,12 +73,12 @@ does not supply principal or route overrides. An absent or ambiguous installatio
 mapping is refused, as are use before connection and use after shutdown or source
 replacement. Existing fixed-roster and replacement hosts do not gain this route.
 
-This factory does not authenticate a connector event or give its sender the
-installation operator's identity. A Google subject stays application provenance;
-it is not a native requester. Whether an application trigger may initiate an Add
-under the installation operator's grant is a separate product/domain decision,
-not permission supplied by this API. A plain Add does not require Console login
-enrollment. Optional mcp= intent with operator_self requires its own actual current
+The application may initiate Add for its declared classes under the installation
+operator's grant when its own domain policy permits the action. Record the trigger's
+connector and external subject as provenance. This factory does not authenticate
+that event or give its sender the operator's identity; a Google subject is not a
+native requester. A plain Add does not require current Console login enrollment.
+Optional mcp= intent with operator_self requires its own actual current
 Console enrollment; never borrow a Console login for a connector sender. The
 factory also accepts hold_timeout_ms and an explicitly observed expected_predecessor,
 with the selected SDK validating them. No checkpoint lookup or retry is implicit.

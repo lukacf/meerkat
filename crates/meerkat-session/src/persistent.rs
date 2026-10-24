@@ -1145,6 +1145,13 @@ enum ReplayedRunTail {
     /// its inputs may already be committed history: the tail is kept, and the
     /// failure stops the executor instead of replaying them.
     RebasedKept,
+    /// The run was dispatched as a resumed run (`ResumeRun`): its rounds may
+    /// have answered calls whose processes ran before the restart as
+    /// outcome-uncertain, and a replay would ask the model afresh without
+    /// them. The tail is kept, and the failure stops the executor instead of
+    /// replaying the run's inputs; the next start repairs the run from its
+    /// tail as interrupted.
+    ResumedKept,
 }
 
 /// The run cursor a held provisional checkpoint carried when it was written.
@@ -14327,6 +14334,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         ),
     > {
         let discarded_run_id = run_id.clone();
+        let resumed = Self::is_resumed_run_dispatch(&req);
         let result = self
             .apply_runtime_turn_with_recoverable_reserved_admission_inner(
                 id,
@@ -14340,16 +14348,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match result {
             Err((error, admission)) => {
                 let tail = self
-                    .discard_replayed_run_provisional_tail(id, &discarded_run_id, &error)
+                    .discard_replayed_run_provisional_tail(id, &discarded_run_id, &error, resumed)
                     .await;
                 self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
                     .await;
                 // A run whose tail records its re-base never replays: its
-                // inputs are committed history, so the executor stops.
-                let error = if tail == ReplayedRunTail::RebasedKept {
-                    Self::rebased_run_stop(&discarded_run_id, &error)
-                } else {
-                    error
+                // inputs are committed history, so the executor stops. Nor
+                // does a resumed run, whose tail keeps what its rounds
+                // answered.
+                let error = match tail {
+                    ReplayedRunTail::RebasedKept => {
+                        Self::rebased_run_stop(&discarded_run_id, &error)
+                    }
+                    ReplayedRunTail::ResumedKept => {
+                        Self::resumed_run_stop(&discarded_run_id, &error)
+                    }
+                    _ => error,
                 };
                 Err((error, admission))
             }
@@ -14505,6 +14519,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         ))
     }
 
+    /// The stop a resumed run's failure becomes: a resumed run never replays
+    /// its inputs, so its tail is kept for the next start to repair.
+    fn resumed_run_stop(run_id: &RunId, error: &SessionError) -> SessionError {
+        SessionError::runtime_executor_stopped(format!(
+            "resumed run {run_id} failed: {error}; a resumed run never replays its inputs, so the run is repaired from its tail at the next start"
+        ))
+    }
+
     /// Whether a run's failure requires the session's teardown: the run then
     /// writes nothing more, and no boundary may commit from it.
     fn failure_requires_teardown(error: &SessionError) -> bool {
@@ -14580,6 +14602,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// is already gone (a resumed run dispatched before its actor was seeded,
     /// for one).
     ///
+    /// A run dispatched as a resumed run (`resumed`) never replays its inputs:
+    /// its WholeBlob tail is kept (`ReplayedRunTail::ResumedKept`), with the
+    /// rounds it resumed and answered, and the caller stops the executor
+    /// instead, so the next start repairs the run as interrupted. A
+    /// HeadCanonical tail is applied and never discarded here, so such a run
+    /// takes the reload below, as every applied tail does.
+    ///
     /// A run whose WholeBlob tail records that it re-based keeps its tail
     /// (`ReplayedRunTail::RebasedKept`): its inputs are in the committed body
     /// since the re-base, so they must not run again, and the caller stops the
@@ -14600,6 +14629,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         run_id: &RunId,
         error: &SessionError,
+        resumed: bool,
     ) -> ReplayedRunTail {
         if !Self::runtime_turn_failure_replays_inputs(error) {
             return ReplayedRunTail::NotReplayed;
@@ -14618,6 +14648,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await
                 {
                     Ok(Some(tail)) if tail.authority().run_id() == run_id => {
+                        if resumed {
+                            tracing::warn!(
+                                session_id = %id,
+                                %run_id,
+                                %error,
+                                "a resumed run failed: its tail is kept, and its inputs are not replayed"
+                            );
+                            return ReplayedRunTail::ResumedKept;
+                        }
                         if Self::replayed_tail_keeps_its_inputs(run_id, tail.candidate_bytes()) {
                             tracing::warn!(
                                 session_id = %id,
@@ -15010,6 +15049,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
     ) -> Result<CoreApplyOutput, SessionError> {
         let discarded_run_id = run_id.clone();
+        let resumed = Self::is_resumed_run_dispatch(&req);
         let result = self
             .apply_runtime_turn_outcome_with_admission_inner(
                 id,
@@ -15023,16 +15063,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match result {
             Err(error) => {
                 let tail = self
-                    .discard_replayed_run_provisional_tail(id, &discarded_run_id, &error)
+                    .discard_replayed_run_provisional_tail(id, &discarded_run_id, &error, resumed)
                     .await;
                 self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
                     .await;
                 // As in the recoverable apply: a tail that records its run's
-                // re-base stops the executor instead of replaying the inputs.
-                if tail == ReplayedRunTail::RebasedKept {
-                    Err(Self::rebased_run_stop(&discarded_run_id, &error))
-                } else {
-                    Err(error)
+                // re-base, or a resumed run's tail, stops the executor instead
+                // of replaying the inputs.
+                match tail {
+                    ReplayedRunTail::RebasedKept => {
+                        Err(Self::rebased_run_stop(&discarded_run_id, &error))
+                    }
+                    ReplayedRunTail::ResumedKept => {
+                        Err(Self::resumed_run_stop(&discarded_run_id, &error))
+                    }
+                    _ => Err(error),
                 }
             }
             ok => ok,

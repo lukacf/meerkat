@@ -703,7 +703,10 @@ impl InprocRegistry {
 
         let envelope_id = envelope.id;
         if response_uses_legacy_queue_semantics {
-            return match sender.send_wait(InboxItem::External { envelope }).await {
+            return match sender
+                .send_wait_in_process(InboxItem::External { envelope })
+                .await
+            {
                 AdmissionOutcome::Admitted => Ok(InprocDelivery {
                     envelope_id,
                     outcome: InprocDeliveryOutcome::Resolved(IngressDeliveryOutcome::Queued),

@@ -729,6 +729,7 @@ pub(crate) fn test_peer_ingress_queue_claim(
     let raw_item_id = claim.entry.raw_item_id;
     let class = claim.entry.class;
     let delivery_contract = claim.entry.delivery_contract;
+    let sender_authentication = claim.entry.sender_authentication;
     let candidate = classified_entry_to_interaction(claim.entry);
     meerkat_core::PeerIngressQueueClaim::from_comms_queue(
         claim.claim_id,
@@ -738,6 +739,7 @@ pub(crate) fn test_peer_ingress_queue_claim(
         candidate,
         claim.lease,
     )
+    .with_sender_authentication(sender_authentication)
 }
 
 #[cfg(test)]
@@ -1587,15 +1589,19 @@ impl CoreCommsRuntime for CommsRuntime {
         let class = claim.entry.class;
         let delivery_contract = claim.entry.delivery_contract;
         let raw_item_id = claim.entry.raw_item_id;
+        let sender_authentication = claim.entry.sender_authentication;
         let candidate = classified_entry_to_interaction(claim.entry);
-        Ok(Some(meerkat_core::PeerIngressQueueClaim::from_comms_queue(
-            claim.claim_id,
-            raw_item_id,
-            class,
-            delivery_contract,
-            candidate,
-            claim.lease,
-        )))
+        Ok(Some(
+            meerkat_core::PeerIngressQueueClaim::from_comms_queue(
+                claim.claim_id,
+                raw_item_id,
+                class,
+                delivery_contract,
+                candidate,
+                claim.lease,
+            )
+            .with_sender_authentication(sender_authentication),
+        ))
     }
 
     async fn peer_ingress_queue_snapshot(

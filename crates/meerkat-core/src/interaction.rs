@@ -454,6 +454,34 @@ impl PeerIngressAuthDecision {
     }
 }
 
+/// How the transport established the sender of one queued peer ingress
+/// item, as the comms layer observed it when it admitted the item. A fact,
+/// never a trust decision: trust and routing still come from the admitted
+/// ingress fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum PeerIngressSenderAuthentication {
+    /// Nothing established the sender: an open-auth listener (which never
+    /// checks a signature, so the envelope's own `from` is a claim), a plain
+    /// event, or an item admitted without transport evidence.
+    #[default]
+    Unverified,
+    /// The listener verified the envelope's signature against the sender key
+    /// it names before the item was admitted.
+    SignatureVerified,
+    /// An in-process delivery: the sending runtime built the envelope from
+    /// its own keypair in this process, so no remote party chose the sender.
+    InProcess,
+}
+
+impl PeerIngressSenderAuthentication {
+    /// Whether the sender's identity was established by the transport, not
+    /// only claimed by the envelope.
+    pub const fn is_established(self) -> bool {
+        matches!(self, Self::SignatureVerified | Self::InProcess)
+    }
+}
+
 /// Typed peer convention admitted at the peer-ingress seam.
 ///
 /// This is the core-side ingress convention, not a rendered prompt. Runtime
@@ -1194,6 +1222,7 @@ pub struct PeerIngressQueueClaim {
     class: PeerInputClass,
     delivery_contract: PeerIngressDeliveryContract,
     candidate: Option<PeerInputCandidate>,
+    sender_authentication: PeerIngressSenderAuthentication,
     lease: Option<Arc<dyn PeerIngressClaimLease>>,
 }
 
@@ -1225,8 +1254,27 @@ impl PeerIngressQueueClaim {
             class,
             delivery_contract,
             candidate,
+            sender_authentication: PeerIngressSenderAuthentication::Unverified,
             lease: Some(lease),
         }
+    }
+
+    /// The same claim with the sender authentication the comms queue
+    /// recorded for its item when the transport admitted it.
+    #[doc(hidden)]
+    pub fn with_sender_authentication(
+        mut self,
+        authentication: PeerIngressSenderAuthentication,
+    ) -> Self {
+        self.sender_authentication = authentication;
+        self
+    }
+
+    /// How the transport established this item's sender (see
+    /// [`PeerIngressSenderAuthentication`]). A claim built without that
+    /// evidence reads `Unverified`.
+    pub fn sender_authentication(&self) -> PeerIngressSenderAuthentication {
+        self.sender_authentication
     }
 
     pub fn claim_id(&self) -> PeerIngressClaimId {

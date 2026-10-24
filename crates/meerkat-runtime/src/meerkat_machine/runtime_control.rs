@@ -17390,6 +17390,81 @@ impl MeerkatMachine {
         )
     }
 
+    /// Admit one governed peer delivery the installed host bound
+    /// (`NativeWorkAuthorizationHost::bind_peer_ingress`), under the same
+    /// key-only replay contract and member-residency fence as the delivery's
+    /// unbound path, with the host's custody of the original it enrolled
+    /// settled by native admission exactly once.
+    pub(crate) async fn accept_governed_peer_input(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+        member_residency: MemberResidencyExpectation,
+        custody: Option<crate::input_admission_custody::NativeInputAdmissionGuard>,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
+        match self
+            .execute_meerkat_machine_ingress_command_with_custody(
+                MeerkatMachineCommand::AcceptWithCompletion {
+                    session_id: session_id.clone(),
+                    input,
+                    register_completion: true,
+                    replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
+                    admission_requirement: crate::accept::AdmissionRequirement::Any,
+                    member_residency,
+                    expected_attachment: None,
+                },
+                custody,
+            )
+            .await?
+        {
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome,
+                handle,
+                admission_signal: _,
+            } => Ok((outcome, handle)),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected governed peer accept result: {other:?}"
+            ))),
+        }
+    }
+
+    /// [`Self::accept_governed_peer_input`] for a durable peer-ingress claim,
+    /// finalized as the claim's runtime receipt. A replay conflict (the
+    /// delivery's key or id already admitted under another binding) is a
+    /// definite refusal of this delivery: the claim ends `Rejected` instead
+    /// of staying the session's FIFO head. A fenced residency mismatch ends
+    /// it `Rejected` too, as on the unbound fenced path.
+    pub(crate) async fn accept_governed_peer_ingress_with_completion(
+        &self,
+        facts: meerkat_core::interaction::PeerIngressClaimCommitFacts,
+        session_id: &SessionId,
+        input: Input,
+        member_residency: MemberResidencyExpectation,
+        custody: Option<crate::input_admission_custody::NativeInputAdmissionGuard>,
+    ) -> super::PeerIngressAcceptFinalization {
+        let submitted_input_id = input.id().clone();
+        let fenced = matches!(member_residency, MemberResidencyExpectation::Placed(_));
+        let result = match self
+            .accept_governed_peer_input(session_id, input, member_residency, custody)
+            .await
+        {
+            Err(RuntimeDriverError::InputIdempotencyConflict { existing_id }) => {
+                Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "governed peer delivery replay conflict: input {existing_id} was \
+                         admitted for this delivery under another binding"
+                    ),
+                })
+            }
+            Err(RuntimeDriverError::StaleAuthority { reason }) if fenced => {
+                Err(RuntimeDriverError::ValidationFailed { reason })
+            }
+            other => other,
+        };
+        self.finalize_peer_ingress_accept(facts, submitted_input_id, result)
+    }
+
     fn finalize_peer_ingress_accept(
         &self,
         facts: meerkat_core::interaction::PeerIngressClaimCommitFacts,

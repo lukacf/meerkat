@@ -107,6 +107,20 @@ impl From<DropReason> for meerkat_core::comms::AdmissionDropReason {
     }
 }
 
+/// What a network listener proved about an envelope's sender: it checks the
+/// signature exactly when peer auth is required (the host acceptor always
+/// requires it), so an open-auth listener only carries the envelope's claim.
+#[cfg(not(target_arch = "wasm32"))]
+fn listener_sender_authentication(
+    require_peer_auth: bool,
+) -> meerkat_core::PeerIngressSenderAuthentication {
+    if require_peer_auth {
+        meerkat_core::PeerIngressSenderAuthentication::SignatureVerified
+    } else {
+        meerkat_core::PeerIngressSenderAuthentication::Unverified
+    }
+}
+
 /// A classified inbox entry, pairing an item with its ingress classification.
 #[derive(Debug, Clone)]
 pub(crate) struct ClassifiedInboxEntry {
@@ -127,6 +141,8 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) response_terminality: Option<TerminalityClass>,
     ingress_completion: Option<IngressCompletion>,
     pub(crate) text_projection: String,
+    /// How the transport established the sender when it admitted the item.
+    pub(crate) sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
 }
 
 /// Internal admission decision paired with the peer-trust diagnostic that the
@@ -443,6 +459,7 @@ impl ClassifiedInboxQueue {
             response_terminality: prepared.response_terminality,
             ingress_completion,
             text_projection: prepared.text_projection,
+            sender_authentication: prepared.sender_authentication,
         };
         let is_actionable = entry.actionable;
         self.entries.push_back(entry);
@@ -1052,7 +1069,11 @@ impl InboxSender {
         require_peer_auth: bool,
     ) -> AdmissionOutcome {
         if self.classification_context.is_some() {
-            return self.send_classified(InboxItem::External { envelope });
+            return self.send_classified_with_observed_tcp_source(
+                InboxItem::External { envelope },
+                None,
+                listener_sender_authentication(require_peer_auth),
+            );
         }
 
         let _ = require_peer_auth;
@@ -1073,9 +1094,12 @@ impl InboxSender {
         envelope: Envelope,
         require_peer_auth: bool,
     ) -> IngressDeliveryOutcome {
-        let _ = require_peer_auth;
-        self.send_classified_for_delivery(InboxItem::External { envelope }, None)
-            .await
+        self.send_classified_for_delivery(
+            InboxItem::External { envelope },
+            None,
+            listener_sender_authentication(require_peer_auth),
+        )
+        .await
     }
 
     /// Admit one envelope received on a TCP connection together with the
@@ -1092,8 +1116,12 @@ impl InboxSender {
         observed_source: SocketAddr,
     ) -> IngressDeliveryOutcome {
         let observed_source = require_peer_auth.then_some(observed_source);
-        self.send_classified_for_delivery(InboxItem::External { envelope }, observed_source)
-            .await
+        self.send_classified_for_delivery(
+            InboxItem::External { envelope },
+            observed_source,
+            listener_sender_authentication(require_peer_auth),
+        )
+        .await
     }
 
     /// Send an item to the inbox.
@@ -1132,13 +1160,18 @@ impl InboxSender {
     /// Classified items are enqueued only on the classified queue, then the
     /// appropriate notify is fired.
     pub(crate) fn send_classified(&self, item: InboxItem) -> AdmissionOutcome {
-        self.send_classified_with_observed_tcp_source(item, None)
+        self.send_classified_with_observed_tcp_source(
+            item,
+            None,
+            meerkat_core::PeerIngressSenderAuthentication::Unverified,
+        )
     }
 
     fn send_classified_with_observed_tcp_source(
         &self,
         item: InboxItem,
         observed_tcp_source: Option<SocketAddr>,
+        sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
     ) -> AdmissionOutcome {
         let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
@@ -1150,7 +1183,7 @@ impl InboxSender {
             return self.record_drop(DropReason::ClassificationRejected);
         };
 
-        let result = match ctx.prepare_with_observed_tcp_source(item, observed_tcp_source) {
+        let mut result = match ctx.prepare_with_observed_tcp_source(item, observed_tcp_source) {
             Some(r) => r,
             None => {
                 // Classification rejected the item before admission (e.g.
@@ -1162,6 +1195,7 @@ impl InboxSender {
                 return self.record_drop(DropReason::ClassificationRejected);
             }
         };
+        result.sender_authentication = sender_authentication;
         // C-H3 — generated admission (trust re-check, auth-exempt bypass,
         // capacity/closed result, phase update) and enqueue happen inside a
         // single queue-lock scope so no handwritten post-authority path can
@@ -1192,9 +1226,34 @@ impl InboxSender {
     /// This is used by runtime-originated peer sends where backpressure is
     /// preferable to semantic loss. Policy and closed-queue failures remain
     /// typed `Dropped` outcomes; only capacity waits.
+    #[cfg(test)]
     pub(crate) async fn send_wait(&self, item: InboxItem) -> AdmissionOutcome {
+        self.send_wait_with_sender_authentication(
+            item,
+            meerkat_core::PeerIngressSenderAuthentication::Unverified,
+        )
+        .await
+    }
+
+    /// Send an item through the same admission path as [`Self::send_classified`],
+    /// awaiting queue capacity instead of reporting `InboxFull`, for an
+    /// in-process delivery: the sending runtime built the envelope from its
+    /// own keypair in this process, so its sender is established.
+    pub(crate) async fn send_wait_in_process(&self, item: InboxItem) -> AdmissionOutcome {
+        self.send_wait_with_sender_authentication(
+            item,
+            meerkat_core::PeerIngressSenderAuthentication::InProcess,
+        )
+        .await
+    }
+
+    async fn send_wait_with_sender_authentication(
+        &self,
+        item: InboxItem,
+        sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+    ) -> AdmissionOutcome {
         if self.classification_context.is_some() {
-            return self.send_classified_wait(item).await;
+            return self.send_classified_wait(item, sender_authentication).await;
         }
         let _ = item;
         tracing::warn!(
@@ -1230,11 +1289,14 @@ impl InboxSender {
                 reason: DropReason::ClassificationRejected,
             });
         };
-        let Some(prepared) = ctx.prepare(item) else {
+        let Some(mut prepared) = ctx.prepare(item) else {
             return BoundedIngressDelivery::Resolved(IngressDeliveryOutcome::Dropped {
                 reason: DropReason::ClassificationRejected,
             });
         };
+        // In-process delivery: the sending runtime built the envelope from its
+        // own keypair in this process.
+        prepared.sender_authentication = meerkat_core::PeerIngressSenderAuthentication::InProcess;
         // ONE budget across both parks, tracked as remaining time rather than
         // as a `tokio::time::Instant` deadline: the wasm glue behind
         // `crate::tokio` exposes neither `Instant` nor `timeout_at`, and this
@@ -1307,7 +1369,11 @@ impl InboxSender {
         }
     }
 
-    async fn send_classified_wait(&self, item: InboxItem) -> AdmissionOutcome {
+    async fn send_classified_wait(
+        &self,
+        item: InboxItem,
+        sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+    ) -> AdmissionOutcome {
         let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
         else {
@@ -1328,6 +1394,8 @@ impl InboxSender {
                 return self.record_drop(DropReason::ClassificationRejected);
             }
         };
+        let mut result = result;
+        result.sender_authentication = sender_authentication;
         let kind = result.kind;
         let mut prepared = Some(result);
         let capacity_notify = classified_queue.lock().capacity_notifier();
@@ -1392,6 +1460,7 @@ impl InboxSender {
         &self,
         item: InboxItem,
         observed_tcp_source: Option<SocketAddr>,
+        sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
     ) -> IngressDeliveryOutcome {
         let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
@@ -1400,11 +1469,13 @@ impl InboxSender {
                 reason: DropReason::ClassificationRejected,
             };
         };
-        let Some(prepared) = ctx.prepare_with_observed_tcp_source(item, observed_tcp_source) else {
+        let Some(mut prepared) = ctx.prepare_with_observed_tcp_source(item, observed_tcp_source)
+        else {
             return IngressDeliveryOutcome::Dropped {
                 reason: DropReason::ClassificationRejected,
             };
         };
+        prepared.sender_authentication = sender_authentication;
         let (completion, receipt) = IngressCompletion::new();
         let decision = classified_queue
             .lock()

@@ -738,6 +738,30 @@ impl PersistentRuntimeDriver {
         // learns whether this is a first authentication or an exact retained
         // replay from the store that actually holds idempotency.
         let qualified_key = crate::input_authority::qualified_idempotency_key(input)?;
+        // A governed input whose id names a row the store already holds under
+        // another qualified key is a replay conflict, whatever phase that row
+        // reached. A governed peer delivery keeps one id across every
+        // redelivery (`crate::input_authority::delivery_input_id`), so a
+        // re-bind that changed the requester, target or namespace of an
+        // admitted delivery is refused here instead of admitted a second time
+        // under a key nothing else indexes. An exact re-bind keeps the key
+        // and reaches the ordinary replay lookup below.
+        if input.header().authority_association.is_some()
+            && let Some(stored) = self
+                .store
+                .load_input_state(&self.runtime_id, input.id())
+                .await
+                .map_err(|error| {
+                    RuntimeDriverError::Internal(format!(
+                        "persistent governed admission could not read its input row: {error}"
+                    ))
+                })?
+            && stored.state.idempotency_key.as_ref() != qualified_key.as_ref()
+        {
+            return Err(RuntimeDriverError::InputIdempotencyConflict {
+                existing_id: stored.state.input_id,
+            });
+        }
         let Some(key) = qualified_key.as_ref() else {
             self.inner.authenticate_work_with_replay(
                 input,

@@ -245,6 +245,10 @@ pub fn spawn_comms_drain(
             {
                 let candidate_class = claim.class();
                 let raw_item_id = claim.raw_item_id();
+                // How the transport established this item's sender, read
+                // before a volatile handoff consumes the claim: the governed
+                // binder is offered only a sender the transport established.
+                let sender_authentication = claim.sender_authentication();
                 let (claim, candidate) = match claim.delivery_contract() {
                     meerkat_core::PeerIngressDeliveryContract::DurableRuntime => {
                         let candidate = claim.candidate().cloned();
@@ -275,11 +279,12 @@ pub fn spawn_comms_drain(
                     commit_non_runtime_claim(claim, "typed malformed projection rejection");
                     continue;
                 };
-                if try_handle_supervisor_bridge_command(
+                if try_handle_supervisor_bridge_command_from(
                     &adapter,
                     &session_id,
                     &comms_runtime,
                     &candidate,
+                    sender_authentication,
                 )
                 .await
                 {
@@ -503,12 +508,19 @@ pub fn spawn_comms_drain(
                                     continue;
                                 }
                             };
+                            let governed = governed_comms_origin(
+                                &candidate,
+                                sender_authentication,
+                                &claim,
+                                raw_item_id,
+                            );
                             match accept_routed_peer_ingress(
                                 &adapter,
                                 claim,
                                 &session_id,
                                 content_input,
                                 None,
+                                governed,
                             )
                             .await
                             {
@@ -600,12 +612,19 @@ pub fn spawn_comms_drain(
                                     continue;
                                 }
                             };
+                            let governed = governed_comms_origin(
+                                &candidate,
+                                sender_authentication,
+                                &claim,
+                                raw_item_id,
+                            );
                             match accept_routed_peer_ingress(
                                 &adapter,
                                 claim,
                                 &session_id,
                                 input,
                                 None,
+                                governed,
                             )
                             .await
                             {
@@ -768,12 +787,19 @@ pub fn spawn_comms_drain(
                                 return;
                             }
                         };
+                        let governed = governed_comms_origin(
+                            &candidate,
+                            sender_authentication,
+                            &claim,
+                            raw_item_id,
+                        );
                         match accept_routed_peer_ingress(
                             &adapter,
                             claim,
                             &session_id,
                             input,
                             fenced_member.as_ref(),
+                            governed,
                         )
                         .await
                         {
@@ -834,7 +860,37 @@ async fn accept_routed_peer_ingress(
     session_id: &SessionId,
     input: crate::Input,
     expected_member: Option<&BridgeMemberIncarnation>,
+    governed: Option<crate::input_authority::PeerIngressCommsOrigin>,
 ) -> Result<Option<crate::CompletionHandle>, crate::RuntimeDriverError> {
+    // A delivery Core may offer the installed binder is bound first, holding
+    // only this claim: no drain, session, runtime or recovery lock.
+    let (input, custody) = match governed {
+        None => (input, None),
+        Some(origin) => match bind_governed_peer_ingress(
+            adapter,
+            session_id,
+            crate::input_authority::PeerIngressOrigin::Comms(origin),
+            input,
+            expected_member,
+            None,
+        )
+        .await
+        {
+            GovernedPeerBind::Unbound(input) => (input, None),
+            GovernedPeerBind::Bound { input, custody } => (input, Some(custody)),
+            GovernedPeerBind::Refused(refusal) => {
+                refuse_peer_ingress_before_admission(adapter, claim, refusal.to_string())?;
+                return Ok(None);
+            }
+            GovernedPeerBind::Pending(error) => return Err(error),
+        },
+    };
+    let residency = || match expected_member {
+        Some(expected) => {
+            crate::meerkat_machine_types::MemberResidencyExpectation::Placed(expected.clone())
+        }
+        None => crate::meerkat_machine_types::MemberResidencyExpectation::Unfenced,
+    };
     match claim {
         RoutedPeerIngressClaim::Durable(claim) => {
             let facts = PeerIngressClaimCommitFacts {
@@ -842,8 +898,19 @@ async fn accept_routed_peer_ingress(
                 raw_item_id: claim.raw_item_id(),
                 class: claim.class(),
             };
-            let result = match expected_member {
-                Some(expected_member) => {
+            let result = match (custody, expected_member) {
+                (Some(custody), _) => {
+                    adapter
+                        .accept_governed_peer_ingress_with_completion(
+                            facts,
+                            session_id,
+                            input,
+                            residency(),
+                            Some(custody),
+                        )
+                        .await
+                }
+                (None, Some(expected_member)) => {
                     adapter
                         .accept_peer_ingress_with_completion_for_member_residency(
                             facts,
@@ -853,7 +920,7 @@ async fn accept_routed_peer_ingress(
                         )
                         .await
                 }
-                None => {
+                (None, None) => {
                     adapter
                         .accept_peer_ingress_with_completion(facts, session_id, input)
                         .await
@@ -873,8 +940,25 @@ async fn accept_routed_peer_ingress(
                 }
             }
         }
-        RoutedPeerIngressClaim::Volatile => match expected_member {
-            Some(expected_member) => adapter
+        RoutedPeerIngressClaim::Volatile => match (custody, expected_member) {
+            // A volatile delivery keeps nothing to retry: a definite refusal
+            // of its binding admits nothing.
+            (Some(custody), _) => match adapter
+                .accept_governed_peer_input(session_id, input, residency(), Some(custody))
+                .await
+            {
+                Ok((_, completion)) => Ok(completion),
+                Err(error) if is_definite_governed_peer_refusal(&error) => {
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "comms_drain: refused a bound volatile peer delivery"
+                    );
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            },
+            (None, Some(expected_member)) => adapter
                 .accept_input_with_completion_for_member_residency(
                     session_id,
                     input,
@@ -882,12 +966,292 @@ async fn accept_routed_peer_ingress(
                 )
                 .await
                 .map(|(_, completion)| completion),
-            None => adapter
+            (None, None) => adapter
                 .accept_input_with_completion(session_id, input)
                 .await
                 .map(|(_, completion)| completion),
         },
     }
+}
+
+/// Why Core admitted no governed peer delivery for good, before or at its
+/// admission. Terminal: a durable claim ends `RuntimeRejected`, a bridge
+/// delivery is rejected, and the session's next delivery proceeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GovernedPeerRefusal {
+    /// The installed binder's verdict.
+    Denied,
+    /// The host's binding is not Core's exact input bound for this delivery
+    /// (see `check_bound_original`): a deterministic host fault, refused for
+    /// good so it never wedges the session's FIFO head.
+    HostBindingMalformed(String),
+}
+
+impl std::fmt::Display for GovernedPeerRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Denied => f.write_str("the installed binder denied the peer delivery's binding"),
+            Self::HostBindingMalformed(detail) => {
+                write!(f, "host binding malformed: {detail}")
+            }
+        }
+    }
+}
+
+/// What the governed seam decided for one peer delivery.
+enum GovernedPeerBind {
+    /// Nothing to bind: an ungoverned runtime, or the host's `NotOffered`.
+    /// Admit the input unbound, exactly as before the seam.
+    Unbound(crate::Input),
+    /// Admit the bound input with the host's custody, which settles
+    /// `NotAdmitted` if the delivery is dropped before admission.
+    Bound {
+        input: crate::Input,
+        custody: crate::input_admission_custody::NativeInputAdmissionGuard,
+    },
+    /// Refused for good.
+    Refused(GovernedPeerRefusal),
+    /// Not answerable now (`NotReady`, `Unavailable`, or a bounded bind that
+    /// expired): admit nothing and keep the delivery for a later attempt.
+    Pending(crate::RuntimeDriverError),
+}
+
+/// Offer one governed peer delivery to the installed binder
+/// ([`crate::input_authority::PeerIngressBinder`]), and check the binding.
+/// The caller decides that this delivery may be offered (its sender
+/// established by the transport, never a plain event). Core hands the
+/// binder its projected input under one id per delivery
+/// (`delivery_input_id`), so a redelivery the store already admitted is found
+/// by that id whatever the host binds next time. `bound` caps the await
+/// (expiry is `Pending`); the caller holds no lock across it.
+async fn bind_governed_peer_ingress(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    origin: crate::input_authority::PeerIngressOrigin,
+    input: crate::Input,
+    expected_member: Option<&BridgeMemberIncarnation>,
+    bound: Option<Duration>,
+) -> GovernedPeerBind {
+    use crate::input_authority::{BoundOriginalPin, PeerIngressBindRefusal};
+    let Some(binder) = adapter.installed_peer_ingress_binder() else {
+        return GovernedPeerBind::Unbound(input);
+    };
+    let Some(event_key) = input.header().idempotency_key.clone() else {
+        return GovernedPeerBind::Unbound(input);
+    };
+    let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
+    let mut handed = input.clone();
+    handed.header_mut().id = crate::input_authority::delivery_input_id(&origin, &event_key);
+    let request = match crate::input_authority::PeerIngressBindRequest::new(
+        runtime_id.clone(),
+        session_id.clone(),
+        expected_member.cloned(),
+        origin,
+        event_key,
+        handed.clone(),
+    ) {
+        Ok(request) => request,
+        Err(detail) => {
+            return GovernedPeerBind::Refused(GovernedPeerRefusal::HostBindingMalformed(detail));
+        }
+    };
+    let delivery_work = request.delivery_work.clone();
+    let answer = match bound {
+        None => binder.bind_peer_ingress(request).await,
+        Some(limit) => {
+            match crate::tokio::time::timeout(limit, binder.bind_peer_ingress(request)).await {
+                Ok(answer) => answer,
+                Err(_) => {
+                    return GovernedPeerBind::Pending(crate::RuntimeDriverError::Internal(
+                        format!(
+                            "the installed binder did not bind the peer delivery within {}ms",
+                            limit.as_millis()
+                        ),
+                    ));
+                }
+            }
+        }
+    };
+    match answer {
+        Err(PeerIngressBindRefusal::NotOffered) => GovernedPeerBind::Unbound(input),
+        Err(PeerIngressBindRefusal::Denied) => {
+            GovernedPeerBind::Refused(GovernedPeerRefusal::Denied)
+        }
+        Err(PeerIngressBindRefusal::NotReady(reason)) => {
+            GovernedPeerBind::Pending(crate::RuntimeDriverError::ControllerReadinessUnavailable {
+                reason,
+            })
+        }
+        Err(PeerIngressBindRefusal::Unavailable(detail)) => {
+            GovernedPeerBind::Pending(crate::RuntimeDriverError::Internal(format!(
+                "the installed binder could not bind the peer delivery now: {detail}"
+            )))
+        }
+        Ok(binding) => {
+            let (bound_input, custody) = binding.into_parts();
+            let custody =
+                custody.map(crate::input_admission_custody::NativeInputAdmissionGuard::new);
+            match crate::input_authority::check_bound_original(
+                &handed,
+                &bound_input,
+                &runtime_id,
+                BoundOriginalPin::DeliveryWork(&delivery_work),
+            ) {
+                Ok(()) => match custody {
+                    Some(custody) => GovernedPeerBind::Bound {
+                        input: bound_input,
+                        custody,
+                    },
+                    None => GovernedPeerBind::Bound {
+                        input: bound_input,
+                        custody: crate::input_admission_custody::NativeInputAdmissionGuard::new(
+                            Box::new(NoHostCustody),
+                        ),
+                    },
+                },
+                Err(detail) => {
+                    // The custody, if any, settles `NotAdmitted` as it drops.
+                    drop(custody);
+                    tracing::error!(
+                        %session_id,
+                        refusal = "host_binding_malformed",
+                        %detail,
+                        "comms_drain: refused the installed binder's malformed binding of a peer delivery"
+                    );
+                    GovernedPeerBind::Refused(GovernedPeerRefusal::HostBindingMalformed(detail))
+                }
+            }
+        }
+    }
+}
+
+/// How long Core awaits the installed binder's binding of a supervisor-bridge
+/// member delivery: well below the supervisor's own command timeout, so the
+/// supervisor never reports a failure for a delivery Core admits after it.
+#[cfg(not(test))]
+const SUPERVISOR_DELIVERY_BIND_BOUND: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const SUPERVISOR_DELIVERY_BIND_BOUND: Duration = Duration::from_millis(500);
+
+/// Offer one supervisor-bridge member delivery to the governed binder, when
+/// the transport established the supervisor that relayed it (an open-auth
+/// listener's claimed supervisor is never offered: it keeps the unbound
+/// path, which a governed runtime refuses). Bounded by
+/// [`SUPERVISOR_DELIVERY_BIND_BOUND`].
+#[allow(clippy::too_many_arguments)]
+async fn bind_supervisor_member_delivery(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+    supervisor: PeerId,
+    interaction_id: meerkat_core::InteractionId,
+    tracked: bool,
+    input: crate::Input,
+    expected_member: Option<&BridgeMemberIncarnation>,
+) -> GovernedPeerBind {
+    if !sender_authentication.is_established() {
+        return GovernedPeerBind::Unbound(input);
+    }
+    bind_governed_peer_ingress(
+        adapter,
+        session_id,
+        crate::input_authority::PeerIngressOrigin::SupervisorDelivery(
+            crate::input_authority::PeerIngressSupervisorOrigin {
+                supervisor,
+                sender_authentication,
+                interaction_id,
+                tracked,
+            },
+        ),
+        input,
+        expected_member,
+        Some(SUPERVISOR_DELIVERY_BIND_BOUND),
+    )
+    .await
+}
+
+/// The rejected delivery a supervisor gets for a governed refusal. The
+/// bridge's closed rejection vocabulary has no binding cause, so the refusal
+/// is `Internal` with its typed detail.
+fn governed_delivery_rejection(input_id: &str, detail: String) -> BridgeDeliveryResponse {
+    BridgeDeliveryResponse {
+        input_id: input_id.to_string(),
+        canonical_input_id: None,
+        outcome: BridgeDeliveryOutcome::Rejected {
+            cause: BridgeDeliveryRejectionCause::Internal {
+                detail: detail.clone(),
+            },
+            reason: detail,
+        },
+    }
+}
+
+/// The custody of a binding whose host keeps none: nothing to settle.
+struct NoHostCustody;
+
+impl crate::input_admission_custody::NativeInputAdmissionCustody for NoHostCustody {
+    fn settle(
+        self: Box<Self>,
+        _settlement: crate::input_admission_custody::NativeInputAdmissionSettlement,
+    ) -> Option<crate::input_admission_custody::NativeInputAdmissionCompletion> {
+        None
+    }
+}
+
+/// Whether a governed peer admission failed with a definite refusal of the
+/// delivery (no effect, never retried): a replay conflict with an earlier
+/// admission of the same delivery, or the receiver's own refusal of the
+/// input.
+fn is_definite_governed_peer_refusal(error: &crate::RuntimeDriverError) -> bool {
+    matches!(
+        error,
+        crate::RuntimeDriverError::InputIdempotencyConflict { .. }
+            | crate::RuntimeDriverError::ValidationFailed { .. }
+    )
+}
+
+/// The facts Core offers the installed binder for one comms delivery, or
+/// `None` when the delivery is not offered and keeps its unbound path: a
+/// plain external event (no sender), a sender the transport did not establish
+/// (an open-auth listener's claimed `from`), or an item admitted through an
+/// exempt route.
+fn governed_comms_origin(
+    candidate: &PeerInputCandidate,
+    sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+    claim: &RoutedPeerIngressClaim,
+    raw_item_id: meerkat_core::InteractionId,
+) -> Option<crate::input_authority::PeerIngressCommsOrigin> {
+    if candidate.class() == PeerInputClass::PlainEvent || !sender_authentication.is_established() {
+        return None;
+    }
+    let auth = candidate.auth()?;
+    if auth.is_exempt() {
+        return None;
+    }
+    let sender = candidate.from_peer_id()?;
+    let in_reply_to = match &candidate.interaction.content {
+        InteractionContent::Response { in_reply_to, .. } => Some(*in_reply_to),
+        _ => None,
+    };
+    Some(crate::input_authority::PeerIngressCommsOrigin {
+        sender,
+        signing_key: candidate.ingress.signing_pubkey,
+        route_label: candidate.ingress.route.as_ref().map(PeerRoute::label),
+        sender_authentication,
+        auth,
+        class: candidate.class(),
+        kind: candidate.kind(),
+        interaction_id: candidate.interaction.id,
+        in_reply_to,
+        claim: match claim {
+            RoutedPeerIngressClaim::Durable(_) => {
+                crate::input_authority::PeerIngressClaimKind::Durable { raw_item_id }
+            }
+            RoutedPeerIngressClaim::Volatile => {
+                crate::input_authority::PeerIngressClaimKind::Volatile
+            }
+        },
+    })
 }
 
 /// Terminalize a claim the drain refused before admission as `Rejected`:
@@ -4302,11 +4666,34 @@ async fn serve_cancel_tracked_member_input(
 /// classes live in DSL state. Bridge dispatch routes binding-sensitive
 /// decisions through generated admission inputs before emitting wire replies
 /// or staging supervisor binding transitions.
+/// [`try_handle_supervisor_bridge_command_from`] for a bridge command whose
+/// sender the transport verified, as the bridge tests deliver them.
+#[cfg(test)]
 async fn try_handle_supervisor_bridge_command(
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
+) -> bool {
+    try_handle_supervisor_bridge_command_from(
+        adapter,
+        session_id,
+        comms_runtime,
+        candidate,
+        meerkat_core::PeerIngressSenderAuthentication::SignatureVerified,
+    )
+    .await
+}
+
+/// Handle one supervisor bridge command. `sender_authentication` is how the
+/// transport established the command's sender; a member delivery is offered
+/// to the governed binder only when it was established.
+async fn try_handle_supervisor_bridge_command_from(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    candidate: &PeerInputCandidate,
+    sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
 ) -> bool {
     if try_handle_supervisor_bridge_delivery(adapter, session_id, comms_runtime, candidate).await {
         return true;
@@ -4937,6 +5324,7 @@ async fn try_handle_supervisor_bridge_command(
                     comms_runtime,
                     candidate,
                     authorized_supervisor.peer_id,
+                    sender_authentication,
                     payload,
                 )
                 .await;
@@ -4971,13 +5359,79 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let accept_result = adapter
-                .accept_input_with_completion_for_member_residency(
-                    session_id,
-                    input,
-                    expected_member.as_ref(),
-                )
-                .await;
+            // On a governed runtime the installed binder binds the delivery
+            // first, holding no lock, bounded below the supervisor's command
+            // timeout. Every refusal, pending ones included, is a rejected
+            // delivery here: the supervisor never resends a rejection, and a
+            // resend of the same input id deduplicates.
+            let (input, custody) = match bind_supervisor_member_delivery(
+                adapter,
+                session_id,
+                sender_authentication,
+                authorized_supervisor.peer_id,
+                candidate.interaction.id,
+                false,
+                input,
+                expected_member.as_ref(),
+            )
+            .await
+            {
+                GovernedPeerBind::Unbound(input) => (input, None),
+                GovernedPeerBind::Bound { input, custody } => (input, Some(custody)),
+                GovernedPeerBind::Refused(refusal) => {
+                    send_bridge_response(
+                        comms_runtime,
+                        candidate,
+                        meerkat_core::interaction::ResponseStatus::Completed,
+                        BridgeReply::Delivery(governed_delivery_rejection(
+                            &request_input_id,
+                            refusal.to_string(),
+                        )),
+                        None,
+                    )
+                    .await;
+                    return true;
+                }
+                GovernedPeerBind::Pending(error) => {
+                    send_bridge_response(
+                        comms_runtime,
+                        candidate,
+                        meerkat_core::interaction::ResponseStatus::Completed,
+                        BridgeReply::Delivery(governed_delivery_rejection(
+                            &request_input_id,
+                            format!("peer delivery binding is not ready: {error}"),
+                        )),
+                        None,
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            let accept_result = match custody {
+                Some(custody) => {
+                    let member_residency = expected_member.clone().map_or(
+                        crate::meerkat_machine_types::MemberResidencyExpectation::PeerOnly,
+                        crate::meerkat_machine_types::MemberResidencyExpectation::Placed,
+                    );
+                    adapter
+                        .accept_governed_peer_input(
+                            session_id,
+                            input,
+                            member_residency,
+                            Some(custody),
+                        )
+                        .await
+                }
+                None => {
+                    adapter
+                        .accept_input_with_completion_for_member_residency(
+                            session_id,
+                            input,
+                            expected_member.as_ref(),
+                        )
+                        .await
+                }
+            };
             match accept_result {
                 Ok((accept_outcome, _completion_handle)) => {
                     let response = match accept_outcome {
@@ -5015,6 +5469,22 @@ async fn try_handle_supervisor_bridge_command(
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
                         BridgeReply::Delivery(response),
+                        None,
+                    )
+                    .await;
+                }
+                Err(crate::traits::RuntimeDriverError::InputIdempotencyConflict { existing_id }) => {
+                    send_bridge_response(
+                        comms_runtime,
+                        candidate,
+                        meerkat_core::interaction::ResponseStatus::Completed,
+                        BridgeReply::Delivery(governed_delivery_rejection(
+                            &request_input_id,
+                            format!(
+                                "governed peer delivery replay conflict: input {existing_id} \
+                                 was admitted for this delivery under another binding"
+                            ),
+                        )),
                         None,
                     )
                     .await;
@@ -7238,6 +7708,15 @@ fn definite_no_effect_delivery_rejection(
                 detail: reason.clone(),
             })
         }
+        // A governed delivery's replay conflict: refused before admission.
+        crate::traits::RuntimeDriverError::InputIdempotencyConflict { existing_id } => {
+            Some(BridgeDeliveryRejectionCause::Internal {
+                detail: format!(
+                    "governed peer delivery replay conflict: input {existing_id} was admitted \
+                     for this delivery under another binding"
+                ),
+            })
+        }
         crate::traits::RuntimeDriverError::StaleAuthority { .. } => {
             Some(BridgeDeliveryRejectionCause::StaleMemberResidency {
                 expected: expected_member.clone(),
@@ -7317,6 +7796,7 @@ async fn serve_tracked_member_delivery(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
     sender_peer_id: PeerId,
+    sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
     payload: BridgeDeliveryPayload,
 ) {
     let request_input_id = payload.input_id.clone();
@@ -7440,6 +7920,53 @@ async fn serve_tracked_member_delivery(
                 .await;
                 return;
             }
+        }
+    };
+    // The input is final here. On a governed runtime the installed binder binds
+    // it now: before the durable Pending window opens and outside the
+    // directed-turn admission permit, so no refusal needs a window cancel and
+    // no host code runs under that lock.
+    let (input, custody) = match bind_supervisor_member_delivery(
+        adapter,
+        session_id,
+        sender_authentication,
+        sender_peer_id,
+        candidate.interaction.id,
+        true,
+        input,
+        Some(&expected_member),
+    )
+    .await
+    {
+        GovernedPeerBind::Unbound(input) => (input, None),
+        GovernedPeerBind::Bound { input, custody } => (input, Some(custody)),
+        GovernedPeerBind::Refused(refusal) => {
+            send_bridge_response(
+                comms_runtime,
+                candidate,
+                meerkat_core::interaction::ResponseStatus::Completed,
+                BridgeReply::Delivery(governed_delivery_rejection(
+                    &request_input_id,
+                    refusal.to_string(),
+                )),
+                None,
+            )
+            .await;
+            return;
+        }
+        GovernedPeerBind::Pending(error) => {
+            send_bridge_response(
+                comms_runtime,
+                candidate,
+                meerkat_core::interaction::ResponseStatus::Completed,
+                BridgeReply::Delivery(governed_delivery_rejection(
+                    &request_input_id,
+                    format!("peer delivery binding is not ready: {error}"),
+                )),
+                None,
+            )
+            .await;
+            return;
         }
     };
     let Some(observation) = adapter.member_observation_host() else {
@@ -7677,13 +8204,29 @@ async fn serve_tracked_member_delivery(
             return;
         }
     };
-    let accept_result = adapter
-        .accept_input_with_completion_for_member_residency(
-            session_id,
-            input,
-            Some(&expected_member),
-        )
-        .await;
+    let accept_result = match custody {
+        Some(custody) => {
+            adapter
+                .accept_governed_peer_input(
+                    session_id,
+                    input,
+                    crate::meerkat_machine_types::MemberResidencyExpectation::Placed(
+                        expected_member.clone(),
+                    ),
+                    Some(custody),
+                )
+                .await
+        }
+        None => {
+            adapter
+                .accept_input_with_completion_for_member_residency(
+                    session_id,
+                    input,
+                    Some(&expected_member),
+                )
+                .await
+        }
+    };
     match accept_result {
         Ok((accept_outcome, completion_handle)) => {
             let response = match accept_outcome {
@@ -7883,6 +8426,8 @@ mod tests {
     use std::collections::{HashMap, HashSet, VecDeque};
     use uuid::Uuid;
 
+    mod governed_peer_ingress;
+
     fn durable_direct_member_test_machine() -> Arc<MeerkatMachine> {
         Arc::new(
             MeerkatMachine::persistent_without_blobs(Arc::new(
@@ -7933,6 +8478,8 @@ mod tests {
                 Arc<dyn std::any::Any + Send + Sync>,
             )>,
         >,
+        /// How the transport established each claimed item's sender.
+        sender_authentication: std::sync::Mutex<meerkat_core::PeerIngressSenderAuthentication>,
     }
 
     impl TestPeerIngressQueue {
@@ -7941,7 +8488,30 @@ mod tests {
                 candidates: std::sync::Mutex::new(candidates.into_iter().collect()),
                 outstanding: std::sync::Mutex::new(None),
                 committed: std::sync::Mutex::new(Vec::new()),
+                sender_authentication: std::sync::Mutex::new(
+                    meerkat_core::PeerIngressSenderAuthentication::Unverified,
+                ),
             })
+        }
+
+        /// Claim every later item as admitted by a transport that
+        /// established its sender as `authentication` says.
+        fn authenticate_senders(
+            &self,
+            authentication: meerkat_core::PeerIngressSenderAuthentication,
+        ) {
+            *self
+                .sender_authentication
+                .lock()
+                .expect("sender authentication mutex") = authentication;
+        }
+
+        /// Queue one more item behind the current ones.
+        fn push(&self, candidate: PeerInputCandidate) {
+            self.candidates
+                .lock()
+                .expect("candidate mutex")
+                .push_back(candidate);
         }
 
         fn remaining(&self) -> usize {
@@ -7991,14 +8561,21 @@ mod tests {
                 meerkat_core::PeerIngressDeliveryContract::VolatileControl
             };
             *outstanding = Some((claim_id, raw_item_id));
-            Some(PeerIngressQueueClaim::from_comms_queue(
-                claim_id,
-                raw_item_id,
-                class,
-                delivery_contract,
-                Some(candidate),
-                Arc::clone(self) as Arc<dyn PeerIngressClaimLease>,
-            ))
+            let sender_authentication = *self
+                .sender_authentication
+                .lock()
+                .expect("sender authentication mutex");
+            Some(
+                PeerIngressQueueClaim::from_comms_queue(
+                    claim_id,
+                    raw_item_id,
+                    class,
+                    delivery_contract,
+                    Some(candidate),
+                    Arc::clone(self) as Arc<dyn PeerIngressClaimLease>,
+                )
+                .with_sender_authentication(sender_authentication),
+            )
         }
     }
 

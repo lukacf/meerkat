@@ -2494,59 +2494,21 @@ fn verify_admitted_host_original(
 /// attached; the association names this session's runtime, a controller
 /// grant lineage and model, and the confirmed original; the ingress names the
 /// association's requester, actor and realm, with a controller client of the
-/// association's selection.
+/// association's selection. The runtime's shared check of a bound original
+/// ([`meerkat_runtime::input_authority::check_bound_original`]), the one the
+/// governed peer seam applies to a bound delivery.
 fn check_bound_host_original(
     handed: &meerkat_runtime::PromptInput,
     bound: &meerkat_runtime::Input,
     session: &SessionId,
     original_work: &meerkat_runtime::OriginalWorkRef,
 ) -> Result<(), String> {
-    let header = bound.header();
-    if header.retained_resume.is_some() {
-        return Err("a bound host original carries no retained resume".into());
-    }
-    let association = header
-        .authority_association
-        .as_ref()
-        .ok_or("the bound host original carries no authority association")?;
-    let ingress = header
-        .ingress_context
-        .as_ref()
-        .ok_or("the bound host original carries no trusted ingress observation")?;
-    let mut expected = handed.clone();
-    expected.header.authority_association = Some(association.clone());
-    let expected = serde_json::to_vec(&meerkat_runtime::Input::Prompt(expected))
-        .map_err(|error| error.to_string())?;
-    if serde_json::to_vec(bound).map_err(|error| error.to_string())? != expected {
-        return Err("the bound input is not the continuation input it was handed".into());
-    }
-    let claims = association.candidate();
-    if claims.controller_grant_lineage.is_empty() {
-        return Err("the binding names no controller grant lineage".into());
-    }
-    let model = claims
-        .controller_model
-        .as_ref()
-        .ok_or("the binding names no controller model")?;
-    if claims.target.logical_runtime.as_str() != LogicalRuntimeId::for_session(session).to_string()
-    {
-        return Err("the binding targets another runtime than the admitting session's".into());
-    }
-    if claims.original_work != *original_work {
-        return Err("the binding names another original than its namespace owner confirmed".into());
-    }
-    if ingress.requester() != &claims.requester
-        || ingress.ingress_actor() != &claims.ingress_actor
-        || ingress.realm() != &claims.ingress_namespace.realm
-    {
-        return Err("the ingress observation names other principals than the binding".into());
-    }
-    match ingress.controller_client() {
-        Some(client) if client.selection() == model => Ok(()),
-        _ => Err(
-            "the ingress observation carries no controller client of the binding's model".into(),
-        ),
-    }
+    meerkat_runtime::input_authority::check_bound_original(
+        &meerkat_runtime::Input::Prompt(handed.clone()),
+        bound,
+        &LogicalRuntimeId::for_session(session),
+        meerkat_runtime::input_authority::BoundOriginalPin::Original(original_work),
+    )
 }
 
 /// Admit one host original row ([`ContinuationOwnerService::submit_host_original`]).

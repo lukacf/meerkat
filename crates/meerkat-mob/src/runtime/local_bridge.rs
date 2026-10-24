@@ -95,6 +95,15 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
         Ok(BridgeAck { ok: true })
     }
 
+    /// Deprecated: no production path delivers member input through the
+    /// in-process bridge (in-process members take turns through
+    /// `SessionBackend::start_turn`), and this path carries no sender
+    /// identity (its peer id is the recipient's own runtime). It is not a
+    /// governed peer delivery: it builds an input with no authority
+    /// association and is never offered to a peer ingress binder, so a
+    /// governed runtime keeps refusing it (`MobError::Internal`). A trait
+    /// method's implementation cannot carry `#[deprecated]`, so this note is
+    /// the deprecation.
     async fn deliver_member_input(
         &self,
         input_id: &str,

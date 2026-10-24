@@ -18,6 +18,14 @@ use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input::Input;
 use crate::traits::RuntimeDriverError;
 
+mod peer_ingress;
+pub(crate) use peer_ingress::delivery_input_id;
+pub use peer_ingress::{
+    PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest, PeerIngressBinder,
+    PeerIngressBinding, PeerIngressClaimKind, PeerIngressCommsOrigin, PeerIngressOrigin,
+    PeerIngressSupervisorOrigin,
+};
+
 /// The native replay lookup's verdict for one admission of a governed input:
 /// the driver's existing qualified-key lookup and exact replay verification,
 /// resolved before the installed host authenticates the input. The runtime
@@ -808,6 +816,92 @@ pub(crate) fn verify_retained_replay(
     }
 }
 
+/// What a bound original's association must name as its original work.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum BoundOriginalPin<'a> {
+    /// The exact original its namespace owner confirmed (a host continuation
+    /// original): authority and work.
+    Original(&'a meerkat_authorization_contracts::work_association::OriginalWorkRef),
+    /// Core's work id for one delivery (a peer delivery,
+    /// [`PeerIngressBindRequest::delivery_work`]): the original's work only,
+    /// since its authority principal is the host's.
+    DeliveryWork(&'a EvidenceId),
+}
+
+/// Check a trusted host's binding of an input Core handed it: Core's exact
+/// `handed` input with only its authority association set and its trusted
+/// ingress observation attached (the ingress observation is not part of the
+/// input's serialized form, so the byte comparison reads the association).
+/// The association names `runtime`, a controller grant lineage and model,
+/// and the original `pin` requires; the ingress names the association's
+/// requester, actor and realm, with a controller client of its model.
+///
+/// # Errors
+/// Why the binding is not Core's exact input so bound.
+pub fn check_bound_original(
+    handed: &Input,
+    bound: &Input,
+    runtime: &LogicalRuntimeId,
+    pin: BoundOriginalPin<'_>,
+) -> Result<(), String> {
+    let header = bound.header();
+    if header.retained_resume.is_some() {
+        return Err("a bound original carries no retained resume".into());
+    }
+    let association = header
+        .authority_association
+        .as_ref()
+        .ok_or("the bound original carries no authority association")?;
+    let ingress = header
+        .ingress_context
+        .as_ref()
+        .ok_or("the bound original carries no trusted ingress observation")?;
+    let mut expected = handed.clone();
+    expected.header_mut().authority_association = Some(association.clone());
+    let expected = serde_json::to_vec(&expected).map_err(|error| error.to_string())?;
+    if serde_json::to_vec(bound).map_err(|error| error.to_string())? != expected {
+        return Err("the bound input is not the input it was handed".into());
+    }
+    let claims = association.candidate();
+    if claims.controller_grant_lineage.is_empty() {
+        return Err("the binding names no controller grant lineage".into());
+    }
+    let model = claims
+        .controller_model
+        .as_ref()
+        .ok_or("the binding names no controller model")?;
+    if claims.target.logical_runtime.as_str() != runtime.to_string() {
+        return Err("the binding targets another runtime than the admitting one".into());
+    }
+    match pin {
+        BoundOriginalPin::Original(original_work) => {
+            if claims.original_work != *original_work {
+                return Err(
+                    "the binding names another original than its namespace owner confirmed".into(),
+                );
+            }
+        }
+        BoundOriginalPin::DeliveryWork(work) => {
+            if claims.original_work.work != *work {
+                return Err("the binding names another delivery's work than Core's".into());
+            }
+        }
+    }
+    if ingress.requester() != &claims.requester
+        || ingress.ingress_actor() != &claims.ingress_actor
+        || ingress.realm() != &claims.ingress_namespace.realm
+    {
+        return Err("the ingress observation names other principals than the binding".into());
+    }
+    match ingress.controller_client() {
+        Some(client) if client.selection() == model => Ok(()),
+        _ => Err(
+            "the ingress observation carries no controller client of the binding's model".into(),
+        ),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 pub(crate) mod tests {
@@ -1176,6 +1270,73 @@ pub(crate) mod tests {
     }
     pub(crate) fn input(requester: &str) -> Input {
         input_with_controller(requester, controller_selection("controller"))
+    }
+
+    /// Bind `request`'s input as a test peer binder does: the association
+    /// [`TestIngress`] admits, naming `requester`, the request's runtime and
+    /// `work` (the request's own `delivery_work` for a well-formed binding),
+    /// with the event key set and the trusted ingress observation attached
+    /// with a controller client of `selection`.
+    pub(crate) fn bind_peer_delivery_for_test(
+        request: &PeerIngressBindRequest,
+        requester: &str,
+        work: EvidenceId,
+        selection: &meerkat_core::ControllerModelSelection,
+    ) -> Input {
+        let association = InputAuthorityAssociation::new(InputAuthorityAssociationCandidate {
+            requester: principal(requester),
+            ingress_actor: principal("ingress"),
+            represented_subject: None,
+            original_authentication: evidence("authenticated-peer-transport"),
+            logical_executor: principal("executor"),
+            target: NativeWorkTarget {
+                logical_owner: principal("native-owner"),
+                logical_runtime: id(&request.runtime_id.to_string()),
+                context: id("context"),
+                context_generation: 1,
+                audience: AudienceRef::Principal {
+                    principal: principal("audience"),
+                },
+            },
+            original_work: OriginalWorkRef {
+                authority: principal("ingress"),
+                work,
+            },
+            root_event: evidence("peer-event"),
+            contributing_work: Vec::new(),
+            authority_basis: WorkAuthorityBasis::HostPolicy {
+                policy: evidence("policy"),
+            },
+            controller_grant_lineage: vec![GrantLineageRef {
+                root_authority: principal("grant-owner"),
+                authority_namespace: id("controller"),
+                authority_generation: 1,
+                authority_incarnation: serde_json::from_value(serde_json::json!(
+                    "00000000-0000-4000-8000-000000000001"
+                ))
+                .expect("fixture incarnation data"),
+                grant_id: id("controller-leaf"),
+                issued_revision: 1,
+            }],
+            controller_model: Some(selection.clone()),
+            controller_ceiling: ExecutionRestrictions::unrestricted(),
+            admitted_ceiling: ExecutionRestrictions::unrestricted(),
+            source_observations: Vec::new(),
+            ingress_namespace: QualifiedIngressNamespace {
+                realm: RealmId::parse("native-test").expect("realm"),
+                ingress: ResourceDomain {
+                    authority: principal("ingress"),
+                    namespace: "peers".into(),
+                },
+                occurrence_scope: id("occurrence"),
+            },
+            contract: ContractRequirements::local_governed_v1(),
+        })
+        .expect("well-formed peer delivery claims");
+        let mut input = request.input.clone();
+        input.header_mut().authority_association = Some(association);
+        input.header_mut().idempotency_key = Some(request.event_key.clone());
+        attach_ingress(input, requester, "peer-delivery-authentication")
     }
     /// The same fixture input under its own controller credential account.
     /// The credential lifecycle lease is process-wide per credential, so

@@ -3342,6 +3342,87 @@ impl MeerkatMachine {
         self.native_work_authorization_host.get().is_some()
     }
 
+    /// Install the trusted host's binder of governed peer deliveries
+    /// ([`crate::input_authority::PeerIngressBinder`]): from now on a peer
+    /// delivery whose sender the transport established is offered to it
+    /// before admission, and admitted only as it binds it. The composition
+    /// installs it once, after the native work authorization host and before
+    /// any session is registered. Without a binder a governed runtime refuses
+    /// peer deliveries as before.
+    pub fn install_peer_ingress_binder(
+        &self,
+        binder: Arc<dyn crate::input_authority::PeerIngressBinder>,
+    ) -> Result<(), PeerIngressBinderInstallRefused> {
+        if self.native_work_authorization_host.get().is_none() {
+            return Err(PeerIngressBinderInstallRefused::Ungoverned);
+        }
+        if self.peer_ingress_binder.get().is_some() {
+            return Err(PeerIngressBinderInstallRefused::AlreadyInstalled);
+        }
+        let sessions = self
+            .sessions
+            .try_read()
+            .map_err(|_| PeerIngressBinderInstallRefused::SessionsRegistered)?;
+        if !sessions.is_empty() {
+            return Err(PeerIngressBinderInstallRefused::SessionsRegistered);
+        }
+        self.peer_ingress_binder
+            .set(binder)
+            .map_err(|_| PeerIngressBinderInstallRefused::AlreadyInstalled)?;
+        drop(sessions);
+        Ok(())
+    }
+
+    /// Whether a governed peer delivery binder was installed. A composition
+    /// observation, never a permission decision.
+    pub fn has_peer_ingress_binder(&self) -> bool {
+        self.peer_ingress_binder.get().is_some()
+    }
+
+    /// The installed peer delivery binder, on a governed runtime only.
+    pub(crate) fn installed_peer_ingress_binder(
+        &self,
+    ) -> Option<Arc<dyn crate::input_authority::PeerIngressBinder>> {
+        if self.native_work_authorization_host.get().is_none() {
+            return None;
+        }
+        self.peer_ingress_binder.get().map(Arc::clone)
+    }
+
+    /// A governed persistent machine over `store` with the host `build`
+    /// makes for it installed, as a governed open builds one, for tests
+    /// whose host is a fixture.
+    #[cfg(test)]
+    pub(crate) fn persistent_governed_with_host_for_test(
+        store: Arc<dyn RuntimeStore>,
+        build: impl FnOnce(&Self) -> Arc<dyn crate::input_authority::NativeWorkAuthorizationHost>,
+    ) -> Result<Self, RuntimeDriverError> {
+        let machine = Self::persistent_with_mode(store, None, true)?;
+        let host = build(&machine);
+        machine.install_native_work_authorization(|_| host)
+    }
+
+    /// Mark `session_id`'s driver as served by an executor that supports
+    /// governed work, as the runtime loop does when such an executor
+    /// attaches, for tests that admit governed input with no executor.
+    #[cfg(test)]
+    pub(crate) async fn support_governed_work_for_test(&self, session_id: &SessionId) {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            Arc::clone(&sessions.get(session_id).expect("registered session").driver)
+        };
+        match &mut *driver.lock().await {
+            DriverEntry::Ephemeral(driver) => {
+                driver.set_executor_work_authorization_support(true);
+            }
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .inner_mut()
+                    .set_executor_work_authorization_support(true);
+            }
+        }
+    }
+
     /// Reauthenticate a fresh UI request through the installed member work
     /// owner. An ungoverned runtime starts with an empty dispatch context;
     /// neither path retains the last agent run's authorization or review.
@@ -10499,6 +10580,24 @@ pub enum ConsentOwnerLossInstallRefused {
     AlreadyInstalled,
 }
 
+/// Why a runtime refused to install a governed peer delivery binder
+/// ([`MeerkatMachine::install_peer_ingress_binder`]). Nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PeerIngressBinderInstallRefused {
+    /// No native work authorization host is installed: the runtime is
+    /// ungoverned, admits peer deliveries as it always did, and has nothing to
+    /// bind them for.
+    #[error("no native work authorization host is installed on this runtime")]
+    Ungoverned,
+    /// A session is registered, or being registered, on this runtime.
+    #[error("a session is already registered on this runtime")]
+    SessionsRegistered,
+    /// Another binder is already installed on this runtime.
+    #[error("another peer ingress binder is already installed on this runtime")]
+    AlreadyInstalled,
+}
+
 /// One tell of a machine's [`RunlessInputTerminalHint`], owed by the step
 /// that commits runless input terminals.
 ///
@@ -10582,6 +10681,10 @@ pub struct MeerkatMachineShared {
     /// settled and nothing is recorded as settled.
     consent_owner_loss_settlement:
         std::sync::OnceLock<Arc<dyn meerkat_core::approval::ConsentOwnerLossSettlement>>,
+    /// The trusted host's binder of governed peer deliveries, installed by
+    /// the composition before any session is registered. Empty: no peer
+    /// delivery is bound, and a governed runtime refuses them as before.
+    peer_ingress_binder: std::sync::OnceLock<Arc<dyn crate::input_authority::PeerIngressBinder>>,
     /// This runtime owner's identity for session hosting claims (#1813).
     /// Every claim this machine's lineage takes (its registrations, and its
     /// session service's actors, cold attaches and store-only writes) carries
@@ -12707,6 +12810,7 @@ impl MeerkatMachine {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 consent_owner_loss_settlement: std::sync::OnceLock::new(),
+                peer_ingress_binder: std::sync::OnceLock::new(),
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
                 hosting_owner: meerkat_core::session_hosting::HostingOwner::mint(),
                 sessions: RwLock::new(HashMap::new()),
@@ -12959,6 +13063,7 @@ impl MeerkatMachine {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 consent_owner_loss_settlement: std::sync::OnceLock::new(),
+                peer_ingress_binder: std::sync::OnceLock::new(),
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
                 hosting_owner: meerkat_core::session_hosting::HostingOwner::mint(),
                 sessions: RwLock::new(HashMap::new()),

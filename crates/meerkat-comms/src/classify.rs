@@ -59,6 +59,9 @@ pub(crate) struct PreparedIngressItem {
     #[allow(dead_code)]
     pub(crate) content_shape: PeerContentShape,
     pub(crate) request_id: Option<InteractionId>,
+    /// How the transport established the sender: set by the inbox path that
+    /// admits the item, `Unverified` unless that path proves otherwise.
+    pub(crate) sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
 }
 
 fn content_shape_for_text_and_blocks(
@@ -483,6 +486,8 @@ impl IngressClassificationContext {
                     ingress_fact,
                     content_shape,
                     request_id,
+                    sender_authentication:
+                        meerkat_core::PeerIngressSenderAuthentication::Unverified,
                     item: InboxItem::External { envelope },
                 })
             }
@@ -532,6 +537,8 @@ impl IngressClassificationContext {
                     ingress_fact,
                     content_shape,
                     request_id: None,
+                    sender_authentication:
+                        meerkat_core::PeerIngressSenderAuthentication::Unverified,
                     item: InboxItem::PlainEvent {
                         body,
                         source,

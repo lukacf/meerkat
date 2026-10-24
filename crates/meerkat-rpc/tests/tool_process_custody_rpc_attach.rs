@@ -57,6 +57,8 @@ const CHILD_BOUND: Duration = Duration::from_secs(120);
 /// Present in a row's root when every incarnation opens a WholeBlob (JSONL)
 /// realm instead of a HeadCanonical (SQLite) one.
 const WHOLE_BLOB_MARKER: &str = "whole-blob";
+/// Bound on turn/start answering after the restart.
+const TURN_BOUND: Duration = Duration::from_secs(90);
 const PHASE_GATEWAY: &str = "gateway";
 /// Run a quick tool, then pause the run's terminal commit (the turn is
 /// terminal in its agent, its provisional tail written, its boundary not
@@ -457,7 +459,14 @@ async fn on_demand_attach_resumes_the_interrupted_run(whole_blob: bool) {
             serde_json::json!({ "session_id": session_id, "prompt": NEXT_PROMPT }),
         )
         .await;
-    let response = rpc.response(id).await;
+    let response = tokio::time::timeout(TURN_BOUND, rpc.response(id))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "turn/start did not answer within {TURN_BOUND:?} (the interrupted call ran {} times)",
+                tool_runs(root)
+            )
+        });
     // The open run resumes at the attach, before the new turn is admitted,
     // so a call it runs again has its `runs` line by now.
     assert_eq!(

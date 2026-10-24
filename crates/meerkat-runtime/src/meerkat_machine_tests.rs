@@ -38462,6 +38462,153 @@ async fn a_never_started_resumed_run_consumes_the_inputs_its_rounds_applied() {
     assert_cold_registration_neither_resumes_nor_requeues(run).await;
 }
 
+/// A durable Steer that would join a resumed run at its model boundary.
+fn resumed_run_durable_steer() -> Input {
+    let mut metadata = crate::runtime_stamped_prompt_turn_metadata(None);
+    metadata.handling_mode = Some(meerkat_core::types::HandlingMode::Steer);
+    let mut prompt = crate::input::PromptInput::new("joins the resumed run", Some(metadata));
+    prompt.typed_turn_appends = vec![meerkat_core::lifecycle::ConversationAppend {
+        runtime_source: None,
+        role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
+        content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
+            kind: meerkat_core::types::SystemNoticeKind::Generic,
+            body: Some("joins the resumed run".into()),
+            blocks: Vec::new(),
+        },
+        identity: None,
+    }];
+    Input::Prompt(prompt)
+}
+
+/// A resumed run whose committed rounds applied `applied` of its inputs,
+/// with `staged` more still staged, parked at its model boundary while a
+/// durable Steer waits: whether generated authority lets the Steer join.
+async fn resumed_run_offered_a_durable_join(
+    applied: usize,
+    staged: usize,
+) -> (ResumedRunWithAppliedInputs, InputId, Result<(), String>) {
+    let run = resumed_run_with_applied_inputs(applied, staged, false).await;
+    let steer = resumed_run_durable_steer();
+    let steer_id = steer.id().clone();
+    let mut driver = run.driver.lock().await;
+    assert!(
+        driver
+            .as_driver_mut()
+            .accept_input(steer)
+            .await
+            .expect("the durable Steer is accepted")
+            .is_accepted()
+    );
+    let authority = driver.shared_dsl_authority();
+    {
+        let mut owner = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut *owner,
+            mm_dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: mm_dsl::RunId::from_domain(&run.run_id),
+                primitive_kind: mm_dsl::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: mm_dsl::ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            },
+        )
+        .expect("the resumed run's turn starts");
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut *owner,
+            mm_dsl::MeerkatMachineInput::PrimitiveApplied {
+                run_id: mm_dsl::RunId::from_domain(&run.run_id),
+            },
+        )
+        .expect("the resumed run parks at its model boundary");
+        let state = owner.state();
+        assert_eq!(state.turn_phase, mm_dsl::TurnPhase::CallingLlm);
+        assert_eq!(
+            state
+                .input_live_boundary_delivery
+                .get(&steer_id.to_string()),
+            Some(&mm_dsl::LiveBoundaryDelivery::DurableAppend),
+            "the Steer is a durable join candidate"
+        );
+    }
+    let joined = MeerkatMachine::preview_dsl_input_on_shared_authority(
+        &authority,
+        mm_dsl::MeerkatMachineInput::JoinLiveBoundaryDurableAppend {
+            run_id: mm_dsl::RunId::from_domain(&run.run_id),
+            input_id: steer_id.to_string(),
+        },
+        "JoinLiveBoundaryDurableAppend",
+    )
+    .map(|_| ());
+    drop(driver);
+    (run, steer_id, joined)
+}
+
+/// A resumed run's commit names every input still bound to it, the ones its
+/// committed rounds already applied as well as the staged ones, as one
+/// terminal-completion batch of at most 256 inputs. So the applied ones count
+/// against the join bound: a resumed run with 128 applied and 128 staged
+/// inputs takes no durable join. The Steer keeps its queued steer-lane
+/// follow-up, and once the run ends the next run's batch is that Steer.
+/// RED with a count of staged inputs only: it saw 128, took the join, and
+/// left the run a commit of 257 inputs that the bound refuses.
+#[tokio::test]
+async fn a_resumed_run_counts_the_inputs_its_rounds_applied_against_the_join_bound() {
+    let (run, steer_id, joined) = resumed_run_offered_a_durable_join(128, 128).await;
+    // The row below offers the same join to the same run with one staged
+    // input fewer, and the join is taken: the contributor bound is the guard
+    // that refuses this one.
+    let refusal = joined.expect_err("a resumed run that holds 256 contributors refuses the join");
+    assert!(
+        refusal.contains("guard rejected"),
+        "a generated guard refuses the join: {refusal}"
+    );
+    {
+        let driver = run.driver.lock().await;
+        assert_eq!(
+            driver.input_phase(&steer_id),
+            Some(crate::input_state::InputLifecycleState::Queued),
+            "the refused Steer stays queued"
+        );
+        let authority = driver.shared_dsl_authority();
+        let owner = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            owner.state().input_lane.get(&steer_id.to_string()),
+            Some(&mm_dsl::InputLane::Steer),
+            "the refused Steer keeps its steer-lane follow-up"
+        );
+    }
+
+    crate::meerkat_machine::cancel_runtime_loop_run(&run.driver, run.run_id.clone())
+        .await
+        .expect("the resumed run ends");
+    let driver = run.driver.lock().await;
+    let next = crate::meerkat_machine::machine_authorize_runtime_loop_batch(&driver)
+        .expect("the next run has a batch");
+    assert_eq!(
+        next.input_ids(),
+        std::slice::from_ref(&steer_id),
+        "the next run carries the refused Steer"
+    );
+    assert_eq!(
+        next.source(),
+        crate::meerkat_machine::driver::RuntimeLoopBatchSource::Steer
+    );
+}
+
+/// The bound is exact for a resumed run as well: with 128 applied and 127
+/// staged inputs, 255 in all, the run takes one durable join, and its commit
+/// names 256.
+#[tokio::test]
+async fn a_resumed_run_takes_a_durable_join_while_its_contributors_stay_below_the_bound() {
+    let (_run, _steer_id, joined) = resumed_run_offered_a_durable_join(128, 127).await;
+    joined.expect("a resumed run that holds 255 contributors takes the join");
+}
+
 #[tokio::test]
 async fn persistent_failed_run_lifecycle_commit_failure_preserves_pre_terminal_state() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());

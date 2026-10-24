@@ -394,8 +394,14 @@ async fn a_mutation_issued_mid_run_lands_after_the_run(head_canonical: bool) {
         let filter = filter.clone();
         async move { service.set_session_tool_filter(&id, filter).await }
     });
-    // The mutation meets the run's round commit before the run ends.
+    // The mutation meets the run's round commit before the run ends, and
+    // waits behind the run's lap: it has not settled when the run is
+    // released.
     tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !mutation.is_finished(),
+        "the mutation settled before the run ended"
+    );
     client.release.add_permits(1);
 
     let outcome_a = tokio::time::timeout(DEADLINE, turn_a)
@@ -523,8 +529,8 @@ impl meerkat_core::tool_process::InterruptedToolEvidenceSource for EvidenceReada
 /// round asks for it. The run is held, never replayed: the executor stops,
 /// run A's provisional tail stands, its input stays with run A (the stop
 /// ends it, nothing requeues it), and the model is not asked again, so
-/// nothing the round did is repeated. The next start resumes or repairs the
-/// run from its tail.
+/// nothing the round did is repeated. The next start repairs the run from
+/// its tail as interrupted.
 async fn an_unreadable_custody_store_holds_the_resumed_run(head_canonical: bool) {
     let root = TempDir::new().expect("temp");
     let stores = DiskStores::new(head_canonical, &root);

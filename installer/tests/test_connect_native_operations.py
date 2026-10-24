@@ -10,7 +10,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from launchkit.connect_installer_caller import CustodyError
-from launchkit.connect_native_operations import bind_native_operations
+from launchkit.connect_application_startup import bind_native_operations
 from test_application_extension import load_host
 
 
@@ -243,4 +243,7 @@ async def test_application_stop_joins_before_closing_store(tmp_path, monkeypatch
 def test_export_includes_native_operations_adapter():
     from launchkit.compiler import connect_application_finalizer_export
     files = {item.path: item.content for item in connect_application_finalizer_export()}
-    assert "class NativeOriginalOperations" in files["launchkit/connect_native_operations.py"]
+    assert "class NativeOriginalOperations" in files["launchkit/connect_application_startup.py"]
+    assert "launchkit/connect_native_operations.py" not in files
+    from launchkit.deployment_sources import _NATIVE_PATHS
+    assert set(files) <= _NATIVE_PATHS

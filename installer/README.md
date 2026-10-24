@@ -402,6 +402,12 @@ guide a question. Previous answers remain in the conversation and can be revisit
 Revisiting a topic keeps its saved context and asks what you want to change;
 the guide uses your answer to shape the next choices.
 
+Use **Attach files** to share existing workplace notes, skills, reference data or
+text PDFs with your message. Ordinary prose is enough. The builder and reviewer
+can read submitted source documents beyond the guide's summary. See
+[getting started](GETTING_STARTED.md) for supported formats, PDF limits and upload
+recovery. Reading an upload does not automatically add it to the exported app.
+
 The right side animates the current proposal: named agents, messages moving along
 workflow dependencies, parallel work, tool access and shared knowledge. Choose a
 workflow, pause, step, replay, or expand the map. Select an agent or source to

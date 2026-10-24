@@ -134,6 +134,29 @@ team. Your actual proposal appears as the guide designs your system. Use
 **Pause motion** to pause the illustration. On a phone, choose **View** on the
 miniature illustration to open the larger view.
 
+You can give the guide an ordinary document or skill describing your workplace's
+tools, data and access instructions. Choose **Attach files** beside the composer,
+select the document, and add a sentence explaining how it relates to your task.
+Wait for the upload to finish, then use the normal Send action. Uploading alone
+does not send a message. You do not need to rewrite the document as a tool catalog
+or install an organization plugin to attach it to your own conversation.
+
+Attach up to four files per message, at most 8 MiB each and 16 MiB together.
+Text, Markdown, CSV and JSON files must use UTF-8. PNG, JPEG, WebP and GIF images
+can also be attached; the guide shows whether its current model can interpret
+their pixels. When PDF is offered, use an unencrypted document with extractable
+text, at most 100 pages and one million extracted text characters. PDF reading
+does not perform OCR or analyze embedded images. For a scan or image-based table,
+paste the relevant text or attach page images and check the guide's image notice.
+
+Sent documents stay with the saved setup. The application builder and independent
+reviewer can read the original text or extracted PDF text in sections, including
+parts beyond the guide's summary. Reading an attachment does not automatically
+copy it into the generated application or exported package. Say explicitly if
+the application needs to retain particular source material. Access instructions
+give the agents context; actual connections still use Connect's supported setup
+and account-access flow.
+
 If an attached file keeps uploading, choose **Stop waiting**. Your draft and
 pending files stay on this page. The upload is unconfirmed, so choose **Retry
 upload** deliberately or **Remove** the files to continue without them. Neither

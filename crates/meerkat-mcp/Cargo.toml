@@ -56,7 +56,7 @@ meerkat-skills = { workspace = true }
 inventory = { workspace = true }
 reqwest = { workspace = true }
 http = "1"
-sse-stream = "0.2.4"  # SseStream::from_bytes_stream first ships in 0.2.4
+sse-stream = "0.3.0"  # SseStream::from_bytes_stream first ships in 0.2.4
 
 [features]
 test-support = []

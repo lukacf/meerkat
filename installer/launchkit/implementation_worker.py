@@ -269,10 +269,20 @@ class BuildTools:
         def load_reference(selected):
             reference_metadata = {}
             if selected == "application":
-                source = APPLICATION_CONTRACT
+                # Older inputs omitted this snapshot. Label their compatibility
+                # reference as current rather than claiming it was frozen.
+                frozen = "application_contract" in self.input
+                source = self.input["application_contract"] if frozen else APPLICATION_CONTRACT
+                if not isinstance(source, str) or not source.strip():
+                    raise ValueError("The saved Build application contract is unavailable.")
                 digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-                origins = [("launchkit/implementation.py#APPLICATION_CONTRACT", i + 1, digest)
-                           for i in range(len(source.splitlines()))]
+                path = ("input.json#application_contract" if frozen
+                    else "launchkit/implementation.py#APPLICATION_CONTRACT")
+                origins = [(path, i + 1, digest) for i in range(len(source.splitlines()))]
+                reference_metadata = {"reference_kind": (
+                    "frozen_application_contract" if frozen else "current_application_contract"),
+                    "source_files": [{"path": path, "sha256": digest}],
+                    "observed_destination": False}
                 return source, origins, reference_metadata
             if selection_error is not None:
                 return "", [], {"ok": False, "error": selection_error, "observed_destination": False}

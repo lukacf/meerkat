@@ -7,6 +7,9 @@
 
 #![allow(dead_code, unused_imports, clippy::expect_used, clippy::large_futures)]
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod resumed_run_tests;
 mod runtime_ingress;
 mod schedule_host;
 

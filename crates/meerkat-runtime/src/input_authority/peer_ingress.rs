@@ -297,11 +297,19 @@ pub enum PeerIngressBindRefusal {
 ///   recovery lock: only the delivery's own queue claim. The comms drain runs
 ///   one task per receiving session, and supervisor deliveries are served in
 ///   the receiving member's own drain, so a slow binder holds back only its
-///   own session's later deliveries. The binder must never await a member
-///   turn, or anything that waits on the receiving session's ingress; what it
-///   cannot answer now is `NotReady`. On the supervisor-bridge path Core
-///   bounds the await below the supervisor's command timeout and reads expiry
-///   as `NotReady`.
+///   own session's later deliveries.
+///   - For a comms delivery the binder never awaits a member turn, or
+///     anything that waits on the receiving session's ingress: Core does not
+///     bound that await, and the turn may itself be waiting on the drain the
+///     bind holds. What it cannot answer now is `NotReady`, which keeps the
+///     delivery at the head of the session's queue.
+///   - For a supervisor delivery Core bounds the await at 2 s, below the
+///     supervisor's command timeout, and reads expiry as `NotReady`. Within
+///     that bound the binder waits for the member's turn boundary before it
+///     pins the member's controller. A supervisor delivery often reaches a
+///     member mid-turn, and answering it `NotReady` at once (only trying the
+///     pin) rejects it, a rejection neither Core nor the mob retries. The
+///     member's later deliveries wait behind that bind, at most the bound.
 /// - It binds Core's exact `request.input`, setting only its authority
 ///   association, its idempotency key (to `request.event_key`) and its
 ///   trusted ingress observation, for example through `bind_scoped_original`.

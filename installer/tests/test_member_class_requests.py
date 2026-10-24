@@ -42,6 +42,8 @@ class RequestFixture(ClassFixture):
                 "authentication_domain": {"authority": deepcopy(self.ingress), "namespace": "selected-auth"},
                 "event_domain": {"authority": deepcopy(self.ingress), "namespace": "selected-events"},
                 "application_parent": None, "controller_parent": None}]}
+        for name in ("authentication_domain", "event_domain"):
+            self.native[name] = deepcopy(self.native["routes"][0][name])
         self.value["application"]["realm"] = {"realm_id": "fixture-realm"}
         self.value["owner"] = {"deployment": "fixture-deployment", "native_host": self.native}
         self.select()
@@ -115,7 +117,7 @@ def test_request_copies_selected_facts_and_survives_cold_reconstruction(tmp_path
     assert _installation_inputs(f.callbacks)[0] == f.human
 
 
-@pytest.mark.parametrize("case", ["missing-owner", "missing-deployment", "realm", "classes", "no-route", "ambiguous-domain",
+@pytest.mark.parametrize("case", ["missing-owner", "missing-deployment", "realm", "classes", "missing-pair", "one-domain", "foreign-domain", "empty-domain", "null-domains", "ambiguous-domain",
     "requester", "subject", "ingress", "authentication", "event", "missing-namespace",
     "logical-owner", "human-domain", "audience", "duplicate-member", "unqualified-ingress"])
 def test_missing_or_inconsistent_selected_mapping_is_refused(tmp_path, case):
@@ -125,7 +127,12 @@ def test_missing_or_inconsistent_selected_mapping_is_refused(tmp_path, case):
     elif case == "missing-deployment": del f.value["owner"]["deployment"]
     elif case == "realm": f.native["realm"] = "another-realm"
     elif case == "classes": f.native["member_classes"] = []
-    elif case == "no-route": f.native["routes"] = []
+    elif case == "missing-pair":
+        del f.native["authentication_domain"], f.native["event_domain"]
+    elif case == "one-domain": del f.native["event_domain"]
+    elif case == "foreign-domain": f.native["authentication_domain"]["authority"] = deepcopy(f.human)
+    elif case == "empty-domain": f.native["event_domain"]["namespace"] = ""
+    elif case == "null-domains": f.native["authentication_domain"] = f.native["event_domain"] = None
     elif case == "ambiguous-domain":
         second = deepcopy(route)
         second["authentication_domain"]["namespace"] = "another-auth"
@@ -262,8 +269,19 @@ async def test_no_native_submission_when_retention_or_currentness_fails(tmp_path
 
 
 @pytest.mark.parametrize("timeout", [60.0, 17.5, 1, None])
-async def test_host_retains_immutable_original_then_submits_private_request_once(tmp_path, sdk, timeout):
+@pytest.mark.parametrize("empty", [False, True])
+async def test_host_retains_immutable_original_then_submits_private_request_once(tmp_path, sdk, timeout, empty):
     f = RequestFixture(tmp_path)
+    if empty:
+        application = f.value["application"]
+        for name in ("helper", "helper_profile"):
+            application.pop(name)
+        application["roster"], application["members"] = [], []
+        f.native["members"], f.native["routes"] = [], []
+        f.deployment["agents"] = []
+        f.select()
+        f.observe(f.definition)
+        assert not f.callbacks._fixed
     spec = sdk.Spec(identity="reader:one", profile="reusable-reader", context={"records": ["original"]})
     events = []
     saved = tmp_path / "app-admitting-request.json"
@@ -272,6 +290,8 @@ async def test_host_retains_immutable_original_then_submits_private_request_once
         assert isinstance(request, sdk.Request)
         assert request.wire() == json.loads(saved.read_text())
         assert request.spec.context == {"records": ["original"]}
+        assert request.route["authentication_domain"] == f.native["authentication_domain"]
+        assert request.route["event_domain"] == f.native["event_domain"]
         assert publish is publish_listed
         assert timeout == selected_timeout
         events.append("native-submit")
@@ -315,3 +335,26 @@ async def test_host_entry_refuses_mcp_and_enrollment_before_retention(tmp_path, 
     with pytest.raises(TypeError, match="unexpected keyword argument"):
         await context._begin_member_class_add(admission_id="saved-add", class_id="reader", spec=object(),
             retain_request=retain, publish=publish, **extra)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+async def test_missing_installed_domains_refuse_add_before_retention_or_submission(tmp_path, sdk, empty):
+    f = RequestFixture(tmp_path)
+    del f.native["authentication_domain"], f.native["event_domain"]
+    if empty:
+        f.native["routes"], f.native["members"] = [], []
+    f.select()
+    f.observe()
+    runtime = SimpleNamespace(member_classes=SimpleNamespace(
+        begin_add=lambda *args, **kwargs: pytest.fail("Missing domains must not submit")))
+    context = SimpleNamespace(runtime=runtime, stop_event=asyncio.Event())
+    app = SimpleNamespace(dynamic=True, context=context, deployment=f.deployment, _application_callbacks=f.callbacks)
+    owner = SimpleNamespace(runtime=runtime, application=app, callbacks=f.callbacks,
+        _shutdown_task=None, _require_current=f.callbacks._current)
+    async def retain(value): pytest.fail("Missing domains must not retain an Add request")
+    async def publish(): pytest.fail("Missing domains must not list")
+    bind_member_class_requests(owner, app, runtime)
+    with pytest.raises(CustodyError, match="installation's selected Console domains"):
+        await context._begin_member_class_add(admission_id="saved-add", class_id="reader",
+            spec=sdk.Spec(identity="reader:one", profile="reusable-reader"),
+            retain_request=retain, publish=publish)

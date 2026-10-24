@@ -72,7 +72,7 @@ before submission sends no Add. After submission, keep the exact native attempt
 or the SDK's observation-unknown exception and its attempt; never blindly retry.
 
 Forge copies requester and represented_subject from the selected installation
-operator, copies ingress and domain facts from its pinned native seed routes,
+operator, copies ingress and Console domains from its pinned native installation,
 and derives the destination and logical owner for the exact durable identity.
 It omits issued application_parent, controller_parent and controller_route;
 native derives the held controller route and issues the parents. This context
@@ -82,6 +82,12 @@ private helper alone cannot enforce that boundary. An absent or ambiguous
 installation mapping is refused, as are use before connection and use after
 shutdown or source replacement. Existing fixed-roster and replacement hosts do
 not gain this route.
+The installation declares both Console domains even when all classes start with
+zero members. Existing seed routes must agree with those installed domains; they
+are not used to invent missing installation authority. Restore preserves older
+prepared plans with neither domain; ordinary Add refuses those plans. Adopting
+new domain-aware native artifacts requires a supported installation migration
+before relying on Add. A source or SDK refresh alone does not supply the pair.
 
 The application may initiate Add for its ordinary declared classes under the
 installation operator's grant when its own domain policy permits the action.

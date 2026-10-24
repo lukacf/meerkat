@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import UUID
 
 from .connect_installer_caller import (CustodyError, ExactFile, NativeApplicationInventory,
-    _json, _path, _private_directory, _same_json_value, _preparation_helper_catalog_request)
+    _json, _path, _private_directory, _same_json_value, _preparation_helper_catalog_request, _selected_console_domains)
 from .forge_application_host import ApplicationPreparationInputs, ForgeApplicationHost
 from .runtime_selection import parse_candidate_selection
 
@@ -460,6 +460,8 @@ class LocalApplicationPreparationOwner:
         human = choices["console_operator"]
         administrator = _principal("runtime_host", "installation-administrator", domain)
         ingress = _principal("runtime_host", "console-ingress", domain)
+        authentication = {"authority": deepcopy(ingress), "namespace": "console-authentication"}
+        event = {"authority": deepcopy(ingress), "namespace": "console-events"}
         has_helper = "helper_identity" in original
         members, routes, controllers, setup_requests = [], [], [], []
         if has_helper:
@@ -483,8 +485,8 @@ class LocalApplicationPreparationOwner:
                     "application_parent": None, "controller_parent": None,
                     "logical_executor": logical, "represented_subject": deepcopy(human),
                     "source_authority": deepcopy(ingress),
-                    "authentication_domain": {"authority": deepcopy(ingress), "namespace": "console-authentication"},
-                    "event_domain": {"authority": deepcopy(ingress), "namespace": "console-events"}})
+                    "authentication_domain": deepcopy(authentication),
+                    "event_domain": deepcopy(event)})
                 controllers.append({"target": {"kind": "original_route", "route": route},
                     "issuance_id": "forge:" + deployment + ":controller:" + str(index)})
                 if has_helper and row["identity"] in choices["initial_setup_identities"]:
@@ -497,6 +499,7 @@ class LocalApplicationPreparationOwner:
                 "realm": actual["realm_id"], "grant_administrator": administrator,
                 "remote_operator": deepcopy(human),
                 "ingress_domain": {"authority": deepcopy(ingress), "namespace": "console-ingress"},
+                "authentication_domain": deepcopy(authentication), "event_domain": deepcopy(event),
                 "members": members, "routes": routes}},
             "startup": {"kind": "initialize", "namespace": choices["namespace"], "generation": choices["generation"]},
             "authorities": {"controllers": controllers},
@@ -504,6 +507,24 @@ class LocalApplicationPreparationOwner:
                 "state_root": str(self._inputs.supervisor.destination / ".mobkit/state")},
             "output": str(self._inputs.startup_selection_path.parent / "prepared-application"),
             "hold_timeout_ms": 180000, "source_id": "forge-local-installation:" + deployment}
+        recovering = self.factory._installed_admission is not None and self._fresh_pin is not None
+        if recovering:
+            from .connect_installer_caller import _artifact_pin
+            self._recovery_admission(self.factory._installed_admission)
+            if not _same_json_value(_json(self._fresh_pin.read()), self._fresh_value):
+                raise CustodyError("The original prepared Fresh selection changed.")
+            retained_plan = _artifact_pin(self._fresh_value["preparation_plan"])
+            retained_owner = _json(retained_plan.read()).get("owner")
+            retained_native = retained_owner.get("native_host") if isinstance(retained_owner, dict) else None
+            if not isinstance(retained_native, dict):
+                raise CustodyError("Recovery requires its original native installation selection.")
+            if _selected_console_domains(retained_native) is None:
+                # Restore reads the original selection; it cannot migrate an
+                # accepted plan or supply authority for an ordinary Add.
+                for name in ("authentication_domain", "event_domain"):
+                    del result["owner"]["native_host"][name]
+            retained_plan.read()
+            self._fresh_pin.read()
         if not has_helper:
             # The same recovered-plan join checks these deterministic original
             # declarations. There are no optional helper choices to recover.
@@ -526,13 +547,7 @@ class LocalApplicationPreparationOwner:
         # Fresh plan. An older custom policy may allow the account tool without
         # having selected its parent. All other declarations use the same
         # inventory join and retain the full recovered-plan comparison.
-        recovering = self.factory._installed_admission is not None and self._fresh_pin is not None
         if recovering:
-            from .connect_installer_caller import _artifact_pin
-            self._recovery_admission(self.factory._installed_admission)
-            if not _same_json_value(_json(self._fresh_pin.read()), self._fresh_value):
-                raise CustodyError("The original prepared Fresh selection changed.")
-            retained_plan = _artifact_pin(self._fresh_value["preparation_plan"])
             retained_authorities = _json(retained_plan.read()).get("authorities")
             retained_report = (retained_authorities.get("helper_report")
                 if isinstance(retained_authorities, dict) else None)

@@ -121,6 +121,37 @@ def _same_member_classes(left, right):
     return _same_json_value(canonical(left), canonical(right))
 
 
+def _selected_console_domains(native):
+    """Check selected ResourceDomain custody; native enforces Add authority.
+
+    Older static installations omit both fields. Never infer a missing pair
+    from a seed route or from an application request.
+    """
+    names = ("authentication_domain", "event_domain")
+    present = set(names) & native.keys()
+    if not present:
+        return None
+    ingress = native.get("ingress_domain")
+    if present != set(names) or not isinstance(ingress, dict) or ingress.get("authority") is None:
+        raise CustodyError("Console domains require both installation selections and their ingress authority.")
+    for name in names:
+        domain = native[name]
+        if (not isinstance(domain, dict) or set(domain) != {"authority", "namespace"}
+                or not isinstance(domain["namespace"], str) or not domain["namespace"]
+                or not _same_json_value(domain["authority"], ingress["authority"])):
+            raise CustodyError("Console domains require a namespace and the installation ingress authority.")
+    routes = native.get("routes")
+    if not isinstance(routes, list):
+        raise CustodyError("Console domain custody requires the selected original route inventory.")
+    for route in routes:
+        if not isinstance(route, dict) or not isinstance(route.get("origin"), dict):
+            raise CustodyError("Console domain custody requires valid original route selections.")
+        if route["origin"].get("kind") == "local_console" and any(
+                not _same_json_value(route.get(name), native[name]) for name in names):
+            raise CustodyError("A LocalConsole route changed its installation-selected domains.")
+    return [native[name] for name in names]
+
+
 def _selected_service_parent_administration(value, *, routes, remote_operator):
     """Check the existing native selection shape, never administrative authority.
 
@@ -771,7 +802,7 @@ def _prepared_plan_source(plan, setup):
     original, resolved = plan["owner"], setup.get("native_owner")
     owner_fields = {"deployment", "components", "channels", "native_host"}
     native_fields = {"realm", "grant_administrator", "remote_operator", "ingress_domain", "members", "routes"}
-    native_optional = {"service_parent_administration", "member_classes"}
+    native_optional = {"service_parent_administration", "member_classes", "authentication_domain", "event_domain"}
     if (not isinstance(original, dict) or set(original) != owner_fields
             or not isinstance(resolved, dict) or set(resolved) != owner_fields
             or not isinstance(original["native_host"], dict) or not native_fields <= original["native_host"].keys()
@@ -781,6 +812,8 @@ def _prepared_plan_source(plan, setup):
             or not _same_json_value(original["native_host"]["members"], source.get("members"))):
         raise CustodyError("The completed preparation requires its exact resolved native owner.")
     before, after = original["native_host"], resolved["native_host"]
+    if not _same_json_value(_selected_console_domains(before), _selected_console_domains(after)):
+        raise CustodyError("The completed native owner changed its selected Console domains.")
     classes = source.get("member_classes", [])
     if (not isinstance(classes, list) or any(not isinstance(row, dict) for row in classes)
             or not _same_member_classes(before.get("member_classes", []), classes)

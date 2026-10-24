@@ -341,3 +341,37 @@ def test_non_helper_provider_route_and_channel_source_survive_helper_projection_
     assert setup["native_owner"]["channels"][-1] == original["channels"][-1]
     assert setup["native_owner"]["channels"][0]["member"] == setup["helper"]["member"]
     assert not f.calls and not f.caller.provision_attempt_path.exists()
+
+
+@pytest.mark.parametrize("change", [None, "remove-pair", "one-domain", "rewrite-pair", "route-copy", "inject-pair", "null-pair"])
+def test_completed_preparation_preserves_exact_installed_console_domains(tmp_path, change):
+    f = PreparationFixture(tmp_path)
+    before = f.plan_value["owner"]["native_host"]
+    after = f.setup_value["native_owner"]["native_host"]
+    for native in (before, after):
+        native["ingress_domain"] = {"authority": "opaque-selected-ingress", "namespace": "ingress"}
+        for name in ("authentication_domain", "event_domain"):
+            native[name] = {"authority": "opaque-selected-ingress", "namespace": "selected-" + name}
+            for row in native["routes"]:
+                row[name] = copy.deepcopy(native[name])
+    if change == "remove-pair":
+        del after["authentication_domain"], after["event_domain"]
+    elif change == "one-domain": del after["event_domain"]
+    elif change == "rewrite-pair":
+        after["event_domain"]["namespace"] = "other-selected-events"
+        for row in after["routes"]:
+            row["event_domain"] = copy.deepcopy(after["event_domain"])
+    elif change == "route-copy": after["routes"][0]["event_domain"]["namespace"] = "route-only"
+    elif change == "inject-pair":
+        del before["authentication_domain"], before["event_domain"]
+    elif change == "null-pair":
+        del before["authentication_domain"], before["event_domain"]
+        after["authentication_domain"] = after["event_domain"] = None
+    f.repin_plan()
+    f.publish()
+    if change is None:
+        setup, _ = f.retain().authenticate()
+        assert json.loads(setup)["native_owner"]["native_host"] == after
+    else:
+        with pytest.raises(CustodyError, match="[Dd]omains"):
+            f.retain()

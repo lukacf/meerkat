@@ -10,7 +10,7 @@ import json
 import math
 import re
 
-from .connect_installer_caller import CustodyError, _json, _same_member_classes
+from .connect_installer_caller import CustodyError, _json, _same_member_classes, _selected_console_domains
 
 
 def _roster_member(identity):
@@ -59,10 +59,13 @@ def _installation_inputs(callbacks):
             or not isinstance(ingress["qualification"].get("trust_domain_id"), str)
             or not ingress["qualification"]["trust_domain_id"]):
         raise CustodyError("Member Add requires the selected installation operator and qualified ingress.")
+    domains = _selected_console_domains(native)
+    if domains is None:
+        raise CustodyError("Member Add requires the installation's selected Console domains.")
+    authentication, event = domains
     routes, members = native.get("routes"), native.get("members")
     if not isinstance(routes, list) or not isinstance(members, list):
         raise CustodyError("Member Add requires the original installation's member routes.")
-    selected = []
     for route in routes:
         if not isinstance(route, dict) or not isinstance(route.get("origin"), dict):
             raise CustodyError("The selected installation contains an invalid native route.")
@@ -70,24 +73,18 @@ def _installation_inputs(callbacks):
         if origin.get("kind") != "local_console":
             continue
         matching = [row for row in members if isinstance(row, dict) and row.get("member") == origin.get("member")]
-        authentication, event = route.get("authentication_domain"), route.get("event_domain")
         if (len(matching) != 1 or origin.get("requester") != human
                 or origin.get("ingress_actor") != ingress or route.get("source_authority") != ingress
                 or route.get("represented_subject") != human
-                or not isinstance(authentication, dict) or authentication.get("authority") != ingress
-                or not isinstance(event, dict) or event.get("authority") != ingress
-                or not isinstance(authentication.get("namespace"), str) or not authentication["namespace"]
-                or not isinstance(event.get("namespace"), str) or not event["namespace"]
+                or route.get("authentication_domain") != authentication
+                or route.get("event_domain") != event
                 or matching[0].get("logical_owner") != route.get("logical_executor")
                 or not isinstance(route.get("logical_executor"), dict)
                 or route["logical_executor"].get("kind") != "shared_agent"
                 or route["logical_executor"].get("qualification") != ingress["qualification"]
                 or matching[0].get("audience") != {"audience": "principal", "principal": human}):
             raise CustodyError("Member Add cannot reinterpret the installation's selected Console authority.")
-        selected.append((authentication, event))
-    if not selected or any(item != selected[0] for item in selected[1:]):
-        raise CustodyError("Member Add needs unambiguous selected Console authentication and event domains.")
-    return human, ingress, selected[0], deployment
+    return human, ingress, (authentication, event), deployment
 
 
 def _member_class_add_request(callbacks, deployment, *, admission_id, class_id, spec,

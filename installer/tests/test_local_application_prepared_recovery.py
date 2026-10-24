@@ -50,9 +50,10 @@ async def prepared_recovery(registry, monkeypatch, request):
     legacy_account_policy = request.param == "legacy-account-policy-restore"
     paired_account_policy = request.param == "paired-account-parent-restore"
     successor_catalog = request.param == "successor-catalog-restore"
+    legacy_domains = request.param == "legacy-console-domains-restore"
     legacy_budget = request.param.startswith("legacy-budget-")
     state = (request.param.removeprefix("legacy-budget-") if legacy_budget else
-        "restore" if legacy_account_policy or paired_account_policy or successor_catalog else request.param)
+        "restore" if legacy_account_policy or paired_account_policy or successor_catalog or legacy_domains else request.param)
     from launchkit import local_application_source
     current_initial_policy = local_application_source._initial_policy
 
@@ -104,6 +105,15 @@ async def prepared_recovery(registry, monkeypatch, request):
         request.addfinalizer(legacy_declarations_patch.undo)
         legacy_declarations_patch.setattr(LocalApplicationPreparationOwner,
             "declarations", successor_declarations)
+    if legacy_domains:
+        def original_domains(owner, inventory):
+            choices = production_declarations(owner, inventory)
+            native = choices["owner"]["native_host"]
+            del native["authentication_domain"], native["event_domain"]
+            return choices
+        legacy_declarations_patch = pytest.MonkeyPatch()
+        request.addfinalizer(legacy_declarations_patch.undo)
+        legacy_declarations_patch.setattr(LocalApplicationPreparationOwner, "declarations", original_domains)
     saved = new_guide(original)
     installed = await build(original, saved)
     await accept_source_fixture(original, installed)
@@ -213,6 +223,10 @@ async def prepared_recovery(registry, monkeypatch, request):
         assert all(row["issuance_id"].endswith(":successors") for row in plan["authorities"]["agent_setup"])
         legacy_declarations_patch.undo()
         assert LocalApplicationPreparationOwner.declarations is production_declarations
+    if legacy_domains:
+        assert not {"authentication_domain", "event_domain"} & plan["owner"]["native_host"].keys()
+        legacy_declarations_patch.undo()
+        assert LocalApplicationPreparationOwner.declarations is production_declarations
     changed = original.store.get(saved["id"])
     changed["proposal"]["project"]["name"] += " evolving draft B"
     changed = original.store.save(changed, changed["version"])
@@ -288,7 +302,8 @@ def retained_bytes(f):
             for path in f.destination.rglob("*") if path.is_symlink()})
 
 
-@pytest.mark.parametrize("prepared_recovery", ["fresh", "finalized", "restore", "successor-catalog-restore"], indirect=True)
+@pytest.mark.parametrize("prepared_recovery", ["fresh", "finalized", "restore", "successor-catalog-restore",
+    "legacy-console-domains-restore"], indirect=True)
 async def test_claimed_prepare_recovers_original_prepared_selection_without_native_replay(prepared_recovery):
     f = prepared_recovery
     before = retained_bytes(f)

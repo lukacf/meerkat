@@ -6853,7 +6853,7 @@ impl Session {
             return false;
         };
         let mut asked = false;
-        for message in self.messages().iter() {
+        for message in self.messages() {
             match message {
                 Message::BlockAssistant(answer) => {
                     asked = answer.identity.run_id.as_ref() == Some(run_id)

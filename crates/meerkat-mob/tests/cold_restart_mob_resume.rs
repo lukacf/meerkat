@@ -7155,6 +7155,12 @@ const FALLBACK_TURN_PROMPT: &str = "FALLBACK_TURN token-omega";
 #[cfg(feature = "test-support")]
 const FALLBACK_REPLY: &str = "backup success";
 
+/// The prompt whose run [`SCRIPTED_PRIMARY_MODEL`] answers with one tool
+/// round (a call to `peers`), and whose next call it then holds without end:
+/// a run kept in flight after a committed round.
+#[cfg(feature = "test-support")]
+const TOOL_ROUND_PROMPT: &str = "TOOL_ROUND token-tau";
+
 /// What [`ScriptedChatServer`] served, and its held request's signals.
 #[cfg(feature = "test-support")]
 #[derive(Default)]
@@ -7164,6 +7170,9 @@ struct ScriptedChatState {
     release: tokio::sync::Notify,
     primary_refusals: std::sync::atomic::AtomicUsize,
     backup_answers: std::sync::atomic::AtomicUsize,
+    /// Notified once a [`TOOL_ROUND_PROMPT`] run's call after its tool round
+    /// is in flight (it is never answered).
+    tool_round_held: tokio::sync::Notify,
 }
 
 /// An OpenAI-compatible chat-completions server behind the members'
@@ -7174,7 +7183,10 @@ struct ScriptedChatState {
 ///   releases it, as [`HeldTurnClient`] does;
 /// - a [`SCRIPTED_PRIMARY_MODEL`] request that mentions
 ///   [`FALLBACK_TURN_PROMPT`] is refused as overloaded (503);
-/// - a [`SCRIPTED_BACKUP_MODEL`] request answers [`FALLBACK_REPLY`].
+/// - a [`SCRIPTED_BACKUP_MODEL`] request answers [`FALLBACK_REPLY`];
+/// - a [`SCRIPTED_PRIMARY_MODEL`] request that mentions [`TOOL_ROUND_PROMPT`]
+///   is answered with a `peers` tool call until it carries a tool result,
+///   and is then held without end.
 #[cfg(feature = "test-support")]
 struct ScriptedChatServer {
     port: u16,
@@ -7317,6 +7329,9 @@ async fn serve_scripted_chat_connection(
             })
         })
     };
+    let carries_tool_result = request["messages"]
+        .as_array()
+        .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"));
     let response = match request["model"].as_str() {
         Some(SCRIPTED_PRIMARY_MODEL) if mentions(FALLBACK_TURN_PROMPT) => {
             state
@@ -7327,6 +7342,14 @@ async fn serve_scripted_chat_connection(
                 "application/json",
                 r#"{"error":{"message":"overloaded","type":"server_error"}}"#,
             )
+        }
+        Some(SCRIPTED_PRIMARY_MODEL) if mentions(TOOL_ROUND_PROMPT) && !carries_tool_result => {
+            scripted_chat_tool_call("peers", "{}")
+        }
+        Some(SCRIPTED_PRIMARY_MODEL) if mentions(TOOL_ROUND_PROMPT) => {
+            state.tool_round_held.notify_one();
+            std::future::pending::<()>().await;
+            return;
         }
         Some(SCRIPTED_PRIMARY_MODEL) => {
             if mentions(HELD_TURN_PROMPT)
@@ -7357,6 +7380,31 @@ fn scripted_chat_answer(text: &str) -> String {
         serde_json::json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }] }),
         serde_json::json!({
             "choices": [],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        }),
+    ];
+    let mut body = String::new();
+    for chunk in chunks {
+        body.push_str("data: ");
+        body.push_str(&chunk.to_string());
+        body.push_str("\n\n");
+    }
+    body.push_str("data: [DONE]\n\n");
+    scripted_http_response("200 OK", "text/event-stream", &body)
+}
+
+/// One complete streamed chat-completions answer that calls `tool` once
+/// with `arguments`.
+#[cfg(feature = "test-support")]
+fn scripted_chat_tool_call(tool: &str, arguments: &str) -> String {
+    let chunks = [
+        serde_json::json!({ "choices": [{ "delta": { "tool_calls": [{
+            "index": 0,
+            "id": "call_scripted_1",
+            "function": { "name": tool, "arguments": arguments }
+        }] }, "finish_reason": null }] }),
+        serde_json::json!({
+            "choices": [{ "delta": {}, "finish_reason": "tool_calls" }],
             "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
         }),
     ];
@@ -8057,6 +8105,239 @@ async fn a_direct_turn_after_a_read_settled_a_stopped_turn_acknowledges_its_fall
     );
     assert_the_next_turn_fell_back_and_committed(&stopped, &server, "read-settle-direct").await;
     let _ = stopped.handle.shutdown().await;
+}
+
+/// A member's next run after a deploy stop past its bound takes a sticky
+/// model fallback at its first model call, and commits and acknowledges it.
+/// The stopped run had committed one tool round, so the graceful stop (its
+/// requeue bound two seconds) kept it at that round. The next start comes
+/// after the bound: the registration marks the run resumable and seeds the
+/// member's actor from its tail (with the run's checkpoint receipt), and the
+/// executor attachment then settles the run as expired and repairs its tail
+/// as an interrupted run. The session keeps serving, and the next run's
+/// primary model refuses its first call as overloaded: the run fails over to
+/// the backup, whose control commit is acknowledged on the actor before the
+/// retry, and completes on the backup. RED while only WholeBlob's
+/// synchronization forgot the settled run's receipt on that actor: the
+/// acknowledgement refused to bypass "an actor-carried provisional tail", so
+/// the committed fallback tore the run down.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sticky_fallback_after_a_deploy_stop_past_its_bound_acknowledges() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "warn,meerkat_runtime::recovery=info,meerkat_session::persistent=info",
+        ))
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let server = ScriptedChatServer::start().await;
+    let max_age = Duration::from_secs(2);
+    let identity = AgentIdentity::from("w-1");
+
+    // Lifetime 1: the member's run commits a tool round, its next call is
+    // held, and the deploy's graceful stop keeps the run.
+    let runtime_store_1: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(&paths.realm_db_path)
+            .expect("open the HeadCanonical runtime store"),
+    );
+    let (service_1, _store_1) = persistent_head_canonical_service_over_providers(
+        &paths,
+        Arc::clone(&runtime_store_1),
+        server.config(),
+    );
+    let handle_1 = MobBuilder::new(
+        self_hosted_fallback_mob_definition(),
+        MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage"),
+    )
+    .with_session_service(service_1.clone())
+    .create()
+    .await
+    .expect("create the persistent mob");
+    handle_1
+        .spawn_spec(SpawnMemberSpec::new("worker", identity.clone()))
+        .await
+        .expect("spawn the worker");
+    let w1_sid = handle_1
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("the worker's session");
+    let runtime_1 = service_1
+        .canonical_runtime_adapter()
+        .expect("the session service's runtime owner");
+    let (accepted, completion) = runtime_1
+        .accept_input_with_completion(
+            &w1_sid,
+            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                TOOL_ROUND_PROMPT,
+                None,
+            )),
+        )
+        .await
+        .expect("accept the run's prompt");
+    let stopped_input = match accepted {
+        meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => input_id,
+        other => panic!("the run's prompt is accepted: {other:?}"),
+    };
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        server.state.tool_round_held.notified(),
+    )
+    .await
+    .expect("the run's call after its tool round is in flight");
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&w1_sid);
+    assert!(
+        runtime_store_1
+            .load_head_canonical_provisional_tail(&runtime_id)
+            .await
+            .expect("load the provisional tail")
+            .is_some(),
+        "the run committed its tool round"
+    );
+    handle_1
+        .shutdown_with_report(
+            meerkat_mob::ShutdownOptions::default()
+                .with_deadline(meerkat_core::time_compat::Instant::now() + Duration::from_secs(60))
+                .with_queued_inputs(meerkat_mob::QueuedInputsOnShutdown::Requeue(
+                    meerkat_mob::RequeueMaxAge::new(max_age).expect("an accepted requeue bound"),
+                )),
+        )
+        .await
+        .expect("the deploy's graceful stop");
+    let waited = tokio::time::timeout(
+        Duration::from_secs(10),
+        completion.expect("the run's completion").wait(),
+    )
+    .await
+    .expect("the run's waiter is answered");
+    assert!(
+        matches!(&waited, Err(error) if error.is_requeued_across_stop()),
+        "the stop keeps the run: {waited:?}"
+    );
+    service_1
+        .discard_live_session(&w1_sid)
+        .await
+        .expect("discard the live session as the process ends");
+    drop(runtime_1);
+    drop(handle_1);
+    drop(service_1);
+    drop(runtime_store_1);
+
+    // The bound passes, measured from the input's admission.
+    sleep(max_age + Duration::from_secs(1)).await;
+
+    // Lifetime 2: the kept run is settled as expired and its tail repaired;
+    // the member's next run falls back at its first call.
+    let runtime_store_2: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(&paths.realm_db_path)
+            .expect("reopen the HeadCanonical runtime store"),
+    );
+    let (service_2, store_2) = persistent_head_canonical_service_over_providers(
+        &paths,
+        Arc::clone(&runtime_store_2),
+        server.config(),
+    );
+    let handle_2 = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen the mob storage"),
+    )
+    .with_session_service(service_2.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("resume the mob after the deploy");
+    let runtime_2 = service_2
+        .canonical_runtime_adapter()
+        .expect("the session service's runtime owner");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let terminal = meerkat_runtime::SessionServiceRuntimeExt::input_state(
+            runtime_2.as_ref(),
+            &w1_sid,
+            &stopped_input,
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|stored| stored.seed.terminal_outcome);
+        if let Some(terminal) = terminal {
+            assert_eq!(
+                terminal,
+                meerkat_runtime::InputTerminalOutcome::Abandoned {
+                    reason: meerkat_runtime::InputAbandonReason::RequeueExpired,
+                },
+                "the kept run is settled as expired, not resumed"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the kept run's input reaches a terminal after the restart"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    let (_accept, completion) = runtime_2
+        .accept_input_with_completion(
+            &w1_sid,
+            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                FALLBACK_TURN_PROMPT,
+                None,
+            )),
+        )
+        .await
+        .expect("accept the next run's prompt");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        completion.expect("the next run's completion").wait(),
+    )
+    .await
+    .expect("the next run ends within its bound");
+    assert!(
+        matches!(
+            outcome,
+            Ok(meerkat_runtime::completion::CompletionOutcome::Completed(ref run))
+                if run.text == FALLBACK_REPLY
+        ),
+        "the next run falls back, commits and acknowledges: {outcome:?}"
+    );
+    assert_eq!(
+        server.primary_refusals(),
+        1,
+        "the primary model refused the next run's first call"
+    );
+    assert_eq!(
+        server.backup_answers(),
+        1,
+        "the backup model answered the call's retry"
+    );
+    let _ = store_2;
+    let session = service_2
+        .load_authoritative_session(&w1_sid)
+        .await
+        .expect("the session reads strictly")
+        .expect("the member's session is committed");
+    assert_eq!(
+        session
+            .session_metadata()
+            .expect("the session keeps its metadata")
+            .llm_identity()
+            .model,
+        SCRIPTED_BACKUP_MODEL,
+        "the session commits the backup as its model"
+    );
+    let history = to_string(session.messages()).expect("serialize the committed transcript");
+    assert_eq!(
+        history.matches(TOOL_ROUND_PROMPT).count(),
+        1,
+        "the repaired run keeps its prompt exactly once: {history}"
+    );
+    assert_eq!(
+        history.matches(FALLBACK_TURN_PROMPT).count(),
+        1,
+        "the session keeps the next run exactly once: {history}"
+    );
+    let _ = handle_2.shutdown().await;
 }
 
 /// A retire over a durable tail the store-owned recovery holds ends typed and

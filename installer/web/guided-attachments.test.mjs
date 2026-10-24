@@ -668,18 +668,22 @@ test('only positively available image analysis suppresses the notice, and docume
   }
 });
 
-test('actual navigation cancels the old upload, hides its late failure and allows the new guide upload without losing old checked refs', async () => {
+for (const outcome of ['success', 'error']) test(`navigation cancels the old upload and fences late ${outcome} while the new guide uploads`, async () => {
   const other = { ...structuredClone(guide), id: 'other-file-guide', name: 'Other saved setup',
     question: { ...guide.question, title: 'Other saved question' } };
   const session = new Map();
   createGuideAttachmentStore(() => storage(session)).add(guide.id, [ref('kept.md')]);
-  let failOld;
+  let finishOld, finishNew;
   await mount({ session, otherGuides: [other], onPost: ({ url }) => {
     if (url === `/api/guide/${guide.id}/attachments`) return new Promise(resolve => {
-      failOld = () => resolve({ httpError: 422, detail: 'Old guide upload failed.' });
+      finishOld = () => resolve(outcome === 'success' ? { attachments: [ref('late.png', 4)] }
+        : { httpError: 422, detail: 'Old guide upload failed.' });
     });
-    if (url === `/api/guide/${other.id}/attachments`) return { attachments: [ref('new.md', 2, other.id)] };
-  } }, async ({ document, choose, calls }) => {
+    if (url === `/api/guide/${other.id}/attachments`) return new Promise(resolve => {
+      finishNew = () => resolve({ attachments: [ref('new.md', 2, other.id)] });
+    });
+  } }, async ({ document, choose, calls, input, local }) => {
+    const savedDraft = local.get(input.key);
     await choose('late.png');
     const oldUpload = calls.find(call => call.url === `/api/guide/${guide.id}/attachments`);
     assert.match(document.querySelector('.setup-attachments [role="status"]').textContent, /Uploading/);
@@ -691,13 +695,25 @@ test('actual navigation cancels the old upload, hides its late failure and allow
     assert.equal(document.querySelector('.setup-attachments [role="alert"]') === null, true);
     assert.equal(document.querySelector('.setup-attachments a') === null, true);
     await choose('new.md');
-    assert.equal(document.querySelector('.setup-attachments a').getAttribute('href'), ref('new.md', 2, other.id).url);
-    await act(async () => { failOld(); await pause(); });
+    const newUpload = calls.find(call => call.url === `/api/guide/${other.id}/attachments`);
+    assert.match(document.querySelector('.setup-attachments [role="status"]').textContent, /Uploading/);
+    await act(async () => { finishOld(); await pause(); });
+    assert.equal(newUpload.signal.aborted, false, 'The abandoned upload cannot cancel the new owner.');
+    assert.match(document.querySelector('.setup-attachments [role="status"]').textContent, /Uploading/);
+    assert.equal(document.querySelector('#setup-send').disabled, true, 'The new upload still owns the pending state.');
+    assert.equal(document.querySelector('.setup-attachments a') === null, true, 'A late success cannot publish the old file here.');
     assert.doesNotMatch(document.body.textContent, /Old guide upload failed/);
+    const beforeCompletion = createGuideAttachmentStore(() => storage(session));
+    assert.deepEqual(beforeCompletion.read(guide.id), [ref('kept.md')], 'A late success cannot add the old pending file to saved refs.');
+    assert.deepEqual(beforeCompletion.read(other.id), []);
+    await act(async () => { finishNew(); await pause(); });
+    assert.equal(document.querySelector('.setup-attachments [role="status"]') === null, true);
+    assert.equal(document.querySelector('.setup-attachments a').getAttribute('href'), ref('new.md', 2, other.id).url);
     assert.equal(document.querySelector('.setup-attachments a').textContent, 'new.md');
     const recovered = createGuideAttachmentStore(() => storage(session));
     assert.deepEqual(recovered.read(guide.id), [ref('kept.md')]);
     assert.deepEqual(recovered.read(other.id), [ref('new.md', 2, other.id)]);
+    assert.equal(local.get(input.key), savedDraft, 'Navigation and late completion preserve the old guide draft and choices.');
     assert.equal(calls.filter(call => call.url.endsWith('/respond')).length, 0);
   });
 });

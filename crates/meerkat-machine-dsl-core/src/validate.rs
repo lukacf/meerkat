@@ -14,7 +14,7 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "meerkat_peer_endpoint_set_peer_ids_unique",
     "meerkat_machine_live_bridge_authority_rows_without_operation",
     "meerkat_machine_live_bridge_authorities_without_operation",
-    "meerkat_machine_run_staged_contributor_count",
+    "meerkat_machine_run_contributor_count",
     "meerkat_machine_run_contributor_limit",
     "mob_machine_external_peer_edge_has_matching_key",
     "mob_machine_external_peer_edge_local",

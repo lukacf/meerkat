@@ -17,7 +17,7 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "meerkat_peer_endpoint_set_peer_ids_unique",
     "meerkat_machine_live_bridge_authority_rows_without_operation",
     "meerkat_machine_live_bridge_authorities_without_operation",
-    "meerkat_machine_run_staged_contributor_count",
+    "meerkat_machine_run_contributor_count",
     "meerkat_machine_run_contributor_limit",
     "mob_machine_identity_has_session_binding",
     "mob_machine_remote_turn_custody_admits",

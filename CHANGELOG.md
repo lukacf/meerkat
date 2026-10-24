@@ -2138,11 +2138,12 @@ them.
   (`command_capabilities::RUNTIME_LOOP_BATCH_MAX_INPUTS`) and the rest of its
   lane runs in the next run, in admission order. A runless termination
   completes every input in batches of at most 256, committed together in its
-  one durable commit. Past 256 contributors (a run's batch and its joins), a
-  durable Steer that cannot join the running turn is delivered in the next run
-  instead: the machine's `JoinLiveBoundaryDurableAppend` gains the
-  `run_contributor_capacity` guard. A recipient set past the bound is refused,
-  typed, before any checkpoint.
+  one durable commit. Past 256 contributors (a run's batch and its joins; a
+  resumed run's batch includes the inputs its committed rounds already
+  applied), a durable Steer that cannot join the running turn is delivered in
+  the next run instead: the machine's `JoinLiveBoundaryDurableAppend` gains
+  the `run_contributor_capacity` guard. A recipient set past the bound is
+  refused, typed, before any checkpoint.
 
 - `meerkat-runtime`: a retire no longer hangs when its runtime loop has many
   wakes pending. Retire held the session mutation gate while it waited for

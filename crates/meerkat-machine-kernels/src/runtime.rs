@@ -1334,8 +1334,8 @@ impl GeneratedMachineKernel {
                     args,
                     transition_name,
                 ),
-            "meerkat_machine_run_staged_contributor_count" => {
-                self.eval_meerkat_machine_run_staged_contributor_count(args, transition_name)
+            "meerkat_machine_run_contributor_count" => {
+                self.eval_meerkat_machine_run_contributor_count(args, transition_name)
             }
             "meerkat_machine_run_contributor_limit" => {
                 if !args.is_empty() {
@@ -1452,7 +1452,7 @@ impl GeneratedMachineKernel {
         ))
     }
 
-    fn eval_meerkat_machine_run_staged_contributor_count(
+    fn eval_meerkat_machine_run_contributor_count(
         &self,
         args: Vec<KernelValue>,
         transition_name: &TransitionId,
@@ -1461,7 +1461,7 @@ impl GeneratedMachineKernel {
             args.try_into().map_err(|_| {
                 self.eval_error(
                     transition_name,
-                    "meerkat_machine_run_staged_contributor_count expects three args",
+                    "meerkat_machine_run_contributor_count expects three args",
                 )
             })?;
         let run_associations = run_associations
@@ -1470,18 +1470,22 @@ impl GeneratedMachineKernel {
         let input_phases = input_phases
             .into_map()
             .map_err(|error| self.eval_error(transition_name, error))?;
-        let staged = run_associations
+        let bound = run_associations
             .iter()
             .filter(|(input_id, associated)| {
                 **associated == run_id
                     && matches!(
                         input_phases.get(*input_id),
                         Some(KernelValue::NamedVariant { enum_name, variant })
-                            if enum_name.as_str() == "InputPhase" && variant.as_str() == "Staged"
+                            if enum_name.as_str() == "InputPhase"
+                                && matches!(
+                                    variant.as_str(),
+                                    "Staged" | "Applied" | "AppliedPendingConsumption"
+                                )
                     )
             })
             .count();
-        Ok(KernelValue::U64(u64::try_from(staged).unwrap_or(u64::MAX)))
+        Ok(KernelValue::U64(u64::try_from(bound).unwrap_or(u64::MAX)))
     }
 
     fn eval_meerkat_machine_live_bridge_authorities_without_operation(
@@ -4609,6 +4613,62 @@ mod tests {
                 )
                 .expect("filter operation-owned authority set"),
             KernelValue::Set(BTreeSet::from([retained_authority, unowned_authority]))
+        );
+    }
+
+    /// The run contributor count, as the join guard reads it: every input
+    /// associated with the run that is staged for it or, in a resumed run,
+    /// applied by one of its committed rounds. A queued, consumed or other
+    /// run's input does not count.
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn meerkat_run_contributor_count_counts_staged_and_applied_contributors() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let transition = transition_id("JoinLiveBoundaryDurableAppendRunning");
+        let run = named_string("RunId", "run-a");
+        let other_run = named_string("RunId", "run-b");
+        let phase = |variant: &str| KernelValue::NamedVariant {
+            enum_name: enum_type_id("InputPhase"),
+            variant: enum_variant_id(variant),
+        };
+        let input = |id: &str| KernelValue::String(id.to_string());
+        let run_associations = KernelValue::Map(BTreeMap::from([
+            (input("staged"), run.clone()),
+            (input("applied"), run.clone()),
+            (input("pending-consumption"), run.clone()),
+            (input("consumed"), run.clone()),
+            (input("other-run"), other_run),
+        ]));
+        let input_phases = KernelValue::Map(BTreeMap::from([
+            (input("staged"), phase("Staged")),
+            (input("applied"), phase("Applied")),
+            (
+                input("pending-consumption"),
+                phase("AppliedPendingConsumption"),
+            ),
+            (input("consumed"), phase("Consumed")),
+            (input("other-run"), phase("Staged")),
+            (input("queued"), phase("Queued")),
+        ]));
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "meerkat_machine_run_contributor_count",
+                    vec![run_associations, input_phases, run],
+                    &transition,
+                )
+                .expect("count the run's contributors"),
+            KernelValue::U64(3)
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "meerkat_machine_run_contributor_limit",
+                    Vec::new(),
+                    &transition,
+                )
+                .expect("the contributor bound"),
+            KernelValue::U64(256)
         );
     }
 

@@ -167,8 +167,10 @@ AuditJoinedInputNotInAnyLane ==
 AuditLateNeverJoins == AuditLate \notin DOMAIN input_live_boundary_join_run
 
 \* Run contributor bound. The generated join guard (run_contributor_capacity)
-\* refuses a durable join once the run's staged contributors, its batch and
-\* its joins, reach meerkat_machine_run_contributor_limit: 256 in the
+\* refuses a durable join once the run's contributors, its batch and its
+\* joins (staged, or applied by a resumed run's committed round, which this
+\* model never reaches: it has no crash), reach
+\* meerkat_machine_run_contributor_limit: 256 in the
 \* generated model, which no bounded run reaches. The contributor-bound runs
 \* substitute a small bound for it in their config
 \* (meerkat_machine_run_contributor_limit <- AuditOneContributor), so TLC
@@ -177,14 +179,14 @@ AuditLateNeverJoins == AuditLate \notin DOMAIN input_live_boundary_join_run
 AuditOneContributor == 1
 AuditTwoContributors == 2
 
-\* The audited run never stages more contributors than the bound in force.
+\* The audited run never holds more contributors than the bound in force.
 AuditRunContributorsWithinBound ==
-    meerkat_machine_run_staged_contributor_count(input_run_associations, input_phases, AuditRun)
+    meerkat_machine_run_contributor_count(input_run_associations, input_phases, AuditRun)
         <= meerkat_machine_run_contributor_limit
 
 \* Reachability goal, never a safety property: the late Steer input waits at
 \* a model boundary of the audited run, queued in the Steer lane with a
-\* durable delivery, while the run already stages the bound's worth of
+\* durable delivery, while the run already holds the bound's worth of
 \* contributors, so the contributor guard is what keeps it out of the run.
 \* The runner requires TLC to report it violated under a bound of one.
 AuditCapacityRefusalNeverReached ==
@@ -194,6 +196,6 @@ AuditCapacityRefusalNeverReached ==
         /\ IF AuditLate \in DOMAIN input_live_boundary_delivery
                THEN input_live_boundary_delivery[AuditLate] = "DurableAppend"
                ELSE FALSE
-        /\ meerkat_machine_run_staged_contributor_count(input_run_associations, input_phases, AuditRun)
+        /\ meerkat_machine_run_contributor_count(input_run_associations, input_phases, AuditRun)
                >= meerkat_machine_run_contributor_limit )
 ====

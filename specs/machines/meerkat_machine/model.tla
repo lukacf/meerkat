@@ -249,8 +249,8 @@ meerkat_machine_live_bridge_authority_rows_without_operation(rows, operation_by_
     [authority_id \in { candidate \in DOMAIN rows : IF candidate \in DOMAIN operation_by_authority THEN operation_by_authority[candidate] # operation_id ELSE TRUE } |-> rows[authority_id]]
 meerkat_machine_live_bridge_authorities_without_operation(authorities, operation_by_authority, operation_id) ==
     { authority_id \in authorities : IF authority_id \in DOMAIN operation_by_authority THEN operation_by_authority[authority_id] # operation_id ELSE TRUE }
-meerkat_machine_run_staged_contributor_count(arg_run_associations, arg_input_phases, arg_run_id) ==
-    Cardinality({ arg_input_id \in DOMAIN arg_run_associations : IF arg_run_associations[arg_input_id] = arg_run_id /\ arg_input_id \in DOMAIN arg_input_phases THEN arg_input_phases[arg_input_id] = "Staged" ELSE FALSE })
+meerkat_machine_run_contributor_count(arg_run_associations, arg_input_phases, arg_run_id) ==
+    Cardinality({ arg_input_id \in DOMAIN arg_run_associations : IF arg_run_associations[arg_input_id] = arg_run_id /\ arg_input_id \in DOMAIN arg_input_phases THEN arg_input_phases[arg_input_id] \in {"Staged", "Applied", "AppliedPendingConsumption"} ELSE FALSE })
 meerkat_machine_run_contributor_limit == 256
 
 Init ==
@@ -16769,7 +16769,7 @@ JoinLiveBoundaryDurableAppendRunning(run_id, input_id) ==
     /\ (input_id \in DOMAIN input_admission_seq)
     /\ ((IF (input_id \in DOMAIN input_live_boundary_delivery) THEN Some((IF input_id \in DOMAIN input_live_boundary_delivery THEN input_live_boundary_delivery[input_id] ELSE "None")) ELSE None) = Some("DurableAppend"))
     /\ ~((input_id \in DOMAIN input_live_boundary_join_run))
-    /\ (meerkat_machine_run_staged_contributor_count(input_run_associations, input_phases, run_id) < meerkat_machine_run_contributor_limit)
+    /\ (meerkat_machine_run_contributor_count(input_run_associations, input_phases, run_id) < meerkat_machine_run_contributor_limit)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ input_phases' = MapSet(input_phases, input_id, "Staged")

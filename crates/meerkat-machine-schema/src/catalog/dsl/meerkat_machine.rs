@@ -25618,11 +25618,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "not_already_joined" { !self.input_live_boundary_join_run.contains_key(input_id) }
             // The run's commit names its batch and every join as one
             // terminal-completion batch, and that batch names at most
-            // `meerkat_machine_run_contributor_limit()` inputs. A join past it
-            // is refused: the input keeps its steer-lane follow-up and the
-            // next run delivers it.
+            // `meerkat_machine_run_contributor_limit()` inputs. A resumed
+            // run's batch includes the inputs its committed rounds already
+            // applied. A join past the bound is refused: the input keeps its
+            // steer-lane follow-up and the next run delivers it.
             guard "run_contributor_capacity" {
-                meerkat_machine_run_staged_contributor_count(self.input_run_associations, self.input_phases, run_id)
+                meerkat_machine_run_contributor_count(self.input_run_associations, self.input_phases, run_id)
                     < meerkat_machine_run_contributor_limit()
             }
             update {
@@ -39678,22 +39679,31 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         impl MeerkatMachineAuthority {
-        // The inputs staged for `run_id`: its batch and every durable Steer
-        // that joined its turn. The run's commit names them (less any join
+        // The inputs still bound to `run_id`: its batch and every durable
+        // Steer that joined its turn, staged for the run or, in a resumed
+        // run, applied by one of its committed rounds (the phases a resumed
+        // run continues from). The run's commit names them (less any join
         // its terminal returns to the lane) as one terminal-completion batch.
-        fn meerkat_machine_run_staged_contributor_count(
+        fn meerkat_machine_run_contributor_count(
             run_associations: &std::collections::BTreeMap<String, RunId>,
             input_phases: &std::collections::BTreeMap<String, InputPhase>,
             run_id: &RunId,
         ) -> u64 {
-            let staged = run_associations
+            let bound = run_associations
                 .iter()
                 .filter(|(input_id, associated)| {
                     *associated == run_id
-                        && input_phases.get(*input_id) == Some(&InputPhase::Staged)
+                        && matches!(
+                            input_phases.get(*input_id),
+                            Some(
+                                InputPhase::Staged
+                                    | InputPhase::Applied
+                                    | InputPhase::AppliedPendingConsumption
+                            )
+                        )
                 })
                 .count();
-            u64::try_from(staged).unwrap_or(u64::MAX)
+            u64::try_from(bound).unwrap_or(u64::MAX)
         }
 
         // The most contributors one run's commit names: the bound of one

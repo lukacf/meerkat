@@ -58927,6 +58927,31 @@ mod terminal_completion_batch_bound {
             }
         }
 
+        /// Every input's directed interaction terminal was published.
+        async fn assert_every_outbox_published(&self, input_ids: &[InputId], context: &str) {
+            for input_id in input_ids {
+                let stored = self
+                    .machine
+                    .input_state(&self.session_id, input_id)
+                    .await
+                    .expect("read an input")
+                    .unwrap_or_else(|| panic!("{context}: input {input_id} is retained"));
+                let outbox = stored
+                    .state
+                    .interaction_terminal_outbox
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{context}: input {input_id} has its outbox"));
+                assert!(
+                    matches!(
+                        outbox.phase,
+                        crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
+                    ),
+                    "{context}: input {input_id}'s directed terminal was published: {:?}",
+                    outbox.phase
+                );
+            }
+        }
+
         /// Every input reached `expected`.
         async fn assert_every_terminal_outcome(
             &self,
@@ -59061,6 +59086,37 @@ mod terminal_completion_batch_bound {
             Err(CoreExecutorError::Internal(
                 "the directed terminal publication is refused".to_string(),
             ))
+        }
+    }
+
+    /// Publishes every directed interaction terminal it is given, and counts
+    /// the calls and the terminals.
+    #[derive(Default)]
+    struct CountingTerminalPublisher {
+        calls: AtomicUsize,
+        terminals: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorPublicationHandle for CountingTerminalPublisher {
+        async fn publish_interaction_terminals(
+            &self,
+            events: &[meerkat_core::event::AgentEvent],
+        ) -> Result<
+            Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+            CoreExecutorError,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.terminals.fetch_add(events.len(), Ordering::SeqCst);
+            events
+                .iter()
+                .zip(1_u64..)
+                .map(|(event, sequence)| {
+                    meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                        event, sequence,
+                    )
+                })
+                .collect()
         }
     }
 
@@ -59962,6 +60018,103 @@ mod terminal_completion_batch_bound {
             .await;
     }
 
+    /// A retirement cleanup of 300 directed inputs commits two directed
+    /// batches, each with its own outbox, and the dispatch publishes both:
+    /// every terminal once, every waiter answered.
+    async fn retirement_cleanup_publishes_every_directed_batch(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        let publisher = Arc::new(CountingTerminalPublisher::default());
+        let (input_ids, waiters, _) =
+            retired_with_pending_mixed_inputs(&fixture, Arc::clone(&publisher) as _, BACKLOG, 0)
+                .await;
+        let abandoned_count = tokio::time::timeout(
+            Duration::from_secs(120),
+            fixture
+                .machine
+                .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
+        )
+        .await
+        .expect("the retirement cleanup finishes")
+        .expect("retirement cleanup");
+        assert_eq!(abandoned_count, BACKLOG);
+        let outcomes = fixture.settle(waiters, "directed cleanup").await;
+        assert_every_runtime_terminated(&outcomes, "retired cleanup", "directed cleanup");
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Retired),
+                "directed cleanup",
+            )
+            .await;
+        fixture
+            .assert_every_outbox_published(&input_ids, "directed cleanup")
+            .await;
+        assert_eq!(
+            publisher.terminals.load(Ordering::SeqCst),
+            BACKLOG,
+            "every directed terminal is published once"
+        );
+        assert!(
+            publisher.calls.load(Ordering::SeqCst) >= 2,
+            "each directed batch is its own publication"
+        );
+        fixture.assert_ready("after the directed cleanup").await;
+    }
+
+    /// A stop of a held loop with 300 directed inputs commits two directed
+    /// batches, and the stop's own publication publishes both.
+    async fn held_loop_stop_publishes_every_directed_batch(store: BoundStore) {
+        let fixture = Fixture::new(store).await;
+        let publisher = Arc::new(CountingTerminalPublisher::default());
+        fixture
+            .machine
+            .prepare_bindings(fixture.session_id.clone())
+            .await
+            .expect("prepare the session's runtime bindings");
+        fixture
+            .machine
+            .ensure_session_with_executor(
+                fixture.session_id.clone(),
+                Box::new(PublishingCompletingExecutor {
+                    publisher: Arc::clone(&publisher) as _,
+                }),
+            )
+            .await
+            .expect("attach the publishing loop");
+        fixture
+            .machine
+            .hold_run_starts(&fixture.session_id, crate::RunStartHoldReason::MobStop)
+            .await
+            .expect("hold run starts");
+        let mut parks = fixture.machine.run_start_held_parks();
+        let (input_ids, waiters) = fixture
+            .admit((0..BACKLOG).map(directed_flow_step).collect())
+            .await;
+        tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+            .await
+            .expect("the runtime loop parks on the hold")
+            .expect("park signal");
+        fixture.stop_until_terminal("runtime stopped").await;
+        let outcomes = fixture.settle(waiters, "directed stop").await;
+        assert_every_runtime_terminated(&outcomes, "runtime stopped", "directed stop");
+        fixture
+            .assert_every_terminal(
+                &input_ids,
+                &abandoned(InputAbandonReason::Stopped),
+                "directed stop",
+            )
+            .await;
+        fixture
+            .assert_every_outbox_published(&input_ids, "directed stop")
+            .await;
+        assert_eq!(
+            publisher.terminals.load(Ordering::SeqCst),
+            BACKLOG,
+            "every directed terminal is published once"
+        );
+        fixture.assert_ready("after the directed stop").await;
+    }
+
     macro_rules! on_every_store {
         ($($row:ident),* $(,)?) => {
             $(
@@ -60000,5 +60153,7 @@ mod terminal_completion_batch_bound {
         reset_refused_while_running_keeps_the_session_usable,
         reset_refused_while_stopped_keeps_the_session_usable,
         retirement_cleanup_answers_the_batch_a_failed_publication_leaves,
+        retirement_cleanup_publishes_every_directed_batch,
+        held_loop_stop_publishes_every_directed_batch,
     );
 }

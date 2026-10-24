@@ -47,7 +47,7 @@ CREDENTIAL_ENVIRONMENT = (
 SERVICES = ("compute.googleapis.com", "iap.googleapis.com")
 PERMISSIONS = (
     "compute.instances.create", "compute.disks.create", "compute.instances.setLabels",
-    "compute.instances.setTags", "compute.firewalls.create", "compute.networks.updatePolicy",
+    "compute.instances.setTags", "compute.firewalls.create", "compute.firewalls.get", "compute.networks.updatePolicy",
     "compute.subnetworks.use",
     "compute.subnetworks.useExternalIp", "compute.instances.get", "compute.instances.list",
     "compute.projects.get", "compute.globalOperations.get", "compute.zoneOperations.get",

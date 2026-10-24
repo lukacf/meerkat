@@ -409,12 +409,14 @@ async def test_unknown_and_denied_preconditions_never_become_readiness(harness, 
     assert result["ready_for_plan"] is False and result["plan"] is None
 
 
-async def test_firewall_creation_requires_network_policy_permission(harness):
+@pytest.mark.parametrize("permission", ["compute.networks.updatePolicy", "compute.firewalls.get"])
+async def test_firewall_setup_checks_network_policy_and_recovery_read_permissions(harness, permission):
     # The firewall insert also authorizes its network field. Being able to
-    # create firewall resources and read the VPC does not prove that right.
+    # create firewall resources and read the VPC does not prove that right,
+    # or the rule read needed when resuming after VM creation failed.
     # https://docs.cloud.google.com/compute/docs/reference/rest/v1/firewalls/insert
+    # https://docs.cloud.google.com/compute/docs/reference/rest/v1/firewalls/get
     cloud = harness[3]
-    permission = "compute.networks.updatePolicy"
     path = "/v1/projects/" + PROJECT + ":testIamPermissions"
     cloud.overrides[path] = RestResult(200, {
         "permissions": [value for value in PERMISSIONS if value != permission],

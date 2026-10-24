@@ -102,8 +102,8 @@ def test_registry_removal_accepts_provenanced_old_host_without_current_carrier(m
     assert report["framework"]["baseline_digest"] == fingerprint
     descriptor = updates.runtime_dependency_transition(previous, candidate, {})
     assert descriptor is not None and descriptor["native_registry_update"] is True
-    assert (descriptor["version"], descriptor["to_version"]) == (4, "0.8.47")
-    assert set(descriptor["required_supervisor_sources"]) == set(updates._runtime_supervisor_paths(4))
+    assert (descriptor["version"], descriptor["to_version"]) == (6, "0.8.47")
+    assert set(descriptor["required_supervisor_sources"]) == set(updates._runtime_supervisor_paths(6))
     assert descriptor["required_supervisor_sources"] == updates._runtime_history_supervisor_sources(6)
 
 

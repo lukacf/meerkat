@@ -257,7 +257,10 @@ def test_native_team_source_compiles_for_the_public_meta_release():
     assert json.loads(files["deployment.json"][0])["mobkitVersion"] == VERSION
     assert files["requirements.sdk.txt"][0].decode().startswith(f"meerkat-meta=={VERSION} --hash=sha256:")
     assert b"meerkat-mobkit" not in files["requirements.txt"][0]
-    assert read_package_source(files)["source_kind"] == "native-team"
+    helper = "launchkit/connect_member_class_requests.py"
+    assert files[helper] == ((Path(__file__).parents[1] / helper).read_bytes(), 0o644)
+    assert read_package_source(files) == source
+    assert source["source_kind"] == "native-team"
 
 
 def test_meta_package_readme_matches_the_shell_route():

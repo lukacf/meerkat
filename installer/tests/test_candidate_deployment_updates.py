@@ -217,6 +217,8 @@ def test_current_worker_pinset_cannot_omit_helper_even_when_host_has_it(crossing
     _, target, previous, candidate, _, _ = crossing
     descriptor = updates.runtime_dependency_transition(previous, candidate, {}, runtime_target=target)
     frozen = service.supervisor_metadata({}, service.supervisor_source_files())
+    assert descriptor is not None and descriptor["version"] == 6
+    service.require_candidate_update_protocol(frozen, {"runtime_dependency_update": descriptor})
     descriptor["required_supervisor_sources"].pop("launchkit/sdk_wheel_integrity.py")
     with pytest.raises(DraftConflict, match="exact current runtime history and compiler closure"):
         service.require_candidate_update_protocol(frozen, {"runtime_dependency_update": descriptor})

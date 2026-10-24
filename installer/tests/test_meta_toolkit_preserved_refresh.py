@@ -286,7 +286,12 @@ def test_fixed_v5_product_history_and_v7_successor_preserve_original_inventory(
             return generate(*args, **kwargs)
     with monkeypatch.context() as old:
         old.setattr(compiler, "generate_package", old_generation)
+        # Workspace seeding imports this function directly. Both entry points
+        # must apply the historical finalizer export to the predecessor.
+        old.setattr("launchkit.implementation_workspace.generate_package", old_generation)
         selected = crossing.__wrapped__(tmp_path, products, inputs)
+        assert "launchkit/connect_member_class_requests.py" not in selected[2]
+        assert ("launchkit/connect_member_class_requests.py" in selected[3]) is successor
         directory, _, _, identity, descriptor = completed(tmp_path, selected)
     assert descriptor["version"] == (7 if successor else 5)
     assert descriptor.get("previous_framework_version", 4) == 4

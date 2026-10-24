@@ -215,6 +215,26 @@ async def test_context_has_no_mapping_before_connected_host(tmp_path, monkeypatc
     bind_member_class_requests(object(), SimpleNamespace(dynamic=False), object())
 
 
+@pytest.mark.parametrize("timeout", [True, False, 0, -1, float("inf"), float("-inf"), float("nan"), "60", []])
+async def test_invalid_timeout_refuses_before_retention_or_submission(tmp_path, sdk, timeout):
+    f = RequestFixture(tmp_path)
+    events = []
+    runtime = SimpleNamespace(member_classes=SimpleNamespace(
+        begin_add=lambda *args, **kwargs: events.append("native-submit")))
+    context = SimpleNamespace(runtime=runtime, stop_event=asyncio.Event())
+    app = SimpleNamespace(dynamic=True, context=context, deployment=f.deployment, _application_callbacks=f.callbacks)
+    owner = SimpleNamespace(runtime=runtime, application=app, callbacks=f.callbacks,
+        _shutdown_task=None, _require_current=f.callbacks._current)
+    async def retain(value): events.append("app-retained")
+    async def publish(): events.append("app-listed")
+    bind_member_class_requests(owner, app, runtime)
+    with pytest.raises(ValueError, match="timeout must be positive and finite"):
+        await context._begin_member_class_add(admission_id="saved-add", class_id="reader",
+            spec=sdk.Spec(identity="reader:one", profile="reusable-reader"),
+            retain_request=retain, publish=publish, timeout=timeout)
+    assert events == []
+
+
 @pytest.mark.parametrize("failure", ["stop", "changed-plan", "invalidated", "retention-error", "cancelled"])
 async def test_no_native_submission_when_retention_or_currentness_fails(tmp_path, monkeypatch, failure):
     f = RequestFixture(tmp_path)
@@ -241,7 +261,7 @@ async def test_no_native_submission_when_retention_or_currentness_fails(tmp_path
         await context._begin_member_class_add(admission_id="one", retain_request=retain, publish=publish)
 
 
-@pytest.mark.parametrize("timeout", [60.0, 17.5])
+@pytest.mark.parametrize("timeout", [60.0, 17.5, 1, None])
 async def test_host_retains_immutable_original_then_submits_private_request_once(tmp_path, sdk, timeout):
     f = RequestFixture(tmp_path)
     spec = sdk.Spec(identity="reader:one", profile="reusable-reader", context={"records": ["original"]})

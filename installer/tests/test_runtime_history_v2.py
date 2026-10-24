@@ -589,7 +589,8 @@ async def test_connect_cannot_enter_worker_install_or_start_and_retry_has_no_sec
 
 
 @pytest.mark.parametrize("mutation", ["missing-reader", "stale-reader", "stale-worker", "extra-source",
-    "missing-login-adapter", "stale-review-asset", "missing-startup-helper", "stale-startup-helper"])
+    "missing-login-adapter", "stale-review-asset", "missing-startup-helper", "stale-startup-helper",
+    "missing-member-request-helper", "stale-member-request-helper"])
 def test_ordinary_v6_requires_exact_frozen_supervisor_even_without_candidate(current_packages, mutation):
     previous, candidate = current_packages
     descriptor = updates.runtime_dependency_transition(previous, candidate, {})
@@ -612,6 +613,10 @@ def test_ordinary_v6_requires_exact_frozen_supervisor_even_without_candidate(cur
         frozen["host_files"].pop("launchkit/connect_application_startup.py")
     elif mutation == "stale-startup-helper":
         frozen["host_files"]["launchkit/connect_application_startup.py"] = "f" * 64
+    elif mutation == "missing-member-request-helper":
+        frozen["host_files"].pop("launchkit/connect_member_class_requests.py")
+    elif mutation == "stale-member-request-helper":
+        frozen["host_files"]["launchkit/connect_member_class_requests.py"] = "f" * 64
     else:
         descriptor["required_supervisor_sources"]["launchkit/future_reader.py"] = "f" * 64
         frozen["host_files"]["launchkit/future_reader.py"] = "f" * 64

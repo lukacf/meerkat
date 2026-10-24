@@ -7,6 +7,7 @@ authority enforcement, controller issuance, held publication and the outcome.
 from copy import deepcopy
 import hashlib
 import json
+import math
 import re
 
 from .connect_installer_caller import CustodyError, _json, _same_member_classes
@@ -150,6 +151,11 @@ def bind_member_class_requests(owner, application, runtime):
         current()
         if not callable(retain_request) or not callable(publish):
             raise TypeError("Member Add requires application retention and publication callbacks.")
+        # Match the SDK's per-call timeout contract before the durable write.
+        # None leaves the already validated private client's default in charge.
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("Member Add timeout must be positive and finite.")
         request = _member_class_add_request(callbacks, application.deployment, **intent)
         # The app owns durable retention. It receives immutable JSON, never the
         # internal request or a dict alias it could alter before submission.

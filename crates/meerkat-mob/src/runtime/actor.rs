@@ -442,7 +442,7 @@ enum IdentitySessionLoadErrorClass {
 /// Whether a session read failed because the committed runtime boundary no
 /// longer names the session's physical head: its store refused the read as a
 /// transcript revision conflict.
-fn is_transcript_revision_conflict(error: &meerkat_core::service::SessionError) -> bool {
+pub(super) fn is_transcript_revision_conflict(error: &meerkat_core::service::SessionError) -> bool {
     matches!(
         error,
         meerkat_core::service::SessionError::Store(error)

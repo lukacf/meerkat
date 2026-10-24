@@ -1755,3 +1755,66 @@ async def test_declaration_update_failure_before_native_entry_can_restore_untouc
     assert read_receipt(directory)["package_sha256"] == previous["package_sha256"]
     assert (destination / ".mobkit/state/native.db").read_bytes() == b"native durable sessions"
     assert (destination / ".env").read_bytes() == private
+
+
+@pytest.mark.parametrize("candidate", [
+    '{"revision":1,"revision":2,"sources":[],"subscriptions":[]}',
+    '{"revision":2,"sources":[{"source_id":"one","source_id":"two"}],"subscriptions":[]}',
+])
+async def test_duplicate_declaration_keys_are_blocked_at_real_update_staging(tmp_path, candidate):
+    source = json.dumps({"revision": 1, "sources": [], "subscriptions": []})
+    service, directory, destination, previous, private = await prepared(tmp_path, announcements=source)
+    name = updates.ANNOUNCEMENT_DECLARATIONS_PATH
+    service.implementation.extra_files[name] = candidate
+    result = await service.stage_update(service.guide.identity, previous["deployment_id"],
+        service.guide.state["version"], service.implementation.identity)
+    assert result["update"]["status"] == "blocked"
+    assert any("ordinary native document" in item for item in result["update"]["blockers"])
+    assert read_receipt(directory)["package_sha256"] == previous["package_sha256"]
+    assert (destination / name).read_text() == source
+    assert (destination / ".env").read_bytes() == private
+
+
+@pytest.mark.parametrize("failure", ["startup", "cleanup", "forward-recovery"])
+async def test_failed_declaration_update_never_offers_rollback_after_native_entry(tmp_path, failure):
+    source = json.dumps({"revision": 1, "sources": [], "subscriptions": []})
+    service, directory, destination, previous, private = await prepared(tmp_path, announcements=source)
+    name = updates.ANNOUNCEMENT_DECLARATIONS_PATH
+    candidate = json.dumps({"revision": 2, "sources": [], "subscriptions": []})
+    service.implementation.extra_files[name] = candidate
+    result = await service.stage_update(service.guide.identity, previous["deployment_id"],
+        service.guide.state["version"], service.implementation.identity)
+    identity = result["update"]["update_id"]
+    assert result["update"]["status"] == "staged"
+    if failure == "forward-recovery":
+        updates.activate(directory, identity)
+        _, root, update = updates.transaction(directory, identity)
+        updates.checkpoint(directory, root, update, status="recovery-needed", runtime_admission_possible=True)
+
+    class FailingCandidate(Supervisor):
+        calls = 0
+        async def command(self, *args, **kwargs): pass
+        async def start(self, definition, *, on_ready):
+            self.calls += 1
+            assert read_receipt(directory)["update"]["runtime_admission_possible"] is True
+            (destination / "data/ledger.db").write_bytes(b"post-entry domain receipt")
+            (destination / ".mobkit/state/native.db").write_bytes(b"post-entry native occurrence")
+            raise RuntimeError("candidate fixture startup failed")
+        async def before_source_restore(self):
+            if failure == "cleanup":
+                raise RuntimeError("fixture cleanup unconfirmed")
+
+    supervisor = FailingCandidate(directory)
+    with pytest.raises(RuntimeError):
+        await update_runtime(supervisor, "recover-current" if failure == "forward-recovery" else "update",
+            update_id=identity)
+    receipt = read_receipt(directory)
+    assert supervisor.calls == 1
+    assert receipt["update"]["status"] == "recovery-needed"
+    assert receipt["update"]["rollback_available"] is False
+    assert updates.ANNOUNCEMENT_RESTORE_REFUSAL in receipt["update"]["detail"]
+    assert receipt["package_sha256"] == result["update"]["package_sha256"]
+    assert (destination / name).read_text() == candidate
+    assert (destination / "data/ledger.db").read_bytes() == b"post-entry domain receipt"
+    assert (destination / ".mobkit/state/native.db").read_bytes() == b"post-entry native occurrence"
+    assert (destination / ".env").read_bytes() == private

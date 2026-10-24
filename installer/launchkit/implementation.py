@@ -326,7 +326,10 @@ an exact retry; never select new issuance IDs, target routes or lifetimes after 
 timeout or attach new selections to an admitted original. Native owns replay and
 currentness. A retained request and its issuance IDs belong to this original
 only; never reuse them as a template for another original. The host joins entered
-callbacks/calls before stop closes the store.
+callbacks/calls before stop closes the store. This host serializes retained requests
+with sorted JSON keys. Earlier hosts saved unsorted bytes, so an existing row may
+refuse an exact-byte retry after adoption. Preserve that row and its original;
+do not rewrite it or mint new issuance IDs to bypass the mismatch.
 
 The request is {not_before_ms,expires_at_ms,targets:[{issuance_id,target}]} with
 1-32 finite targets. Select actual installed routes, including completed Active
@@ -358,8 +361,10 @@ enabled=true. No file means announcements remain at the existing default. Native
 owns schema validation, monotonic revision/digest checks and managed-record
 reconciliation. Declaration changes are native configuration changes, outside a
 source-only repair of a retained framework. Implementation tools cannot add or
-edit this protected file. Use a new explicit artifact revision for changed declarations;
-never reset revisions to bypass a refusal, mirror a cursor, or replay subscriptions
+edit this protected file. The following contract describes host-adopted declarations,
+not files for the implementation agent to author. Record requested changes as unmet
+intent for the host preparation owner to adopt at a new explicit revision. Never
+reset revisions to bypass a refusal, mirror a cursor, or replay subscriptions
 from application code. The host checks sources.v1 and the applied native revision
 before starting application adapters, waiting at most 30 seconds for startup
 reconciliation and asking native to verify the same revision and exact content.
@@ -378,14 +383,15 @@ demonstrate support through its native contract and actual handling evidence.
 
 A subscription is {subscription_id, member:{mob_id,identity}, topics, start:{kind:"now"}}
 or uses members:{mob_id,role} instead of member. Native role means the actual
-profile, not the Blueprint class ID or a display label. For a whole class, cover
-its fixed identities from deployment.json.agents with member subscriptions and
-its future members with a role template using deployment.json.applicationProfiles[class_id].
-If applicationProfiles is absent, declare fixed identities only; that accepted
-deployment has no reusable class profiles to template. Never guess a profile.
+profile, not the Blueprint class ID or a display label. Host-adopted coverage of a
+whole class uses its fixed identities from deployment.json.agents with member
+subscriptions and its future members with a role template using
+deployment.json.applicationProfiles[class_id]. If applicationProfiles is absent,
+only fixed identities can be declared; that accepted deployment has no reusable
+class profiles to template. Never guess a profile.
 The role template also covers zero-start classes without placeholder members and avoids
-guessing a setup helper's native profile projection. Use distinct stable IDs for
-these declared records. Native expands role templates at capture; do not enumerate
+guessing a setup helper's native profile projection. Host-adopted records have
+distinct stable IDs. Native expands role templates at capture; do not enumerate
 the live roster or create per-member subscriptions on each restart. An explicit
 identity route needs only that member. Preserve triage and conversation exclusions,
 source-owned audience checks, and the user's bounded-history requirement.

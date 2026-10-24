@@ -85,6 +85,8 @@ class NativeOriginalOperations:
             raise CustodyError("The selected Connect SDK does not support native operation request validation.") from error
         submission = deepcopy(submission)
         request = validate(deepcopy(request))
+        if type(request) is not dict:
+            raise CustodyError("The selected Connect SDK did not return a validated request object.")
         serialized = json.dumps({"submission": asdict(submission), "request": request},
             ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
         selected = json.loads(serialized)["request"]

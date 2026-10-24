@@ -293,3 +293,13 @@ async def test_sdk_without_public_validation_refuses_before_retaining(sdk):
     with pytest.raises(CustodyError, match="request validation"):
         await f.adapter.prepare(f.submission, f.request, retain_request=f.retain)
     assert not f.retained and not f.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", [None, [], "request", False])
+async def test_sdk_nonobject_result_refuses_before_retention_or_native_preparation(sdk, result):
+    f = fixture(sdk)
+    sdk.module.validate_native_original_operations_request = lambda request: result
+    with pytest.raises(CustodyError, match="validated request object"):
+        await f.adapter.prepare(f.submission, f.request, retain_request=f.retain)
+    assert not f.retained and not f.calls and not f.adapter._pending

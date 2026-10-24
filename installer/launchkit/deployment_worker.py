@@ -2319,7 +2319,7 @@ async def update_runtime(supervisor, mode, *, update_id=None, expected_binding=N
                 detail = supervisor.redact(str(error))[:1500] if isinstance(error, (ValueError, RuntimeError, TimeoutError)) else type(error).__name__
                 updates.checkpoint(directory, root, current, expected_binding=expected_binding, expected_installation=expected_installation, status="recovery-needed", rollback_available=True,
                     recovery_error=detail,
-                    detail="The current application recovery has not passed native bootstrap and live Console health. Latest native and application records, including any recovery activity, are retained; retry this exact candidate or restore the previous source.")
+                    detail="The current application recovery has not passed native bootstrap and live Console health. Latest native and application records, including any recovery activity, are retained; use the available recovery actions for this exact transaction.")
             # An explicit forward recovery never switches to another source or
             # rewinds state after a failed check/start or owner interruption.
             raise

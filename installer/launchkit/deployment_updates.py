@@ -2006,13 +2006,21 @@ def announcement_declarations_changed(previous, candidate):
 
 def _announcement_update_issue(previous, candidate):
     """Require a newer explicit revision; native still validates the schema."""
+    def declaration_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Announcement declarations contain a duplicate JSON field.")
+            result[key] = value
+        return result
+
     def revision(files):
         row = files.get(ANNOUNCEMENT_DECLARATIONS_PATH)
         if row is None:
             return 0
         if row[1] != 0o644 or len(row[0]) > 16 * 1024 * 1024:
             raise ValueError("Unbounded or nonordinary declaration source")
-        value = json.loads(row[0])
+        value = json.loads(row[0], object_pairs_hook=declaration_object)
         if (type(value) is not dict or not _ordinary_toml(value)
                 or type(value.get("revision")) is not int or value["revision"] <= 0):
             raise ValueError("Invalid declaration revision")
@@ -2433,6 +2441,14 @@ def _require_live_package(directory, accepted_hashes):
 def checkpoint(directory, root, update, *, expected_binding=None, expected_installation=None, **changes):
     from .deployment import receipt_lock
     update = {**update, **changes}
+    if update.get("rollback_available") is True and update.get("runtime_admission_possible") is not False:
+        _, previous = checked_package(root, "previous.zip", update["previous_package_sha256"])
+        _, candidate = checked_package(root, "candidate.zip", update["package_sha256"])
+        if announcement_declarations_changed(previous, candidate):
+            update["rollback_available"] = False
+            detail = update.get("detail", "")
+            if ANNOUNCEMENT_RESTORE_REFUSAL not in detail:
+                update["detail"] = (detail + " " + ANNOUNCEMENT_RESTORE_REFUSAL).strip()
     with receipt_lock(directory):
         receipt = read_receipt(directory)
         if expected_installation is not None:

@@ -58740,12 +58740,16 @@ mod terminal_completion_batch_bound {
         machine: Arc<MeerkatMachine>,
         store: Arc<dyn crate::store::RuntimeStore>,
         session_id: SessionId,
+        /// The test host under the host store realm, whose commit gate parks
+        /// a commit in flight.
+        host: Option<Arc<crate::store::spi::test_host::TestHost>>,
         _owners: Vec<Box<dyn std::any::Any + Send + Sync>>,
     }
 
     impl Fixture {
         async fn new(store: BoundStore) -> Self {
             let mut owners: Vec<Box<dyn std::any::Any + Send + Sync>> = Vec::new();
+            let mut host_handle = None;
             let runtime_store: Arc<dyn crate::store::RuntimeStore> = match store {
                 BoundStore::Memory => Arc::new(crate::store::InMemoryRuntimeStore::new()),
                 BoundStore::Sqlite => {
@@ -58768,6 +58772,7 @@ mod terminal_completion_batch_bound {
                         .await
                         .expect("host store runtime store opens");
                     owners.push(Box::new(realm));
+                    host_handle = Some(Arc::clone(&host));
                     owners.push(Box::new(host));
                     Arc::new(spi)
                 }
@@ -58780,6 +58785,7 @@ mod terminal_completion_batch_bound {
                 machine,
                 store: runtime_store,
                 session_id: SessionId::new(),
+                host: host_handle,
                 _owners: owners,
             }
         }
@@ -60156,4 +60162,179 @@ mod terminal_completion_batch_bound {
         retirement_cleanup_publishes_every_directed_batch,
         held_loop_stop_publishes_every_directed_batch,
     );
+
+    /// Inputs a dropped-caller row queues.
+    const DROPPED_CALLER_INPUTS: usize = 3;
+
+    /// Run `operation` in a caller task until it parks at its first durable
+    /// commit on the host store, drop the caller there (as an RPC request
+    /// aborted after EOF or SIGTERM, an aborted mob task or a cancelled
+    /// schedule host drops it), then let the commit land.
+    async fn drop_the_caller_at_its_first_commit(
+        fixture: &Fixture,
+        operation: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let host = fixture
+            .host
+            .as_ref()
+            .expect("the dropped-caller rows run on the host store realm");
+        let gate = Arc::new(Notify::new());
+        let started = host.commits_started.load(Ordering::Acquire);
+        *host
+            .commit_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        let caller = tokio::spawn(operation);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while host.commits_started.load(Ordering::Acquire) == started {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the operation reaches its durable commit");
+        caller.abort();
+        let dropped = caller.await;
+        assert!(
+            dropped
+                .as_ref()
+                .is_err_and(tokio::task::JoinError::is_cancelled),
+            "the caller is dropped while the commit is in flight: {dropped:?}"
+        );
+        *host
+            .commit_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        gate.notify_one();
+    }
+
+    /// After a dropped caller: every waiter got the operation's runtime
+    /// terminal, every input reached `reason`, the runtime is `state`, and
+    /// the registration is ready.
+    async fn assert_completed_after_the_dropped_caller(
+        fixture: &Fixture,
+        input_ids: &[InputId],
+        waiters: Vec<CompletionHandle>,
+        terminated: &str,
+        reason: InputAbandonReason,
+        state: RuntimeState,
+        context: &str,
+    ) {
+        let outcomes = fixture
+            .settle_within(waiters, context, Duration::from_secs(30))
+            .await;
+        assert_every_runtime_terminated(&outcomes, terminated, context);
+        fixture
+            .assert_every_terminal(input_ids, &abandoned(reason), context)
+            .await;
+        assert_eq!(
+            crate::traits::RuntimeControlPlane::runtime_state(
+                fixture.machine.as_ref(),
+                &fixture.runtime_id(),
+            )
+            .await
+            .expect("read the runtime state"),
+            state,
+            "{context}: the operation completed"
+        );
+        fixture.assert_ready(context).await;
+    }
+
+    /// A reset whose caller is dropped while its durable commit is in flight
+    /// completes all the same. RED while the reset ran in its caller's task:
+    /// the drop dropped its armed terminal transition, which marks the
+    /// registration reload-required, and nothing finished the reset.
+    #[tokio::test]
+    async fn a_reset_dropped_at_its_commit_completes() {
+        let fixture = Fixture::new(BoundStore::HostRealm).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (input_ids, waiters) = fixture
+            .admit_backlog(DROPPED_CALLER_INPUTS, HandlingMode::Queue)
+            .await;
+        let machine = Arc::clone(&fixture.machine);
+        let runtime_id = fixture.runtime_id();
+        drop_the_caller_at_its_first_commit(&fixture, async move {
+            let _ = crate::traits::RuntimeControlPlane::reset(machine.as_ref(), &runtime_id).await;
+        })
+        .await;
+        assert_completed_after_the_dropped_caller(
+            &fixture,
+            &input_ids,
+            waiters,
+            "runtime reset",
+            InputAbandonReason::Reset,
+            RuntimeState::Idle,
+            "dropped reset",
+        )
+        .await;
+    }
+
+    /// A destroy whose caller is dropped while its durable commit is in
+    /// flight completes all the same. RED while the destroy ran in its
+    /// caller's task, as the reset.
+    #[tokio::test]
+    async fn a_destroy_dropped_at_its_commit_completes() {
+        let fixture = Fixture::new(BoundStore::HostRealm).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (input_ids, waiters) = fixture
+            .admit_backlog(DROPPED_CALLER_INPUTS, HandlingMode::Queue)
+            .await;
+        let machine = Arc::clone(&fixture.machine);
+        let runtime_id = fixture.runtime_id();
+        drop_the_caller_at_its_first_commit(&fixture, async move {
+            let _ =
+                crate::traits::RuntimeControlPlane::destroy(machine.as_ref(), &runtime_id).await;
+        })
+        .await;
+        assert_completed_after_the_dropped_caller(
+            &fixture,
+            &input_ids,
+            waiters,
+            "runtime destroyed",
+            InputAbandonReason::Destroyed,
+            RuntimeState::Destroyed,
+            "dropped destroy",
+        )
+        .await;
+    }
+
+    /// A retire without a runtime loop whose caller is dropped while its
+    /// durable commit is in flight completes all the same. RED while the
+    /// retire ran in its caller's task: the drop left the session Retired in
+    /// memory with its pending inputs never ended and nothing marked.
+    #[tokio::test]
+    async fn a_loopless_retire_dropped_at_its_commit_completes() {
+        let fixture = Fixture::new(BoundStore::HostRealm).await;
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the session without a loop");
+        let (input_ids, waiters) = fixture
+            .admit_backlog(DROPPED_CALLER_INPUTS, HandlingMode::Queue)
+            .await;
+        let machine = Arc::clone(&fixture.machine);
+        let runtime_id = fixture.runtime_id();
+        drop_the_caller_at_its_first_commit(&fixture, async move {
+            let _ = crate::traits::RuntimeControlPlane::retire(machine.as_ref(), &runtime_id).await;
+        })
+        .await;
+        assert_completed_after_the_dropped_caller(
+            &fixture,
+            &input_ids,
+            waiters,
+            "retired without runtime loop",
+            InputAbandonReason::Retired,
+            RuntimeState::Retired,
+            "dropped loop-less retire",
+        )
+        .await;
+    }
 }

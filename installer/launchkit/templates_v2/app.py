@@ -1174,8 +1174,12 @@ class Application:
             options = {}
             if observe is not None:
                 from dataclasses import asdict
-                from meerkat_toolkit.host_control import PrivateSourceEvidence
-                from meerkat_toolkit.member_classes import ObservedMemberMcpRequirement
+                try:
+                    from meerkat_toolkit.host_control import PrivateSourceEvidence
+                    from meerkat_toolkit.member_classes import ObservedMemberMcpRequirement
+                except ImportError as error:
+                    raise RuntimeError("Member MCP observation requires a Toolkit SDK with observed-requirement support. "
+                        "Update the selected native SDK and runtime together.") from error
 
                 async def observe_requirement(selection, source):
                     exact = MemberMcpAdmissionSelection.from_wire(selection.wire())

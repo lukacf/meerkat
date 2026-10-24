@@ -294,8 +294,10 @@ before native startup; cold native registration may call lookup before start().
 retain must atomically compare that exact nonvoided admitting row and commit the
 complete bounded set (at most 32 unique refs) before returning None. Exact replay
 may succeed; changed refs, class, identity, admission or a successor row must fail.
-lookup returns that exact committed value for an admitting or listed row. Missing,
-unreadable, voided, retired or mismatched rows must raise, never return implicit [].
+For ordinary operator-self bindings, lookup returns that exact committed value
+for an admitting or listed row. Missing, unreadable, voided, retired or mismatched
+rows must raise, never return implicit []. The observed-requirement cleanup-only
+lookup exception is described below.
 An explicitly committed empty bindings list means no MCP. Neither hook publishes
 the identity or grants access. Connect owns approval, mandate and current binding
 resolution; the normal native admission/finalizer owns publication readiness.

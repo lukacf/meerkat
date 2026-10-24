@@ -32,7 +32,8 @@ def test_observation_requires_existing_admission_store_hooks(tmp_path, monkeypat
         app.member_mcp_runtime_options()
 
 
-def test_ordinary_participant_does_not_import_or_pass_observed_sdk_api(tmp_path, monkeypatch):
+@pytest.mark.parametrize("requires_observation", [False, True])
+def test_older_sdk_observation_is_optional_and_actionable(tmp_path, monkeypatch, requires_observation):
     app = application(tmp_path, monkeypatch)
     app.integration.retain_member_mcp = lambda value: None
     app.integration.lookup_member_mcp = lambda key: None
@@ -42,6 +43,13 @@ def test_ordinary_participant_does_not_import_or_pass_observed_sdk_api(tmp_path,
         return object()
     monkeypatch.setitem(sys.modules, "meerkat_toolkit.member_classes", SimpleNamespace(
         MemberMcpApplication=legacy, MemberMcpAdmissionSelection=object, RetainedMemberMcpBindings=object))
+    if requires_observation:
+        app.integration.observe_member_mcp_requirement = lambda key, source: None
+        with pytest.raises(RuntimeError, match="Toolkit SDK with observed-requirement support") as failed:
+            app.member_mcp_runtime_options()
+        assert isinstance(failed.value.__cause__, ImportError)
+        assert calls == [] and app._member_mcp is None
+        return
     assert app.member_mcp_runtime_options()["member_mcp"] is app._member_mcp
     assert len(calls) == 1
 
